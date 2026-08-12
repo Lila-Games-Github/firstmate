@@ -12,6 +12,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.lock"
+LOCK_SESSION="$STATE/.lock-session"
 mkdir -p "$STATE" 2>/dev/null || {
   echo "error: cannot create session-lock state directory $STATE; operate read-only until resolved" >&2
   exit 1
@@ -29,11 +30,21 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live harness pid $old"; else echo "lock: stale (pid $old dead or not a harness)"; fi
+  old_session=$(cat "$LOCK_SESSION" 2>/dev/null || true)
+  if fm_session_lock_holder_alive "$STATE"; then
+    if [ -n "$old_session" ]; then
+      echo "lock: held by live harness pid $old session $old_session"
+    else
+      echo "lock: held by live harness pid $old"
+    fi
+  else
+    echo "lock: stale (pid $old dead, not a harness, or session archived)"
+  fi
   exit 0
 fi
 
 me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me_session=$(fm_playbot_current_session_id 2>/dev/null || true)
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -57,11 +68,15 @@ trap 'exit 1' HUP INT TERM
 
 if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
   old=$(cat "$LOCK" 2>/dev/null || true)
-  if [ "$old" = "$me" ]; then
-    echo "lock acquired: harness pid $me"
+  if fm_session_lock_owned_by_self "$STATE"; then
+    if [ -n "$me_session" ]; then
+      echo "lock acquired: harness pid $me session $me_session"
+    else
+      echo "lock acquired: harness pid $me"
+    fi
     exit 0
   fi
-  if fm_harness_pid_alive "$old"; then
+  if fm_session_lock_holder_alive "$STATE"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
@@ -86,10 +101,34 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is unreadable; operate read-only until resolved" >&2
     exit 1
   }
-  if [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if ! fm_session_lock_owned_by_self "$STATE" && fm_session_lock_holder_alive "$STATE"; then
     echo "error: another live firstmate session holds the lock (pid $old); operate read-only until resolved" >&2
     exit 1
   fi
+fi
+if [ -e "$LOCK_SESSION" ] || [ -L "$LOCK_SESSION" ]; then
+  if [ ! -f "$LOCK_SESSION" ] || [ -L "$LOCK_SESSION" ]; then
+    echo "error: session lock identity is not a regular file; operate read-only until resolved" >&2
+    exit 1
+  fi
+fi
+session_tmp=
+if [ -n "$me_session" ]; then
+  session_tmp=$(mktemp "$STATE/.lock-session.XXXXXX" 2>/dev/null) || {
+    echo "error: cannot write session lock identity; operate read-only until resolved" >&2
+    exit 1
+  }
+  if ! printf '%s\n' "$me_session" > "$session_tmp" 2>/dev/null \
+    || ! mv -f "$session_tmp" "$LOCK_SESSION" 2>/dev/null; then
+    rm -f "$session_tmp" 2>/dev/null || true
+    echo "error: cannot publish session lock identity; operate read-only until resolved" >&2
+    exit 1
+  fi
+else
+  rm -f "$LOCK_SESSION" 2>/dev/null || {
+    echo "error: cannot clear stale session lock identity; operate read-only until resolved" >&2
+    exit 1
+  }
 fi
 if ! { printf '%s\n' "$me" > "$LOCK"; } 2>/dev/null; then
   echo "error: cannot write session lock; operate read-only until resolved" >&2
@@ -99,9 +138,14 @@ written=$(cat "$LOCK" 2>/dev/null) || {
   echo "error: cannot verify session lock ownership; operate read-only until resolved" >&2
   exit 1
 }
-if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ]; then
+if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ] \
+  || ! fm_session_lock_owned_by_self "$STATE"; then
   echo "error: session lock ownership verification failed; operate read-only until resolved" >&2
   exit 1
 fi
 release_claim_lock
-echo "lock acquired: harness pid $me"
+if [ -n "$me_session" ]; then
+  echo "lock acquired: harness pid $me session $me_session"
+else
+  echo "lock acquired: harness pid $me"
+fi

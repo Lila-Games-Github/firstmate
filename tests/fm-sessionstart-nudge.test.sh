@@ -124,18 +124,40 @@ test_missing_state_is_silent() {
 }
 
 test_owned_lock_is_silent() {
-  local root="$TMP_ROOT/already-ran"
+  local root="$TMP_ROOT/already-ran" fakebin
   make_primary "$root"
-  printf '%s\n' "$$" > "$root/state/.lock"
-  expect_silent_zero "owned lock nudge" run_nudge "$root"
+  fakebin=$(fm_fakebin "$root/fakebin")
+  cat > "$fakebin/ps" <<'EOF'
+#!/usr/bin/env bash
+pid= field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) pid=$2; shift 2 ;;
+    -o) field=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  4242:comm=) printf '%s\n' codex ;;
+  4242:args=) printf '%s\n' codex ;;
+  4242:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 4242 ;;
+esac
+EOF
+  chmod +x "$fakebin/ps"
+  printf '%s\n' 4242 > "$root/state/.lock"
+  PATH="$fakebin:$PATH" expect_silent_zero "owned lock nudge" run_nudge "$root"
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
 }
 
 test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
-  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-primary-scope-lib.sh" \
-    "$ROOT/bin/fm-gate-refuse-lib.sh" "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
+  cp "$ROOT/bin/fm-sessionstart-nudge.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-operational-input.sh" "$root/bin/"
   chmod +x "$root/bin/fm-sessionstart-nudge.sh"
   out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     WORKTREE="$root" EXPECTED="$NUDGE_LINE" node --input-type=module 2>&1 <<'EOF'
@@ -165,7 +187,7 @@ if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.le
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
 EOF
   ) || status=$?
-  expect_code 0 "$status" "OpenCode exact nudge delivery"
+  [ "$status" -eq 0 ] || fail "OpenCode exact nudge delivery exited $status: $out"
   [ -z "$out" ] || fail "OpenCode exact nudge delivery printed output: $out"
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }

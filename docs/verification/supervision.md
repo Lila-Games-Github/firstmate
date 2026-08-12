@@ -404,3 +404,36 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+## Playbot lanes
+
+On 2026-07-29, Playbot 0.80.0 on Windows was verified to expose `threads:openThread`, `threads:send`, `threads:archiveThread`, and `codex:mcpServers:reload` through its Electron IPC bridge.
+The installed application persisted the Playbot chat id and Codex session id together in `workspace_threads`, while the Codex rollout recorded a stable completed turn id and final agent message before the Stop hook returned.
+
+The focused verification command was:
+
+```text
+"C:\Program Files\Git\bin\bash.exe" tests/fm-playbot-lanes.test.sh
+```
+
+The exact result was:
+
+```text
+ok - fm-playbot-lanes: node syntax is valid
+ok - fm-playbot-lanes: global project discovery is project-id and path aware
+ok - fm-playbot-lanes: duplicate project names fail closed
+ok - fm-playbot-lanes: caller identity comes from the exact Codex session marker
+ok - fm-playbot-lanes: cross-project tools are restricted to the configured controller project
+ok - fm-playbot-lanes: thread reads are bounded and non-resuming
+ok - fm-playbot-lanes: Stop wake delivery is routed, durable, and turn-deduplicated
+ok - fm-playbot-lanes: installer merges one MCP server and one hook of each kind
+ok - fm-playbot-lanes: hook readiness requires one owned hook of each kind
+ok - fm-playbot-lanes: setup repairs only when needed and never creates a startup chat
+```
+
+On 2026-07-30, the live `setup` command returned `ready: true` and `changed: false`, proving that an already healthy integration is left untouched.
+The same result reported a reachable renderer, one owned hook of each kind, an enabled error-free MCP, and all 12 expected tools.
+
+On 2026-07-30, Playbot 0.81.0 on Windows exposed one shared Codex app-server process for multiple persisted chat threads.
+The Windows session-lock verification proved that Git Bash can recover that host process through PowerShell while `CODEX_THREAD_ID` plus the Playbot database narrows ownership to the exact unarchived Firstmate thread.
+The regression command was `"C:\Program Files\Git\bin\bash.exe" tests/fm-playbot-session-lock.test.sh`.
+It proved that a second live thread is refused even when both threads share one Codex pid, an archived prior thread is reclaimable, and database uncertainty fails closed.

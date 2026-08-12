@@ -195,6 +195,7 @@ fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
     "$lockdir/pid" \
+    "$lockdir/owner" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/role" \
@@ -254,6 +255,11 @@ fm_lock_link_owner() {
 
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
+  if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    actual=$(cat "$lockdir/owner" 2>/dev/null) || return 1
+    [ "$actual" = "$ownerdir" ]
+    return
+  fi
   actual=$(readlink "$lockdir" 2>/dev/null) || return 1
   [ "$actual" = "$ownerdir" ]
 }
@@ -283,6 +289,13 @@ fm_lock_claim_blocked_by_steal() {
   return 0
 }
 
+fm_lock_uses_directory_owner() {
+  case "$_FM_UNAME" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_lock_claim() {
   local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
   mypid=${BASHPID:-$$}
@@ -301,7 +314,11 @@ fm_lock_claim() {
   fi
   if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-      rm -f "$lockdir" 2>/dev/null || true
+      if [ -L "$lockdir" ]; then
+        rm -f "$lockdir" 2>/dev/null || true
+      else
+        fm_lock_remove_path "$lockdir" 2>/dev/null || true
+      fi
     fi
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -310,8 +327,35 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir mypid back
   FM_LOCK_OWNER_DIR=
+  if fm_lock_uses_directory_owner; then
+    [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+    ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+    if ! fm_lock_prepare_owner "$ownerdir"; then
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
+    if ! mkdir "$lockdir" 2>/dev/null; then
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
+    mypid=${BASHPID:-$$}
+    if printf '%s\n' "$mypid" > "$lockdir/pid" 2>/dev/null \
+      && printf '%s\n' "$ownerdir" > "$lockdir/owner" 2>/dev/null; then
+      back=$(cat "$lockdir/pid" 2>/dev/null || true)
+    else
+      back=
+    fi
+    if [ "$back" = "$mypid" ] && fm_lock_points_to_owner "$lockdir" "$ownerdir" \
+      && ! fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+      FM_LOCK_OWNER_DIR=$ownerdir
+      return 0
+    fi
+    fm_lock_remove_path "$lockdir" 2>/dev/null || true
+    fm_lock_discard_owner "$ownerdir"
+    return 1
+  fi
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
@@ -344,8 +388,10 @@ fm_lock_remove_path() {
     [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
     return 0
   fi
+  ownerdir=$(cat "$lockdir/owner" 2>/dev/null || true)
   fm_lock_clean_known_files "$lockdir"
-  rmdir "$lockdir" 2>/dev/null
+  rmdir "$lockdir" 2>/dev/null || return 1
+  [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
 }
 
 fm_lock_mid_acquire_is_fresh() {
@@ -680,6 +726,8 @@ fm_lock_try_acquire() {
   primary_owner=
   if [ -L "$lockdir" ]; then
     primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+  elif [ -d "$lockdir" ]; then
+    primary_owner=$(cat "$lockdir/owner" 2>/dev/null || true)
   fi
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur"; then
@@ -732,10 +780,12 @@ fm_lock_release() {
     fm_lock_discard_owner "$ownerdir"
     return 0
   fi
+  ownerdir=$(cat "$lockdir/owner" 2>/dev/null || true)
+  [ -n "$ownerdir" ] || return 0
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
-  fm_lock_clean_known_files "$lockdir"
-  rmdir "$lockdir" 2>/dev/null || true
+  fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
+  fm_lock_remove_path "$lockdir" 2>/dev/null || true
 }
 
 fm_meta_lock_path() {
