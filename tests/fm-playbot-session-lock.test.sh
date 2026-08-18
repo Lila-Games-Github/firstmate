@@ -47,8 +47,32 @@ esac
 EOF
 chmod +x "$FAKEBIN/uname" "$FAKEBIN/powershell.exe"
 
+# The Windows fallback under test is only consulted when the Unix ancestry walk
+# finds no harness, so the fake environment must hide the harness that runs this
+# suite (same pattern as tests/fm-session-lock-ancestry.test.sh): a fake ps
+# presents every pid as a plain bash directly under init, and playbot_env drops
+# the verified env markers that would short-circuit detection before ancestry.
+cat > "$FAKEBIN/ps" <<'EOF'
+#!/usr/bin/env bash
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=) printf '%s\n' bash ;;
+  args=) printf '%s\n' bash ;;
+  ppid=) printf '%s\n' 1 ;;
+esac
+EOF
+chmod +x "$FAKEBIN/ps"
+
 playbot_env() {
-  env PATH="$FAKEBIN:$REAL_PATH" PLAYBOT_DESKTOP_DIR="$DESKTOP_DIR" \
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    PATH="$FAKEBIN:$REAL_PATH" PLAYBOT_DESKTOP_DIR="$DESKTOP_DIR" \
     PLAYBOT_APP_RUN_ID=run-a FM_ROOT_OVERRIDE="$PROJECT" "$@"
 }
 
