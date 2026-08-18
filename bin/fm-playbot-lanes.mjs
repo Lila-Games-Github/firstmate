@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Project-scoped Playbot chat lanes and Stop-hook wake delivery.
 //
-// This executable has four entry points:
+// This executable has six entry points:
 //   serve          Run the stdio MCP server.
 //   install        Register the MCP server and inert global Playbot hooks.
 //   hook-pretool   Capture the exact Codex session invoking one MCP tool.

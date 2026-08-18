@@ -390,12 +390,13 @@ Since the CLI handoff is unreliable, the **verified** way to start/continue a ch
 
 **Verified (v0.79.0):** sending *"make all enemies render as circles instead of squares…"* this way spawned thread **"Render All Enemies as Circles"** (`gpt-5.6-sol`, `xhigh`), `agent_status=working`, and the agent began inspecting scenes and editing the project — all without the GUI CLI and without touching the keyboard.
 
-**Ready-to-use tool:** `playbot-drive.mjs` (ships alongside this doc; Node ≥ 20, zero deps):
+**Ready-to-use tool:** `bin/playbot-drive.mjs` in this repo (Node ≥ 20, zero deps):
 ```sh
-node playbot-drive.mjs send "make all enemies render as circles instead of squares"
-node playbot-drive.mjs status                 # recent threads + agent_status (working/ready)
-node playbot-drive.mjs read  [threadId]       # print the conversation transcript (newest thread if omitted)
-node playbot-drive.mjs watch [threadId]       # poll until the agent goes idle, then print the transcript
+node bin/playbot-drive.mjs send "make all enemies render as circles instead of squares"
+node bin/playbot-drive.mjs status                 # recent threads + agent_status (working/ready)
+node bin/playbot-drive.mjs read  [threadId]       # print the conversation transcript (newest thread if omitted)
+node bin/playbot-drive.mjs watch [threadId]       # poll until the agent goes idle, then print the transcript
+node bin/playbot-drive.mjs approve [once|session] # click a pending file-write/command approval dialog
 ```
 It auto-discovers the DevTools port (the Playbot LISTEN socket whose `/json/version` returns a `webSocketDebuggerUrl`), finds the page target that has the composer, and drives it.
 
@@ -469,8 +470,8 @@ curl -s http://127.0.0.1:<port>/            # -> ok
 # 5. Confirm engine tool present:
 #    listTools() includes "execute_engine_code"  (only when a project is open)
 
-# 6. Or drive the built-in agent:
-~/.playbot/bin/playbot "<prompt>" -C <project-dir> --mode default|plan
+# 6. Or drive the built-in agent (the ~/.playbot/bin/playbot CLI silently no-ops, §8):
+node bin/playbot-drive.mjs send "<prompt>"   # CDP method, §8.1
 ```
 
 MCP endpoint: `POST http://127.0.0.1:<port>/mcp?roots=<json>&primaryRootId=<id>`
