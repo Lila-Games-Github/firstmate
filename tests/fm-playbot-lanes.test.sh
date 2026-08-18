@@ -354,7 +354,7 @@ NODE
 
 node --no-warnings "$FIXTURE_ROOT/fake-cdp.mjs" &
 FAKE_CDP_PID=$!
-trap 'kill "$FAKE_CDP_PID" 2>/dev/null' EXIT
+trap 'kill "$FAKE_CDP_PID" 2>/dev/null; fm_test_cleanup' EXIT
 for _ in $(seq 1 50); do
   [ -f "$PLAYBOT_DESKTOP_DIR/DevToolsActivePort" ] && break
   sleep 0.1

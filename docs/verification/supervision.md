@@ -439,7 +439,7 @@ A live `create_workspace` tool call with `baseBranch: "godot-base"` on a consent
 Playbot's delete preserved the created git branch, which was removed separately; expect that residue when cleaning up test workspaces.
 Playbot's own create handler marks the new workspace selected within its project, so workspace creation on a project the captain is actively viewing changes what they see; the lane tools themselves never invoke `workspace:select`.
 
-The focused regression command `tests/fm-playbot-lanes.test.sh` passed all 16 checks on the same date, including five added for workspace support:
+The focused regression command `tests/fm-playbot-lanes.test.sh` passed all 16 checks on the same date, including six added for workspace support:
 
 ```text
 ok - fm-playbot-lanes: workspace root branches are visible in the global topology

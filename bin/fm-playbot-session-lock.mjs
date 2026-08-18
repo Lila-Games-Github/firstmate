@@ -11,7 +11,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { DatabaseSync } from "node:sqlite";
+
+let DatabaseSync;
 
 function desktopDir() {
   if (process.env.PLAYBOT_DESKTOP_DIR) return path.resolve(process.env.PLAYBOT_DESKTOP_DIR);
@@ -82,6 +83,7 @@ function main() {
 }
 
 try {
+  ({ DatabaseSync } = await import("node:sqlite"));
   main();
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));

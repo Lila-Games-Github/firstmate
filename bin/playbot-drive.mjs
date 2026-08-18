@@ -29,6 +29,7 @@ function sql(db, q) {
   catch { return ''; }
 }
 function sqlJSON(db, q) { const o = sql(db, q); return o ? JSON.parse(o) : []; }
+function sqlLit(v) { return `'${String(v).replace(/'/g, "''")}'`; }
 
 // ---------- DevTools (CDP) discovery ----------
 async function devtoolsBase() {
@@ -104,7 +105,7 @@ function cmdStatus() {
   for (const r of t) console.log(`${(r.agent_status || '').padEnd(14)} ${(r.execution_model || '').padEnd(12)} ${r.title}`);
 }
 function newestThread() { return sqlJSON(STATEDB, `SELECT id,rollout_path FROM threads ORDER BY created_at DESC LIMIT 1`)[0]; }
-function rolloutPath(id) { return sqlJSON(STATEDB, `SELECT rollout_path FROM threads WHERE id=${JSON.stringify(id)}`)[0]?.rollout_path; }
+function rolloutPath(id) { return sqlJSON(STATEDB, `SELECT rollout_path FROM threads WHERE id=${sqlLit(id)}`)[0]?.rollout_path; }
 function readTranscript(id) {
   const rp = id ? rolloutPath(id) : newestThread()?.rollout_path;
   if (!rp || !fs.existsSync(rp)) { console.log('no transcript'); return; }
@@ -119,7 +120,9 @@ function readTranscript(id) {
 async function cmdWatch(id) {
   id = id || newestThread()?.id;
   for (let i = 0; i < 120; i++) {
-    const st = sqlJSON(APPDB, `SELECT agent_status FROM workspace_threads WHERE id LIKE 'chat-%' ORDER BY updated_at DESC LIMIT 1`)[0]?.agent_status;
+    const st = sqlJSON(APPDB, id
+      ? `SELECT agent_status FROM workspace_threads WHERE session_id=${sqlLit(id)} ORDER BY updated_at DESC LIMIT 1`
+      : `SELECT agent_status FROM workspace_threads WHERE id LIKE 'chat-%' ORDER BY updated_at DESC LIMIT 1`)[0]?.agent_status;
     process.stdout.write(`\r[watch] status=${st}   `);
     if (st && st !== 'working' && st !== 'thinking') { console.log('\n--- agent idle ---'); break; }
     await new Promise(r => setTimeout(r, 3000));
@@ -136,7 +139,7 @@ async function cmdApprove(mode = 'session') {
     const has = await c.evaluate(`document.body.innerText.includes('Do you want to allow')||document.body.innerText.includes("don't ask again")`);
     if (!has) { c.close(); continue; }
     const res = await c.evaluate(`(()=>{const norm=s=>(s||'').replace(/\\s+/g,' ').trim();
-      const want=${mode === 'once' ? '/^\\\\d?\\\\s*Yes$/i' : '/don.t ask again/i'};
+      const want=${mode === 'once' ? '/^\\d?\\s*Yes$/i' : '/don.t ask again/i'};
       let cand=[...document.querySelectorAll('button,[role=button],[role=option],li,div,a')].filter(e=>want.test(norm(e.innerText))&&e.childElementCount<=3);
       cand.sort((a,b)=>norm(a.innerText).length-norm(b.innerText).length);
       if(!cand[0])return 'no-option';
