@@ -413,6 +413,20 @@ It auto-discovers the DevTools port (the Playbot LISTEN socket whose `/json/vers
 
 **Remote control:** the app has a `remote_control_enrollments` table (websocket URL + account/server enrollment), indicating an official path to drive the desktop agent remotely over a WebSocket. Not documented here; explore only if you intend to use Playco's sanctioned remote-control feature.
 
+### 8.2 Workspace management over the same CDP transport (verified v0.93.1, Linux)
+
+The renderer's `window.electronAPI.invoke(channel, payload)` bridge (the transport from §8.1, and the one `bin/fm-playbot-lanes.mjs` uses) also reaches Playbot's workspace IPC module. Handlers register dynamically via `ipcMain.handle` on the channel `<module.name>:<key>` with zod-validated payloads. Confirmed by extracting `.vite/build/main.js` from the running app's `app.asar` (v0.93.1) and locating the `workspace` module registration and its schemas:
+
+- **`workspace:create`** — payload is a **strict** zod discriminated union on `strategy`:
+  - `{ strategy: "project", projectId, branch?, name?, baseBranch?, rootOverrides? }` — creates a workspace with a worktree on **every** project root. `baseBranch` selects the branch each worktree is taken from; a missing `branch` gets a generated name; `name` is the display name. This is the strategy Firstmate's lane tools use.
+  - `{ strategy: "quick", projectId, projectRootId?, baseRef?, branch?, expectedCommit?, targetBranch?, pullRequestProviderId?, pullRequestNumber?, mode, rootOverrides? }` — single-root provisioning where `mode` selects one of the `open`/`from`/`copy` provisioning functions. Confirmed in the schema but not exercised by Firstmate.
+  - Both objects are `.strict()`: any extra key, or an empty string for a `min(1)` field, is rejected. `branch`/`name`/`baseBranch` are `trim().min(1)` — omit them rather than sending blanks.
+  - The handler **awaits provisioning** and returns the fresh workspace record (with its `id`); on default-root failure it rolls the workspace back and throws.
+- **`workspace:delete`** — `{ workspaceId, preserveWorktrees? }` (default `false`). Refuses to delete the Local workspace, and refuses to delete the selected workspace unless a replacement exists.
+- Related channels confirmed present in the same module: `workspace:update`, `workspace:archive`, `workspace:select`, `workspace:renameBranch`, and `workspaceRoots:list`. Avoid `workspace:select` from automation — it changes what the user is looking at.
+
+Firstmate's `playbot_lanes` MCP exposes this as the `create_workspace` tool plus a `newWorkspace` option on `create_chat`/`dispatch` (see `docs/playbot-lanes.md`); prefer those over raw CDP calls.
+
 ---
 
 ## 9. Limitations & gotchas

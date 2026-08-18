@@ -27,10 +27,25 @@ It never treats the visibly selected or most recently active chat as sufficient 
 If concurrent calls make the marker ambiguous, the tool refuses and asks for a retry instead of choosing a chat.
 Every cross-project MCP operation also verifies that the caller belongs to the configured controller project, so worker chats cannot use the globally installed server as an unrestricted control plane.
 
+## Workspaces
+
+Every workspace root's current `branch` is visible in `list_projects`, so a caller can see which branch each workspace is on before targeting it.
+
+`create_workspace` creates a new workspace in one project through Playbot's own `workspace:create` IPC handler, using its project strategy so every project root gets a worktree.
+`baseBranch` chooses the branch each worktree is taken from, `branch` names the new working branch, and `name` labels the workspace; Playbot generates a branch name and display name when they are omitted.
+The tool waits for Playbot to finish provisioning, then returns the created workspace's id, name, and per-root paths and branches read back from the application state.
+The lane tools never invoke workspace selection themselves, but Playbot's own create handler marks the new workspace selected within its project, so creating one inside the project the captain is actively viewing changes which workspace that project shows.
+
+`create_chat` and `dispatch` accept an optional `newWorkspace` object with the same `name`, `baseBranch`, and `branch` fields.
+When present, the workspace is created first and the chat is created inside it, which isolates dispatched work on its own branch in one call.
+`newWorkspace` is mutually exclusive with `workspace`, and `dispatch` additionally rejects combining it with `thread`, because a just-created workspace has no existing chats.
+When `newWorkspace` is absent, existing workspace selection behavior is unchanged.
+
 ## Lane lifecycle
 
 `dispatch` performs the normal end-to-end path.
 It identifies the controller, resolves an existing worker chat or creates an empty one, records a durable worker-to-controller route, and sends the task through Playbot's own `threads:send` IPC.
+With `newWorkspace`, it creates the isolated workspace first and creates the worker chat inside it.
 The message can enter a non-selected project and does not require changing UI focus.
 
 The global Stop hook is inert for every chat that has no active route.
@@ -46,6 +61,6 @@ Private route and hook state defaults to `~/.playbot/mcp/project-chat`.
 The integration reads Playbot's application and Codex SQLite databases but never writes them directly.
 Chat creation, message delivery, and archive operations go through Playbot's Electron IPC handlers over the local DevTools socket.
 
-The current adapter targets Playbot 0.80.0 and Node.js 22.5 or newer.
+The current adapter targets Playbot 0.80.0 and Node.js 22.5 or newer; the workspace operations were verified against Playbot 0.93.1 on Linux.
 Playbot's private IPC is not a published compatibility surface, so a Playbot update requires rerunning `doctor` and the focused test before relying on cross-project delivery.
 Current empirical evidence is recorded in [verification/supervision.md](verification/supervision.md#playbot-lanes).
