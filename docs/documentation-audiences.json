@@ -117,6 +117,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/ahoy-playbot/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/ask-user-authority/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -274,6 +278,14 @@
     },
     {
       "path": "docs/orca-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/playbot-agent-integration.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/playbot-lanes.md",
       "audience": "operator-current"
     },
     {

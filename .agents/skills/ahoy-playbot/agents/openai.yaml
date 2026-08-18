@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ahoy Playbot"
+  short_description: "Initialize and verify Playbot lane control"
+  default_prompt: "Use $ahoy-playbot to ensure Playbot lane control is ready without restarting Playbot or starting any chat."
