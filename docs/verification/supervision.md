@@ -433,6 +433,25 @@ ok - fm-playbot-lanes: setup repairs only when needed and never creates a startu
 On 2026-07-30, the live `setup` command returned `ready: true` and `changed: false`, proving that an already healthy integration is left untouched.
 The same result reported a reachable renderer, one owned hook of each kind, an enabled error-free MCP, and all 12 expected tools.
 
+On 2026-08-18, Playbot 0.93.1 on Linux was verified to expose `workspace:create` and `workspace:delete` through the same Electron IPC bridge.
+The `workspace:create` payload was confirmed from the running app's extracted `.vite/build/main.js` as a strict zod discriminated union on `strategy`, whose `project` strategy accepts `projectId` plus optional trimmed non-empty `branch`, `name`, `baseBranch`, and `rootOverrides`, awaits worktree provisioning, and returns the created workspace record.
+A live `create_workspace` tool call with `baseBranch: "godot-base"` on a consented test project created workspace `ws_ae669f5ed8e7` whose worktree HEAD `00766f08e985` exactly equaled the `godot-base` tip, proving base-branch selection; `workspace:delete` then removed the workspace row, its `workspace_roots` row, and the worktree directory, and restored the project's prior selected workspace.
+Playbot's delete preserved the created git branch, which was removed separately; expect that residue when cleaning up test workspaces.
+Playbot's own create handler marks the new workspace selected within its project, so workspace creation on a project the captain is actively viewing changes what they see; the lane tools themselves never invoke `workspace:select`.
+
+The focused regression command `tests/fm-playbot-lanes.test.sh` passed all 16 checks on the same date, including six added for workspace support:
+
+```text
+ok - fm-playbot-lanes: workspace root branches are visible in the global topology
+ok - fm-playbot-lanes: create_workspace sends the verified workspace:create payload and returns the created roots
+ok - fm-playbot-lanes: create_workspace omits blank optional fields so Playbot's strict schema accepts the payload
+ok - fm-playbot-lanes: dispatch creates a workspace, creates the worker chat inside it, and delivers the task
+ok - fm-playbot-lanes: ambiguous workspace targeting fails closed
+ok - fm-playbot-lanes: existing-workspace selection is unchanged
+```
+
+Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
+
 On 2026-07-30, Playbot 0.81.0 on Windows exposed one shared Codex app-server process for multiple persisted chat threads.
 The Windows session-lock verification proved that Git Bash can recover that host process through PowerShell while `CODEX_THREAD_ID` plus the Playbot database narrows ownership to the exact unarchived Firstmate thread.
 The regression command was `"C:\Program Files\Git\bin\bash.exe" tests/fm-playbot-session-lock.test.sh`.

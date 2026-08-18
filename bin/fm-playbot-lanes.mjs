@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Project-scoped Playbot chat lanes and Stop-hook wake delivery.
 //
-// This executable has four entry points:
+// This executable has six entry points:
 //   serve          Run the stdio MCP server.
 //   install        Register the MCP server and inert global Playbot hooks.
 //   hook-pretool   Capture the exact Codex session invoking one MCP tool.
@@ -10,7 +10,7 @@
 //   doctor         Print bounded local integration diagnostics.
 //
 // The server talks to Playbot through its local Electron DevTools socket and
-// invokes Playbot's own threads:* IPC handlers. It reads Playbot's SQLite state
+// invokes Playbot's own threads:* and workspace:* IPC handlers. It reads Playbot's SQLite state
 // only for discovery, exact session-to-chat identity, and completed-turn
 // deduplication. It never writes either Playbot database directly.
 //
@@ -28,7 +28,7 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
 
@@ -374,6 +374,37 @@ async function playbotInvoke(channel, payload) {
 
 function createThreadId() {
   return `chat-lane-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
+function workspaceCreatePayload(projectId, { name, baseBranch, branch } = {}) {
+  const trimmed = (value) => String(value ?? "").trim();
+  const payload = { strategy: "project", projectId };
+  if (trimmed(name)) payload.name = trimmed(name);
+  if (trimmed(branch)) payload.branch = trimmed(branch);
+  if (trimmed(baseBranch)) payload.baseBranch = trimmed(baseBranch);
+  return payload;
+}
+
+async function createWorkspace(project, options = {}) {
+  const created = await playbotInvoke("workspace:create", workspaceCreatePayload(project.id, options));
+  const workspaceId = created?.id;
+  if (!workspaceId) throw new Error("Playbot did not return the created workspace id");
+  const fresh = topology().find((candidate) => candidate.id === project.id)
+    ?.workspaces.find((workspace) => workspace.id === workspaceId);
+  if (!fresh) throw new Error(`Created workspace ${workspaceId} is not visible in Playbot state yet`);
+  return fresh;
+}
+
+async function resolveTargetWorkspace(name, project, args) {
+  const request = args.newWorkspace;
+  const eligible = name === "create_chat" || name === "dispatch";
+  if (request === undefined || !eligible) return resolveWorkspace(project, args.workspace);
+  if (typeof request !== "object" || request === null || Array.isArray(request)) {
+    throw new Error("newWorkspace must be an object with optional name, baseBranch, and branch");
+  }
+  if (args.workspace) throw new Error("Provide workspace or newWorkspace, not both");
+  if (name === "dispatch" && args.thread) throw new Error("thread cannot be combined with newWorkspace; a just-created workspace has no existing chats");
+  return createWorkspace(project, request);
 }
 
 async function createChat({ project, workspace, title, approvalMode = "full-access", planMode = false }) {
@@ -771,6 +802,14 @@ function toolDefinitions() {
   const object = (properties = {}, required = []) => ({ type: "object", properties, required, additionalProperties: false });
   const string = (description) => ({ type: "string", description });
   const boolean = (description, defaultValue) => ({ type: "boolean", description, default: defaultValue });
+  const newWorkspace = () => ({
+    ...object({
+      name: string("Optional workspace name; Playbot shows a generated name when omitted"),
+      baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"),
+      branch: string("Optional name for the new working branch; generated when omitted"),
+    }),
+    description: "Create a new workspace first and target it. Mutually exclusive with workspace.",
+  });
   return [
     {
       name: "list_projects",
@@ -791,9 +830,14 @@ function toolDefinitions() {
       annotations: { readOnlyHint: true },
     },
     {
+      name: "create_workspace",
+      description: "Create a new Playbot workspace in one project through Playbot's own workspace IPC, optionally from a chosen base branch. Playbot marks it selected within that project.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), name: string("Optional workspace name; Playbot shows a generated name when omitted"), baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"), branch: string("Optional name for the new working branch; generated when omitted") }, ["project"]),
+    },
+    {
       name: "create_chat",
-      description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false) }, ["project", "title"]),
+      description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), newWorkspace: newWorkspace(), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false) }, ["project", "title"]),
     },
     {
       name: "send_message",
@@ -819,8 +863,8 @@ function toolDefinitions() {
     },
     {
       name: "dispatch",
-      description: "Herdr-style dispatch: identify this controller, resolve or create a worker chat by project, register its wake route, and send the task.",
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      description: "Herdr-style dispatch: identify this controller, resolve or create a worker chat by project, register its wake route, and send the task. Can create an isolated workspace first via newWorkspace.",
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -858,7 +902,10 @@ async function handleTool(name, args = {}) {
   }
 
   const project = resolveProject(args.project, projects);
-  const workspace = resolveWorkspace(project, args.workspace);
+  if (name === "create_workspace") {
+    return { workspace: await createWorkspace(project, args) };
+  }
+  const workspace = await resolveTargetWorkspace(name, project, args);
   if (name === "list_threads") {
     return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
   }

@@ -390,12 +390,13 @@ Since the CLI handoff is unreliable, the **verified** way to start/continue a ch
 
 **Verified (v0.79.0):** sending *"make all enemies render as circles instead of squares…"* this way spawned thread **"Render All Enemies as Circles"** (`gpt-5.6-sol`, `xhigh`), `agent_status=working`, and the agent began inspecting scenes and editing the project — all without the GUI CLI and without touching the keyboard.
 
-**Ready-to-use tool:** `playbot-drive.mjs` (ships alongside this doc; Node ≥ 20, zero deps):
+**Ready-to-use tool:** `bin/playbot-drive.mjs` in this repo (Node ≥ 20, zero deps):
 ```sh
-node playbot-drive.mjs send "make all enemies render as circles instead of squares"
-node playbot-drive.mjs status                 # recent threads + agent_status (working/ready)
-node playbot-drive.mjs read  [threadId]       # print the conversation transcript (newest thread if omitted)
-node playbot-drive.mjs watch [threadId]       # poll until the agent goes idle, then print the transcript
+node bin/playbot-drive.mjs send "make all enemies render as circles instead of squares"
+node bin/playbot-drive.mjs status                 # recent threads + agent_status (working/ready)
+node bin/playbot-drive.mjs read  [threadId]       # print the conversation transcript (newest thread if omitted)
+node bin/playbot-drive.mjs watch [threadId]       # poll until the agent goes idle, then print the transcript
+node bin/playbot-drive.mjs approve [once|session] # click a pending file-write/command approval dialog
 ```
 It auto-discovers the DevTools port (the Playbot LISTEN socket whose `/json/version` returns a `webSocketDebuggerUrl`), finds the page target that has the composer, and drives it.
 
@@ -412,6 +413,20 @@ It auto-discovers the DevTools port (the Playbot LISTEN socket whose `/json/vers
 - These run through the **"Playbot Gateway"**, an OpenAI **Responses-API-compatible** proxy (`https://*.play.bot/.../responses`) authenticated by a short-lived, account-scoped token minted from Playbot's backend. Treat direct gateway use as out of scope unless Playco sanctions it.
 
 **Remote control:** the app has a `remote_control_enrollments` table (websocket URL + account/server enrollment), indicating an official path to drive the desktop agent remotely over a WebSocket. Not documented here; explore only if you intend to use Playco's sanctioned remote-control feature.
+
+### 8.2 Workspace management over the same CDP transport (verified v0.93.1, Linux)
+
+The renderer's `window.electronAPI.invoke(channel, payload)` bridge (the transport from §8.1, and the one `bin/fm-playbot-lanes.mjs` uses) also reaches Playbot's workspace IPC module. Handlers register dynamically via `ipcMain.handle` on the channel `<module.name>:<key>` with zod-validated payloads. Confirmed by extracting `.vite/build/main.js` from the running app's `app.asar` (v0.93.1) and locating the `workspace` module registration and its schemas:
+
+- **`workspace:create`** — payload is a **strict** zod discriminated union on `strategy`:
+  - `{ strategy: "project", projectId, branch?, name?, baseBranch?, rootOverrides? }` — creates a workspace with a worktree on **every** project root. `baseBranch` selects the branch each worktree is taken from; a missing `branch` gets a generated name; `name` is the display name. This is the strategy Firstmate's lane tools use.
+  - `{ strategy: "quick", projectId, projectRootId?, baseRef?, branch?, expectedCommit?, targetBranch?, pullRequestProviderId?, pullRequestNumber?, mode, rootOverrides? }` — single-root provisioning where `mode` selects one of the `open`/`from`/`copy` provisioning functions. Confirmed in the schema but not exercised by Firstmate.
+  - Both objects are `.strict()`: any extra key, or an empty string for a `min(1)` field, is rejected. `branch`/`name`/`baseBranch` are `trim().min(1)` — omit them rather than sending blanks.
+  - The handler **awaits provisioning** and returns the fresh workspace record (with its `id`); on default-root failure it rolls the workspace back and throws.
+- **`workspace:delete`** — `{ workspaceId, preserveWorktrees? }` (default `false`). Refuses to delete the Local workspace, and refuses to delete the selected workspace unless a replacement exists.
+- Related channels confirmed present in the same module: `workspace:update`, `workspace:archive`, `workspace:select`, `workspace:renameBranch`, and `workspaceRoots:list`. Avoid `workspace:select` from automation — it changes what the user is looking at.
+
+Firstmate's `playbot_lanes` MCP exposes this as the `create_workspace` tool plus a `newWorkspace` option on `create_chat`/`dispatch` (see `docs/playbot-lanes.md`); prefer those over raw CDP calls.
 
 ---
 
@@ -455,8 +470,8 @@ curl -s http://127.0.0.1:<port>/            # -> ok
 # 5. Confirm engine tool present:
 #    listTools() includes "execute_engine_code"  (only when a project is open)
 
-# 6. Or drive the built-in agent:
-~/.playbot/bin/playbot "<prompt>" -C <project-dir> --mode default|plan
+# 6. Or drive the built-in agent (the ~/.playbot/bin/playbot CLI silently no-ops, §8):
+node bin/playbot-drive.mjs send "<prompt>"   # CDP method, §8.1
 ```
 
 MCP endpoint: `POST http://127.0.0.1:<port>/mcp?roots=<json>&primaryRootId=<id>`

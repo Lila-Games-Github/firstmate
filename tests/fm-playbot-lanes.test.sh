@@ -188,7 +188,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup did not fail closed 
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== false || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== false || value.checks.controllerPresent !== true) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 12) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 13) process.exit(1);
 NODE
 threads_after=$(FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -200,3 +200,227 @@ NODE
 )
 [ "$threads_before" = "$threads_after" ] || fail "setup created or removed a Playbot chat"
 pass "fm-playbot-lanes: setup repairs only when needed and never creates a startup chat"
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "list_projects did not expose each workspace root's branch"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const project = value.projects.find(candidate => candidate.id === 'project-worker');
+const roots = project.workspaces[0].roots;
+if (roots.length !== 1 || roots[0].branch !== 'main' || !roots[0].path) process.exit(1);
+NODE
+pass "fm-playbot-lanes: workspace root branches are visible in the global topology"
+
+# The remaining tests exercise Playbot IPC end to end against a hermetic fake
+# DevTools endpoint whose window.electronAPI.invoke stub records every call and
+# emulates workspace and thread creation against the fixture database.
+cat > "$FIXTURE_ROOT/fake-cdp.mjs" <<'NODE'
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import vm from 'node:vm';
+import { DatabaseSync } from 'node:sqlite';
+
+const desktop = path.join(process.env.FIXTURE_ROOT, 'desktop');
+const callsFile = path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl');
+let createCounter = 0;
+
+async function electronInvoke(channel, payload) {
+  fs.appendFileSync(callsFile, `${JSON.stringify({ channel, payload })}\n`);
+  const db = new DatabaseSync(path.join(desktop, 'playbot.db'));
+  try {
+    if (channel === 'workspace:create') {
+      if (payload.strategy !== 'project') throw new Error('fixture implements only the project strategy');
+      const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(payload.projectId);
+      if (!project) throw new Error(`Unknown project: ${payload.projectId}`);
+      createCounter += 1;
+      const id = `ws-created-${createCounter}`;
+      const branch = payload.branch ?? `generated-${createCounter}`;
+      const now = new Date().toISOString();
+      db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, payload.projectId, payload.name ?? null, 'worktree', 0, 'active', now, now);
+      const roots = db.prepare(`
+        SELECT pr.id AS root_id, r.path AS repo_path FROM project_roots pr
+        JOIN repositories r ON r.id = pr.repository_id WHERE pr.project_id = ?
+      `).all(payload.projectId);
+      for (const root of roots) {
+        db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+          .run(id, root.root_id, path.join(root.repo_path, '.worktrees', branch), branch);
+      }
+      return { id, name: payload.name ?? null };
+    }
+    if (channel === 'threads:openThread') {
+      const now = new Date().toISOString();
+      db.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(payload.id, payload.workspaceId, payload.title, 0, 1, null, payload.approvalMode, payload.planMode ? 1 : 0, 0, '', null, 'ready', 0, now, now, now, 0);
+      return null;
+    }
+    if (channel === 'threads:send') return null;
+    throw new Error(`fixture does not implement channel ${channel}`);
+  } finally {
+    db.close();
+  }
+}
+
+function encodeFrame(text) {
+  const payload = Buffer.from(text, 'utf8');
+  let header;
+  if (payload.length < 126) {
+    header = Buffer.from([0x81, payload.length]);
+  } else if (payload.length < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(payload.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x81;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(payload.length), 2);
+  }
+  return Buffer.concat([header, payload]);
+}
+
+function drainFrames(state, onMessage, onClose) {
+  for (;;) {
+    const buf = state.buf;
+    if (buf.length < 2) return;
+    const opcode = buf[0] & 0x0f;
+    const masked = (buf[1] & 0x80) !== 0;
+    let length = buf[1] & 0x7f;
+    let offset = 2;
+    if (length === 126) {
+      if (buf.length < 4) return;
+      length = buf.readUInt16BE(2);
+      offset = 4;
+    } else if (length === 127) {
+      if (buf.length < 10) return;
+      length = Number(buf.readBigUInt64BE(2));
+      offset = 10;
+    }
+    const maskLength = masked ? 4 : 0;
+    if (buf.length < offset + maskLength + length) return;
+    const mask = masked ? buf.subarray(offset, offset + 4) : null;
+    const payload = Buffer.from(buf.subarray(offset + maskLength, offset + maskLength + length));
+    if (mask) for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4];
+    state.buf = buf.subarray(offset + maskLength + length);
+    if (opcode === 1) onMessage(payload.toString('utf8'));
+    if (opcode === 8) return onClose();
+  }
+}
+
+async function handleCdp(message) {
+  if (message.method !== 'Runtime.evaluate') return { id: message.id, result: {} };
+  try {
+    const sandbox = { window: { electronAPI: { invoke: electronInvoke } } };
+    const value = await vm.runInNewContext(`(async () => (${message.params.expression}))()`, sandbox);
+    return { id: message.id, result: { result: { value } } };
+  } catch (error) {
+    return { id: message.id, result: { exceptionDetails: { text: error instanceof Error ? error.message : String(error) } } };
+  }
+}
+
+const server = http.createServer((req, res) => {
+  if (req.url === '/json') {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify([{ type: 'page', webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/page` }]));
+    return;
+  }
+  res.statusCode = 404;
+  res.end();
+});
+server.on('upgrade', (req, socket) => {
+  const accept = crypto.createHash('sha1')
+    .update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest('base64');
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  const state = { buf: Buffer.alloc(0) };
+  socket.on('data', (chunk) => {
+    state.buf = Buffer.concat([state.buf, chunk]);
+    drainFrames(state, async (text) => {
+      const response = await handleCdp(JSON.parse(text));
+      socket.write(encodeFrame(JSON.stringify(response)));
+    }, () => {
+      socket.write(Buffer.from([0x88, 0x00]));
+      socket.end();
+    });
+  });
+  socket.on('error', () => {});
+});
+server.listen(0, '127.0.0.1', () => {
+  fs.writeFileSync(path.join(desktop, 'DevToolsActivePort'), `${server.address().port}\n`);
+});
+NODE
+
+node --no-warnings "$FIXTURE_ROOT/fake-cdp.mjs" &
+FAKE_CDP_PID=$!
+trap 'kill "$FAKE_CDP_PID" 2>/dev/null; fm_test_cleanup' EXIT
+for _ in $(seq 1 50); do
+  [ -f "$PLAYBOT_DESKTOP_DIR/DevToolsActivePort" ] && break
+  sleep 0.1
+done
+[ -f "$PLAYBOT_DESKTOP_DIR/DevToolsActivePort" ] || fail "fake Playbot DevTools endpoint did not start"
+
+worker_json=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path")
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"name\":\"iso\",\"baseBranch\":\"develop\",\"branch\":\"fm-branch-1\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "create_workspace did not send the exact project-strategy payload or read the workspace back"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.length !== 1 || calls[0].channel !== 'workspace:create') process.exit(1);
+const payload = calls[0].payload;
+const keys = Object.keys(payload).sort().join(',');
+if (keys !== 'baseBranch,branch,name,projectId,strategy') process.exit(1);
+if (payload.strategy !== 'project' || payload.projectId !== 'project-worker') process.exit(1);
+if (payload.name !== 'iso' || payload.baseBranch !== 'develop' || payload.branch !== 'fm-branch-1') process.exit(1);
+const workspace = JSON.parse(process.env.OUT).result.structuredContent.workspace;
+if (workspace.id !== 'ws-created-1' || workspace.name !== 'iso' || workspace.kind !== 'worktree') process.exit(1);
+if (workspace.roots.length !== 1 || workspace.roots[0].branch !== 'fm-branch-1' || !workspace.roots[0].path) process.exit(1);
+NODE
+pass "fm-playbot-lanes: create_workspace sends the verified workspace:create payload and returns the created roots"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"name\":\"  \"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "create_workspace did not omit empty optional fields from the strict payload"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const keys = Object.keys(calls[0].payload).sort().join(',');
+if (keys !== 'projectId,strategy') process.exit(1);
+const workspace = JSON.parse(process.env.OUT).result.structuredContent.workspace;
+if (workspace.id !== 'ws-created-2' || workspace.roots[0].branch !== 'generated-2') process.exit(1);
+NODE
+pass "fm-playbot-lanes: create_workspace omits blank optional fields so Playbot's strict schema accepts the payload"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"develop\",\"branch\":\"fm-branch-3\"},\"title\":\"Isolated task\",\"message\":\"Do the isolated work\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "dispatch did not create the workspace and worker chat in one call"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'workspace:create,threads:openThread,threads:send') process.exit(1);
+if (calls[0].payload.baseBranch !== 'develop' || calls[0].payload.branch !== 'fm-branch-3') process.exit(1);
+if (calls[1].payload.workspaceId !== 'ws-created-3' || calls[1].payload.title !== 'Isolated task') process.exit(1);
+if (calls[2].payload.threadId !== calls[1].payload.id || calls[2].payload.text !== 'Do the isolated work') process.exit(1);
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.workspaceId !== 'ws-created-3' || value.lane.worker.workspaceId !== 'ws-created-3') process.exit(1);
+if (value.lane.supervisor.id !== 'chat-controller' || !value.lane.active) process.exit(1);
+NODE
+pass "fm-playbot-lanes: dispatch creates a workspace, creates the worker chat inside it, and delivers the task"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "workspace plus newWorkspace was not rejected"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('not both')) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{},\"thread\":\"Greeting\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "thread plus newWorkspace was not rejected"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('cannot be combined with newWorkspace')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: ambiguous workspace targeting fails closed"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\",\"message\":\"Plain send\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "existing-workspace targeting changed behavior"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.id !== 'chat-worker' || value.thread.workspaceId !== 'ws-worker') process.exit(1);
+NODE
+pass "fm-playbot-lanes: existing-workspace selection is unchanged"
