@@ -111,6 +111,15 @@ if (value.thread.id !== 'chat-controller') process.exit(1);
 NODE
 pass "fm-playbot-lanes: caller identity comes from the exact Codex session marker"
 
+printf '%s\n' '{"session_id":"worker-session","cwd":"fixture-worker","tool_name":"mcp__playbot_lanes__identify_current_thread"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"identify_current_thread","arguments":{}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "a Playbot chat outside the controller project could not identify itself"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.controller !== 'playbot-chat' || value.thread.id !== 'chat-worker') process.exit(1);
+NODE
+pass "fm-playbot-lanes: identity stays readable for chats outside the controller project"
+
 printf '%s\n' '{"session_id":"worker-session","cwd":"fixture-worker","tool_name":"mcp__playbot_lanes__list_projects"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}')

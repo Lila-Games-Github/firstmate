@@ -872,14 +872,15 @@ function toolDefinitions() {
 }
 
 async function handleTool(name, args = {}) {
+  if (name === "identify_current_thread") {
+    const row = identifyController(name);
+    return row
+      ? { controller: "playbot-chat", thread: publicThread(row) }
+      : { controller: "external-terminal", thread: null };
+  }
   const caller = controllerForTool(name);
   const projects = topology();
   if (name === "list_projects") return { projects };
-  if (name === "identify_current_thread") {
-    return caller
-      ? { controller: "playbot-chat", thread: publicThread(caller) }
-      : { controller: "external-terminal", thread: null };
-  }
   if (name === "list_lanes") return { lanes: loadRoutes().filter((route) => !args.activeOnly || route.active) };
   if (name === "close_lane") {
     const file = routePath(args.laneId);
