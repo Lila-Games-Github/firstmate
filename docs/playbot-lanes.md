@@ -1,7 +1,8 @@
 # Playbot lanes
 
-Playbot lanes let one Playbot chat supervise chats in other Playbot projects without selecting those chats in the UI.
-The integration is intentionally close to Firstmate's Herdr supervision shape: one controller, durable worker routes, background delivery, and a completion notification only when a routed worker has new actionable output.
+Playbot lanes let a normal terminal or one Playbot chat control chats in Playbot projects without selecting those chats in the UI.
+A Playbot-chat controller can register durable worker routes and receive background completion notifications.
+A normal-terminal controller supervises dispatched workers through bounded status and conversation reads because it has no Playbot chat to wake.
 
 `bin/fm-playbot-lanes.mjs` is the single owner of the tool schemas, private state format, install command, hook behavior, and exact failure rules.
 Run its `doctor` command for bounded local diagnostics and its `install` command to register the server and hooks in Playbot's managed Codex home.
@@ -13,7 +14,8 @@ The exact captain phrase `Ahoy Playbot!` loads the internal `ahoy-playbot` skill
 Setup checks readiness first and makes no changes when the integration is already healthy.
 When readiness fails, it installs the MCP definition and hooks, asks the running Playbot process to reload its MCP servers, and checks again without restarting Playbot.
 This initialization never creates, selects, messages, closes, or archives a chat, and it never starts an agent session.
-It reports ready only when Playbot DevTools is reachable, the configured controller project exists, exactly one owned PreToolUse hook and Stop hook are installed, and Playbot reports the enabled MCP with no error and the expected tool count.
+It reports ready only when Playbot DevTools is reachable, exactly one owned PreToolUse hook and Stop hook are installed, and Playbot reports the enabled MCP with no error and the expected tool count.
+The configured controller root is diagnostic identity for Playbot-chat callers and does not need to be open as a Playbot project for normal-terminal control.
 
 ## Identity and project routing
 
@@ -21,11 +23,12 @@ The MCP lists projects globally rather than inheriting Playbot's current-project
 Project ids and root paths are stable selectors.
 A project name is accepted only when it identifies exactly one project, so two projects named `prototype-game` are never silently conflated.
 
-The global PreToolUse hook records the Codex `session_id` immediately before a `playbot_lanes` tool call.
-The MCP maps that session id through Playbot's persisted `workspace_threads.session_id` field to identify the calling controller chat.
+The global PreToolUse hook records the Codex `session_id` immediately before a `playbot_lanes` tool call made by a Playbot chat.
+The MCP maps that session id through Playbot's persisted `workspace_threads.session_id` field to identify that controller chat.
 It never treats the visibly selected or most recently active chat as sufficient identity evidence.
 If concurrent calls make the marker ambiguous, the tool refuses and asks for a retry instead of choosing a chat.
-Every cross-project MCP operation also verifies that the caller belongs to the configured controller project, so worker chats cannot use the globally installed server as an unrestricted control plane.
+When no fresh Playbot marker exists, the caller is an external normal terminal and no Playbot project identity is required.
+When a marker does exist, every cross-project MCP operation verifies that the Playbot chat belongs to the configured controller project, so worker chats cannot use the globally installed server as an unrestricted control plane.
 
 ## Workspaces
 
@@ -43,10 +46,11 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 
 ## Lane lifecycle
 
-`dispatch` performs the normal end-to-end path.
-It identifies the controller, resolves an existing worker chat or creates an empty one, records a durable worker-to-controller route, and sends the task through Playbot's own `threads:send` IPC.
+`dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC.
 With `newWorkspace`, it creates the isolated workspace first and creates the worker chat inside it.
 The message can enter a non-selected project and does not require changing UI focus.
+For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.
+For a normal-terminal caller, it returns `lane: null` plus the `get_thread_status` and `read_thread` supervision tools instead of inventing a chat route that cannot deliver a wake.
 
 The global Stop hook is inert for every chat that has no active route.
 For a routed worker, it reads the completed Codex turn id and final message from the persisted rollout, ignores an already delivered turn, and sends one marked follow-up to the controller chat.

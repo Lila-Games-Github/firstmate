@@ -88,6 +88,13 @@ if (value.projects.length !== 3) process.exit(1);
 NODE
 pass "fm-playbot-lanes: global project discovery is project-id and path aware"
 
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"identify_current_thread","arguments":{}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller was not identified without a Playbot controller project"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.controller !== 'external-terminal' || value.thread !== null) process.exit(1);
+NODE
+pass "fm-playbot-lanes: normal-terminal callers need no Playbot controller project"
+
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_threads","arguments":{"project":"prototype-game"}}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "duplicate project names were not rejected"
 const value = JSON.parse(process.env.OUT);
@@ -103,6 +110,15 @@ const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.thread.id !== 'chat-controller') process.exit(1);
 NODE
 pass "fm-playbot-lanes: caller identity comes from the exact Codex session marker"
+
+printf '%s\n' '{"session_id":"worker-session","cwd":"fixture-worker","tool_name":"mcp__playbot_lanes__identify_current_thread"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"identify_current_thread","arguments":{}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "a Playbot chat outside the controller project could not identify itself"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.controller !== 'playbot-chat' || value.thread.id !== 'chat-worker') process.exit(1);
+NODE
+pass "fm-playbot-lanes: identity stays readable for chats outside the controller project"
 
 printf '%s\n' '{"session_id":"worker-session","cwd":"fixture-worker","tool_name":"mcp__playbot_lanes__list_projects"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
@@ -120,6 +136,28 @@ const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.thread.id !== 'chat-worker' || value.finalAnswer !== 'ACK' || value.completion.turnId !== 'turn-worker-1') process.exit(1);
 NODE
 pass "fm-playbot-lanes: thread reads are bounded and non-resuming"
+
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller could not read thread status without a controller project"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.id !== 'chat-worker' || value.thread.status !== 'ready') process.exit(1);
+NODE
+pass "fm-playbot-lanes: normal-terminal callers can poll thread status"
+
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_thread\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\",\"turnLimit\":2}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller could not read a thread without a controller project"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.id !== 'chat-worker' || value.finalAnswer !== 'ACK') process.exit(1);
+NODE
+pass "fm-playbot-lanes: normal-terminal callers can read worker conversations"
+
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal register_lane was not refused with polling guidance"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('requires a Playbot controller chat')) process.exit(1);
+if (!value.error.message.includes('get_thread_status and read_thread')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: normal-terminal register_lane fails closed toward polling supervision"
 
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
@@ -229,6 +267,9 @@ async function electronInvoke(channel, payload) {
   fs.appendFileSync(callsFile, `${JSON.stringify({ channel, payload })}\n`);
   const db = new DatabaseSync(path.join(desktop, 'playbot.db'));
   try {
+    if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
+      return [{ name: 'playbot_lanes', enabled: true, error: null, toolCount: 13 }];
+    }
     if (channel === 'workspace:create') {
       if (payload.strategy !== 'project') throw new Error('fixture implements only the project strategy');
       const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(payload.projectId);
@@ -361,6 +402,15 @@ for _ in $(seq 1 50); do
 done
 [ -f "$PLAYBOT_DESKTOP_DIR/DevToolsActivePort" ] || fail "fake Playbot DevTools endpoint did not start"
 
+setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
+OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup required the external terminal root to be a Playbot project"
+const value = JSON.parse(process.env.OUT);
+if (value.ready !== true || value.changed !== false) process.exit(1);
+if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.toolCount !== 13) process.exit(1);
+NODE
+pass "fm-playbot-lanes: setup readiness does not require a controller project"
+
 worker_json=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path")
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"name\":\"iso\",\"baseBranch\":\"develop\",\"branch\":\"fm-branch-1\"}}}")
@@ -392,6 +442,8 @@ NODE
 pass "fm-playbot-lanes: create_workspace omits blank optional fields so Playbot's strict schema accepts the payload"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"develop\",\"branch\":\"fm-branch-3\"},\"title\":\"Isolated task\",\"message\":\"Do the isolated work\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "dispatch did not create the workspace and worker chat in one call"
 const fs = require('node:fs');
@@ -405,6 +457,19 @@ if (value.thread.workspaceId !== 'ws-created-3' || value.lane.worker.workspaceId
 if (value.lane.supervisor.id !== 'chat-controller' || !value.lane.active) process.exit(1);
 NODE
 pass "fm-playbot-lanes: dispatch creates a workspace, creates the worker chat inside it, and delivers the task"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "normal-terminal dispatch did not create and send without a controller chat"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'workspace:create,threads:openThread,threads:send') process.exit(1);
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.lane !== null || value.thread.workspaceId !== 'ws-created-4') process.exit(1);
+if (value.supervision?.mode !== 'poll') process.exit(1);
+if (value.supervision.tools.join(',') !== 'get_thread_status,read_thread') process.exit(1);
+NODE
+pass "fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision"
 
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace plus newWorkspace was not rejected"
