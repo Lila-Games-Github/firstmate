@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-// Project-scoped Playbot chat lanes and Stop-hook wake delivery.
+// Playbot chat lanes controllable from a Playbot controller chat or a normal
+// terminal. A caller with a fresh PreToolUse marker is a Playbot chat that
+// must belong to the configured controller project to operate across
+// projects; it gets durable lanes with routed Stop-hook wake delivery. A
+// caller without one is an external terminal that dispatches without a lane
+// and supervises by polling.
 //
 // This executable has six entry points:
 //   serve          Run the stdio MCP server.

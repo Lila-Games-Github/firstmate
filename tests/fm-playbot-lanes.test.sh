@@ -137,6 +137,28 @@ if (value.thread.id !== 'chat-worker' || value.finalAnswer !== 'ACK' || value.co
 NODE
 pass "fm-playbot-lanes: thread reads are bounded and non-resuming"
 
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller could not read thread status without a controller project"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.id !== 'chat-worker' || value.thread.status !== 'ready') process.exit(1);
+NODE
+pass "fm-playbot-lanes: normal-terminal callers can poll thread status"
+
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_thread\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\",\"turnLimit\":2}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller could not read a thread without a controller project"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.id !== 'chat-worker' || value.finalAnswer !== 'ACK') process.exit(1);
+NODE
+pass "fm-playbot-lanes: normal-terminal callers can read worker conversations"
+
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal register_lane was not refused with polling guidance"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('requires a Playbot controller chat')) process.exit(1);
+if (!value.error.message.includes('get_thread_status and read_thread')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: normal-terminal register_lane fails closed toward polling supervision"
+
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
