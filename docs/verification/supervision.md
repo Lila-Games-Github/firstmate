@@ -543,3 +543,17 @@ On 2026-07-30, Playbot 0.81.0 on Windows exposed one shared Codex app-server pro
 The Windows session-lock verification proved that Git Bash can recover that host process through PowerShell while `CODEX_THREAD_ID` plus the Playbot database narrows ownership to the exact unarchived Firstmate thread.
 The regression command was `"C:\Program Files\Git\bin\bash.exe" tests/fm-playbot-session-lock.test.sh`.
 It proved that a second live thread is refused even when both threads share one Codex pid, an archived prior thread is reclaimable, and database uncertainty fails closed.
+
+On 2026-08-19 at 12:25 UTC, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 23 checks against pipeline head `11af79e7` (exported tree), covering the external-terminal guarantees added for callers outside a Playbot controller chat:
+
+```text
+ok - fm-playbot-lanes: normal-terminal callers need no Playbot controller project
+ok - fm-playbot-lanes: identity stays readable for chats outside the controller project
+ok - fm-playbot-lanes: normal-terminal callers can poll thread status
+ok - fm-playbot-lanes: normal-terminal callers can read worker conversations
+ok - fm-playbot-lanes: normal-terminal register_lane fails closed toward polling supervision
+ok - fm-playbot-lanes: setup readiness does not require a controller project
+ok - fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision
+```
+
+The suite self-skips where node is absent; this run was performed in the author environment because the pipeline environment lacks node.
