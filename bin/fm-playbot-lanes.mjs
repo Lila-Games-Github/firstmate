@@ -564,31 +564,17 @@ function rowForSession(sessionId) {
   return null;
 }
 
-function projectForControllerRoot(projects = topology()) {
-  const root = controllerRoot();
-  const matches = projects.filter((project) => projectPaths(project).has(root));
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) throw new Error(`Controller root maps to multiple Playbot projects: ${root}`);
-  throw new Error(`Controller root is not open as a Playbot project: ${root}`);
-}
-
 function identifyController(toolName) {
   const marker = consumeCaller(toolName);
-  if (marker) {
-    const row = rowForSession(marker.sessionId);
-    if (!row) throw new Error(`Current Codex session is not mapped to a persisted Playbot chat yet: ${marker.sessionId}`);
-    return row;
-  }
-  const project = projectForControllerRoot();
-  const candidates = threadsForProject(project.id).filter((row) => row.agent_status === "working");
-  if (candidates.length === 1) return candidates[0];
-  const all = threadsForProject(project.id);
-  if (all.length === 1) return all[0];
-  throw new Error("Could not identify the calling Playbot chat without a fresh PreToolUse marker; no selected-chat guess was made");
+  if (!marker) return null;
+  const row = rowForSession(marker.sessionId);
+  if (!row) throw new Error(`Current Codex session is not mapped to a persisted Playbot chat yet: ${marker.sessionId}`);
+  return row;
 }
 
-function requireConfiguredController(toolName) {
+function controllerForTool(toolName) {
   const row = identifyController(toolName);
+  if (!row) return null;
   const project = topology().find((candidate) => candidate.id === row.project_id);
   if (!project || !projectPaths(project).has(controllerRoot())) {
     throw new Error(`The calling chat ${row.thread_id} is not in the configured controller project ${controllerRoot()}`);
@@ -825,7 +811,7 @@ function toolDefinitions() {
     },
     {
       name: "identify_current_thread",
-      description: "Identify the Playbot chat calling this MCP from its PreToolUse session marker. Never guesses from the visibly selected chat.",
+      description: "Identify the Playbot chat calling this MCP from its PreToolUse session marker, or report an external-terminal caller. Never guesses from the visibly selected chat.",
       inputSchema: object(),
       annotations: { readOnlyHint: true },
     },
@@ -863,7 +849,7 @@ function toolDefinitions() {
     },
     {
       name: "dispatch",
-      description: "Herdr-style dispatch: identify this controller, resolve or create a worker chat by project, register its wake route, and send the task. Can create an isolated workspace first via newWorkspace.",
+      description: "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status and read_thread.",
       inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
@@ -886,10 +872,14 @@ function toolDefinitions() {
 }
 
 async function handleTool(name, args = {}) {
-  const caller = name === "identify_current_thread" ? null : requireConfiguredController(name);
+  const caller = controllerForTool(name);
   const projects = topology();
   if (name === "list_projects") return { projects };
-  if (name === "identify_current_thread") return { thread: publicThread(identifyController(name)) };
+  if (name === "identify_current_thread") {
+    return caller
+      ? { controller: "playbot-chat", thread: publicThread(caller) }
+      : { controller: "external-terminal", thread: null };
+  }
   if (name === "list_lanes") return { lanes: loadRoutes().filter((route) => !args.activeOnly || route.active) };
   if (name === "close_lane") {
     const file = routePath(args.laneId);
@@ -926,15 +916,26 @@ async function handleTool(name, args = {}) {
       const created = await createChat({ project: project.id, workspace: workspace.id, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode });
       worker = resolveThread(project.id, workspace.id, created.id);
     }
-    const lane = registerLane(caller, worker);
+    const lane = caller ? registerLane(caller, worker) : null;
     try {
       const thread = await sendMessage(worker, args.message);
-      return { lane, thread };
+      return caller
+        ? { lane, thread }
+        : {
+            lane: null,
+            thread,
+            supervision: {
+              mode: "poll",
+              tools: ["get_thread_status", "read_thread"],
+            },
+          };
     } catch (error) {
-      lane.active = false;
-      lane.updatedAt = nowIso();
-      lane.error = error instanceof Error ? error.message : String(error);
-      atomicWriteJson(routePath(lane.id), lane);
+      if (lane) {
+        lane.active = false;
+        lane.updatedAt = nowIso();
+        lane.error = error instanceof Error ? error.message : String(error);
+        atomicWriteJson(routePath(lane.id), lane);
+      }
       throw error;
     }
   }
@@ -946,7 +947,10 @@ async function handleTool(name, args = {}) {
     const publicValue = publicThread(thread);
     return { thread: publicValue, lanes: loadRoutes().filter((route) => route.supervisor?.id === thread.thread_id || route.worker?.id === thread.thread_id) };
   }
-  if (name === "register_lane") return { lane: registerLane(caller, thread) };
+  if (name === "register_lane") {
+    if (!caller) throw new Error("register_lane requires a Playbot controller chat; external-terminal callers supervise with get_thread_status and read_thread");
+    return { lane: registerLane(caller, thread) };
+  }
   if (name === "archive_chat") {
     if (args.confirm !== true) throw new Error("archive_chat requires confirm=true");
     await playbotInvoke("threads:archiveThread", { threadId: thread.thread_id, nextActiveThreadId: null });
@@ -1063,7 +1067,6 @@ function readiness(diagnostics) {
   const controllerPresent = diagnostics.projects.some((project) => project.paths.includes(controllerRoot()));
   const expectedToolCount = toolDefinitions().length;
   const ready = diagnostics.renderer
-    && controllerPresent
     && diagnostics.hooks.ready
     && diagnostics.mcpServer?.enabled === true
     && diagnostics.mcpServer?.error == null
