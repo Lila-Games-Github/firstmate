@@ -894,3 +894,33 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 ```sh
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
+
+## Treehouse return path matching
+
+`treehouse return` matching of its path argument against pool records was verified on 2026-08-20 with treehouse v2.1.1 on Fedora (ostree layout, where `/home` is a symlink to `/var/home`).
+This evidence supports `bin/fm-teardown.sh`'s alias resolution, which reads the recorded spelling from `treehouse status --json` and substitutes it only when both spellings canonicalize to the same directory.
+
+From a scratch git repo, `treehouse get --lease` printed the leased worktree path and recorded the same spelling in the pool state:
+
+```text
+/home/sanchith/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test
+```
+
+Returning the physical (`pwd -P`) spelling of that same directory was refused, proving the match is by string, not by directory identity:
+
+```sh
+treehouse return --force /var/home/sanchith/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test
+```
+
+```text
+worktree /var/home/sanchith/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test is not managed by treehouse
+```
+
+Returning the recorded `/home` spelling succeeded, and `treehouse status --json` (run from the project directory) exposed that recorded spelling in each record's `path` field:
+
+```text
+[{"name":"1","path":"/home/sanchith/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test","status":"leased",...}]
+```
+
+The portable regression pinning teardown's alias resolution and its refusal of genuinely different directories is in `tests/fm-teardown.test.sh` (`test_treehouse_path_alias_of_same_dir_returns_with_recorded_spelling` and `test_treehouse_genuinely_different_path_still_refuses`).
+Refresh this proof against a scratch pool after a treehouse upgrade if returns start refusing paths again.
