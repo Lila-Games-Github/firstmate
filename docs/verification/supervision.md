@@ -557,3 +557,27 @@ ok - fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervisio
 ```
 
 The suite self-skips where node is absent; this run was performed in the author environment because the pipeline environment lacks node.
+
+On 2026-08-20, Playbot 0.94.0 on Linux was verified to have removed the `threads:openThread` and `workspace:create` IPC handlers and folded chat and workspace creation into one strict `threads:launch` call.
+The facts were confirmed from the running app's extracted `.vite/build/main.js`: IPC channels are registered as `${module}:${key}` from per-module tables, `threads:launch` takes `{destination: existing-workspace | new-workspace, thread: {title (trim min 1), approvalMode ("default"|"auto-review"|"full-access"), planMode, ...} (strict, no caller-chosen id), message?, activate?}` and returns the persisted `workspace` and `thread`, the new-workspace `workspace` field reuses the exact pre-0.94 `{strategy: "project", projectId, name?, branch?, baseBranch?}` shape, the `workspace` module registers no bare creation channel, and `threads:send` (`{threadId, text, ...}`) plus `threads:archiveThread` (`{threadId, nextActiveThreadId?}`) are unchanged.
+
+Live evidence against the running Playbot 0.94.0 on the same date:
+
+- `doctor` reported `chatCreation: "launch"` from the side-effect-free capability probe, and `setup` returned `ready: true`, `changed: false` without touching the healthy installation.
+- An external-terminal `dispatch` with `newWorkspace: {name: "smoke-delete-me"}` into project `project_df995db1b164` created workspace `ws_3ee259e69989` with a provisioned worktree, created chat `chat-d32cc81d-5ac0-4320-a485-d5c505fc0d4a` under Playbot's own generated id, and delivered the task through the unchanged `threads:send`.
+- The chat acquired Codex session `01a01ed0-11f7-7863-aa72-add41494c590` and completed turn `01a01ed0-1840-7481-b9cc-e778bf22fd8f` with final answer `ACK`, read back through `read_thread` without resuming the chat.
+- The created workspace stayed `selected: false`, proving `activate: false` prevents the selection change Playbot 0.93.x's create handler used to make.
+- `archive_chat` archived the smoke chat through the unchanged `threads:archiveThread`; the DevTools HTTP endpoint was transiently unresponsive for roughly three minutes mid-smoke and recovered on its own, so a lane timeout is worth one retry before deeper diagnosis.
+
+The focused regression command `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 28 checks on the same date, including six added or reworked for the 0.94.0 surface and the legacy fallback:
+
+```text
+ok - fm-playbot-lanes: doctor detects the 0.94.0 threads:launch API from the safe capability probe
+ok - fm-playbot-lanes: create_workspace launches the 0.94.0 new-workspace payload and archives its setup chat
+ok - fm-playbot-lanes: create_chat launches with the Playbot-generated thread id and no UI activation
+ok - fm-playbot-lanes: doctor detects the pre-0.94 chat-creation API on a legacy Playbot
+ok - fm-playbot-lanes: create_workspace falls back to workspace:create on a legacy Playbot
+ok - fm-playbot-lanes: dispatch falls back to the pre-0.94 channels on a legacy Playbot
+```
+
+The fake DevTools endpoint inside the test serves the 0.94.0 `threads:launch` surface by default and the pre-0.94 surface in its legacy mode, so both adapter paths and the missing-handler detection between them are enforced hermetically.
