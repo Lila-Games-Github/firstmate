@@ -438,13 +438,12 @@ async function createWorkspace(project, options = {}) {
   const workspaceId = launch?.workspace?.id;
   const placeholderThreadId = launch?.thread?.id;
   if (!workspaceId || !placeholderThreadId) throw new Error("Playbot did not return the launched workspace and chat ids");
-  const fresh = readBackWorkspace(project, workspaceId);
   try {
     await playbotInvoke("threads:archiveThread", { threadId: placeholderThreadId, nextActiveThreadId: null });
   } catch (error) {
     throw new Error(`Workspace ${workspaceId} was created, but archiving its setup chat ${placeholderThreadId} failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return fresh;
+  return readBackWorkspace(project, workspaceId);
 }
 
 function assertNewWorkspaceRequest(name, args) {
