@@ -486,6 +486,7 @@ fm_lock_remove_path() {
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || return 1
   [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
+  return 0
 }
 
 fm_lock_mid_acquire_is_fresh() {
