@@ -15,6 +15,35 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+# lib.sh's EXIT trap removes temp dirs but cannot kill fixture processes. Any
+# fail exits with background fixtures still running - a 300s sleeper, a
+# TERM-resistant peer, a polling watcher - and those inherit this script's
+# stdout/stderr, holding a capturing runner's pipe open until they die (one
+# failure burned ~300s in CI). So reap stray jobs on exit: TERM first so an arm
+# can clean up its watcher child, a short bounded wait, then KILL survivors.
+# Pass paths kill and reap their own jobs, so a green run sees an empty job
+# table here and pays nothing.
+cleanup_stray_jobs() {
+  local pids i
+  pids=$(jobs -p)
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086 # the pid list is deliberately word-split
+    kill -TERM $pids 2>/dev/null
+    i=0
+    while [ "$i" -lt 20 ] && [ -n "$(jobs -rp)" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    pids=$(jobs -rp)
+    if [ -n "$pids" ]; then
+      # shellcheck disable=SC2086 # the pid list is deliberately word-split
+      kill -KILL $pids 2>/dev/null
+    fi
+  fi
+  fm_test_cleanup
+}
+trap cleanup_stray_jobs EXIT
+
 mark_pr_check_migration_complete() {
   local state=$1
   printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
@@ -80,7 +109,7 @@ test_stale_watch_lock_reclaimed() {
   done
   mkdir "$state/.watch.lock"
   printf '%s\n' "$dead_pid" > "$state/.watch.lock/pid"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
   live=0
@@ -420,6 +449,34 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+test_lock_remove_path_succeeds_without_owner_file() {
+  # Regression: a plain-directory lock with no owner file (the legacy watch-lock
+  # shape) must report success once it is actually removed. A trailing owner
+  # cleanup guard used to leak status 1 here, which the restart path read as
+  # "recovery state could not be persisted" and aborted before relaunching.
+  local dir state lockdir out
+  dir=$(make_case lock-remove-ownerless)
+  state="$dir/state"
+  lockdir="$state/.legacy.lock"
+  mkdir "$lockdir"
+  printf '%s\n' 12345 > "$lockdir/pid"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_remove_path "$2"; then removed=ok; else removed=failed; fi
+    if [ -e "$2" ]; then present=yes; else present=no; fi
+    printf "removed=%s present=%s\n" "$removed" "$present"
+  ' _ "$LIB" "$lockdir")
+  case "$out" in
+    *"removed=ok"*) ;;
+    *) fail "removing an ownerless directory lock reported failure: $out" ;;
+  esac
+  case "$out" in
+    *"present=no"*) ;;
+    *) fail "ownerless directory lock was not actually removed: $out" ;;
+  esac
+  pass "removing an ownerless directory lock reports success"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i
   dir=$(make_case restart-reused-pid)
@@ -567,7 +624,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   out="$dir/watch.out"
   armout="$dir/arm.out"
   # A genuinely live watcher with a fresh beacon already holds the singleton.
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wpid=$!
   i=0
   while [ "$i" -lt 60 ]; do
@@ -608,7 +665,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wpid=$!
   i=0
   while [ "$i" -lt 60 ]; do
@@ -660,7 +717,7 @@ test_arm_starts_and_self_heals() {
       printf '%s\n' "dead watcher identity" > "$state/.watch.lock/pid-identity"
       touch "$state/.last-watcher-beat"
     fi
-    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     armpid=$!
     i=0
     while [ "$i" -lt 80 ]; do
@@ -699,7 +756,7 @@ test_arm_hup_cleans_child_and_temp_output() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -855,7 +912,7 @@ SH
 
   rm -f "$check_file" "$state/task.check-trust"
   armout="$dir/successor-arm.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   successor_arm=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -880,7 +937,7 @@ SH
   iteration=0
   while [ "$iteration" -lt 6 ]; do
     armout="$dir/bounded-$iteration.out"
-    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_CYCLE_LOG_MAX_BYTES=1400 FM_WATCH_CYCLE_LOG_KEEP_LINES=2 FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     successor_arm=$!
     i=0
     while [ "$i" -lt 80 ]; do
@@ -909,7 +966,7 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   mark_pr_check_migration_complete "$state"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -1114,6 +1171,7 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_remove_path_succeeds_without_owner_file
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
