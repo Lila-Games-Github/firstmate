@@ -56,7 +56,7 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 ## Lane lifecycle
 
 `dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x and 0.94.0.
-With `newWorkspace`, it creates the isolated workspace first and creates the worker chat inside it.
+With `newWorkspace`, it creates the isolated workspace and creates the worker chat inside it.
 The message can enter a non-selected project and does not require changing UI focus.
 For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.
 For a normal-terminal caller, it returns `lane: null` plus the `get_thread_status` and `read_thread` supervision tools instead of inventing a chat route that cannot deliver a wake.
