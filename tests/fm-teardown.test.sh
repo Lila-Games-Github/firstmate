@@ -445,6 +445,45 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+# Override fakebin/treehouse to mimic the real binary's (verified v2.1.1)
+# string-literal path matching: `status --json` prints one worktree record with
+# the exact recorded spelling, and `return --force <path>` succeeds only when
+# <path> is byte-equal to it, logging the accepted path to
+# $case_dir/treehouse-returned; any other path is refused with the real
+# "worktree <path> is not managed by treehouse" error. This reproduces the
+# Fedora ostree /home -> /var/home alias failure hermetically.
+# Args: case_dir recorded_path
+add_path_matching_treehouse() {
+  local case_dir=$1 recorded=$2
+  printf '%s\n' "$recorded" > "$case_dir/treehouse-recorded-path"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+recorded=\$(cat '$case_dir/treehouse-recorded-path')
+case "\${1:-}" in
+  status)
+    printf '[{"name":"1","path":"%s","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]\n' "\$recorded"
+    exit 0 ;;
+  return)
+    shift
+    wt=""
+    for a in "\$@"; do
+      case "\$a" in
+        --force) ;;
+        *) wt=\$a ;;
+      esac
+    done
+    if [ "\$wt" = "\$recorded" ]; then
+      printf '%s\n' "\$wt" >> '$case_dir/treehouse-returned'
+      exit 0
+    fi
+    echo "worktree \$wt is not managed by treehouse" >&2
+    exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 git_index_lock_path() {
   local dir=$1 lock abs_dir
   lock=$(git -C "$dir" rev-parse --git-path index.lock)
@@ -1287,6 +1326,71 @@ test_fractional_legacy_retry_wait_refuses_without_arithmetic_error() {
   assert_not_contains "$(cat "$case_dir/stderr")" "syntax error" \
     "fractional-legacy-retry-wait: teardown hit an arithmetic error"
   pass "fractional legacy retry wait remains supported without arithmetic"
+}
+
+# Regression for the Fedora ostree /home -> /var/home alias failure (observed
+# 2026-08-18 and 2026-08-20): the task meta records one spelling of the worktree
+# while treehouse records another spelling of the SAME directory, and treehouse
+# refuses the meta spelling as "not managed by treehouse" after every landed-work
+# check has already passed. Teardown must resolve treehouse's own spelling and
+# return with it.
+test_treehouse_path_alias_of_same_dir_returns_with_recorded_spelling() {
+  local case_dir rc
+  case_dir=$(make_case path-alias-allow)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  # treehouse records the worktree under a symlink alias of the meta's spelling.
+  ln -s "$case_dir/wt" "$case_dir/wt-alias"
+  add_path_matching_treehouse "$case_dir" "$case_dir/wt-alias"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "path-alias-allow: teardown should succeed when meta and treehouse spellings alias the same directory"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "path-alias-allow: teardown printed a REFUSED line"
+  ! grep -q "not managed by treehouse" "$case_dir/stderr" \
+    || fail "path-alias-allow: treehouse still refused the path as unmanaged"
+  grep -Fxq "$case_dir/wt-alias" "$case_dir/treehouse-returned" 2>/dev/null \
+    || fail "path-alias-allow: treehouse return was not called with treehouse's own recorded spelling"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "path-alias-allow: teardown remained incomplete after the aliased return"
+  pass "worktree recorded under a path alias of the same directory is returned with treehouse's spelling"
+}
+
+# The alias substitution must be identity-preserving: a treehouse record that is
+# a genuinely different directory (not an alias of the meta worktree) must never
+# be substituted, and the original refusal must abort teardown loudly.
+test_treehouse_genuinely_different_path_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case path-alias-refuse)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  # A real, existing directory that is NOT the meta worktree.
+  mkdir -p "$case_dir/other-wt"
+  add_path_matching_treehouse "$case_dir" "$case_dir/other-wt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "path-alias-refuse: teardown must abort when treehouse manages a genuinely different directory"
+  grep -q "not managed by treehouse" "$case_dir/stderr" \
+    || fail "path-alias-refuse: the original treehouse refusal was not surfaced"
+  grep -q "teardown aborted" "$case_dir/stderr" \
+    || fail "path-alias-refuse: teardown did not abort loudly on the return failure"
+  [ ! -e "$case_dir/treehouse-returned" ] \
+    || fail "path-alias-refuse: treehouse return was called with a substituted different directory"
+  [ -d "$case_dir/wt" ] || fail "path-alias-refuse: worktree was removed despite the failed return"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "path-alias-refuse: task state was cleaned up despite the failed return"
+  pass "a treehouse record for a genuinely different directory is never substituted and still refuses"
 }
 
 test_local_only_force_overrides_unpushed() {
@@ -2632,6 +2736,8 @@ test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
 test_persistent_index_lock_exhausts_retries_and_refuses_loudly
 test_empty_retry_wait_uses_default_without_aborting
 test_fractional_legacy_retry_wait_refuses_without_arithmetic_error
+test_treehouse_path_alias_of_same_dir_returns_with_recorded_spelling
+test_treehouse_genuinely_different_path_still_refuses
 test_parked_own_run_is_aborted_before_teardown
 test_parked_own_run_refuses_when_abort_is_unconfirmed
 test_mismatched_run_after_abort_refuses_unconfirmed

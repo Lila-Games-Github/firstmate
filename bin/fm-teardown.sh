@@ -59,6 +59,15 @@
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
 #
+# Path-alias tolerant treehouse return: on systems where the recorded worktree
+# path and treehouse's own record are different spellings of the same directory
+# (e.g. Fedora ostree's /home -> /var/home symlink), `treehouse return` refuses
+# the alias as "not managed by treehouse". teardown_treehouse_return therefore
+# first resolves the spelling treehouse records via `treehouse status --json`,
+# substituting it only when both spellings canonicalize (pwd -P) to the same
+# directory - a genuinely different path is never substituted, and every
+# landed-work and safety check has already run against the recorded path.
+#
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
 # non-linked worktree, .git/index.lock) that makes `treehouse return --force` fail
@@ -1004,6 +1013,47 @@ treehouse_return_is_index_lock_error() {
   printf '%s\n' "$text" | grep -Eq "Unable to create ['\"].*index\\.lock['\"]: File exists"
 }
 
+# Paths treehouse currently records for the pool resolved from cd_dir, one per
+# line, exactly as treehouse itself spells them. Uses the machine-readable
+# `treehouse status --json` surface (verified against treehouse v2.1.1) rather
+# than the human status table or a vendor error string. Fails when treehouse
+# status is unavailable; callers must then keep their original path.
+treehouse_recorded_paths() {
+  local cd_dir=$1 status
+  status=$( ( cd "$cd_dir" && treehouse status --json ) 2>/dev/null ) || return 1
+  printf '%s\n' "$status" | grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed -E 's/^"path"[[:space:]]*:[[:space:]]*"//; s/"$//'
+}
+
+# Echo the spelling treehouse itself records for $dir when a recorded entry is
+# the same physical directory under a different path alias, e.g. Fedora ostree
+# where /home is a symlink to /var/home: the task meta records the physical
+# /var/home spelling while treehouse recorded the /home spelling it was launched
+# with, and `treehouse return` matches its argument against its records as a
+# string, refusing the alias as "not managed by treehouse" even though the
+# directory is managed (observed 2026-08-18 and 2026-08-20).
+# Only the spelling may change: a recorded entry counts solely when both sides
+# canonicalize (pwd -P) to the same directory, so a genuinely different path can
+# never be substituted and no landed-work or safety guard is affected.
+# Prints nothing and fails when $dir is gone, treehouse status is unavailable,
+# or no recorded entry is the same directory.
+treehouse_managed_alias_for_dir() {
+  local dir=$1 cd_dir=$2 canon recorded path canon_path
+  canon=$(canonical_existing_dir "$dir") || return 1
+  recorded=$(treehouse_recorded_paths "$cd_dir") || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    canon_path=$(canonical_existing_dir "$path") || continue
+    if [ "$canon_path" = "$canon" ]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done <<EOF
+$recorded
+EOF
+  return 1
+}
+
 # Absolute path to the git index lock for a worktree/repo dir, or empty when it
 # cannot be resolved (dir missing or not a git worktree at all).
 worktree_git_lock_path() {
@@ -1060,7 +1110,16 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
-  local out lock attempt=0 max_retries lock_desc
+  local out lock attempt=0 max_retries lock_desc managed_spelling
+
+  # Hand treehouse its own recorded spelling when $dir is the same directory
+  # under a path alias (see treehouse_managed_alias_for_dir); only the path
+  # identity changes, never which directory is returned.
+  if managed_spelling=$(treehouse_managed_alias_for_dir "$dir" "$cd_dir") \
+     && [ -n "$managed_spelling" ] && [ "$managed_spelling" != "$dir" ]; then
+    echo "teardown: $label $dir is recorded by treehouse as $managed_spelling (same directory under a path alias); returning treehouse's spelling" >&2
+    dir=$managed_spelling
+  fi
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
