@@ -15,9 +15,13 @@
 //   doctor         Print bounded local integration diagnostics.
 //
 // The server talks to Playbot through its local Electron DevTools socket and
-// invokes Playbot's own threads:* and workspace:* IPC handlers. It reads Playbot's SQLite state
-// only for discovery, exact session-to-chat identity, and completed-turn
-// deduplication. It never writes either Playbot database directly.
+// invokes Playbot's own IPC handlers: threads:launch for chat and workspace
+// creation on Playbot 0.94.0 and newer, with a detected fallback to the
+// pre-0.94 threads:openThread and workspace:create channels, plus the
+// unchanged threads:send and threads:archiveThread channels. It reads
+// Playbot's SQLite state only for discovery, exact session-to-chat identity,
+// and completed-turn deduplication. It never writes either Playbot database
+// directly.
 //
 // Durable private state defaults to ~/.playbot/mcp/project-chat. Routes are one
 // file each so independent Stop hooks do not contend on one shared JSON blob.
@@ -33,7 +37,7 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.3.0";
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
 
@@ -381,6 +385,28 @@ function createThreadId() {
   return `chat-lane-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
 }
 
+// Playbot 0.94.0 removed threads:openThread and workspace:create and folded
+// both into threads:launch. The probe payload below is rejected by every
+// known Playbot schema before any handler code can run, so classifying the
+// rejection detects which API this Playbot exposes without side effects:
+// a missing-handler rejection means the pre-0.94 channels, any other
+// rejection means threads:launch, and an accepted probe is an explicit
+// error rather than a guess.
+const CHAT_API_PROBE = { destination: { kind: "fm-capability-probe" } };
+let detectedChatApi = null;
+
+async function chatCreationApi() {
+  if (detectedChatApi) return detectedChatApi;
+  const outcome = await withPlaybotPage((client) => client.evaluate(
+    `window.electronAPI.invoke("threads:launch", ${JSON.stringify(CHAT_API_PROBE)}).then(() => ({ accepted: true }), (error) => ({ accepted: false, message: String((error && error.message) || error) }))`
+  ));
+  if (!outcome || outcome.accepted !== false) {
+    throw new Error("Playbot accepted the threads:launch capability probe; refusing to guess the chat-creation API");
+  }
+  detectedChatApi = /No handler registered/i.test(outcome.message ?? "") ? "openThread" : "launch";
+  return detectedChatApi;
+}
+
 function workspaceCreatePayload(projectId, { name, baseBranch, branch } = {}) {
   const trimmed = (value) => String(value ?? "").trim();
   const payload = { strategy: "project", projectId };
@@ -390,37 +416,75 @@ function workspaceCreatePayload(projectId, { name, baseBranch, branch } = {}) {
   return payload;
 }
 
-async function createWorkspace(project, options = {}) {
-  const created = await playbotInvoke("workspace:create", workspaceCreatePayload(project.id, options));
-  const workspaceId = created?.id;
-  if (!workspaceId) throw new Error("Playbot did not return the created workspace id");
+function readBackWorkspace(project, workspaceId) {
   const fresh = topology().find((candidate) => candidate.id === project.id)
     ?.workspaces.find((workspace) => workspace.id === workspaceId);
   if (!fresh) throw new Error(`Created workspace ${workspaceId} is not visible in Playbot state yet`);
   return fresh;
 }
 
-async function resolveTargetWorkspace(name, project, args) {
+async function createWorkspace(project, options = {}) {
+  if (await chatCreationApi() === "openThread") {
+    const created = await playbotInvoke("workspace:create", workspaceCreatePayload(project.id, options));
+    const workspaceId = created?.id;
+    if (!workspaceId) throw new Error("Playbot did not return the created workspace id");
+    return readBackWorkspace(project, workspaceId);
+  }
+  const launch = await playbotInvoke("threads:launch", {
+    destination: { kind: "new-workspace", workspace: workspaceCreatePayload(project.id, options) },
+    thread: { title: "Firstmate workspace setup", approvalMode: "default", planMode: false },
+    activate: false,
+  });
+  const workspaceId = launch?.workspace?.id;
+  const placeholderThreadId = launch?.thread?.id;
+  if (!workspaceId || !placeholderThreadId) throw new Error("Playbot did not return the launched workspace and chat ids");
+  try {
+    await playbotInvoke("threads:archiveThread", { threadId: placeholderThreadId, nextActiveThreadId: null });
+  } catch (error) {
+    throw new Error(`Workspace ${workspaceId} was created, but archiving its setup chat ${placeholderThreadId} failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return readBackWorkspace(project, workspaceId);
+}
+
+function assertNewWorkspaceRequest(name, args) {
   const request = args.newWorkspace;
   const eligible = name === "create_chat" || name === "dispatch";
-  if (request === undefined || !eligible) return resolveWorkspace(project, args.workspace);
+  if (request === undefined || !eligible) return false;
   if (typeof request !== "object" || request === null || Array.isArray(request)) {
     throw new Error("newWorkspace must be an object with optional name, baseBranch, and branch");
   }
   if (args.workspace) throw new Error("Provide workspace or newWorkspace, not both");
   if (name === "dispatch" && args.thread) throw new Error("thread cannot be combined with newWorkspace; a just-created workspace has no existing chats");
-  return createWorkspace(project, request);
+  return true;
 }
 
-async function createChat({ project, workspace, title, approvalMode = "full-access", planMode = false }) {
+async function createChat({ project, workspace, newWorkspace, title, approvalMode = "full-access", planMode = false }) {
   const projects = topology();
   const targetProject = resolveProject(project, projects);
-  const targetWorkspace = resolveWorkspace(targetProject, workspace);
+  const cleanTitle = String(title ?? "").trim();
+  if (!cleanTitle) throw new Error("title must not be blank; Playbot requires a non-empty chat title");
+  if (await chatCreationApi() === "launch") {
+    const destination = newWorkspace === undefined
+      ? { kind: "existing-workspace", workspaceId: resolveWorkspace(targetProject, workspace).id }
+      : { kind: "new-workspace", workspace: workspaceCreatePayload(targetProject.id, newWorkspace) };
+    const launch = await playbotInvoke("threads:launch", {
+      destination,
+      thread: { title: cleanTitle, approvalMode, planMode: Boolean(planMode) },
+      activate: false,
+    });
+    const threadId = launch?.thread?.id;
+    const workspaceId = launch?.workspace?.id ?? destination.workspaceId;
+    if (!threadId || !workspaceId) throw new Error("Playbot did not return the launched chat and workspace ids");
+    return publicThread(resolveThread(targetProject.id, workspaceId, threadId));
+  }
+  const targetWorkspace = newWorkspace === undefined
+    ? resolveWorkspace(targetProject, workspace)
+    : await createWorkspace(targetProject, newWorkspace);
   const threadId = createThreadId();
   await playbotInvoke("threads:openThread", {
     id: threadId,
     workspaceId: targetWorkspace.id,
-    title: String(title || "Firstmate task").trim(),
+    title: cleanTitle,
     approvalMode,
     planMode: Boolean(planMode),
   });
@@ -822,7 +886,7 @@ function toolDefinitions() {
     },
     {
       name: "create_workspace",
-      description: "Create a new Playbot workspace in one project through Playbot's own workspace IPC, optionally from a chosen base branch. Playbot marks it selected within that project.",
+      description: "Create a new Playbot workspace in one project through Playbot's own IPC, optionally from a chosen base branch. On Playbot 0.94.0 and newer this launches and immediately archives one setup chat, because workspace creation is folded into chat launch, and does not change the selected workspace; on 0.93.x Playbot marks the workspace selected within its project.",
       inputSchema: object({ project: string("Project id, root path, or unique project name"), name: string("Optional workspace name; Playbot shows a generated name when omitted"), baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"), branch: string("Optional name for the new working branch; generated when omitted") }, ["project"]),
     },
     {
@@ -901,26 +965,27 @@ async function handleTool(name, args = {}) {
   if (name === "create_workspace") {
     return { workspace: await createWorkspace(project, args) };
   }
-  const workspace = await resolveTargetWorkspace(name, project, args);
-  if (name === "list_threads") {
-    return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
-  }
   if (name === "create_chat") {
-    return { thread: await createChat({ project: project.id, workspace: workspace.id, title: args.title, approvalMode: args.approvalMode, planMode: args.planMode }) };
+    const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
+    return { thread: await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title, approvalMode: args.approvalMode, planMode: args.planMode }) };
   }
 
   if (name === "dispatch") {
-    let worker;
-    if (args.thread) {
-      worker = resolveThread(project.id, workspace.id, args.thread);
-    } else if (args.title) {
-      const matches = threadsForProject(project.id, workspace.id).filter((row) => row.title.toLowerCase() === String(args.title).trim().toLowerCase());
-      if (matches.length > 1) throw new Error(`Ambiguous worker title '${args.title}': ${matches.map((row) => row.thread_id).join(", ")}`);
-      worker = matches[0] ?? null;
+    const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
+    let worker = null;
+    if (!wantsNewWorkspace) {
+      const workspace = resolveWorkspace(project, args.workspace);
+      if (args.thread) {
+        worker = resolveThread(project.id, workspace.id, args.thread);
+      } else if (args.title) {
+        const matches = threadsForProject(project.id, workspace.id).filter((row) => row.title.toLowerCase() === String(args.title).trim().toLowerCase());
+        if (matches.length > 1) throw new Error(`Ambiguous worker title '${args.title}': ${matches.map((row) => row.thread_id).join(", ")}`);
+        worker = matches[0] ?? null;
+      }
     }
     if (!worker) {
-      const created = await createChat({ project: project.id, workspace: workspace.id, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode });
-      worker = resolveThread(project.id, workspace.id, created.id);
+      const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode });
+      worker = resolveThread(project.id, created.workspaceId, created.id);
     }
     const lane = caller ? registerLane(caller, worker) : null;
     try {
@@ -946,6 +1011,10 @@ async function handleTool(name, args = {}) {
     }
   }
 
+  const workspace = resolveWorkspace(project, args.workspace);
+  if (name === "list_threads") {
+    return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
+  }
   const thread = resolveThread(project.id, workspace.id, args.thread, name === "archive_chat");
   if (name === "send_message") return { thread: await sendMessage(thread, args.message) };
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
@@ -1047,12 +1116,20 @@ async function doctor() {
   const projects = topology();
   let renderer = false;
   let mcpServer = null;
+  let chatCreation = null;
   try {
     renderer = await withPlaybotPage(async () => true);
     const servers = await playbotInvoke("codex:mcpServers:list", undefined);
     mcpServer = Array.isArray(servers) ? servers.find((server) => server.name === SERVER_NAME) ?? null : null;
   } catch {
     renderer = false;
+  }
+  if (renderer) {
+    try {
+      chatCreation = await chatCreationApi();
+    } catch {
+      chatCreation = null;
+    }
   }
   return {
     server: `${SERVER_NAME}@${SERVER_VERSION}`,
@@ -1063,6 +1140,7 @@ async function doctor() {
     codexDb: codexDbPath(),
     renderer,
     mcpServer,
+    chatCreation,
     hooks: installedHookStatus(),
     projects: projects.map((project) => ({ id: project.id, name: project.name, paths: [...projectPaths(project)] })),
     routes: loadRoutes().length,

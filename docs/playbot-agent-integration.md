@@ -416,6 +416,10 @@ It auto-discovers the DevTools port (the Playbot LISTEN socket whose `/json/vers
 
 ### 8.2 Workspace management over the same CDP transport (verified v0.93.1, Linux)
 
+Playbot 0.94.0 removed the standalone `workspace:create` and `threads:openThread` channels and folded chat and workspace creation into the strict `threads:launch` channel, whose `new-workspace` destination reuses the exact `{strategy: "project", ...}` payload shape documented below.
+The lane server detects which surface the running Playbot exposes; [playbot-lanes.md](playbot-lanes.md#chat-creation-api-detection) owns that compatibility posture, and [verification/supervision.md](verification/supervision.md#playbot-lanes) records the dated 0.94.0 schema evidence.
+The rest of this section documents the pre-0.94 surface, which remains the lane server's detected legacy fallback path.
+
 The renderer's `window.electronAPI.invoke(channel, payload)` bridge (the transport from §8.1, and the one `bin/fm-playbot-lanes.mjs` uses) also reaches Playbot's workspace IPC module. Handlers register dynamically via `ipcMain.handle` on the channel `<module.name>:<key>` with zod-validated payloads. Confirmed by extracting `.vite/build/main.js` from the running app's `app.asar` (v0.93.1) and locating the `workspace` module registration and its schemas:
 
 - **`workspace:create`** — payload is a **strict** zod discriminated union on `strategy`:
