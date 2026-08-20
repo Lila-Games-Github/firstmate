@@ -885,19 +885,28 @@ pr_is_merged() {
 # as "added". A HEAD fully reachable from the target passes the same test, since
 # merging an ancestor changes nothing. Returns non-zero when inconclusive (no
 # target ref, or a merge conflict), so the caller refuses rather than guesses.
+# When the target ref itself cannot be resolved it also sets
+# LANDING_TARGET_UNRESOLVED=1, so the caller can name a stale recorded landing
+# branch in its refusal instead of giving generic push-the-branch advice.
+LANDING_TARGET_UNRESOLVED=
 content_in_default() {
   local name ref default_tree merged_tree
+  LANDING_TARGET_UNRESOLVED=
   if [ -n "$LANDING_BRANCH" ]; then
     name=$LANDING_BRANCH
   else
     name=$(default_branch) || return 1
   fi
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    if ! git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1; then
+      LANDING_TARGET_UNRESOLVED=1
+      return 1
+    fi
     ref="refs/remotes/origin/$name"
   elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
+    LANDING_TARGET_UNRESOLVED=1
     return 1
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
@@ -1211,7 +1220,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT DEFAULT_REF unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1250,10 +1259,12 @@ validate_worktree_teardown_safety() {
         return 1
       }
       DEFAULT=$LANDING_BRANCH
+      DEFAULT_REF=refs/heads/$LANDING_BRANCH
     else
       DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+      DEFAULT_REF=$DEFAULT
     fi
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT_REF" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
@@ -1281,6 +1292,11 @@ validate_worktree_teardown_safety() {
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
+      if [ -n "$LANDING_BRANCH" ] && [ -n "$LANDING_TARGET_UNRESOLVED" ]; then
+        echo "REFUSED: recorded landing branch $LANDING_BRANCH does not exist in $PROJ." >&2
+        echo "Correct it with bin/fm-landing-branch.sh, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      fi
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
