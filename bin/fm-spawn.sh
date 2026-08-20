@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -16,6 +16,19 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   --landing-branch <branch> records landing_branch=<branch> in the task's meta:
+#   the project branch this task's work is expected to land on when the captain's
+#   posture for the project lands work somewhere other than the default branch
+#   (e.g. a long-lived development branch). This header is the field's contract:
+#   landing_branch= is optional, ship-only, and read by bin/fm-teardown.sh, whose
+#   landed-work test then verifies landing against the recorded branch instead of
+#   the default branch; absent means default-branch behavior exactly.
+#   bin/fm-landing-branch.sh is the guarded helper that records or corrects the
+#   field on an EXISTING task under the meta lock. The flag is refused on --scout,
+#   --secondmate, and --relaunch spawns (relaunch preserves a recorded value), and
+#   the value must pass git check-ref-format and resolve in the project clone as a
+#   local branch or an origin remote-tracking branch, so a typo fails the spawn
+#   instead of arming a landed-work test against a branch that does not exist.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
@@ -274,6 +287,7 @@ EFFORT=
 BACKEND_ARG=
 MODE=
 YOLO=
+LANDING_BRANCH=
 TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
@@ -281,6 +295,7 @@ EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
+LANDING_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 POS=()
@@ -297,6 +312,7 @@ for a in "$@"; do
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      landing-branch) LANDING_BRANCH=$a; LANDING_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
@@ -319,6 +335,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --landing-branch) want_value=landing-branch ;;
+    --landing-branch=*) LANDING_BRANCH=${a#--landing-branch=}; LANDING_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
     *) POS+=("$a") ;;
@@ -331,6 +349,13 @@ done
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
+[ "$LANDING_SET" -eq 0 ] || [ -n "$LANDING_BRANCH" ] || { echo "error: --landing-branch requires a non-empty value" >&2; exit 1; }
+if [ "$LANDING_SET" -eq 1 ]; then
+  git check-ref-format "refs/heads/$LANDING_BRANCH" >/dev/null 2>&1 || {
+    echo "error: --landing-branch '$LANDING_BRANCH' is not a valid git branch name" >&2
+    exit 1
+  }
+fi
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -359,6 +384,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$LANDING_SET" -eq 0 ] || { echo "error: --relaunch preserves the task's recorded landing branch; correct it with bin/fm-landing-branch.sh instead" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -391,6 +417,10 @@ else
     }
     [ "$YOLO_SET" -eq 0 ] || {
       echo "error: --yolo applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
+      exit 1
+    }
+    [ "$LANDING_SET" -eq 0 ] || {
+      echo "error: --landing-branch applies only to ship spawns; a scout delivers a report and a secondmate lands nothing" >&2
       exit 1
     }
   fi
@@ -1657,6 +1687,15 @@ delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
+  # A recorded landing branch must already exist in the project clone (as a
+  # local branch or an origin remote-tracking branch), so the landed-work test
+  # it arms in fm-teardown.sh can never point at a ref that does not resolve.
+  if [ "$LANDING_SET" -eq 1 ] \
+    && ! git -C "$PROJ_ABS" rev-parse --quiet --verify "refs/heads/$LANDING_BRANCH^{commit}" >/dev/null 2>&1 \
+    && ! git -C "$PROJ_ABS" rev-parse --quiet --verify "refs/remotes/origin/$LANDING_BRANCH^{commit}" >/dev/null 2>&1; then
+    echo "error: --landing-branch '$LANDING_BRANCH' does not resolve in $PROJ_ABS as a local branch or an origin remote-tracking branch" >&2
+    exit 1
+  fi
   PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
@@ -2647,6 +2686,7 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ -z "$LANDING_BRANCH" ] || echo "landing_branch=$LANDING_BRANCH"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

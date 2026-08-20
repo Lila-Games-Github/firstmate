@@ -25,6 +25,14 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# A task whose meta records landing_branch=<branch> (written by bin/fm-spawn.sh
+# --landing-branch at spawn time, or later by bin/fm-landing-branch.sh) verifies
+# landing against that recorded branch instead of the default branch: the
+# local-only merged-into-local test and the content fallback both run against the
+# recorded branch, using the exact same reachability/content tests. An absent
+# landing_branch= keeps today's default-branch behavior unchanged, and a recorded
+# branch that does not resolve refuses rather than silently falling back, so the
+# guard never weakens - only the landing target moves.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -465,6 +473,9 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+# Optional per-task landing branch (field contract: bin/fm-spawn.sh header).
+# Empty means the default branch remains the landing target, exactly as before.
+LANDING_BRANCH=$(fm_meta_get "$META" landing_branch)
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -865,16 +876,22 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# Is the branch's content already present in the up-to-date landing target? The
+# target is the recorded landing_branch when the task has one, else the default
+# branch. Fetches first, then 3-way merges the target with HEAD: when HEAD
+# introduces nothing the target does not already contain (e.g. its change landed
+# via squash) the merged tree equals the target's tree. This isolates branch-only
+# changes, so unrelated commits the target gained past the merge-base do not count
+# as "added". A HEAD fully reachable from the target passes the same test, since
+# merging an ancestor changes nothing. Returns non-zero when inconclusive (no
+# target ref, or a merge conflict), so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  if [ -n "$LANDING_BRANCH" ]; then
+    name=$LANDING_BRANCH
+  else
+    name=$(default_branch) || return 1
+  fi
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
@@ -1222,7 +1239,20 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+    # The landing target is the recorded landing_branch when the task has one,
+    # else the default branch - the same reachability test either way. A
+    # recorded branch that does not resolve refuses rather than silently
+    # falling back to the default branch.
+    if [ -n "$LANDING_BRANCH" ]; then
+      git -C "$WT" rev-parse --quiet --verify "refs/heads/$LANDING_BRANCH^{commit}" >/dev/null 2>&1 || {
+        echo "REFUSED: recorded landing branch $LANDING_BRANCH does not exist in $PROJ." >&2
+        echo "Correct it with bin/fm-landing-branch.sh, or get the captain's explicit OK to discard, then --force." >&2
+        return 1
+      }
+      DEFAULT=$LANDING_BRANCH
+    else
+      DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+    fi
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
