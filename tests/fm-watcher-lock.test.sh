@@ -34,7 +34,7 @@ cleanup_stray_jobs() {
       sleep 0.1
       i=$((i + 1))
     done
-    pids=$(jobs -rp)
+    pids=$(jobs -p)
     if [ -n "$pids" ]; then
       # shellcheck disable=SC2086 # the pid list is deliberately word-split
       kill -KILL $pids 2>/dev/null
@@ -960,7 +960,7 @@ SH
 }
 
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
-  local dir state fakebin armout armpid watcher_pid i status
+  local dir state fakebin armout armpid watcher_pid i status alive_while_stopped healthy_while_stopped
   dir=$(make_case stopped-watcher)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -979,13 +979,17 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
 
   kill -STOP "$watcher_pid" 2>/dev/null || fail "could not SIGSTOP watcher"
   touch -t 200001010000 "$state/.last-watcher-beat"
+  alive_while_stopped=0
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_alive "$2"' _ "$LIB" "$watcher_pid" \
-    || fail "SIGSTOP watcher was not classified as a live pid"
+    && alive_while_stopped=1
+  healthy_while_stopped=0
   if FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ "$LIB" "$state" "$WATCH" "$dir"; then
-    fail "SIGSTOP watcher with a stale beacon was classified healthy"
+    healthy_while_stopped=1
   fi
 
   kill -CONT "$watcher_pid" 2>/dev/null || true
+  [ "$alive_while_stopped" -eq 1 ] || fail "SIGSTOP watcher was not classified as a live pid"
+  [ "$healthy_while_stopped" -eq 0 ] || fail "SIGSTOP watcher with a stale beacon was classified healthy"
   kill -TERM "$watcher_pid" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?
