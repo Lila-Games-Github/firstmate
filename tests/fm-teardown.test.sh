@@ -39,6 +39,18 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
+# Recorded landing branch (landing_branch= in meta; bin/fm-spawn.sh header owns
+# the field, bin/fm-landing-branch.sh sets it later): the landed-work test runs
+# against the recorded branch instead of the default branch, and only there.
+#   (z1) local-only + landing_branch + merged into that branch  -> ALLOW
+#   (z2) local-only + landing_branch + NOT merged into it       -> REFUSE
+#   (z3) local-only + NO landing_branch + merged into dev only  -> REFUSE (unchanged)
+#   (z4) landing_branch records a missing branch                -> REFUSE (fail closed)
+#   (z5) no-mistakes + landing_branch + content on origin/dev   -> ALLOW  (content fallback)
+#   (z6) no-mistakes + NO landing_branch + content on origin/dev only -> REFUSE (unchanged)
+#   (z7) landing_branch names a dash-leading branch, work unmerged -> REFUSE (ref, never a git option)
+#   (z8) no-mistakes + landing_branch missing from origin       -> REFUSE naming the branch + helper
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -690,6 +702,183 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+# Record a landing branch on the task's meta, the way fm-spawn/fm-landing-branch
+# would. Args: case_dir branch
+append_landing_branch_meta() {
+  local case_dir=$1 branch=$2
+  printf 'landing_branch=%s\n' "$branch" >> "$case_dir/state/task-x1.meta"
+}
+
+# Create (or move) a local project branch at the given commit without checking it
+# out; the worktree shares the project's object db so the ref is visible from it.
+# Args: case_dir branch commit-ish
+set_project_branch() {
+  local case_dir=$1 branch=$2 target=$3
+  git -C "$case_dir/project" update-ref "refs/heads/$branch" "$(git -C "$case_dir/wt" rev-parse "$target")"
+}
+
+test_landing_branch_merged_allows() {
+  local case_dir rc
+  case_dir=$(make_case landing-merged)
+  write_meta "$case_dir" local-only ship
+  append_landing_branch_meta "$case_dir" proto/dev
+  wt_commit "$case_dir" "dev-branch work"
+  # The work is merged into the recorded landing branch only; main never moves.
+  set_project_branch "$case_dir" proto/dev HEAD
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landing-merged: teardown should succeed when work is merged into the recorded landing branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "landing-merged: teardown printed a REFUSED line"
+  pass "local-only work merged into the recorded landing branch is torn down"
+}
+
+test_landing_branch_unmerged_refuses() {
+  local case_dir rc
+  case_dir=$(make_case landing-unmerged)
+  write_meta "$case_dir" local-only ship
+  append_landing_branch_meta "$case_dir" proto/dev
+  # The landing branch exists but stays at the baseline; the new work never lands.
+  set_project_branch "$case_dir" proto/dev HEAD
+  wt_commit "$case_dir" "unlanded dev work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "landing-unmerged: teardown should refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "landing-unmerged: no REFUSED line in stderr"
+  grep -q "proto/dev" "$case_dir/stderr" || fail "landing-unmerged: refusal does not name the recorded landing branch"
+  pass "local-only work not merged into the recorded landing branch is refused (guard preserved)"
+}
+
+test_no_landing_branch_dev_merge_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case landing-absent-dev-merge)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "dev-only work"
+  # Merged into a development branch, but with NO recorded landing branch the
+  # landed test must keep judging against the default branch and refuse.
+  set_project_branch "$case_dir" proto/dev HEAD
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "landing-absent: teardown should refuse without a recorded landing branch"
+  grep -q REFUSED "$case_dir/stderr" || fail "landing-absent: no REFUSED line in stderr"
+  pass "absent landing_branch keeps the default-branch landed test (dev merge alone still refuses)"
+}
+
+test_landing_branch_missing_ref_refuses() {
+  local case_dir rc wt_head
+  case_dir=$(make_case landing-missing-ref)
+  write_meta "$case_dir" local-only ship
+  append_landing_branch_meta "$case_dir" ghost/dev
+  wt_commit "$case_dir" "merged work"
+  # Even though the work is merged into local main, a recorded landing branch
+  # that does not resolve refuses instead of silently falling back.
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "landing-missing-ref: teardown should refuse"
+  grep -q "recorded landing branch ghost/dev does not exist" "$case_dir/stderr" \
+    || fail "landing-missing-ref: refusal does not name the unresolvable recorded branch"
+  pass "an unresolvable recorded landing branch refuses instead of falling back to the default branch"
+}
+
+test_landing_branch_dash_named_unmerged_refuses() {
+  local case_dir rc
+  case_dir=$(make_case landing-dash-name)
+  write_meta "$case_dir" local-only ship
+  append_landing_branch_meta "$case_dir" --all
+  # A branch literally named "--all" passes git check-ref-format; the landed
+  # test must pass it to git log as a qualified ref so git can never parse it
+  # as an option (HEAD --not --all is empty, which would pass unlanded work).
+  set_project_branch "$case_dir" --all HEAD
+  wt_commit "$case_dir" "unlanded dash-branch work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "landing-dash-name: teardown should refuse unmerged work on a dash-named landing branch"
+  grep -q REFUSED "$case_dir/stderr" || fail "landing-dash-name: no REFUSED line in stderr"
+  pass "a dash-named recorded landing branch is treated as a ref, not a git option (guard preserved)"
+}
+
+test_landing_branch_content_on_origin_dev_allows() {
+  local case_dir rc
+  case_dir=$(make_case landing-origin-dev)
+  write_meta "$case_dir" no-mistakes ship
+  append_landing_branch_meta "$case_dir" proto/dev
+  wt_commit_file "$case_dir" feature.txt hello "dev feature"
+  # The equivalent change lands as a different commit on origin's proto/dev
+  # (squash-style), never on origin/main; the content fallback must judge
+  # against the recorded landing branch.
+  land_equivalent_patch_on_origin_branch "$case_dir" proto/dev feature.txt hello "squash feature" >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "landing-origin-dev: teardown should succeed when content landed on the recorded origin branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "landing-origin-dev: teardown printed a REFUSED line"
+  pass "no-mistakes content landed on the recorded origin landing branch is torn down"
+}
+
+test_no_landing_branch_content_on_origin_dev_refuses() {
+  local case_dir rc
+  case_dir=$(make_case landing-absent-origin-dev)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "dev feature"
+  land_equivalent_patch_on_origin_branch "$case_dir" proto/dev feature.txt hello "squash feature" >/dev/null
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "landing-absent-origin-dev: teardown should refuse without a recorded landing branch"
+  grep -q REFUSED "$case_dir/stderr" || fail "landing-absent-origin-dev: no REFUSED line in stderr"
+  pass "absent landing_branch keeps the content fallback on the default branch (origin dev landing alone still refuses)"
+}
+
+test_landing_branch_missing_on_origin_names_branch() {
+  local case_dir rc
+  case_dir=$(make_case landing-origin-missing)
+  write_meta "$case_dir" no-mistakes ship
+  append_landing_branch_meta "$case_dir" proto/dev
+  wt_commit_file "$case_dir" feature.txt hello "dev feature"
+  # proto/dev is recorded but never exists on origin (e.g. deleted after
+  # recording): the refusal must name the stale recorded branch and point at
+  # the correction helper instead of the generic push-the-branch advice.
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "landing-origin-missing: teardown should refuse"
+  grep -q "recorded landing branch proto/dev does not exist" "$case_dir/stderr" \
+    || fail "landing-origin-missing: refusal does not name the unresolvable recorded branch"
+  grep -q "fm-landing-branch.sh" "$case_dir/stderr" \
+    || fail "landing-origin-missing: refusal does not point at the correction helper"
+  pass "no-mistakes refusal names an unresolvable recorded landing branch and the correction helper"
 }
 
 test_no_mistakes_origin_remote_allows() {
@@ -2700,6 +2889,14 @@ test_teardown_prompts_tasks_axi_done_when_compatible
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_landing_branch_merged_allows
+test_landing_branch_unmerged_refuses
+test_no_landing_branch_dev_merge_still_refuses
+test_landing_branch_missing_ref_refuses
+test_landing_branch_dash_named_unmerged_refuses
+test_landing_branch_content_on_origin_dev_allows
+test_no_landing_branch_content_on_origin_dev_refuses
+test_landing_branch_missing_on_origin_names_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
