@@ -333,6 +333,10 @@ const reconcileFile = path.join(process.env.FIXTURE_ROOT, 'send-reconciles');
 const metadataFlakyFile = path.join(process.env.FIXTURE_ROOT, 'metadata-flaky');
 const metadataVersionlessFile = path.join(process.env.FIXTURE_ROOT, 'metadata-versionless');
 const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
+// The same drop mechanism aimed at the snapshot Playbot returns WITH a completed
+// write, so the post-action reads can be driven without touching the pre-action
+// read in the same tool call.
+const afterDropFile = path.join(process.env.FIXTURE_ROOT, 'after-drop-key');
 const sendFailsFile = path.join(process.env.FIXTURE_ROOT, 'send-fails');
 let createCounter = 0;
 let threadCounter = 0;
@@ -500,7 +504,8 @@ async function electronInvoke(channel, payload) {
       snapshot.agentStatus = snapshot.userInputRequests.length > 0 ? 'pending_input' : 'working';
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
-      return snapshot;
+      const afterDrop = readFileOr(afterDropFile, '');
+      return afterDrop ? applyDropSpec(snapshot, afterDrop) : snapshot;
     }
     if (channel === 'threads:recallMessage') {
       const store = loadSnapshots();
@@ -510,7 +515,12 @@ async function electronInvoke(channel, payload) {
       const [message] = snapshot.pendingMessages.splice(index, 1);
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
-      return { outcome: 'recalled', message: { id: message.id, input: { text: message.text } }, snapshot };
+      const afterDrop = readFileOr(afterDropFile, '');
+      return {
+        outcome: 'recalled',
+        message: { id: message.id, input: { text: message.text } },
+        snapshot: afterDrop ? applyDropSpec(snapshot, afterDrop) : snapshot,
+      };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
       return [{ name: 'playbot_lanes', enabled: true, error: null, toolCount: 18 }];
@@ -1266,6 +1276,69 @@ if (!value.warnings.some(warning => warning.includes('response in flight'))) pro
 if (!value.warnings.some(warning => warning.includes('Partial answer'))) process.exit(1);
 NODE
 pass "fm-playbot-lanes: a partial answer sends its option label verbatim and reports what went unanswered"
+
+# ---------------------------------------------------------------------------
+# A write that already succeeded must never be reported as a failure, and the
+# snapshot Playbot returns with it must never read as an empty queue or a
+# cleared card when that projection is unreadable.
+# ---------------------------------------------------------------------------
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const store = JSON.parse(fs.readFileSync(file, 'utf8'));
+store['chat-worker-alt'] = {
+  threadId: 'chat-worker-alt',
+  phase: { kind: 'prompting', threadId: 'worker-alt-session', turnId: 'turn-alt-3' },
+  agentStatus: 'pending_input',
+  userInputRequests: [{
+    id: 12,
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'worker-alt-session',
+      turnId: 'turn-alt-3',
+      itemId: 'call_alt_3',
+      questions: [{ id: 'ruling', header: 'Ruling', question: 'Proceed?', isOther: false, isSecret: false,
+        options: [{ label: 'Proceed', description: '' }] }],
+    },
+  }],
+  approvalRequests: [],
+  mcpElicitationRequests: [],
+  respondingRequestIds: [],
+  pendingMessages: [{ id: 'msg-9', text: 'Held steer to recall' }],
+  outboundMessages: [],
+};
+fs.writeFileSync(file, `${JSON.stringify(store, null, 2)}\n`);
+NODE
+
+printf 'pendingMessages:null\n' > "$FIXTURE_ROOT/after-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"messageId\":\"msg-9\"}}}")
+rm -f "$FIXTURE_ROOT/after-drop-key"
+OUT="$out" node --no-warnings <<'NODE' || fail "a recall that succeeded reported an unreadable queue as empty or failed outright"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const result = value.result.structuredContent;
+if (result.outcome !== 'recalled' || result.recalled.id !== 'msg-9') process.exit(1);
+if (result.queueAfter.queued !== null) process.exit(1);
+if (!Array.isArray(result.queueAfter.sending) || !Array.isArray(result.queueAfter.failed)) process.exit(1);
+if (!result.warnings.some(warning => warning.includes('pendingMessages'))) process.exit(1);
+if (!result.warnings.some(warning => warning.includes('null rather than empty'))) process.exit(1);
+NODE
+
+printf 'userInputRequests:null\n' > "$FIXTURE_ROOT/after-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":12,\"answers\":{\"ruling\":\"Proceed\"}}}}")
+rm -f "$FIXTURE_ROOT/after-drop-key"
+OUT="$out" node --no-warnings <<'NODE' || fail "an answer that succeeded reported an unreadable card projection as cleared or failed outright"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const result = value.result.structuredContent;
+if (result.answered !== true || result.requestId !== 12) process.exit(1);
+if (result.cardsRemaining !== null) process.exit(1);
+if (!result.warnings.some(warning => warning.includes('userInputRequests'))) process.exit(1);
+if (!result.warnings.some(warning => warning.includes('cardsRemaining is null rather than empty'))) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a completed answer or recall reports an unreadable projection as null, never as empty"
 
 # ---------------------------------------------------------------------------
 # The Stop-hook wake must not record a rejected wake as notified.

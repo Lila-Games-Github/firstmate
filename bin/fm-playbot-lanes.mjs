@@ -527,6 +527,28 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
   return publicThread(row);
 }
 
+// Every read of a Playbot snapshot projection goes through this one accessor. A
+// projection is a list or it is unreadable; it is never silently empty, because
+// an empty list is a positive claim - "nothing is held", "no card remains" -
+// that an unreadable shape has not earned. The caller picks the mode: a
+// PRE-ACTION read collects the unreadable names and refuses by name, while a
+// POST-ACTION read must not throw, because the write already succeeded, so it
+// reports the affected field as null and warns naming the projection.
+const UNREADABLE_PROJECTION = Symbol("unreadable projection");
+
+function snapshotProjection(snapshot, key, unreadable) {
+  const value = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) ? snapshot[key] : undefined;
+  if (Array.isArray(value)) return value;
+  if (unreadable && !unreadable.includes(key)) unreadable.push(key);
+  return UNREADABLE_PROJECTION;
+}
+
+function unreadableProjections(snapshot, keys) {
+  const unreadable = [];
+  for (const key of keys) snapshotProjection(snapshot, key, unreadable);
+  return unreadable;
+}
+
 // Playbot accepts a send it cannot deliver yet and holds it in a queue the
 // sender is never told about, so a bare "the channel returned" is not evidence
 // the worker saw anything. The send response is Playbot's own thread snapshot,
@@ -547,13 +569,13 @@ async function deliveryVerdict(response, text, threadId) {
   // renamed shape, not a legacy Playbot, so it is refused by name. A projection
   // that is present but not a list is just as unreadable as a removed one, and
   // treating it as an empty list would claim delivery for a held message.
-  const missing = SEND_SNAPSHOT_REQUIRED_KEYS.filter((key) => !Array.isArray(response[key]));
+  const missing = unreadableProjections(response, SEND_SNAPSHOT_REQUIRED_KEYS);
   if (missing.length > 0) {
     throw new Error(`${playbotVersionLabel(await playbotVersion())} returned a send snapshot for ${threadId} without ${missing.join(", ")}, so whether the message was delivered or is only held cannot be read. `
       + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape, and check list_queued_messages before resending.`);
   }
-  const queued = response.pendingMessages ?? [];
-  const outbound = response.outboundMessages ?? [];
+  const queued = snapshotProjection(response, "pendingMessages");
+  const outbound = snapshotProjection(response, "outboundMessages");
   // Playbot projects both lists in arrival order and omits createdAtMs from the
   // queued one, so the most recent match is the last one, not the newest stamp.
   const newestMatch = (list) => {
@@ -675,7 +697,7 @@ function assertSnapshotShape(snapshot, threadId, version) {
   }
   const missing = [
     ...SNAPSHOT_REQUIRED_KEYS.filter((key) => snapshot[key] === undefined),
-    ...SNAPSHOT_REQUIRED_LIST_KEYS.filter((key) => !Array.isArray(snapshot[key])),
+    ...unreadableProjections(snapshot, SNAPSHOT_REQUIRED_LIST_KEYS),
   ];
   if (missing.length > 0) {
     throw new Error(`${playbotVersionLabel(version)} returned a thread snapshot without ${missing.join(", ")}. `
@@ -710,8 +732,9 @@ function publicQuestion(question) {
   };
 }
 
-function publicCard(request, kind, snapshot) {
+function publicCard(request, kind, snapshot, unreadable) {
   const params = request?.params ?? {};
+  const responding = snapshotProjection(snapshot, "respondingRequestIds", unreadable);
   return {
     requestId: request?.id ?? null,
     kind,
@@ -721,17 +744,23 @@ function publicCard(request, kind, snapshot) {
     turnId: params.turnId ?? null,
     itemId: params.itemId ?? null,
     answerable: kind === "question",
-    responding: (snapshot.respondingRequestIds ?? []).some((id) => String(id) === String(request?.id)),
+    responding: responding === UNREADABLE_PROJECTION ? null : responding.some((id) => String(id) === String(request?.id)),
     questions: (params.questions ?? []).map(publicQuestion),
   };
 }
 
-function publicCards(snapshot) {
-  return [
-    ...(snapshot.userInputRequests ?? []).map((request) => publicCard(request, "question", snapshot)),
-    ...(snapshot.approvalRequests ?? []).map((request) => publicCard(request, "approval", snapshot)),
-    ...(snapshot.mcpElicitationRequests ?? []).map((request) => publicCard(request, "elicitation", snapshot)),
-  ];
+const CARD_PROJECTIONS = [
+  ["userInputRequests", "question"],
+  ["approvalRequests", "approval"],
+  ["mcpElicitationRequests", "elicitation"],
+];
+
+// null, never [], when any card projection was unreadable: an empty card list
+// reads as "the card is cleared", which an unreadable shape has not shown.
+function publicCards(snapshot, unreadable) {
+  const groups = CARD_PROJECTIONS.map(([key, kind]) => [snapshotProjection(snapshot, key, unreadable), kind]);
+  if (groups.some(([list]) => list === UNREADABLE_PROJECTION)) return null;
+  return groups.flatMap(([list, kind]) => list.map((request) => publicCard(request, kind, snapshot, unreadable)));
 }
 
 function publicQueuedMessage(message, status) {
@@ -748,12 +777,16 @@ function publicQueuedMessage(message, status) {
 // Playbot holds a message it cannot deliver yet in pendingMessages and reports
 // an in-flight or rejected one in outboundMessages, so a message id that is in
 // neither list has actually reached the agent's turn.
-function publicQueue(snapshot) {
-  const outbound = snapshot.outboundMessages ?? [];
+function publicQueue(snapshot, unreadable) {
+  const queued = snapshotProjection(snapshot, "pendingMessages", unreadable);
+  const outbound = snapshotProjection(snapshot, "outboundMessages", unreadable);
+  const withStatus = (status) => outbound === UNREADABLE_PROJECTION
+    ? null
+    : outbound.filter((message) => message?.status === status).map((message) => publicQueuedMessage(message, status));
   return {
-    queued: (snapshot.pendingMessages ?? []).map((message) => publicQueuedMessage(message, "queued")),
-    sending: outbound.filter((message) => message.status === "sending").map((message) => publicQueuedMessage(message, "sending")),
-    failed: outbound.filter((message) => message.status === "failed").map((message) => publicQueuedMessage(message, "failed")),
+    queued: queued === UNREADABLE_PROJECTION ? null : queued.map((message) => publicQueuedMessage(message, "queued")),
+    sending: withStatus("sending"),
+    failed: withStatus("failed"),
   };
 }
 
@@ -814,7 +847,8 @@ function buildCardResponse(card, answers, skip) {
 
 function findAnswerableCard(snapshot, requestId) {
   const cards = publicCards(snapshot);
-  const match = (snapshot.userInputRequests ?? []).find((request) => String(request?.id) === String(requestId));
+  const requests = snapshotProjection(snapshot, "userInputRequests");
+  const match = requests === UNREADABLE_PROJECTION ? null : requests.find((request) => String(request?.id) === String(requestId));
   if (match) return { request: match, card: publicCard(match, "question", snapshot) };
   const other = cards.find((card) => String(card.requestId) === String(requestId));
   if (other) {
@@ -1471,7 +1505,13 @@ async function handleTool(name, args = {}) {
       requestId: request.id,
       response,
     });
-    const remaining = after && typeof after === "object" ? publicCards(after) : [];
+    // The answer already reached Playbot, so an unreadable response snapshot is
+    // reported, never thrown: throwing would call a completed answer a failure.
+    const unreadableAfter = [];
+    const remaining = publicCards(after, unreadableAfter);
+    if (unreadableAfter.length > 0) {
+      warnings.push(`The answer was sent, but Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so cardsRemaining is null rather than empty: whether this chat still holds a card is unknown, and get_thread_card is the way to find out.`);
+    }
     return {
       answered: true,
       thread: publicThread(resolveThread(thread.project_id, thread.workspace_id, thread.thread_id)),
@@ -1502,14 +1542,21 @@ async function handleTool(name, args = {}) {
     if (!messageId) throw new Error("messageId must not be empty; use list_queued_messages to choose one");
     const version = await playbotVersion();
     const result = await cardInvoke("threads:recallMessage", { threadId: thread.thread_id, messageId });
-    const snapshot = result?.snapshot;
+    // The recall already happened, so an unreadable queue projection is reported
+    // as null and warned about rather than thrown, and never as an empty queue: a
+    // supervisor reads an empty queueAfter as "the pile is gone" and acts on it.
+    const unreadableAfter = [];
+    const queueAfter = publicQueue(result?.snapshot, unreadableAfter);
     return {
       thread: publicThread(resolveThread(thread.project_id, thread.workspace_id, thread.thread_id)),
       playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
       messageId,
       outcome: result?.outcome ?? null,
       recalled: result?.outcome === "recalled" ? result.message ?? null : null,
-      ...snapshot && typeof snapshot === "object" ? { queueAfter: publicQueue(snapshot) } : {},
+      queueAfter,
+      warnings: unreadableAfter.length > 0
+        ? [`The recall was applied, but Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so that part of queueAfter is null rather than empty: what remains held is unknown, and list_queued_messages is the way to find out.`]
+        : [],
     };
   }
   if (name === "register_lane") {
