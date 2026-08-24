@@ -73,12 +73,29 @@ pass() {
 
 FM_TEST_NODE_MIN=22.5
 
+FM_TEST_NODE_REJECTION=
+
 fm_test_node_usable() {
   local candidate=$1 version
-  [ -n "$candidate" ] && [ -x "$candidate" ] || return 1
-  version=$("$candidate" -p 'process.versions.node' 2>/dev/null) || return 1
-  [ -n "$version" ] || return 1
-  [ "$(printf '%s\n%s\n' "$FM_TEST_NODE_MIN" "$version" | sort -V | head -1)" = "$FM_TEST_NODE_MIN" ]
+  FM_TEST_NODE_REJECTION=
+  if [ -z "$candidate" ]; then
+    FM_TEST_NODE_REJECTION="is empty"
+    return 1
+  fi
+  if [ ! -x "$candidate" ]; then
+    FM_TEST_NODE_REJECTION="is not an executable file"
+    return 1
+  fi
+  version=$("$candidate" -p 'process.versions.node' 2>/dev/null) || version=
+  if [ -z "$version" ]; then
+    FM_TEST_NODE_REJECTION="did not report a Node version, so it is not a Node runtime"
+    return 1
+  fi
+  if [ "$(printf '%s\n%s\n' "$FM_TEST_NODE_MIN" "$version" | sort -V | head -1)" = "$FM_TEST_NODE_MIN" ]; then
+    return 0
+  fi
+  FM_TEST_NODE_REJECTION="reports Node $version, older than $FM_TEST_NODE_MIN"
+  return 1
 }
 
 fm_test_find_node() {
@@ -130,6 +147,14 @@ fm_test_find_node() {
 
 fm_test_require_node() {
   local subject=${1:-this suite} resolved dir
+  # An explicit FM_TEST_NODE stays authoritative and never falls back to a
+  # different runtime, so its refusal must name the rejected path and why -
+  # pointing the operator at FM_TEST_NODE would name the variable they just set.
+  # This check runs in the caller's shell, unlike the subshell fm_test_find_node
+  # is captured in, so the rejection reason survives.
+  if [ -n "${FM_TEST_NODE:-}" ] && ! fm_test_node_usable "$FM_TEST_NODE"; then
+    fail "$subject requires Node $FM_TEST_NODE_MIN or newer, and the runtime named by FM_TEST_NODE ('$FM_TEST_NODE') $FM_TEST_NODE_REJECTION; point FM_TEST_NODE at a usable runtime, or unset it to search PATH and the known install roots"
+  fi
   resolved=$(fm_test_find_node)
   if [ -z "$resolved" ]; then
     fail "$subject requires Node $FM_TEST_NODE_MIN or newer and none was found on PATH or in any known install root; set FM_TEST_NODE to an explicit runtime"

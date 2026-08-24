@@ -1077,6 +1077,46 @@ NODE
 rm -f "$FIXTURE_ROOT/send-drop-key"
 pass "fm-playbot-lanes: a send snapshot missing the queue projection refuses by name"
 
+# That refusal lands AFTER Playbot accepted the send, so dispatch must not read
+# it as a failed send: the task may already be with the worker, and an inactive
+# lane silently loses every later wake for it. Only a send that never reached
+# Playbot may tear the lane down. Both halves drive the same lane, so the only
+# difference between them is where the failure happened.
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+alt_lane=$(OUT="$out" node -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.lane.id)')
+[ -n "$alt_lane" ] || fail "could not register a lane onto the parked worker"
+
+printf 'pendingMessages\n' > "$FIXTURE_ROOT/send-drop-key"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Unreadable dispatch\"}}}")
+rm -f "$FIXTURE_ROOT/send-drop-key"
+OUT="$out" LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$alt_lane.json" node --no-warnings <<'NODE' || fail "an unreadable verdict on an accepted send tore the dispatch lane down"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('without pendingMessages')) process.exit(1);
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.active !== true || route.error !== undefined) process.exit(1);
+NODE
+pass "fm-playbot-lanes: an unreadable verdict refuses without deactivating the lane it was dispatched on"
+
+printf 'threads:send\n' > "$FIXTURE_ROOT/ipc-missing"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Undelivered dispatch\"}}}")
+rm -f "$FIXTURE_ROOT/ipc-missing"
+OUT="$out" LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$alt_lane.json" node --no-warnings <<'NODE' || fail "a dispatch whose send never reached Playbot left the lane active"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes("No handler registered for 'threads:send'")) process.exit(1);
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.active !== false) process.exit(1);
+if (!String(route.error).includes("threads:send")) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a dispatch whose send never reached Playbot deactivates the lane"
+
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Held task\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch reported a task Playbot is only holding as delivered"
@@ -1233,3 +1273,36 @@ if (route.lastNotifiedTurnId !== 'turn-worker-3') process.exit(1);
 if (route.lastNotifiedDelivery !== 'sending' && route.lastNotifiedDelivery !== 'delivered') process.exit(1);
 NODE
 pass "fm-playbot-lanes: a rejected lane wake stays eligible for retry and is recorded, then lands on retry"
+
+# ---------------------------------------------------------------------------
+# The shared node resolver must name what it rejected.
+#
+# An explicit FM_TEST_NODE stays authoritative and never falls back to another
+# runtime, so when it names something unusable the refusal has to point at that
+# path - naming FM_TEST_NODE alone points the operator at the variable they
+# just set. Driven through fm_test_require_node in a child shell, because it
+# exits the shell it refuses in.
+# ---------------------------------------------------------------------------
+
+node_probe_refusal() {
+  FM_TEST_NODE="$1" bash -c '. "$1"; fm_test_require_node "probe suite"' _ "$ROOT/tests/lib.sh" 2>&1
+}
+
+not_a_runtime="$TMP_ROOT/not-a-node"
+printf '#!/bin/sh\nexit 0\n' > "$not_a_runtime"
+chmod +x "$not_a_runtime"
+refusal=$(node_probe_refusal "$not_a_runtime") && fail "an FM_TEST_NODE that is not a Node runtime was accepted"
+case "$refusal" in
+  *"$not_a_runtime"*"not a Node runtime"*) ;;
+  *) fail "the FM_TEST_NODE refusal did not name the rejected path and why: $refusal" ;;
+esac
+
+old_runtime="$TMP_ROOT/old-node"
+printf '#!/bin/sh\nprintf "18.20.4\\n"\n' > "$old_runtime"
+chmod +x "$old_runtime"
+refusal=$(node_probe_refusal "$old_runtime") && fail "an FM_TEST_NODE older than the minimum was accepted"
+case "$refusal" in
+  *"$old_runtime"*"18.20.4"*) ;;
+  *) fail "the too-old FM_TEST_NODE refusal did not name the path and the version it reported: $refusal" ;;
+esac
+pass "fm-playbot-lanes: an unusable FM_TEST_NODE is refused by path and reason"

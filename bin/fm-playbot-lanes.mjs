@@ -581,15 +581,29 @@ async function deliveryVerdict(response, text, threadId) {
   return { state: "delivered", messageId: null, queuedTotal: queued.length };
 }
 
+// The invoke returning is the only evidence a send reached Playbot. Everything
+// after it - reading back the row, refusing an unreadable verdict - can still
+// throw on a message Playbot may already have delivered, so those failures are
+// marked and must never be treated as "the send did not happen".
+function sendReachedPlaybot(error) {
+  return Boolean(error && typeof error === "object" && error.sendReachedPlaybot);
+}
+
 async function sendMessage(row, text) {
   if (row.archived) throw new Error(`Cannot send to archived thread ${row.thread_id}`);
   const value = String(text ?? "").trim();
   if (!value) throw new Error("message must not be empty");
   const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
-  return {
-    thread: publicThread(resolveThread(row.project_id, row.workspace_id, row.thread_id)),
-    delivery: await deliveryVerdict(response, value, row.thread_id),
-  };
+  try {
+    return {
+      thread: publicThread(resolveThread(row.project_id, row.workspace_id, row.thread_id)),
+      delivery: await deliveryVerdict(response, value, row.thread_id),
+    };
+  } catch (error) {
+    const accepted = error instanceof Error ? error : new Error(String(error));
+    accepted.sendReachedPlaybot = true;
+    throw accepted;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,7 +1391,11 @@ async function handleTool(name, args = {}) {
             },
           };
     } catch (error) {
-      if (lane) {
+      // Only a send that never reached Playbot may tear the lane down. When the
+      // send was accepted the message may already be with the worker, so the
+      // route must survive to carry every later wake even though the refusal
+      // still reaches the caller.
+      if (lane && !sendReachedPlaybot(error)) {
         lane.active = false;
         lane.updatedAt = nowIso();
         lane.error = error instanceof Error ? error.message : String(error);
