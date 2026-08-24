@@ -390,15 +390,15 @@ Since the CLI handoff is unreliable, the **verified** way to start/continue a ch
 
 **Verified (v0.79.0):** sending *"make all enemies render as circles instead of squares…"* this way spawned thread **"Render All Enemies as Circles"** (`gpt-5.6-sol`, `xhigh`), `agent_status=working`, and the agent began inspecting scenes and editing the project — all without the GUI CLI and without touching the keyboard.
 
-**Ready-to-use tool:** `bin/playbot-drive.mjs` in this repo (Node ≥ 20, zero deps):
-```sh
-node bin/playbot-drive.mjs send "make all enemies render as circles instead of squares"
-node bin/playbot-drive.mjs status                 # recent threads + agent_status (working/ready)
-node bin/playbot-drive.mjs read  [threadId]       # print the conversation transcript (newest thread if omitted)
-node bin/playbot-drive.mjs watch [threadId]       # poll until the agent goes idle, then print the transcript
-node bin/playbot-drive.mjs approve [once|session] # click a pending file-write/command approval dialog
-```
-It auto-discovers the DevTools port (the Playbot LISTEN socket whose `/json/version` returns a `webSocketDebuggerUrl`), finds the page target that has the composer, and drives it.
+**Do not drive the composer to send a message.**
+Typing into the composer reaches whichever conversation the window happens to be showing, and nothing in this method can name a target.
+A guard used to make that survivable by refusing whenever the visible thread had no mounted composer, which was the case while it showed a question or approval card.
+Playbot 0.95.0 keeps the composer mounted alongside a card, so that guard no longer fires and an untargeted send lands silently on an unrelated conversation.
+This repo therefore ships no composer-driving tool.
+
+**Use `bin/fm-playbot-lanes.mjs` instead** ([playbot-lanes.md](playbot-lanes.md)).
+It reaches the same renderer over the same DevTools socket, but calls Playbot's own IPC handlers, so every send, read, and card answer names its chat explicitly and cannot land on the visible one.
+It also reports whether Playbot delivered a message or is only holding it, which composer automation cannot observe at all.
 
 **Caveats**
 - Requires a **project window open** in Playbot (the composer must exist). The engine can be headless; the app window can be minimized but must not be closed.
@@ -475,7 +475,7 @@ curl -s http://127.0.0.1:<port>/            # -> ok
 #    listTools() includes "execute_engine_code"  (only when a project is open)
 
 # 6. Or drive the built-in agent (the ~/.playbot/bin/playbot CLI silently no-ops, §8):
-node bin/playbot-drive.mjs send "<prompt>"   # CDP method, §8.1
+node bin/fm-playbot-lanes.mjs serve          # thread-addressed lane MCP, §8.1
 ```
 
 MCP endpoint: `POST http://127.0.0.1:<port>/mcp?roots=<json>&primaryRootId=<id>`
