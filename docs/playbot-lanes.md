@@ -31,7 +31,8 @@ When no fresh Playbot marker exists, the caller is an external normal terminal a
 When a marker does exist, every cross-project MCP operation verifies that the Playbot chat belongs to the configured controller project, so worker chats cannot use the globally installed server as an unrestricted control plane.
 
 A `thread` selector identifies one chat on its own, so the workspace it lives in is derived from the match rather than guessed.
-Supplying `workspace` narrows the search and still fails closed when the chat is not in it, and omitting `workspace` searches the whole project.
+Supplying `workspace` narrows the search and still fails closed when the chat is not in it, and omitting `workspace` searches the whole project's active workspaces.
+An archived workspace is out of that default scope, exactly as it is out of an explicit `workspace` selector's, so its chats are neither addressable by default nor able to collide with an active chat's title.
 An ambiguous exact title or duplicate id is reported rather than resolved, and the not-found message names the scope that was searched.
 
 ## Chat-creation API detection
@@ -67,8 +68,10 @@ For a normal-terminal caller, it returns `lane: null` plus the `get_thread_statu
 
 Playbot accepts a message it cannot deliver yet and holds it in a queue the sender is never told about, so `send_message` and `dispatch` report a `delivery` verdict taken from the thread snapshot Playbot returns.
 `delivered` means the agent's turn accepted the message, `sending` means it is in flight, `queued` means Playbot is holding it and the worker has not seen it, `failed` carries Playbot's own reason, and `unknown` means Playbot returned no snapshot so delivery could not be confirmed.
+`unknown` covers only a Playbot that returns no snapshot at all; a snapshot that is returned without the queued or outbound projection is refused by name, like every other changed shape, rather than passing as an old Playbot.
 Only `delivered` and `sending` mean the message is on its way; a `queued` verdict is cured by answering the chat's card or dropping the held message, never by resending, because a resend adds to the pile and a later drain replays superseded instructions in order.
 Every chat view also carries `queuedCount` from the persisted queue, so a pile is visible without asking for it.
+`queuedCount` is `null`, never `0`, when that persisted ledger is present but not in a shape these tools can read, so an unreadable queue can never be mistaken for an empty one.
 
 The global Stop hook is inert for every chat that has no active route.
 For a routed worker, it reads the completed Codex turn id and final message from the persisted rollout, ignores an already delivered turn, and sends one marked follow-up to the controller chat.

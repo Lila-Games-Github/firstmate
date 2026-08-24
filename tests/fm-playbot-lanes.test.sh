@@ -64,10 +64,20 @@ app.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
 app.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
   .run('ws-worker-alt', 'root-worker', path.join(root, 'worker', '.worktrees', 'alt'), 'alt');
 
+// An ARCHIVED workspace in the same project holding a chat whose title is
+// identical to an active one. Nothing may resolve to it without an explicit
+// workspace, and it must not make the active chat's title ambiguous.
+const older = '2026-07-28T12:00:00.000Z';
+app.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-worker-archived', 'project-worker', 'retired', 'worktree', 0, 'archived', older, older);
+app.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-worker-archived', 'root-worker', path.join(root, 'worker', '.worktrees', 'retired'), 'retired');
+
 const insertThread = app.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 insertThread.run('chat-controller', 'ws-controller', 'Firstmate', 0, 1, 'controller-session', 'full-access', 0, 0, '', null, 'working', 0, now, now, now, 0);
 insertThread.run('chat-worker', 'ws-worker', 'Greeting', 0, 1, 'worker-session', 'full-access', 0, 0, '', null, 'ready', 0, now, now, now, 0);
 insertThread.run('chat-worker-alt', 'ws-worker-alt', 'Alt greeting', 0, 1, 'worker-alt-session', 'full-access', 0, 0, '', null, 'pending_input', 0, now, now, now, 0);
+insertThread.run('chat-worker-archived', 'ws-worker-archived', 'Greeting', 0, 0, 'worker-archived-session', 'full-access', 0, 0, '', null, 'ready', 0, older, older, older, 0);
 app.close();
 
 const rollout = path.join(harness, 'worker-rollout.jsonl');
@@ -175,6 +185,24 @@ const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('Thread not found in workspace ws-worker')) process.exit(1);
 NODE
 pass "fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it"
+
+# Resolving project-wide must still apply the active-workspace filter the
+# explicit-workspace path applies: a chat in an ARCHIVED workspace stays out of
+# the default scope entirely, so it is never sent to or answered, and its title
+# cannot collide with an active chat's.
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an identically titled chat in an archived workspace made an active chat's title ambiguous"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const thread = value.result.structuredContent.thread;
+if (thread.id !== 'chat-worker' || thread.workspaceId !== 'ws-worker') process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"chat-worker-archived\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a chat in an archived workspace resolved inside the default project-wide scope"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('Thread not found in project project-worker')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: an archived workspace's chats stay out of the default thread scope"
 
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_thread\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\",\"turnLimit\":2}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller could not read a thread without a controller project"
@@ -301,9 +329,12 @@ const snapshotFile = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
 const versionFile = path.join(process.env.FIXTURE_ROOT, 'app-version');
 const missingFile = path.join(process.env.FIXTURE_ROOT, 'ipc-missing');
 const reconcileFile = path.join(process.env.FIXTURE_ROOT, 'send-reconciles');
+const metadataFlakyFile = path.join(process.env.FIXTURE_ROOT, 'metadata-flaky');
+const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
+let metadataFailures = 0;
 
 function currentMode() {
   try {
@@ -425,7 +456,15 @@ async function electronInvoke(channel, payload) {
   if (missingChannels().includes(channel)) throw new Error(`No handler registered for '${channel}'`);
   const db = new DatabaseSync(path.join(desktop, 'playbot.db'));
   try {
-    if (channel === 'app:metadata') return { name: 'Playbot', version: readFileOr(versionFile, '0.95.0') };
+    if (channel === 'app:metadata') {
+      // One transient failure, then healthy again: a version read must recover
+      // inside the same long-lived server process.
+      if (readFileOr(metadataFlakyFile, '') && metadataFailures === 0) {
+        metadataFailures += 1;
+        throw new Error('Playbot window is not available');
+      }
+      return { name: 'Playbot', version: readFileOr(versionFile, '0.95.0') };
+    }
     if (channel === 'threads:getSnapshot') {
       const snapshot = snapshotFor(payload.threadId);
       const drop = readFileOr(path.join(process.env.FIXTURE_ROOT, 'snapshot-drop-key'), '');
@@ -496,6 +535,12 @@ async function electronInvoke(channel, payload) {
       }
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
+      const sendDrop = readFileOr(sendDropFile, '');
+      if (sendDrop) {
+        const partial = { ...snapshot };
+        delete partial[sendDrop];
+        return partial;
+      }
       return snapshot;
     }
     throw new Error(`fixture does not implement channel ${channel}`);
@@ -968,6 +1013,24 @@ NODE
 rm -f "$FIXTURE_ROOT/snapshot-drop-key"
 pass "fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and names what is missing"
 
+# serve is one long-lived process, so a single failed version read must not pin
+# the provenance stamp to null for the rest of its life.
+printf 'yes\n' > "$FIXTURE_ROOT/metadata-flaky"
+card_request_one="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}"
+card_request_two="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}"
+out=$(printf '%s\n%s\n' "$card_request_one" "$card_request_two" | node --no-warnings "$SCRIPT" serve)
+OUT="$out" node --no-warnings <<'NODE' || fail "a transient version read failure was cached for the life of the server process"
+const responses = process.env.OUT.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+if (responses.length !== 2) process.exit(1);
+const first = responses.find(response => response.id === 1);
+const second = responses.find(response => response.id === 2);
+if (first.error || second.error) process.exit(1);
+if (first.result.structuredContent.playbot.version !== null) process.exit(1);
+if (second.result.structuredContent.playbot.version !== '0.95.0') process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/metadata-flaky"
+pass "fm-playbot-lanes: a transient version read recovers instead of sticking at unreadable"
+
 # ---------------------------------------------------------------------------
 # Delivery verdicts: a message Playbot only holds must never read as delivered.
 # ---------------------------------------------------------------------------
@@ -996,6 +1059,20 @@ NODE
 rm -f "$FIXTURE_ROOT/send-reconciles"
 pass "fm-playbot-lanes: send_message reports held, in-flight, and delivered separately"
 
+# A send snapshot that IS returned but has lost the queue projection is a
+# renamed shape, not a legacy Playbot, so it must refuse by name instead of
+# masquerading as an unconfirmed send forever.
+printf 'pendingMessages\n' > "$FIXTURE_ROOT/send-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\",\"message\":\"Unreadable steer\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a send snapshot missing the queue projection degraded quietly instead of naming the field"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('without pendingMessages')) process.exit(1);
+if (!value.error.message.includes('Playbot 0.95.0')) process.exit(1);
+if (!value.error.message.includes('re-verify the snapshot shape')) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/send-drop-key"
+pass "fm-playbot-lanes: a send snapshot missing the queue projection refuses by name"
+
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Held task\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch reported a task Playbot is only holding as delivered"
@@ -1015,3 +1092,37 @@ if (!value.delivery.note.includes('delivery is unconfirmed')) process.exit(1);
 NODE
 printf 'modern\n' > "$FIXTURE_ROOT/ipc-mode"
 pass "fm-playbot-lanes: a Playbot that returns no send snapshot leaves delivery explicitly unconfirmed"
+
+# ---------------------------------------------------------------------------
+# The persisted queue count: an unreadable ledger must never read as empty.
+# ---------------------------------------------------------------------------
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const update = db.prepare('UPDATE workspace_threads SET pending_queue_json = ? WHERE id = ?');
+update.run(JSON.stringify({ messages: [{ id: 'held-1', text: 'First steer' }, { id: 'held-2', text: 'Second steer' }] }), 'chat-worker');
+update.run(JSON.stringify({ queueVersion: 2, entries: [{ id: 'held-1' }] }), 'chat-controller');
+update.run(JSON.stringify({ messages: [] }), 'chat-worker-alt');
+db.close();
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$worker_json,\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a recognized two-message ledger was not counted"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+if (value.result.structuredContent.thread.queuedCount !== 2) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":\"firstmate\",\"thread\":\"Firstmate\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an unrecognized queue ledger was reported as an empty queue"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+if (value.result.structuredContent.thread.queuedCount !== null) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an empty ledger was not counted as zero"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+if (value.result.structuredContent.thread.queuedCount !== 0) process.exit(1);
+NODE
+pass "fm-playbot-lanes: an unreadable persisted queue reads as unknown, never as empty"

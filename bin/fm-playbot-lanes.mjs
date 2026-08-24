@@ -278,9 +278,13 @@ function resolveWorkspace(project, selector) {
   throw new Error(`Project ${project.id} has multiple active workspaces; provide workspace id or path`);
 }
 
+// An explicit workspace selector is resolved against the project's ACTIVE
+// workspaces, so the unscoped project-wide search applies the same filter: a
+// chat in an archived workspace is out of scope, so it is neither addressable
+// nor able to make an active chat's title ambiguous.
 function threadsForProject(projectId, workspaceId = null, includeArchived = false) {
   return threadRows().filter((row) => row.project_id === projectId
-    && (!workspaceId || row.workspace_id === workspaceId)
+    && (workspaceId ? row.workspace_id === workspaceId : row.archive_state === "active")
     && (includeArchived || !row.archived));
 }
 
@@ -528,14 +532,23 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
 // the worker saw anything. The send response is Playbot's own thread snapshot,
 // and it distinguishes held from in-flight from accepted; report that verdict
 // instead of implying success.
-function deliveryVerdict(response, text) {
-  if (!response || typeof response !== "object" || response.pendingMessages === undefined || response.outboundMessages === undefined) {
+const SEND_SNAPSHOT_REQUIRED_KEYS = ["pendingMessages", "outboundMessages"];
+
+async function deliveryVerdict(response, text, threadId) {
+  if (!response || typeof response !== "object") {
     return {
       state: "unknown",
       messageId: null,
       queuedTotal: null,
       note: "Playbot returned no thread snapshot for this send, so delivery is unconfirmed. Check list_queued_messages before resending, because a resend compounds the queue.",
     };
+  }
+  // A snapshot that IS returned without the queue projection is a renamed
+  // shape, not a legacy Playbot, so it is refused by name.
+  const missing = SEND_SNAPSHOT_REQUIRED_KEYS.filter((key) => response[key] === undefined);
+  if (missing.length > 0) {
+    throw new Error(`${playbotVersionLabel(await playbotVersion())} returned a send snapshot for ${threadId} without ${missing.join(", ")}, so whether the message was delivered or is only held cannot be read. `
+      + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape, and check list_queued_messages before resending.`);
   }
   const queued = response.pendingMessages ?? [];
   const outbound = response.outboundMessages ?? [];
@@ -575,7 +588,7 @@ async function sendMessage(row, text) {
   const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
   return {
     thread: publicThread(resolveThread(row.project_id, row.workspace_id, row.thread_id)),
-    delivery: deliveryVerdict(response, value),
+    delivery: await deliveryVerdict(response, value, row.thread_id),
   };
 }
 
@@ -605,13 +618,15 @@ let detectedPlaybotVersion;
 
 async function playbotVersion() {
   if (detectedPlaybotVersion !== undefined) return detectedPlaybotVersion;
+  let metadata;
   try {
-    const metadata = await playbotInvoke("app:metadata", undefined);
-    const version = metadata?.version;
-    detectedPlaybotVersion = typeof version === "string" && version.trim() ? version.trim() : null;
+    metadata = await playbotInvoke("app:metadata", undefined);
   } catch {
-    detectedPlaybotVersion = null;
+    // Only a successful read is cached; this process outlives one bad moment.
+    return null;
   }
+  const version = metadata?.version;
+  detectedPlaybotVersion = typeof version === "string" && version.trim() ? version.trim() : null;
   return detectedPlaybotVersion;
 }
 
@@ -724,9 +739,12 @@ function publicQueue(snapshot) {
   };
 }
 
+// null means the ledger is present but unreadable, never that nothing is held;
+// 0 is reserved for an absent or empty queue.
 function queuedMessageCount(pendingQueueJson) {
+  if (typeof pendingQueueJson !== "string" || !pendingQueueJson.trim()) return 0;
   const ledger = readJsonText(pendingQueueJson);
-  return Array.isArray(ledger?.messages) ? ledger.messages.length : 0;
+  return Array.isArray(ledger?.messages) ? ledger.messages.length : null;
 }
 
 function readJsonText(text) {
@@ -1178,18 +1196,18 @@ function toolDefinitions() {
     {
       name: "send_message",
       description: "Send a message to an existing Playbot chat in any project without selecting or focusing that chat. Reports delivery from Playbot's own send response: state \"delivered\" means the worker accepted it, \"sending\" means it is in flight, \"queued\" means Playbot is HOLDING it and the worker has not seen it, \"failed\" carries Playbot's reason, and \"unknown\" means delivery could not be confirmed. Never treat a queued or unknown send as delivered.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send") }, ["project", "thread", "message"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send") }, ["project", "thread", "message"]),
     },
     {
       name: "read_thread",
       description: "Read a bounded recent Playbot conversation directly from its persisted Codex rollout without resuming the chat.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title"), turnLimit: { type: "integer", minimum: 1, maximum: 30, default: 8 } }, ["project", "thread"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), turnLimit: { type: "integer", minimum: 1, maximum: 30, default: 8 } }, ["project", "thread"]),
       annotations: { readOnlyHint: true },
     },
     {
       name: "get_thread_status",
       description: "Get one Playbot chat's persisted status and route membership without resuming it.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
       annotations: { readOnlyHint: true },
     },
     {
@@ -1201,7 +1219,7 @@ function toolDefinitions() {
     {
       name: "get_thread_card",
       description: `Read the pending question, approval, and MCP cards for one named chat, with every question's exact text and option labels, plus its live queued messages. Addresses the chat explicitly and never acts on the visibly selected one. This is the confirming read for list_parked_threads and it RESUMES a chat that has not been resumed since Playbot started, exactly as opening that chat in the Playbot window does; it starts no agent turn. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC and refuses if the channel or snapshot shape has changed.`,
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
       annotations: { readOnlyHint: true },
     },
     {
@@ -1209,7 +1227,7 @@ function toolDefinitions() {
       description: `Answer one named chat's pending question card, the same call Playbot makes when a human clicks an option. Re-reads the chat's live cards first and refuses unless requestId is pending on THAT chat, because Playbot resolves a request id globally and a mismatched pair would answer another worker's card. Pass each answer as the option label exactly as get_thread_card reported it, or as free text where the question allows it, or skip=true to skip the card. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
-        workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"),
+        workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"),
         thread: string("Thread id, Codex session id, or unique exact title"),
         requestId: { description: "Pending question requestId exactly as get_thread_card returned it", type: ["integer", "string"] },
         answers: { description: "Answer per question id: the exact option label, free text, or an array of either", type: "object", additionalProperties: { type: ["string", "array"], items: { type: "string" } } },
@@ -1221,23 +1239,23 @@ function toolDefinitions() {
     {
       name: "list_queued_messages",
       description: `List one named chat's undelivered messages: queued, in flight, and failed. Playbot holds a message it cannot deliver yet and tells the sender nothing, so this is how a pile becomes visible. Resumes an unresumed chat the same way get_thread_card does. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
       annotations: { readOnlyHint: true },
     },
     {
       name: "drop_queued_message",
       description: `Recall one queued or in-flight message from a named chat so a superseded instruction is removed instead of resent, the same call Playbot's own recall control makes. Returns outcome "recalled" when it was removed and "not-recallable" when it had already been delivered; neither is an error. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title"), messageId: string("Message id from list_queued_messages") }, ["project", "thread", "messageId"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), messageId: string("Message id from list_queued_messages") }, ["project", "thread", "messageId"]),
     },
     {
       name: "register_lane",
       description: "Bind an existing worker chat to the current controller chat so its future completed turns wake the controller.",
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Worker thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Worker thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
     },
     {
       name: "dispatch",
       description: "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status, read_thread, and get_thread_card.",
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -1253,7 +1271,7 @@ function toolDefinitions() {
     {
       name: "archive_chat",
       description: "Archive one Playbot chat. Requires confirm=true and never archives the current controller implicitly.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title"), confirm: { type: "boolean", const: true } }, ["project", "thread", "confirm"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), confirm: { type: "boolean", const: true } }, ["project", "thread", "confirm"]),
     },
   ];
 }
