@@ -30,6 +30,10 @@ If concurrent calls make the marker ambiguous, the tool refuses and asks for a r
 When no fresh Playbot marker exists, the caller is an external normal terminal and no Playbot project identity is required.
 When a marker does exist, every cross-project MCP operation verifies that the Playbot chat belongs to the configured controller project, so worker chats cannot use the globally installed server as an unrestricted control plane.
 
+A `thread` selector identifies one chat on its own, so the workspace it lives in is derived from the match rather than guessed.
+Supplying `workspace` narrows the search and still fails closed when the chat is not in it, and omitting `workspace` searches the whole project.
+An ambiguous exact title or duplicate id is reported rather than resolved, and the not-found message names the scope that was searched.
+
 ## Chat-creation API detection
 
 Playbot 0.94.0 removed the standalone `threads:openThread` and `workspace:create` IPC handlers and folded chat and workspace creation into one strict `threads:launch` call whose destination either targets an existing workspace or creates a new one.
@@ -59,7 +63,12 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 With `newWorkspace`, it creates the isolated workspace and creates the worker chat inside it.
 The message can enter a non-selected project and does not require changing UI focus.
 For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.
-For a normal-terminal caller, it returns `lane: null` plus the `get_thread_status` and `read_thread` supervision tools instead of inventing a chat route that cannot deliver a wake.
+For a normal-terminal caller, it returns `lane: null` plus the `get_thread_status`, `read_thread`, and `get_thread_card` supervision tools instead of inventing a chat route that cannot deliver a wake.
+
+Playbot accepts a message it cannot deliver yet and holds it in a queue the sender is never told about, so `send_message` and `dispatch` report a `delivery` verdict taken from the thread snapshot Playbot returns.
+`delivered` means the agent's turn accepted the message, `sending` means it is in flight, `queued` means Playbot is holding it and the worker has not seen it, `failed` carries Playbot's own reason, and `unknown` means Playbot returned no snapshot so delivery could not be confirmed.
+Only `delivered` and `sending` mean the message is on its way; a `queued` verdict is cured by answering the chat's card or dropping the held message, never by resending, because a resend adds to the pile and a later drain replays superseded instructions in order.
+Every chat view also carries `queuedCount` from the persisted queue, so a pile is visible without asking for it.
 
 The global Stop hook is inert for every chat that has no active route.
 For a routed worker, it reads the completed Codex turn id and final message from the persisted rollout, ignores an already delivered turn, and sends one marked follow-up to the controller chat.
@@ -68,6 +77,24 @@ Playbot queues that follow-up when the controller is busy, so the controller rec
 `close_lane` disables notification without archiving either chat.
 `archive_chat` is a separate explicit action and requires `confirm=true`.
 
+## Question cards and held messages
+
+A Playbot worker that asks a question parks until someone chooses an option, and no text channel reaches it while it waits.
+`list_parked_threads` is the cheap fleet-wide detector: it reads persisted status only, resumes nothing, and contacts Playbot not at all.
+Its results are candidates rather than findings, because Playbot reports a merely rehydrated chat as `pending_input` whether or not it is actually parked.
+
+`get_thread_card` is the confirming live read for one named chat, returning each pending question's exact text and option labels alongside the chat's held messages.
+Reading a live snapshot resumes a chat that has not been resumed since Playbot started, exactly as opening that chat in the Playbot window does, and starts no agent turn.
+Keeping the detector persisted and the confirmation live is what keeps that resume off a fleet-wide poll.
+
+`answer_thread_card` answers one question card, which is the same call Playbot makes when a human clicks an option.
+Playbot resolves a request id against a single process-wide registry, so a valid id paired with the wrong chat would answer a different worker's card; the tool therefore re-reads the named chat's live cards and sends only an id that read found on that chat.
+An answer is the option label passed through exactly as it was read, because Playbot's own renderer uses each option's label as its answer value, and skipping a card is an explicit `skip` rather than an empty answer set.
+Approval and MCP cards are reported for context but are not answerable through this tool.
+
+`list_queued_messages` and `drop_queued_message` make the held queue visible and withdraw a superseded instruction instead of resending it.
+A message that has already been delivered reports `not-recallable`, which is an outcome rather than an error.
+
 ## State and compatibility
 
 Private route and hook state defaults to `~/.playbot/mcp/project-chat`.
@@ -75,5 +102,8 @@ The integration reads Playbot's application and Codex SQLite databases but never
 Chat creation, message delivery, and archive operations go through Playbot's Electron IPC handlers over the local DevTools socket.
 
 The current adapter targets Playbot 0.94.0 and Node.js 22.5 or newer, with a detected fallback to the pre-0.94 channels that were verified against Playbot 0.93.1 on Linux.
+The card, snapshot, and queue channels are verified against Playbot 0.95.x, and every result from those tools carries both the version Playbot reports through `app:metadata` and the verified range, so a mismatch is visible in the output rather than inferred.
+A channel Playbot no longer registers, or a snapshot missing a field these tools read, is refused with the missing channel or field and the observed version named; nothing falls back to driving the visible window.
+`doctor` reports the same observed version as `playbotApp`.
 Playbot's private IPC is not a published compatibility surface, so a Playbot update requires rerunning `doctor` and the focused test before relying on cross-project delivery.
 Current empirical evidence is recorded in [verification/supervision.md](verification/supervision.md#playbot-lanes).

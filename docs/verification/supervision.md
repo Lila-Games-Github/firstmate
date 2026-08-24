@@ -539,6 +539,38 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
+On 2026-08-24, Playbot 0.95.0 on Linux was verified to expose the question-card, snapshot, and pending-queue channels the card tools use, and to have kept the composer mounted while a card is displayed.
+`app:metadata` returned `{name: "Playbot", version: "0.95.0"}`, matching the extracted `resources/app.asar` `/package.json` and the crashpad `--annotation=_version=0.95.0`.
+The channel names and payload shapes were confirmed from the running app's extracted `.vite/build/main.js`, where `threads:respondToUserInput` takes `{threadId, requestId, response, composerContext?}` and resolves the pending Codex `item/tool/requestUserInput` request, `threads:getSnapshot` takes `{threadId}` and returns `userInputRequests`, `pendingMessages`, and `outboundMessages` among its fields, `threads:recallMessage` takes `{threadId, messageId}` and returns `{outcome, message?, snapshot}`, and `threads:send` returns that same thread snapshot.
+The only precondition on the answer path is that the chat's workspace is not archived; nothing on it inspects the selected workspace or the visible chat.
+
+Live evidence against the running Playbot 0.95.0 on the same date, taken with a real worker parked on a real card:
+
+- `get_thread_card` on a chat in a NON-selected workspace returned that chat's own card, with `requestId: 10`, question id `gate_ruling`, and option labels `Proceed (Recommended)` and `Keep current commit`.
+- `answer_thread_card` with a request id that was not pending on the named chat was refused without any IPC write, and the card was still pending with `responding: false` afterwards.
+- `answer_thread_card` with request id `10`, which was genuinely pending on a DIFFERENT chat, was refused when paired with the wrong chat rather than answering that other worker's card. This is the property that makes a process-wide request-id registry safe to use.
+- The card was later answered by a human in the Playbot window, and the Codex rollout recorded the resulting tool output as `{"answers":{"gate_ruling":{"answers":["Proceed (Recommended)"]}}}`, byte-identical to the payload `answer_thread_card` constructs from an option label.
+- `send_message` to a chat whose turn was running reported `state: "queued"` with `queuedTotal: 1` and a message id, `list_queued_messages` showed that exact held message, and `drop_queued_message` returned `outcome: "recalled"` and left the queue empty. The worker never saw the message, which is the held-and-invisible behavior the delivery verdict exists to report.
+- Playbot's queued projection carries no `createdAtMs`, unlike the outbound one, so the delivery verdict matches the most recent message by list order rather than by timestamp.
+
+The same day, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 39 checks, including eleven added for the thread-resolution scope, the card and queue surfaces, and the delivery verdict:
+
+```text
+ok - fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it
+ok - fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot
+ok - fm-playbot-lanes: get_thread_card enumerates a named chat's card without focusing it
+ok - fm-playbot-lanes: answer_thread_card refuses a borrowed request id, an unknown question, a moved turn, and an implicit skip
+ok - fm-playbot-lanes: answer_thread_card answers the card once and reports a second attempt as already answered
+ok - fm-playbot-lanes: get_thread_card contradicts a persisted pending_input that holds no live card
+ok - fm-playbot-lanes: queued messages are listable and one can be dropped instead of resent
+ok - fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and names what is missing
+ok - fm-playbot-lanes: send_message reports held, in-flight, and delivered separately
+ok - fm-playbot-lanes: dispatch onto a parked worker reports the task as held, not delivered
+ok - fm-playbot-lanes: a Playbot that returns no send snapshot leaves delivery explicitly unconfirmed
+```
+
+Those checks run against the hermetic fake DevTools endpoint described below, extended to serve the card channels, to reject a named channel as unregistered, and to omit a snapshot field, so the loud-refusal paths are enforced without waiting for a real Playbot upgrade.
+
 On 2026-07-30, Playbot 0.81.0 on Windows exposed one shared Codex app-server process for multiple persisted chat threads.
 The Windows session-lock verification proved that Git Bash can recover that host process through PowerShell while `CODEX_THREAD_ID` plus the Playbot database narrows ownership to the exact unarchived Firstmate thread.
 The regression command was `"C:\Program Files\Git\bin\bash.exe" tests/fm-playbot-session-lock.test.sh`.
