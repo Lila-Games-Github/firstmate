@@ -2,7 +2,7 @@
 
 Playbot lanes let a normal terminal or one Playbot chat control chats in Playbot projects without selecting those chats in the UI.
 A Playbot-chat controller can register durable worker routes and receive background completion notifications.
-A normal-terminal controller supervises dispatched workers through bounded status and conversation reads because it has no Playbot chat to wake.
+A normal-terminal controller has no Playbot chat to wake, so `dispatch` arms that worker's firstmate watcher poll for it and it supervises through bounded status and conversation reads.
 
 `bin/fm-playbot-lanes.mjs` is the single owner of the tool schemas, private state format, install command, hook behavior, and exact failure rules.
 Run its `doctor` command for bounded local diagnostics and its `install` command to register the server and hooks in Playbot's managed Codex home.
@@ -64,7 +64,19 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 With `newWorkspace`, it creates the isolated workspace and creates the worker chat inside it.
 The message can enter a non-selected project and does not require changing UI focus.
 For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.
-For a normal-terminal caller, it returns `lane: null` plus the `get_thread_status`, `read_thread`, and `get_thread_card` supervision tools instead of inventing a chat route that cannot deliver a wake.
+
+A normal-terminal caller has no chat to wake, so polling is the only supervision available to it, and `dispatch` arms that poll itself rather than naming tools and leaving the caller to remember.
+It writes `state/<taskId>.check.sh` under the configured controller root, binds it through `bin/fm-check-register.sh`, and reports the outcome in the result's `supervision` block: `mode`, the `taskId` and whether it came from the argument or the workspace, the `check` path, and `armed`.
+The armed poll reads persisted Playbot state only, so it contacts Playbot not at all and resumes nothing.
+It stays silent while the worker is `working` and prints one line when the worker parks on a card, stops without one, becomes unreadable, or cannot be read at all, which is why a poll that failed reports the failure instead of passing as silence.
+A persisted `pending_input` is a candidate on exactly the terms `list_parked_threads` describes, so the wake line says so and names `get_thread_card` as the confirming read.
+It keeps firing each check interval until the poll is retired, because a worker that is still parked still needs its supervisor.
+
+`taskId` is optional and the workspace id is used when it is absent, so the poll always exists; a workspace-keyed poll is not retired by firstmate's task teardown and the result says so.
+Arming only ever replaces a check this server generated, so a merged-PR poll or any other check already armed for that task id is left untouched and the arming is refused instead.
+A failed arming never turns a delivered task into an error: the result carries the delivery verdict beside `armed: false`, the reason, and a warning that nothing is polling the worker.
+A Playbot-chat caller is reported as `mode: "routed-wake"` and arms nothing, because its lane already delivers.
+`create_chat` arms nothing either: it starts no agent turn, so there is no worker to supervise until a `dispatch` sends one a task.
 
 Playbot accepts a message it cannot deliver yet and holds it in a queue the sender is never told about, so `send_message` and `dispatch` report a `delivery` verdict taken from the thread snapshot Playbot returns.
 `delivered` means the agent's turn accepted the message, `sending` means it is in flight, `queued` means Playbot is holding it and the worker has not seen it, `steering` means Playbot marked that exact message for the active turn, `failed` carries Playbot's own reason, and `unknown` means Playbot returned no usable confirmation.
