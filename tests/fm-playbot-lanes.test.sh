@@ -346,6 +346,10 @@ const sendFailsFile = path.join(process.env.FIXTURE_ROOT, 'send-fails');
 // all: the verdict is unknown for the same reason a legacy Playbot's is, but on
 // a version that can report one, so the two have to be told apart.
 const sendNonObjectFile = path.join(process.env.FIXTURE_ROOT, 'send-non-object');
+// A Playbot that ACCEPTS the chat-creation capability probe instead of rejecting
+// it: the adapter refuses to guess which API it is talking to, so the detection
+// itself throws while the send that came before it already succeeded.
+const probeAcceptedFile = path.join(process.env.FIXTURE_ROOT, 'launch-accepts-probe');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
@@ -538,6 +542,9 @@ async function electronInvoke(channel, payload) {
     }
     if (channel === 'threads:launch') {
       if (mode !== 'modern') throw new Error("No handler registered for 'threads:launch'");
+      if (readFileOr(probeAcceptedFile, '') && (payload.destination ?? {}).kind === 'fm-capability-probe') {
+        return { thread: { id: 'thread-probe-accepted' } };
+      }
       return launchThread(db, payload);
     }
     if (channel === 'workspace:create') {
@@ -1561,6 +1568,95 @@ const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
 if (route.lastNotifiedError !== undefined) process.exit(1);
 NODE
 pass "fm-playbot-lanes: an unconfirmed wake advances only on a Playbot whose send path cannot report a verdict"
+
+# The detection that classifies an unknown verdict runs AFTER threads:send has
+# returned, so a Playbot that accepts the capability probe - which the adapter
+# refuses to guess from - must not turn a send that reached Playbot into a record
+# claiming it never did. The conservative default still holds: an unclassifiable
+# unknown does not advance.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const rollout = path.join(process.env.FIXTURE_ROOT, 'harness', 'worker-rollout.jsonl');
+const at = '2026-07-29T12:08:00.000Z';
+fs.appendFileSync(rollout, [
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'agent_message', message: 'SIXTH ACK', phase: 'final_answer' } }),
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-worker-6', last_agent_message: 'SIXTH ACK', completed_at: 1785326700, duration_ms: 100 } }),
+].join('\n') + '\n');
+NODE
+
+rm -f "$PLAYBOT_LANES_STATE_DIR/last-hook-error.json"
+printf 'yes\n' > "$FIXTURE_ROOT/send-non-object"
+printf 'yes\n' > "$FIXTURE_ROOT/launch-accepts-probe"
+printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
+  | node --no-warnings "$SCRIPT" hook-stop >/dev/null
+rm -f "$FIXTURE_ROOT/send-non-object" "$FIXTURE_ROOT/launch-accepts-probe"
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json" ERR_FILE="$PLAYBOT_LANES_STATE_DIR/last-hook-error.json" node --no-warnings <<'NODE' || fail "a probe failure after a completed send was recorded as a send that never reached Playbot"
+const fs = require('node:fs');
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.lastNotifiedTurnId === 'turn-worker-6') process.exit(1);
+const error = JSON.parse(fs.readFileSync(process.env.ERR_FILE, 'utf8'));
+if (error.turnId !== 'turn-worker-6') process.exit(1);
+// The verdict the send DID produce has to be in the record, and nothing in it
+// may claim the send never reached Playbot.
+if (!error.delivery || error.delivery.state !== 'unknown') process.exit(1);
+if (error.sendReachedPlaybot === false) process.exit(1);
+if (!error.error.includes('capability probe')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a chat-creation probe that fails after the send does not mislabel the wake as undelivered"
+
+# A routed worker is addressed by exact thread id, so it stays wakeable wherever
+# its chat lives - including a project Playbot no longer marks active, which
+# rowForSession already resolves the caller from. And a route that cannot be
+# processed at all must not stop the routes behind it in the same hook run.
+FIXTURE_ROOT="$FIXTURE_ROOT" PLAYBOT_LANES_STATE_DIR="$PLAYBOT_LANES_STATE_DIR" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const rollout = path.join(process.env.FIXTURE_ROOT, 'harness', 'worker-rollout.jsonl');
+const at = '2026-07-29T12:09:00.000Z';
+fs.appendFileSync(rollout, [
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'agent_message', message: 'SEVENTH ACK', phase: 'final_answer' } }),
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-worker-7', last_agent_message: 'SEVENTH ACK', completed_at: 1785326760, duration_ms: 100 } }),
+].join('\n') + '\n');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare("UPDATE projects SET deletion_state = 'pending_deletion' WHERE id = ?").run('project-worker');
+db.close();
+// A persisted route, the adapter's own state file, pointing at a supervisor chat
+// that no longer exists. It sorts ahead of the live lane, so a route the hook
+// cannot process is reached first.
+fs.writeFileSync(path.join(process.env.PLAYBOT_LANES_STATE_DIR, 'routes', 'lane-orphan-supervisor.json'), `${JSON.stringify({
+  version: 1,
+  id: 'lane-orphan-supervisor',
+  active: true,
+  supervisor: { id: 'chat-that-no-longer-exists' },
+  worker: { id: 'chat-worker' },
+  createdAt: at,
+  updatedAt: '2030-01-01T00:00:00.000Z',
+  lastNotifiedTurnId: null,
+  lastNotifiedAt: null,
+}, null, 2)}\n`);
+NODE
+
+printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
+  | node --no-warnings "$SCRIPT" hook-stop >/dev/null
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare("UPDATE projects SET deletion_state = 'active' WHERE id = ?").run('project-worker');
+db.close();
+NODE
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json" ORPHAN="$PLAYBOT_LANES_STATE_DIR/routes/lane-orphan-supervisor.json" node --no-warnings <<'NODE' || fail "a worker outside an active project, behind an unprocessable route, lost its wake"
+const fs = require('node:fs');
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.lastNotifiedTurnId !== 'turn-worker-7') process.exit(1);
+if (route.lastNotifiedDelivery !== 'sending' && route.lastNotifiedDelivery !== 'delivered') process.exit(1);
+const orphan = JSON.parse(fs.readFileSync(process.env.ORPHAN, 'utf8'));
+if (orphan.lastNotifiedTurnId !== null) process.exit(1);
+NODE
+rm -f "$PLAYBOT_LANES_STATE_DIR/routes/lane-orphan-supervisor.json"
+pass "fm-playbot-lanes: a worker in a project Playbot no longer marks active still wakes its supervisor"
 
 # ---------------------------------------------------------------------------
 # The shared node resolver must name what it rejected.

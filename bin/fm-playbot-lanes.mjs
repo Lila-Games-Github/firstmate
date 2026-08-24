@@ -298,6 +298,25 @@ function threadsForProject(projectId = null, workspaceId = null, includeArchived
     && (includeArchived || !row.archived));
 }
 
+// The explicit wider scope threadsForProject's note points at, and the ONE place
+// that owns it: an exact thread id, wherever that chat lives. Selecting a chat
+// out of a caller's request is resolution and belongs in the scoped accessor;
+// this is for a chat that is already identified - a registered lane's supervisor
+// or worker, or a row being re-read for fresh persisted state after it was
+// resolved and acted on. Re-applying the resolution scope there would refuse a
+// chat the caller was already acting on, and after a completed write it would
+// report a failure for work that succeeded.
+function threadRowById(threadId) {
+  const rows = threadId ? threadRows().filter((row) => row.thread_id === threadId && !row.archived) : [];
+  return rows.length === 1 ? rows[0] : null;
+}
+
+function refreshThread(row) {
+  const fresh = threadRowById(row.thread_id);
+  if (!fresh) throw new Error(`Thread ${row.thread_id} is no longer readable in Playbot state; use list_threads to see the chats its project holds`);
+  return fresh;
+}
+
 function publicThread(row) {
   return {
     id: row.thread_id,
@@ -630,7 +649,7 @@ async function sendMessage(row, text) {
   const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
   try {
     return {
-      thread: publicThread(resolveThread(row.project_id, row.workspace_id, row.thread_id)),
+      thread: publicThread(refreshThread(row)),
       delivery: await deliveryVerdict(response, value, row.thread_id),
     };
   } catch (error) {
@@ -1099,8 +1118,13 @@ async function processStop(payload) {
   if (!worker) return { matched: 0, notified: 0 };
   const matches = loadRoutes().filter((route) => route.active && route.worker?.id === worker.thread_id);
   let notified = 0;
+  // A routed worker must stay wakeable wherever its chat lives, exactly as
+  // rowForSession found it, so this is the exact-id accessor rather than the
+  // scoped one, and an unreadable row ends the run instead of throwing through
+  // the routes still waiting to be processed.
+  const currentWorker = threadRowById(worker.thread_id);
+  if (!currentWorker) return { matched: matches.length, notified };
   for (const route of matches) {
-    const currentWorker = resolveThread(worker.project_id, worker.workspace_id, worker.thread_id);
     const conversation = recentConversation(currentWorker, 2);
     const completedTurnId = conversation.completion?.turnId ?? null;
     let eventId = completedTurnId;
@@ -1111,10 +1135,10 @@ async function processStop(payload) {
       eventKind = "input request";
     }
     if (route.lastNotifiedTurnId === eventId) continue;
-    // Deliberately the raw rows, not the scoped accessor: a registered
-    // supervisor is addressed by exact id and stays wakeable wherever it lives.
-    const supervisorRows = threadRows().filter((row) => row.thread_id === route.supervisor?.id && !row.archived);
-    if (supervisorRows.length !== 1 || supervisorRows[0].thread_id === currentWorker.thread_id) continue;
+    // A registered supervisor is addressed by exact id and stays wakeable
+    // wherever it lives, so this is the exact-id accessor too.
+    const supervisor = threadRowById(route.supervisor?.id);
+    if (!supervisor || supervisor.thread_id === currentWorker.thread_id) continue;
     const message = [
       WAKE_PREFIX,
       `Lane: ${route.id}`,
@@ -1131,13 +1155,13 @@ async function processStop(payload) {
         atomicWriteJson(path.join(stateDir(), "last-dry-run-wake.json"), {
           at: nowIso(),
           routeId: route.id,
-          supervisorThreadId: supervisorRows[0].thread_id,
+          supervisorThreadId: supervisor.thread_id,
           workerThreadId: currentWorker.thread_id,
           turnId: eventId,
           message,
         });
       } else {
-        ({ delivery } = await sendMessage(supervisorRows[0], message));
+        ({ delivery } = await sendMessage(supervisor, message));
       }
       // A wake Playbot rejected must stay eligible for retry. Nothing throws on
       // a rejection, so recording the turn as notified would suppress it
@@ -1164,14 +1188,29 @@ async function processStop(payload) {
       // no retry and no error - while wrongly refusing only repeats a
       // self-announcing wake. Silent loss is the worse failure, so an
       // unclassifiable unknown stays eligible for retry and is recorded.
-      if (delivery?.state === "unknown" && await chatCreationApi() !== "openThread") {
+      // The detection is resolved into a local here rather than awaited inside
+      // the branch: the send has already returned, so a throw from the probe is
+      // not a send failure and must not be recorded as one.
+      let legacySendPath = false;
+      let detectionError = null;
+      if (delivery?.state === "unknown") {
+        try {
+          legacySendPath = await chatCreationApi() === "openThread";
+        } catch (error) {
+          detectionError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      if (delivery?.state === "unknown" && !legacySendPath) {
+        const unconfirmed = detectionError
+          ? `Playbot returned no thread snapshot for the lane wake, and the chat-creation detection that would say whether this Playbot can report a verdict at all failed: ${detectionError}`
+          : "Playbot returned no thread snapshot for the lane wake, so delivery is unconfirmed on a Playbot whose send path reports a verdict";
         atomicWriteJson(path.join(stateDir(), "last-hook-error.json"), {
           at: nowIso(),
           routeId: route.id,
           workerThreadId: currentWorker.thread_id,
           turnId: eventId,
           delivery,
-          error: `Playbot returned no thread snapshot for the lane wake, so delivery is unconfirmed on a Playbot whose send path reports a verdict. Check list_queued_messages for ${supervisorRows[0].thread_id} before the next hook run resends it.`,
+          error: `${unconfirmed}. Check list_queued_messages for ${supervisor.thread_id} before the next hook run resends it.`,
         });
         continue;
       }
@@ -1585,7 +1624,7 @@ async function handleTool(name, args = {}) {
     }
     return {
       answered: true,
-      thread: publicThread(resolveThread(thread.project_id, thread.workspace_id, thread.thread_id)),
+      thread: publicThread(refreshThread(thread)),
       playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
       requestId: request.id,
       skipped: args.skip === true,
@@ -1619,7 +1658,7 @@ async function handleTool(name, args = {}) {
     const unreadableAfter = [];
     const queueAfter = publicQueue(result?.snapshot, unreadableAfter);
     return {
-      thread: publicThread(resolveThread(thread.project_id, thread.workspace_id, thread.thread_id)),
+      thread: publicThread(refreshThread(thread)),
       playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
       messageId,
       outcome: result?.outcome ?? null,
