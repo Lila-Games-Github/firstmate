@@ -18,7 +18,9 @@
 // invokes Playbot's own IPC handlers: threads:launch for chat and workspace
 // creation on Playbot 0.94.0 and newer, with a detected fallback to the
 // pre-0.94 threads:openThread and workspace:create channels, plus the
-// unchanged threads:send and threads:archiveThread channels. It reads
+// unchanged threads:send and threads:archiveThread channels, whose send response
+// is the thread snapshot that says whether Playbot delivered the message or is
+// only holding it. It reads
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
 // directly.
@@ -521,12 +523,60 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
   return publicThread(row);
 }
 
+// Playbot accepts a send it cannot deliver yet and holds it in a queue the
+// sender is never told about, so a bare "the channel returned" is not evidence
+// the worker saw anything. The send response is Playbot's own thread snapshot,
+// and it distinguishes held from in-flight from accepted; report that verdict
+// instead of implying success.
+function deliveryVerdict(response, text) {
+  if (!response || typeof response !== "object" || response.pendingMessages === undefined || response.outboundMessages === undefined) {
+    return {
+      state: "unknown",
+      messageId: null,
+      queuedTotal: null,
+      note: "Playbot returned no thread snapshot for this send, so delivery is unconfirmed. Check list_queued_messages before resending, because a resend compounds the queue.",
+    };
+  }
+  const queued = response.pendingMessages ?? [];
+  const outbound = response.outboundMessages ?? [];
+  // Playbot projects both lists in arrival order and omits createdAtMs from the
+  // queued one, so the most recent match is the last one, not the newest stamp.
+  const newestMatch = (list) => {
+    const matches = list.filter((message) => message?.text === text);
+    return matches[matches.length - 1] ?? null;
+  };
+
+  const held = newestMatch(queued);
+  if (held) {
+    return {
+      state: "queued",
+      messageId: held.id ?? null,
+      queuedTotal: queued.length,
+      queuedAhead: queued.findIndex((message) => message === held),
+      note: "Playbot is HOLDING this message and the worker has not seen it. It stays held until the running turn ends or the chat's pending card is answered. Do not resend: use get_thread_card to answer the card, or drop_queued_message to withdraw a superseded instruction.",
+    };
+  }
+  const inFlight = newestMatch(outbound);
+  if (inFlight) {
+    return {
+      state: inFlight.status === "failed" ? "failed" : "sending",
+      messageId: inFlight.id ?? null,
+      queuedTotal: queued.length,
+      ...inFlight.reason ? { reason: inFlight.reason } : {},
+    };
+  }
+  return { state: "delivered", messageId: null, queuedTotal: queued.length };
+}
+
 async function sendMessage(row, text) {
   if (row.archived) throw new Error(`Cannot send to archived thread ${row.thread_id}`);
   const value = String(text ?? "").trim();
   if (!value) throw new Error("message must not be empty");
-  await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
-  return publicThread(resolveThread(row.project_id, row.workspace_id, row.thread_id));
+  const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
+  return {
+    thread: publicThread(resolveThread(row.project_id, row.workspace_id, row.thread_id)),
+    delivery: deliveryVerdict(response, value),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,7 +1177,7 @@ function toolDefinitions() {
     },
     {
       name: "send_message",
-      description: "Send a message to an existing Playbot chat in any project without selecting or focusing that chat.",
+      description: "Send a message to an existing Playbot chat in any project without selecting or focusing that chat. Reports delivery from Playbot's own send response: state \"delivered\" means the worker accepted it, \"sending\" means it is in flight, \"queued\" means Playbot is HOLDING it and the worker has not seen it, \"failed\" carries Playbot's reason, and \"unknown\" means delivery could not be confirmed. Never treat a queued or unknown send as delivered.",
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send") }, ["project", "thread", "message"]),
     },
     {
@@ -1186,7 +1236,7 @@ function toolDefinitions() {
     },
     {
       name: "dispatch",
-      description: "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status and read_thread.",
+      description: "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status, read_thread, and get_thread_card.",
       inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
@@ -1271,15 +1321,16 @@ async function handleTool(name, args = {}) {
     }
     const lane = caller ? registerLane(caller, worker) : null;
     try {
-      const thread = await sendMessage(worker, args.message);
+      const { thread, delivery } = await sendMessage(worker, args.message);
       return caller
-        ? { lane, thread }
+        ? { lane, thread, delivery }
         : {
             lane: null,
             thread,
+            delivery,
             supervision: {
               mode: "poll",
-              tools: ["get_thread_status", "read_thread"],
+              tools: ["get_thread_status", "read_thread", "get_thread_card"],
             },
           };
     } catch (error) {
@@ -1298,7 +1349,7 @@ async function handleTool(name, args = {}) {
     return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
   }
   const thread = resolveThreadInProject(project, args.workspace, args.thread, name === "archive_chat");
-  if (name === "send_message") return { thread: await sendMessage(thread, args.message) };
+  if (name === "send_message") return sendMessage(thread, args.message);
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
   if (name === "get_thread_status") {
     const publicValue = publicThread(thread);

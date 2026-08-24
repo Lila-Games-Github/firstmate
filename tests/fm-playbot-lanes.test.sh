@@ -300,8 +300,10 @@ const modeFile = path.join(process.env.FIXTURE_ROOT, 'ipc-mode');
 const snapshotFile = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
 const versionFile = path.join(process.env.FIXTURE_ROOT, 'app-version');
 const missingFile = path.join(process.env.FIXTURE_ROOT, 'ipc-missing');
+const reconcileFile = path.join(process.env.FIXTURE_ROOT, 'send-reconciles');
 let createCounter = 0;
 let threadCounter = 0;
+let sendCounter = 0;
 
 function currentMode() {
   try {
@@ -478,7 +480,24 @@ async function electronInvoke(channel, payload) {
       if (Number(changed.changes) !== 1) throw new Error(`Thread not found: ${payload.threadId}`);
       return null;
     }
-    if (channel === 'threads:send') return null;
+    if (channel === 'threads:send') {
+      // A legacy Playbot returns nothing here, which is what leaves delivery
+      // unconfirmed; a modern one returns the thread snapshot and holds the
+      // message whenever the chat is parked on a card or already has a queue.
+      if (mode !== 'modern') return null;
+      const store = loadSnapshots();
+      const snapshot = store[payload.threadId] ?? emptySnapshot(payload.threadId);
+      sendCounter += 1;
+      if (!readFileOr(reconcileFile, '')) {
+        const held = (snapshot.userInputRequests ?? []).length > 0 || (snapshot.pendingMessages ?? []).length > 0;
+        // Playbot's queued projection carries no createdAtMs; its outbound one does.
+        if (held) snapshot.pendingMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text });
+        else snapshot.outboundMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text, status: 'sending', createdAtMs: 1000 + sendCounter });
+      }
+      store[payload.threadId] = snapshot;
+      saveSnapshots(store);
+      return snapshot;
+    }
     throw new Error(`fixture does not implement channel ${channel}`);
   } finally {
     db.close();
@@ -686,7 +705,7 @@ if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.lane !== null || value.thread.workspaceId !== 'ws-created-4') process.exit(1);
 if (value.supervision?.mode !== 'poll') process.exit(1);
-if (value.supervision.tools.join(',') !== 'get_thread_status,read_thread') process.exit(1);
+if (value.supervision.tools.join(',') !== 'get_thread_status,read_thread,get_thread_card') process.exit(1);
 NODE
 pass "fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision"
 
@@ -787,8 +806,8 @@ fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'snapshots.json'), `${JSON.
     mcpElicitationRequests: [],
     respondingRequestIds: [],
     pendingMessages: [
-      { id: 'msg-1', text: 'First steer', createdAtMs: 1 },
-      { id: 'msg-2', text: 'Superseding steer', createdAtMs: 2 },
+      { id: 'msg-1', text: 'First steer' },
+      { id: 'msg-2', text: 'Superseding steer' },
     ],
     outboundMessages: [{ id: 'msg-0', text: 'Rejected steer', status: 'failed', reason: 'Message not sent', createdAtMs: 0 }],
   },
@@ -948,3 +967,51 @@ if (!value.error.message.includes('re-verify the snapshot shape')) process.exit(
 NODE
 rm -f "$FIXTURE_ROOT/snapshot-drop-key"
 pass "fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and names what is missing"
+
+# ---------------------------------------------------------------------------
+# Delivery verdicts: a message Playbot only holds must never read as delivered.
+# ---------------------------------------------------------------------------
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Held steer\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a send onto an existing queue was not reported as held"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.id !== 'chat-worker-alt') process.exit(1);
+if (value.delivery.state !== 'queued') process.exit(1);
+if (!value.delivery.messageId || value.delivery.queuedTotal !== 2 || value.delivery.queuedAhead !== 1) process.exit(1);
+if (!value.delivery.note.includes('has not seen it')) process.exit(1);
+if (!value.delivery.note.includes('Do not resend')) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\",\"message\":\"Live steer\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a dispatched send was not reported as in flight"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'sending' || !value.delivery.messageId || value.delivery.queuedTotal !== 0) process.exit(1);
+if (value.delivery.note !== undefined) process.exit(1);
+NODE
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\",\"message\":\"Accepted steer\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an accepted send was not reported as delivered"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'delivered') process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/send-reconciles"
+pass "fm-playbot-lanes: send_message reports held, in-flight, and delivered separately"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Held task\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch reported a task Playbot is only holding as delivered"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.id !== 'chat-worker-alt') process.exit(1);
+if (value.delivery.state !== 'queued') process.exit(1);
+if (value.supervision.tools.join(',') !== 'get_thread_status,read_thread,get_thread_card') process.exit(1);
+NODE
+pass "fm-playbot-lanes: dispatch onto a parked worker reports the task as held, not delivered"
+
+printf 'legacy\n' > "$FIXTURE_ROOT/ipc-mode"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\",\"message\":\"Unconfirmed steer\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a send with no snapshot back was reported as delivered instead of unconfirmed"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'unknown' || value.delivery.messageId !== null) process.exit(1);
+if (!value.delivery.note.includes('delivery is unconfirmed')) process.exit(1);
+NODE
+printf 'modern\n' > "$FIXTURE_ROOT/ipc-mode"
+pass "fm-playbot-lanes: a Playbot that returns no send snapshot leaves delivery explicitly unconfirmed"
