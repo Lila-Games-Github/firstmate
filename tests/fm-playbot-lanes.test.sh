@@ -258,7 +258,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup did not fail closed 
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== false || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== false || value.checks.controllerPresent !== true) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 13) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 18) process.exit(1);
 NODE
 threads_after=$(FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -297,6 +297,9 @@ import { DatabaseSync } from 'node:sqlite';
 const desktop = path.join(process.env.FIXTURE_ROOT, 'desktop');
 const callsFile = path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl');
 const modeFile = path.join(process.env.FIXTURE_ROOT, 'ipc-mode');
+const snapshotFile = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const versionFile = path.join(process.env.FIXTURE_ROOT, 'app-version');
+const missingFile = path.join(process.env.FIXTURE_ROOT, 'ipc-missing');
 let createCounter = 0;
 let threadCounter = 0;
 
@@ -306,6 +309,50 @@ function currentMode() {
   } catch {
     return 'modern';
   }
+}
+
+function readFileOr(file, fallback) {
+  try {
+    const text = fs.readFileSync(file, 'utf8').trim();
+    return text || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function missingChannels() {
+  return readFileOr(missingFile, '').split(/\s+/).filter(Boolean);
+}
+
+function emptySnapshot(threadId) {
+  return {
+    threadId,
+    phase: { kind: 'ready', threadId: `session-${threadId}` },
+    agentStatus: 'ready',
+    userInputRequests: [],
+    approvalRequests: [],
+    mcpElicitationRequests: [],
+    respondingRequestIds: [],
+    pendingMessages: [],
+    outboundMessages: [],
+  };
+}
+
+function loadSnapshots() {
+  try {
+    return JSON.parse(fs.readFileSync(snapshotFile, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveSnapshots(store) {
+  fs.writeFileSync(snapshotFile, `${JSON.stringify(store, null, 2)}\n`);
+}
+
+function snapshotFor(threadId) {
+  const store = loadSnapshots();
+  return store[threadId] ?? emptySnapshot(threadId);
 }
 
 function createWorkspaceRows(db, spec) {
@@ -373,10 +420,43 @@ function launchThread(db, payload) {
 async function electronInvoke(channel, payload) {
   fs.appendFileSync(callsFile, `${JSON.stringify({ channel, payload })}\n`);
   const mode = currentMode();
+  if (missingChannels().includes(channel)) throw new Error(`No handler registered for '${channel}'`);
   const db = new DatabaseSync(path.join(desktop, 'playbot.db'));
   try {
+    if (channel === 'app:metadata') return { name: 'Playbot', version: readFileOr(versionFile, '0.95.0') };
+    if (channel === 'threads:getSnapshot') {
+      const snapshot = snapshotFor(payload.threadId);
+      const drop = readFileOr(path.join(process.env.FIXTURE_ROOT, 'snapshot-drop-key'), '');
+      if (drop) {
+        const partial = { ...snapshot };
+        delete partial[drop];
+        return partial;
+      }
+      return snapshot;
+    }
+    if (channel === 'threads:respondToUserInput') {
+      const store = loadSnapshots();
+      const snapshot = store[payload.threadId] ?? emptySnapshot(payload.threadId);
+      const index = (snapshot.userInputRequests ?? []).findIndex((request) => String(request.id) === String(payload.requestId));
+      if (index < 0) throw new Error(`No pending user input request with id ${payload.requestId}`);
+      snapshot.userInputRequests.splice(index, 1);
+      snapshot.agentStatus = snapshot.userInputRequests.length > 0 ? 'pending_input' : 'working';
+      store[payload.threadId] = snapshot;
+      saveSnapshots(store);
+      return snapshot;
+    }
+    if (channel === 'threads:recallMessage') {
+      const store = loadSnapshots();
+      const snapshot = store[payload.threadId] ?? emptySnapshot(payload.threadId);
+      const index = (snapshot.pendingMessages ?? []).findIndex((message) => message.id === payload.messageId);
+      if (index < 0) return { outcome: 'not-recallable', snapshot };
+      const [message] = snapshot.pendingMessages.splice(index, 1);
+      store[payload.threadId] = snapshot;
+      saveSnapshots(store);
+      return { outcome: 'recalled', message: { id: message.id, input: { text: message.text } }, snapshot };
+    }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      return [{ name: 'playbot_lanes', enabled: true, error: null, toolCount: 13 }];
+      return [{ name: 'playbot_lanes', enabled: true, error: null, toolCount: 18 }];
     }
     if (channel === 'threads:launch') {
       if (mode !== 'modern') throw new Error("No handler registered for 'threads:launch'");
@@ -509,7 +589,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup required the externa
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== false) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.toolCount !== 13) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.toolCount !== 18) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup readiness does not require a controller project"
 
@@ -670,3 +750,201 @@ NODE
 pass "fm-playbot-lanes: dispatch falls back to the pre-0.94 channels on a legacy Playbot"
 
 printf 'modern\n' > "$FIXTURE_ROOT/ipc-mode"
+
+# ---------------------------------------------------------------------------
+# Question cards, answering, and the pending-message queue.
+# ---------------------------------------------------------------------------
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'snapshots.json'), `${JSON.stringify({
+  'chat-worker-alt': {
+    threadId: 'chat-worker-alt',
+    phase: { kind: 'prompting', threadId: 'worker-alt-session', turnId: 'turn-alt-1' },
+    agentStatus: 'pending_input',
+    userInputRequests: [{
+      id: 10,
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'worker-alt-session',
+        turnId: 'turn-alt-1',
+        itemId: 'call_alt_1',
+        questions: [{
+          id: 'gate_ruling',
+          header: 'Gate ruling',
+          question: 'Keep payout at 0.0?',
+          isOther: true,
+          isSecret: false,
+          options: [
+            { label: 'Proceed (Recommended)', description: 'Apply the two narrow fixes.' },
+            { label: 'Keep current commit', description: 'Approve what is there.' },
+          ],
+        }],
+      },
+    }],
+    approvalRequests: [],
+    mcpElicitationRequests: [],
+    respondingRequestIds: [],
+    pendingMessages: [
+      { id: 'msg-1', text: 'First steer', createdAtMs: 1 },
+      { id: 'msg-2', text: 'Superseding steer', createdAtMs: 2 },
+    ],
+    outboundMessages: [{ id: 'msg-0', text: 'Rejected steer', status: 'failed', reason: 'Message not sent', createdAtMs: 0 }],
+  },
+}, null, 2)}\n`);
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_parked_threads\",\"arguments\":{\"project\":$worker_json}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads did not report the parked candidate with a confirm pointer"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.candidates.length !== 1) process.exit(1);
+if (value.candidates[0].id !== 'chat-worker-alt' || value.candidates[0].workspaceId !== 'ws-worker-alt') process.exit(1);
+if (value.candidates[0].status !== 'pending_input' || value.candidates[0].queuedCount !== 0) process.exit(1);
+if (value.confirmWith !== 'get_thread_card' || !value.note.includes('confirm each candidate')) process.exit(1);
+NODE
+[ -f "$FIXTURE_ROOT/ipc-calls.jsonl" ] && fail "list_parked_threads talked to Playbot instead of staying a persisted read"
+pass "fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "get_thread_card did not enumerate the card's questions and options"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.parked !== true || value.status !== 'pending_input') process.exit(1);
+if (value.playbot.version !== '0.95.0' || !value.playbot.verifiedVersions) process.exit(1);
+if (value.cards.length !== 1) process.exit(1);
+const card = value.cards[0];
+if (card.requestId !== 10 || card.kind !== 'question' || card.answerable !== true) process.exit(1);
+if (card.sessionId !== 'worker-alt-session' || card.turnId !== 'turn-alt-1' || card.itemId !== 'call_alt_1') process.exit(1);
+const question = card.questions[0];
+if (question.id !== 'gate_ruling' || question.header !== 'Gate ruling') process.exit(1);
+if (question.isOther !== true || question.freeTextOnly !== false) process.exit(1);
+if (question.options.map(option => option.label).join('|') !== 'Proceed (Recommended)|Keep current commit') process.exit(1);
+if (value.queue.queued.map(message => message.id).join(',') !== 'msg-1,msg-2') process.exit(1);
+if (value.queue.failed.length !== 1 || value.queue.failed[0].reason !== 'Message not sent') process.exit(1);
+NODE
+pass "fm-playbot-lanes: get_thread_card enumerates a named chat's card without focusing it"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":999999,\"answers\":{\"gate_ruling\":\"Proceed (Recommended)\"}}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "answer_thread_card accepted a requestId that is not pending on the named chat"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('No pending request 999999')) process.exit(1);
+if (!value.error.message.includes('10 (question)')) process.exit(1);
+NODE
+# Playbot resolves a request id against one process-wide registry, so an id that
+# is genuinely pending on ANOTHER chat must be refused here rather than answering
+# that other worker's card.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker\",\"requestId\":10,\"answers\":{\"gate_ruling\":\"Proceed (Recommended)\"}}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a request id pending on another chat was not refused on the named chat"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('No pending request 10 on this chat and it holds no pending card at all')) process.exit(1);
+NODE
+CALLS_AFTER="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "a refused answer still wrote to Playbot"
+const fs = require('node:fs');
+let calls = [];
+try {
+  calls = fs.readFileSync(process.env.CALLS_AFTER, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+} catch {
+  calls = [];
+}
+if (calls.some(call => call.channel === 'threads:respondToUserInput')) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":10,\"answers\":{\"not_a_question\":\"x\"}}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "answer_thread_card accepted an answer for a question the card does not ask"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('Question not on request 10: not_a_question')) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":10,\"expectTurnId\":\"turn-alt-0\",\"answers\":{\"gate_ruling\":\"Proceed (Recommended)\"}}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "answer_thread_card ignored a turn id that had moved"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('belongs to turn turn-alt-1, not turn-alt-0')) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":10,\"skip\":true,\"answers\":{\"gate_ruling\":\"Proceed (Recommended)\"}}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "answer_thread_card accepted skip together with an answer"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('omit answers')) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":10,\"answers\":{}}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an empty answers object was silently treated as a skip"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('pass skip=true')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: answer_thread_card refuses a borrowed request id, an unknown question, a moved turn, and an implicit skip"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":10,\"expectTurnId\":\"turn-alt-1\",\"expectItemId\":\"call_alt_1\",\"answers\":{\"gate_ruling\":\"Proceed (Recommended)\"}}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "answer_thread_card did not send the option label Playbot itself reported"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const respond = calls.filter(call => call.channel === 'threads:respondToUserInput');
+if (respond.length !== 1) process.exit(1);
+if (respond[0].payload.threadId !== 'chat-worker-alt' || respond[0].payload.requestId !== 10) process.exit(1);
+if (JSON.stringify(respond[0].payload.response) !== JSON.stringify({ answers: { gate_ruling: { answers: ['Proceed (Recommended)'] } } })) process.exit(1);
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.answered !== true || value.skipped !== false || value.requestId !== 10) process.exit(1);
+if (value.cardsRemaining.length !== 0 || value.statusAfter !== 'working') process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":10,\"answers\":{\"gate_ruling\":\"Keep current commit\"}}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "answering an already-answered card was not reported as no longer pending"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('No pending request 10')) process.exit(1);
+if (!value.error.message.includes('holds no pending card at all')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: answer_thread_card answers the card once and reports a second attempt as already answered"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a persisted pending_input with no live card was not flagged as a false candidate"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.parked !== false || value.cards.length !== 0) process.exit(1);
+if (value.warnings.length !== 1 || !value.warnings[0].includes('treat it as not parked')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: get_thread_card contradicts a persisted pending_input that holds no live card"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_queued_messages\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "list_queued_messages did not separate queued from failed messages"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.queued.map(message => `${message.id}:${message.text}`).join(',') !== 'msg-1:First steer,msg-2:Superseding steer') process.exit(1);
+if (value.sending.length !== 0 || value.failed.map(message => message.id).join(',') !== 'msg-0') process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"messageId\":\"msg-1\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "drop_queued_message did not recall the superseded steer"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.outcome !== 'recalled' || value.recalled.id !== 'msg-1') process.exit(1);
+if (value.queueAfter.queued.map(message => message.id).join(',') !== 'msg-2') process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"messageId\":\"msg-1\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an already-delivered message was reported as an error instead of not-recallable"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+if (value.result.structuredContent.outcome !== 'not-recallable') process.exit(1);
+NODE
+pass "fm-playbot-lanes: queued messages are listable and one can be dropped instead of resent"
+
+printf 'threads:getSnapshot\n' > "$FIXTURE_ROOT/ipc-missing"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a renamed Playbot channel did not fail loudly with the channel and version"
+const value = JSON.parse(process.env.OUT);
+if (!value.error) process.exit(1);
+if (!value.error.message.includes("does not register the 'threads:getSnapshot' channel")) process.exit(1);
+if (!value.error.message.includes('Playbot 0.95.0')) process.exit(1);
+if (!value.error.message.includes('re-verify the channel names')) process.exit(1);
+NODE
+printf '0.99.0\n' > "$FIXTURE_ROOT/app-version"
+printf 'threads:recallMessage\n' > "$FIXTURE_ROOT/ipc-missing"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"messageId\":\"msg-2\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a missing recall channel did not name the upgraded Playbot version"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('Playbot 0.99.0')) process.exit(1);
+if (!value.error.message.includes("does not register the 'threads:recallMessage' channel")) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/ipc-missing" "$FIXTURE_ROOT/app-version"
+printf 'userInputRequests\n' > "$FIXTURE_ROOT/snapshot-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a changed snapshot shape was not refused by name"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('without userInputRequests')) process.exit(1);
+if (!value.error.message.includes('re-verify the snapshot shape')) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/snapshot-drop-key"
+pass "fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and names what is missing"
