@@ -790,6 +790,15 @@ function publicQueue(snapshot, unreadable) {
   };
 }
 
+// "not-recallable" means Playbot had already delivered the message, so a warning
+// about the snapshot must never carry "the recall was applied" past that path: a
+// supervisor would read a superseded instruction as withdrawn when it was not.
+function recallOutcomeClause(outcome) {
+  return outcome === "recalled"
+    ? "The recall was applied"
+    : `The recall was NOT applied - Playbot reported outcome ${outcome ?? "none"}`;
+}
+
 // null means the ledger is present but unreadable, never that nothing is held;
 // 0 is reserved for an absent or empty queue.
 function queuedMessageCount(pendingQueueJson) {
@@ -1509,8 +1518,13 @@ async function handleTool(name, args = {}) {
     // reported, never thrown: throwing would call a completed answer a failure.
     const unreadableAfter = [];
     const remaining = publicCards(after, unreadableAfter);
-    if (unreadableAfter.length > 0) {
-      warnings.push(`The answer was sent, but Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so cardsRemaining is null rather than empty: whether this chat still holds a card is unknown, and get_thread_card is the way to find out.`);
+    // Only the card projections decide whether cardsRemaining could be read. An
+    // unreadable respondingRequestIds leaves it populated and correct, and each
+    // card already carries responding: null, so claiming otherwise here would
+    // contradict the payload shipped beside it.
+    if (remaining === null) {
+      const unreadableCards = unreadableAfter.filter((key) => CARD_PROJECTIONS.some(([projection]) => projection === key));
+      warnings.push(`The answer was sent, but Playbot's response snapshot carried no readable ${unreadableCards.join(", ")}, so cardsRemaining is null rather than empty: whether this chat still holds a card is unknown, and get_thread_card is the way to find out.`);
     }
     return {
       answered: true,
@@ -1555,7 +1569,7 @@ async function handleTool(name, args = {}) {
       recalled: result?.outcome === "recalled" ? result.message ?? null : null,
       queueAfter,
       warnings: unreadableAfter.length > 0
-        ? [`The recall was applied, but Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so that part of queueAfter is null rather than empty: what remains held is unknown, and list_queued_messages is the way to find out.`]
+        ? [`${recallOutcomeClause(result?.outcome)}, and Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so that part of queueAfter is null rather than empty: what remains held is unknown, and list_queued_messages is the way to find out.`]
         : [],
     };
   }

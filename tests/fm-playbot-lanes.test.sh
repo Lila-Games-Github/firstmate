@@ -511,15 +511,18 @@ async function electronInvoke(channel, payload) {
       const store = loadSnapshots();
       const snapshot = store[payload.threadId] ?? emptySnapshot(payload.threadId);
       const index = (snapshot.pendingMessages ?? []).findIndex((message) => message.id === payload.messageId);
-      if (index < 0) return { outcome: 'not-recallable', snapshot };
+      // The knob is read on BOTH outcomes: an unreadable projection has to be
+      // reachable alongside not-recallable, not only alongside a recall.
+      const afterDrop = readFileOr(afterDropFile, '');
+      const projected = (value) => (afterDrop ? applyDropSpec(value, afterDrop) : value);
+      if (index < 0) return { outcome: 'not-recallable', snapshot: projected(snapshot) };
       const [message] = snapshot.pendingMessages.splice(index, 1);
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
-      const afterDrop = readFileOr(afterDropFile, '');
       return {
         outcome: 'recalled',
         message: { id: message.id, input: { text: message.text } },
-        snapshot: afterDrop ? applyDropSpec(snapshot, afterDrop) : snapshot,
+        snapshot: projected(snapshot),
       };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
@@ -1339,6 +1342,75 @@ if (!result.warnings.some(warning => warning.includes('userInputRequests'))) pro
 if (!result.warnings.some(warning => warning.includes('cardsRemaining is null rather than empty'))) process.exit(1);
 NODE
 pass "fm-playbot-lanes: a completed answer or recall reports an unreadable projection as null, never as empty"
+
+# A recall Playbot did NOT apply must not be warned about as if it had been, and
+# an unreadable projection must still not read as empty on that path either.
+printf 'pendingMessages:null\n' > "$FIXTURE_ROOT/after-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"messageId\":\"msg-9\"}}}")
+rm -f "$FIXTURE_ROOT/after-drop-key"
+OUT="$out" node --no-warnings <<'NODE' || fail "a recall Playbot never applied was warned about as applied"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const result = value.result.structuredContent;
+if (result.outcome !== 'not-recallable' || result.recalled !== null) process.exit(1);
+if (result.queueAfter.queued !== null) process.exit(1);
+if (result.warnings.length !== 1) process.exit(1);
+if (result.warnings.some(warning => warning.includes('The recall was applied'))) process.exit(1);
+if (!result.warnings[0].includes('NOT applied')) process.exit(1);
+if (!result.warnings[0].includes('not-recallable')) process.exit(1);
+if (!result.warnings[0].includes('pendingMessages')) process.exit(1);
+NODE
+
+# An unreadable respondingRequestIds alone leaves cardsRemaining populated and
+# correct, so nothing may claim it is null: each card reports responding: null.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const store = JSON.parse(fs.readFileSync(file, 'utf8'));
+store['chat-worker-alt'] = {
+  threadId: 'chat-worker-alt',
+  phase: { kind: 'prompting', threadId: 'worker-alt-session', turnId: 'turn-alt-4' },
+  agentStatus: 'pending_input',
+  userInputRequests: [{
+    id: 13,
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'worker-alt-session',
+      turnId: 'turn-alt-4',
+      itemId: 'call_alt_4',
+      questions: [{ id: 'ruling', header: 'Ruling', question: 'Proceed?', isOther: false, isSecret: false,
+        options: [{ label: 'Proceed', description: '' }] }],
+    },
+  }],
+  // Survives the answer, so cardsRemaining is populated afterwards.
+  approvalRequests: [{
+    id: 20,
+    method: 'item/tool/requestApproval',
+    params: { threadId: 'worker-alt-session', turnId: 'turn-alt-4', itemId: 'call_alt_5', questions: [] },
+  }],
+  mcpElicitationRequests: [],
+  respondingRequestIds: [],
+  pendingMessages: [],
+  outboundMessages: [],
+};
+fs.writeFileSync(file, `${JSON.stringify(store, null, 2)}\n`);
+NODE
+
+printf 'respondingRequestIds:null\n' > "$FIXTURE_ROOT/after-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":13,\"answers\":{\"ruling\":\"Proceed\"}}}}")
+rm -f "$FIXTURE_ROOT/after-drop-key"
+OUT="$out" node --no-warnings <<'NODE' || fail "a readable cardsRemaining was reported as null because a sibling projection was unreadable"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const result = value.result.structuredContent;
+if (result.answered !== true || result.requestId !== 13) process.exit(1);
+if (!Array.isArray(result.cardsRemaining) || result.cardsRemaining.length !== 1) process.exit(1);
+if (result.cardsRemaining[0].requestId !== 20 || result.cardsRemaining[0].kind !== 'approval') process.exit(1);
+if (result.cardsRemaining.some(card => card.responding !== null)) process.exit(1);
+if (result.warnings.some(warning => warning.includes('cardsRemaining is null'))) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a post-action warning never contradicts the payload it ships with"
 
 # ---------------------------------------------------------------------------
 # The Stop-hook wake must not record a rejected wake as notified.
