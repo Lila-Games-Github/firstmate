@@ -60,12 +60,14 @@ pass() {
 # absent" would self-skip and report ok, so a green run would prove nothing
 # about the code it covers.
 #
-# fm_test_find_node echoes the newest usable Node it can locate, or nothing.
-# Version directories are globbed and version-sorted rather than pinned, so a
-# runtime upgrade cannot silently strip the runtime again. FM_TEST_NODE
-# overrides the search for an operator who wants an exact runtime.
+# fm_test_find_node searches PATH and the known install roots and echoes the
+# newest usable Node it can locate, or nothing. Version directories are globbed
+# and version-sorted rather than pinned, so a runtime upgrade cannot silently
+# strip the runtime again.
 #
-# fm_test_require_node puts that runtime's directory on PATH - so both `node`
+# fm_test_require_node owns the FM_TEST_NODE override - an operator who names an
+# exact runtime gets that one or a refusal, never a substitute - puts the
+# resolved runtime's directory on PATH - so both `node`
 # and a `#!/usr/bin/env node` shebang resolve - publishes it as
 # FM_TEST_NODE_BIN, and FAILS LOUDLY when no usable runtime exists. Absence is a
 # failure, never a pass. It must be called directly rather than through command
@@ -100,10 +102,6 @@ fm_test_node_usable() {
 
 fm_test_find_node() {
   local candidate
-  if [ -n "${FM_TEST_NODE:-}" ]; then
-    fm_test_node_usable "$FM_TEST_NODE" && printf '%s\n' "$FM_TEST_NODE"
-    return 0
-  fi
   candidate=$(command -v node 2>/dev/null || true)
   if fm_test_node_usable "$candidate"; then
     printf '%s\n' "$candidate"
@@ -147,15 +145,20 @@ fm_test_find_node() {
 
 fm_test_require_node() {
   local subject=${1:-this suite} resolved dir
-  # An explicit FM_TEST_NODE stays authoritative and never falls back to a
-  # different runtime, so its refusal must name the rejected path and why -
-  # pointing the operator at FM_TEST_NODE would name the variable they just set.
-  # This check runs in the caller's shell, unlike the subshell fm_test_find_node
-  # is captured in, so the rejection reason survives.
-  if [ -n "${FM_TEST_NODE:-}" ] && ! fm_test_node_usable "$FM_TEST_NODE"; then
-    fail "$subject requires Node $FM_TEST_NODE_MIN or newer, and the runtime named by FM_TEST_NODE ('$FM_TEST_NODE') $FM_TEST_NODE_REJECTION; point FM_TEST_NODE at a usable runtime, or unset it to search PATH and the known install roots"
+  # An explicit FM_TEST_NODE is authoritative: it is probed here, exactly once,
+  # and never falls back to a different runtime. Its refusal must name the
+  # rejected path and why - pointing the operator at FM_TEST_NODE would name the
+  # variable they just set. The probe runs in the caller's shell, unlike the
+  # subshell fm_test_find_node is captured in, so the reason survives.
+  if [ -n "${FM_TEST_NODE:-}" ]; then
+    if fm_test_node_usable "$FM_TEST_NODE"; then
+      resolved=$FM_TEST_NODE
+    else
+      fail "$subject requires Node $FM_TEST_NODE_MIN or newer, and the runtime named by FM_TEST_NODE ('$FM_TEST_NODE') $FM_TEST_NODE_REJECTION; point FM_TEST_NODE at a usable runtime, or unset it to search PATH and the known install roots"
+    fi
+  else
+    resolved=$(fm_test_find_node)
   fi
-  resolved=$(fm_test_find_node)
   if [ -z "$resolved" ]; then
     fail "$subject requires Node $FM_TEST_NODE_MIN or newer and none was found on PATH or in any known install root; set FM_TEST_NODE to an explicit runtime"
   fi

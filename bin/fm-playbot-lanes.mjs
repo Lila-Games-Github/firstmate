@@ -543,9 +543,11 @@ async function deliveryVerdict(response, text, threadId) {
       note: "Playbot returned no thread snapshot for this send, so delivery is unconfirmed. Check list_queued_messages before resending, because a resend compounds the queue.",
     };
   }
-  // A snapshot that IS returned without the queue projection is a renamed
-  // shape, not a legacy Playbot, so it is refused by name.
-  const missing = SEND_SNAPSHOT_REQUIRED_KEYS.filter((key) => response[key] === undefined);
+  // A snapshot that IS returned without a readable queue projection is a
+  // renamed shape, not a legacy Playbot, so it is refused by name. A projection
+  // that is present but not a list is just as unreadable as a removed one, and
+  // treating it as an empty list would claim delivery for a held message.
+  const missing = SEND_SNAPSHOT_REQUIRED_KEYS.filter((key) => !Array.isArray(response[key]));
   if (missing.length > 0) {
     throw new Error(`${playbotVersionLabel(await playbotVersion())} returned a send snapshot for ${threadId} without ${missing.join(", ")}, so whether the message was delivered or is only held cannot be read. `
       + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape, and check list_queued_messages before resending.`);
@@ -618,9 +620,11 @@ async function sendMessage(row, text) {
 // ---------------------------------------------------------------------------
 
 const VERIFIED_PLAYBOT_VERSIONS = "0.95.x";
-const SNAPSHOT_REQUIRED_KEYS = [
-  "agentStatus",
-  "phase",
+const SNAPSHOT_REQUIRED_KEYS = ["agentStatus", "phase"];
+// Every projection below must be a list. One that arrives as anything else is
+// as unreadable as a removed one, and reading it as empty would report a card
+// or a held message as absent.
+const SNAPSHOT_REQUIRED_LIST_KEYS = [
   "userInputRequests",
   "approvalRequests",
   "mcpElicitationRequests",
@@ -649,10 +653,6 @@ function playbotVersionLabel(version) {
   return version ? `Playbot ${version}` : "this Playbot (version unreadable)";
 }
 
-async function playbotProvenance() {
-  return { version: await playbotVersion(), verifiedVersions: VERIFIED_PLAYBOT_VERSIONS };
-}
-
 // A renamed or removed channel is the exact upgrade failure this surface has to
 // survive, and Playbot reports it as a distinct missing-handler rejection.
 async function cardInvoke(channel, payload) {
@@ -673,7 +673,10 @@ function assertSnapshotShape(snapshot, threadId, version) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     throw new Error(`Playbot returned no thread snapshot for ${threadId}; expected an object from 'threads:getSnapshot'`);
   }
-  const missing = SNAPSHOT_REQUIRED_KEYS.filter((key) => snapshot[key] === undefined);
+  const missing = [
+    ...SNAPSHOT_REQUIRED_KEYS.filter((key) => snapshot[key] === undefined),
+    ...SNAPSHOT_REQUIRED_LIST_KEYS.filter((key) => !Array.isArray(snapshot[key])),
+  ];
   if (missing.length > 0) {
     throw new Error(`${playbotVersionLabel(version)} returned a thread snapshot without ${missing.join(", ")}. `
       + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape before trusting these tools.`);
@@ -1254,13 +1257,18 @@ function toolDefinitions() {
       name: "list_parked_threads",
       description: `Cheap detector for chats that may be parked on a question or approval card, read from persisted state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
       inputSchema: object({ project: string("Optional project id, root path, or unique project name; every project when omitted"), includeArchived: boolean("Include archived chats", false) }),
+      // The only one of the three card reads that is genuinely side-effect-free:
+      // it never contacts Playbot. get_thread_card and list_queued_messages
+      // deliberately carry no readOnlyHint, because that hint is what lets a
+      // client call a tool freely without approval, and the resume those two
+      // perform is the exact cost this cheap persisted detector exists to keep
+      // off an unbounded poll.
       annotations: { readOnlyHint: true },
     },
     {
       name: "get_thread_card",
       description: `Read the pending question, approval, and MCP cards for one named chat, with every question's exact text and option labels, plus its live queued messages. Addresses the chat explicitly and never acts on the visibly selected one. This is the confirming read for list_parked_threads and it RESUMES a chat that has not been resumed since Playbot started, exactly as opening that chat in the Playbot window does; it starts no agent turn. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC and refuses if the channel or snapshot shape has changed.`,
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
-      annotations: { readOnlyHint: true },
     },
     {
       name: "answer_thread_card",
@@ -1280,7 +1288,6 @@ function toolDefinitions() {
       name: "list_queued_messages",
       description: `List one named chat's undelivered messages: queued, in flight, and failed. Playbot holds a message it cannot deliver yet and tells the sender nothing, so this is how a pile becomes visible. Resumes an unresumed chat the same way get_thread_card does. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
-      annotations: { readOnlyHint: true },
     },
     {
       name: "drop_queued_message",

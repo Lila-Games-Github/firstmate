@@ -375,6 +375,16 @@ function emptySnapshot(threadId) {
   };
 }
 
+// A projection can be REMOVED or arrive as null; both are unreadable shapes and
+// both must refuse, so the drop knobs take "<key>" or "<key>:null".
+function applyDropSpec(snapshot, spec) {
+  const [key, mode] = spec.split(':');
+  const partial = { ...snapshot };
+  if (mode === 'null') partial[key] = null;
+  else delete partial[key];
+  return partial;
+}
+
 function loadSnapshots() {
   try {
     return JSON.parse(fs.readFileSync(snapshotFile, 'utf8'));
@@ -478,11 +488,7 @@ async function electronInvoke(channel, payload) {
     if (channel === 'threads:getSnapshot') {
       const snapshot = snapshotFor(payload.threadId);
       const drop = readFileOr(path.join(process.env.FIXTURE_ROOT, 'snapshot-drop-key'), '');
-      if (drop) {
-        const partial = { ...snapshot };
-        delete partial[drop];
-        return partial;
-      }
+      if (drop) return applyDropSpec(snapshot, drop);
       return snapshot;
     }
     if (channel === 'threads:respondToUserInput') {
@@ -548,11 +554,7 @@ async function electronInvoke(channel, payload) {
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
       const sendDrop = readFileOr(sendDropFile, '');
-      if (sendDrop) {
-        const partial = { ...snapshot };
-        delete partial[sendDrop];
-        return partial;
-      }
+      if (sendDrop) return applyDropSpec(snapshot, sendDrop);
       return snapshot;
     }
     throw new Error(`fixture does not implement channel ${channel}`);
@@ -1022,6 +1024,13 @@ const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('without userInputRequests')) process.exit(1);
 if (!value.error.message.includes('re-verify the snapshot shape')) process.exit(1);
 NODE
+printf 'userInputRequests:null\n' > "$FIXTURE_ROOT/snapshot-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a null card projection read as no card instead of refusing by name"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('without userInputRequests')) process.exit(1);
+if (!value.error.message.includes('re-verify the snapshot shape')) process.exit(1);
+NODE
 rm -f "$FIXTURE_ROOT/snapshot-drop-key"
 pass "fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and names what is missing"
 
@@ -1095,8 +1104,16 @@ if (!value.error || !value.error.message.includes('without pendingMessages')) pr
 if (!value.error.message.includes('Playbot 0.95.0')) process.exit(1);
 if (!value.error.message.includes('re-verify the snapshot shape')) process.exit(1);
 NODE
+printf 'pendingMessages:null\n' > "$FIXTURE_ROOT/send-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\",\"message\":\"Unreadable null steer\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a null queue projection was reported as delivered instead of refusing by name"
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+if (!value.error || !value.error.message.includes('without pendingMessages')) process.exit(1);
+if (!value.error.message.includes('re-verify the snapshot shape')) process.exit(1);
+NODE
 rm -f "$FIXTURE_ROOT/send-drop-key"
-pass "fm-playbot-lanes: a send snapshot missing the queue projection refuses by name"
+pass "fm-playbot-lanes: a send snapshot whose queue projection is missing or unreadable refuses by name"
 
 # That refusal lands AFTER Playbot accepted the send, so dispatch must not read
 # it as a failed send: the task may already be with the worker, and an inactive
