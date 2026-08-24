@@ -83,6 +83,11 @@ insertThread.run('chat-worker-archived', 'ws-worker-archived', 'Greeting', 0, 0,
 // pending_input. The parked detector must not offer it, because the confirming
 // read it hands back cannot resolve a chat outside the default thread scope.
 insertThread.run('chat-worker-retired-parked', 'ws-worker-archived', 'Retired parked', 1, 0, 'worker-retired-session', 'full-access', 0, 0, '', null, 'pending_input', 0, older, older, older, 0);
+// A chat in an ACTIVE workspace which persisted state still calls
+// pending_input, archived at the THREAD level. The detector must not offer it
+// either, for the same reason: get_thread_card cannot resolve an archived chat
+// and exposes no parameter that would widen its read to match.
+insertThread.run('chat-worker-archived-parked', 'ws-worker', 'Archived parked', 2, 0, 'worker-archived-parked-session', 'full-access', 0, 0, '', null, 'pending_input', 0, older, older, older, 1);
 app.close();
 
 const rollout = path.join(harness, 'worker-rollout.jsonl');
@@ -923,6 +928,31 @@ const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('Thread not found in project project-worker')) process.exit(1);
 NODE
 pass "fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot"
+
+# The detector advertises no parameter that widens its scope, because
+# get_thread_card has none to match, and it ignores one if a client sends it
+# anyway: a thread-level archived chat is outside the confirming read's scope,
+# so offering it would hand back a candidate that pointer refuses to resolve.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_parked_threads\",\"arguments\":{\"project\":$worker_json,\"includeArchived\":true}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the parked detector offered an archived chat its own confirming read cannot resolve"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.candidates.length !== 1 || value.candidates[0].id !== 'chat-worker-alt') process.exit(1);
+if (value.candidates.some(candidate => candidate.id === 'chat-worker-archived-parked')) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-archived-parked\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the confirming read resolved an archived chat, so the detector's scope is not the one it points at"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('Thread not found in project project-worker')) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads advertises a scope-widening parameter get_thread_card cannot match"
+const tools = JSON.parse(process.env.OUT).result.tools;
+const detector = tools.find(tool => tool.name === 'list_parked_threads');
+if (!detector) process.exit(1);
+if (JSON.stringify(Object.keys(detector.inputSchema.properties)) !== '["project"]') process.exit(1);
+NODE
+pass "fm-playbot-lanes: the parked detector cannot be widened past its confirming read's scope"
 
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "get_thread_card did not enumerate the card's questions and options"

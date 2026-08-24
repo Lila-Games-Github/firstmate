@@ -562,11 +562,12 @@ Live evidence against the running Playbot 0.95.0 on the same date, taken with a 
 - All six snapshot projections came back as real arrays on both Frogpile chats: `userInputRequests`, `pendingMessages`, `outboundMessages`, `approvalRequests`, `mcpElicitationRequests`, and `respondingRequestIds`, each `array(0)` on `chat-7975fcb9` and `chat-3bbd9805`. This is why the shape guard requires a list rather than mere presence and refuses a non-array by name. It is one version observed at one moment, not a contract.
 - `threadRows()` selects `t.pending_queue_json` unconditionally, and that one query backs every tool and both hooks, so the column's presence across the supported range was settled by evidence rather than by a defensive probe. Parsing `resources/app.asar` and reading every `/migrations/*/migration.sql` shows `workspace_threads` is created already carrying `pending_queue_json` by migration `20260414225126_medical_lilandra`, dated 2026-04-14, and that this is the only migration among the 33 in the 0.95.0 bundle that creates that table. Playbot 0.93.1, the oldest version this adapter's detected fallback targets, shipped around 2026-08-18, four months later, and Playbot runs its migrations forward on app start. No Playbot in the supported 0.93.1-to-0.95.0 range can therefore present a `workspace_threads` without that column. This says nothing about versions outside that range.
 
-The same day, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 52 checks, including twenty-four added for the thread-resolution scope, the card and queue surfaces, the delivery verdict, and the lane-wake delivery rules:
+The same day, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 56 checks, including twenty-eight added for the thread-resolution scope, the card and queue surfaces, the delivery verdict, and the lane-wake delivery rules:
 
 ```text
 ok - fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it
 ok - fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot
+ok - fm-playbot-lanes: the parked detector cannot be widened past its confirming read's scope
 ok - fm-playbot-lanes: get_thread_card enumerates a named chat's card without focusing it
 ok - fm-playbot-lanes: answer_thread_card refuses a borrowed request id, an unknown question, a moved turn, and an implicit skip
 ok - fm-playbot-lanes: answer_thread_card answers the card once and reports a second attempt as already answered
@@ -576,13 +577,16 @@ ok - fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and n
 ok - fm-playbot-lanes: send_message reports held, in-flight, and delivered separately
 ok - fm-playbot-lanes: dispatch onto a parked worker reports the task as held, not delivered
 ok - fm-playbot-lanes: a Playbot that returns no send snapshot leaves delivery explicitly unconfirmed
+ok - fm-playbot-lanes: an unconfirmed wake advances only on a Playbot whose send path cannot report a verdict
+ok - fm-playbot-lanes: a chat-creation probe that fails after the send does not mislabel the wake as undelivered
+ok - fm-playbot-lanes: a worker in a project Playbot no longer marks active still wakes its supervisor
 ```
 
 Those checks run against the hermetic fake DevTools endpoint described below, extended to serve the card channels, to reject a named channel as unregistered, and to omit a snapshot field, so the loud-refusal paths are enforced without waiting for a real Playbot upgrade.
 
 This suite previously printed `ok - fm-playbot-lanes: skipped (node unavailable)` and exited 0 whenever `node` was absent from `PATH`, which made a green run prove nothing: the same inherited-`PATH` gap that hides `shellcheck` and `actionlint` from a hook or validation-pipeline subprocess also hid the Node runtime, and one review round on this branch reported "there is no Node runtime anywhere on this machine" while `/home/linuxbrew/.linuxbrew/bin/node` was installed and in use.
 `fm_test_require_node` in `tests/lib.sh` now resolves a runtime from `FM_TEST_NODE`, then `PATH`, then the known fixed and version-managed install roots, version-sorting each globbed directory so no version is pinned, and it fails the suite when none is usable rather than skipping.
-It was verified on 2026-08-24 by running the suite under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 52 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.
+It was verified on 2026-08-24 by running the suite under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 56 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.
 
 On 2026-07-30, Playbot 0.81.0 on Windows exposed one shared Codex app-server process for multiple persisted chat threads.
 The Windows session-lock verification proved that Git Bash can recover that host process through PowerShell while `CODEX_THREAD_ID` plus the Playbot database narrows ownership to the exact unarchived Firstmate thread.

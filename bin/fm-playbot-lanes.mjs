@@ -1397,7 +1397,7 @@ function toolDefinitions() {
     {
       name: "list_parked_threads",
       description: `Cheap detector for chats that may be parked on a question or approval card, read from persisted state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
-      inputSchema: object({ project: string("Optional project id, root path, or unique project name; every project when omitted"), includeArchived: boolean("Include archived chats", false) }),
+      inputSchema: object({ project: string("Optional project id, root path, or unique project name; every project when omitted") }),
       // The only one of the three card reads that is genuinely side-effect-free:
       // it never contacts Playbot. get_thread_card and list_queued_messages
       // deliberately carry no readOnlyHint, because that hint is what lets a
@@ -1487,7 +1487,10 @@ async function handleTool(name, args = {}) {
 
   if (name === "list_parked_threads") {
     const scope = args.project ? resolveProject(args.project, projects).id : null;
-    const candidates = threadsForProject(scope, null, Boolean(args.includeArchived))
+    // No scope-widening parameter: the confirming read this hands back has no
+    // matching one, so an archived chat offered here would be a candidate
+    // get_thread_card then refuses to resolve.
+    const candidates = threadsForProject(scope, null)
       .filter((row) => row.agent_status === "pending_input")
       .map(publicThread);
     return {

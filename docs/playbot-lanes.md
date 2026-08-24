@@ -90,7 +90,7 @@ An `unknown` verdict is classified by the chat-creation API this Playbot exposes
 A Playbot worker that asks a question parks until someone chooses an option, and no text channel reaches it while it waits.
 `list_parked_threads` is the cheap fleet-wide detector: it reads persisted status only, resumes nothing, and contacts Playbot not at all.
 Its results are candidates rather than findings, because Playbot reports a merely rehydrated chat as `pending_input` whether or not it is actually parked.
-It shares one scope with the thread resolution described above, so every candidate it offers is resolvable by the `get_thread_card` pointer it hands back, and a chat in an archived workspace is offered by neither.
+It shares one scope with the thread resolution described above and takes no parameter that widens it, because the confirming read has none to match, so every candidate it offers is resolvable by the `get_thread_card` pointer it hands back; an archived chat, and any chat in an archived workspace, is offered by neither.
 
 `get_thread_card` is the confirming live read for one named chat, returning each pending question's exact text and option labels alongside the chat's held messages.
 Reading a live snapshot resumes a chat that has not been resumed since Playbot started, exactly as opening that chat in the Playbot window does, and starts no agent turn.
