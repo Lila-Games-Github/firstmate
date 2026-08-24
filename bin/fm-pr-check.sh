@@ -93,8 +93,11 @@ pr_check_cleanup() {
 }
 trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
+# A refusal that names its cause reaches the caller instead of the generic
+# wording: the shared state/<id>.check.sh name has a second owner, so "could not
+# prepare PR poll" would hide which two things wanted the same file.
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
-  || { echo "error: could not prepare PR poll" >&2; exit 1; }
+  || { echo "error: ${FM_PR_POLL_REFUSAL:-could not prepare PR poll}" >&2; exit 1; }
 
 META_LOCK=$(fm_meta_lock_path "$META") || exit 1
 fm_lock_acquire_wait "$META_LOCK"
@@ -131,7 +134,7 @@ fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
 fm_pr_poll_publish_prepared || {
-  echo "error: could not publish PR poll" >&2
+  echo "error: ${FM_PR_POLL_REFUSAL:-could not publish PR poll}" >&2
   exit 1
 }
 printf 'armed: state/%s.check.sh\n' "$ID"

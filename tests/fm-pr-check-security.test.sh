@@ -2631,6 +2631,11 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  # A Playbot lane supervision poll keeps its observed-state record beside the
+  # check it belongs to, so a task torn down while its worker was still working
+  # must leave that behind no more than it leaves the check.
+  printf 'fm-playbot-lane-poll-v1\nworking\n' > "$dir/home/state/task-a.lane-poll"
+  chmod 0600 "$dir/home/state/task-a.lane-poll"
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
   printf 'legacy\n' > "$dir/home/state/.pr-check-quarantine/task-a.check.abc123"
@@ -2649,6 +2654,7 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$dir/home/state/task-a.lane-poll" ] || fail "teardown left the lane poll's observed-state record"
   ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
     || fail "teardown left task quarantine artifacts"
 

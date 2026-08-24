@@ -2005,6 +2005,17 @@ check_is_registered fm-autoarm-probe \
   || fail "the armed check was not bound in the watcher's trust store by fm-check-register.sh"
 pass "fm-playbot-lanes: an external-terminal dispatch arms and registers that worker's watcher poll"
 
+# A freshly dispatched worker sits at `ready` until its turn starts, which is a
+# state the poll otherwise reports as a worker that stopped. Arming records what
+# it saw, so that state is not a change into stopping and the poll must neither
+# fire nor disarm a worker that has not begun.
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh")
+[ -z "$poll_line" ] || fail "the poll fired for the state its own arming had already observed: $poll_line"
+[ -f "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh" ] \
+  || fail "the poll retired a worker that had not started its turn yet"
+check_is_registered fm-autoarm-probe || fail "the poll disarmed a worker that had not started its turn yet"
+pass "fm-playbot-lanes: the armed poll neither fires nor retires on the state its arming observed"
+
 # Silent while the worker works. Asserted through the real watcher, not by
 # reading the check's output: a check the watcher rejects is also silent, and
 # only the watcher can tell those two apart.
@@ -2032,21 +2043,10 @@ case "$drained" in
 esac
 pass "fm-playbot-lanes: the armed poll wakes the real watcher when the worker parks, naming the task"
 
-# A worker that stopped without a card is the other half of the contract: an
-# armed poll that only ever reported parked workers would leave a finished or
-# failed worker unwatched.
-set_thread_status "$armed_thread" error || fail "could not stop the armed worker"
-poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh")
-case "$poll_line" in
-  *"playbot lane fm-autoarm-probe"*"stopped without a card"*"status error"*) ;;
-  *) fail "a stopped worker was not reported as stopped: $poll_line" ;;
-esac
-[ "$(printf '%s\n' "$poll_line" | wc -l)" = 1 ] \
-  || fail "the poll printed more than the one line the watcher turns into a wake reason: $poll_line"
-pass "fm-playbot-lanes: the armed poll reports a worker that stopped without a card"
-
 # Held messages are the PL-017 defect, so a fired poll carries the pile rather
-# than making firstmate go looking for it.
+# than making firstmate go looking for it. A parked worker is a standing
+# condition rather than news, so the poll also has to keep firing every interval
+# for as long as it stays parked.
 FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$armed_thread" node --no-warnings <<'NODE' || fail "could not stage held messages"
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
@@ -2055,35 +2055,18 @@ db.prepare('UPDATE workspace_threads SET pending_queue_json = ? WHERE id = ?')
   .run(JSON.stringify({ messages: [{ id: 'held-a', text: 'one' }, { id: 'held-b', text: 'two' }] }), process.env.THREAD);
 db.close();
 NODE
-set_thread_status "$armed_thread" pending_input || fail "could not re-park the armed worker"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh")
 case "$poll_line" in
   *"2 held messages"*) ;;
   *) fail "a parked worker's held messages were not reported with the wake: $poll_line" ;;
 esac
-pass "fm-playbot-lanes: a fired poll reports the worker's held messages with it"
-
-# A worker whose chat is gone must not read as a silent, healthy worker.
-FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$armed_thread" node --no-warnings <<'NODE' || fail "could not archive the armed worker"
-const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
-const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
-db.prepare('UPDATE workspace_threads SET archived = 1 WHERE id = ?').run(process.env.THREAD);
-db.close();
-NODE
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh")
 case "$poll_line" in
-  *"playbot lane fm-autoarm-probe"*"no longer readable in Playbot state"*) ;;
-  *) fail "an unreadable worker chat was not reported: $poll_line" ;;
+  *"playbot lane fm-autoarm-probe"*"may be parked on a card"*) ;;
+  *) fail "a worker that is still parked stopped being reported: $poll_line" ;;
 esac
-# A poll that cannot read Playbot at all must say so too, for the same reason.
-poll_line=$(PLAYBOT_DESKTOP_DIR="$FIXTURE_ROOT/no-such-desktop" \
-  node --no-warnings "$SCRIPT" supervision-poll --task fm-autoarm-probe --thread "$armed_thread")
-case "$poll_line" in
-  *"fm-autoarm-probe"*"supervision poll failed"*) ;;
-  *) fail "a poll that could not read Playbot state was silent instead of loud: $poll_line" ;;
-esac
-pass "fm-playbot-lanes: a poll that cannot read the worker reports that instead of passing as silence"
+check_is_registered fm-autoarm-probe || fail "a still-parked worker's poll retired itself"
+pass "fm-playbot-lanes: a fired poll reports held messages and keeps firing while the worker stays parked"
 
 # Re-arming the same task is the ordinary re-dispatch case and must converge
 # rather than refuse or double-register.
@@ -2104,6 +2087,58 @@ case "$poll_line" in
 esac
 pass "fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker"
 
+# A worker that stopped without a card is the other half of the contract: an
+# armed poll that only ever reported parked workers would leave a finished or
+# failed worker unwatched. That is news exactly once, so the poll reports the
+# change into it and then retires itself rather than re-waking firstmate every
+# interval for a worker it has already handled.
+set_thread_status "$rearmed_thread" error || fail "could not stop the armed worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-probe"*"stopped without a card"*"status error"*"retired itself"*) ;;
+  *) fail "a stopped worker was not reported as stopped and retired: $poll_line" ;;
+esac
+[ "$(printf '%s\n' "$poll_line" | wc -l)" = 1 ] \
+  || fail "the poll printed more than the one line the watcher turns into a wake reason: $poll_line"
+for leftover in fm-autoarm-probe.check.sh fm-autoarm-probe.check-trust fm-autoarm-probe.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "a retired poll left $leftover armed in the watcher's state directory"
+done
+! check_is_registered fm-autoarm-probe || fail "a retired poll was still bound in the watcher's trust store"
+pass "fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself"
+
+# A worker whose chat is gone must not read as a silent, healthy worker, and it
+# is just as finished as one that stopped, so it retires the same way.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-8\"},\"title\":\"Vanishing worker\",\"message\":\"Do the vanishing work\",\"taskId\":\"fm-autoarm-vanish\"}")
+vanish_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+check_is_registered fm-autoarm-vanish || fail "the vanishing worker's poll was not armed"
+FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$vanish_thread" node --no-warnings <<'NODE' || fail "could not archive the armed worker"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET archived = 1 WHERE id = ?').run(process.env.THREAD);
+db.close();
+NODE
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-vanish.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-vanish"*"no longer readable in Playbot state"*"retired itself"*) ;;
+  *) fail "an unreadable worker chat was not reported and retired: $poll_line" ;;
+esac
+for leftover in fm-autoarm-vanish.check.sh fm-autoarm-vanish.check-trust fm-autoarm-vanish.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the retired poll left $leftover armed for a worker whose chat is gone"
+done
+# A poll that cannot read Playbot at all must say so too, for the same reason.
+poll_line=$(PLAYBOT_DESKTOP_DIR="$FIXTURE_ROOT/no-such-desktop" \
+  node --no-warnings "$SCRIPT" supervision-poll --task fm-autoarm-vanish --thread "$vanish_thread" \
+  --state "$FM_HOME_FIXTURE/state")
+case "$poll_line" in
+  *"fm-autoarm-vanish"*"supervision poll failed"*) ;;
+  *) fail "a poll that could not read Playbot state was silent instead of loud: $poll_line" ;;
+esac
+pass "fm-playbot-lanes: a poll that cannot read the worker reports that instead of passing as silence"
+
 # Without a taskId the poll still has to exist, keyed on the workspace, and the
 # result has to say that task teardown will not retire it.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
@@ -2118,6 +2153,21 @@ NODE
 unkeyed_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
 check_is_registered "$unkeyed_workspace" || fail "the workspace-keyed check was not bound in the trust store"
 pass "fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace"
+
+# An explicit JSON null is what a client sends for an optional field it did not
+# set, so it has to take the same workspace fallback. Coercing it would key the
+# poll on the literal name "null", which no teardown matches and which a second
+# unset dispatch would silently retarget off the first worker.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-9\"},\"title\":\"Null key\",\"message\":\"Do the null-keyed work\",\"taskId\":null}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a null taskId was coerced instead of taken as absent"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== true || value.supervision.taskIdSource !== 'workspace-id') process.exit(1);
+if (value.supervision.taskId !== value.thread.workspaceId) process.exit(1);
+NODE
+[ ! -e "$FM_HOME_FIXTURE/state/null.check.sh" ] \
+  || fail "a null taskId armed a poll keyed on the literal name null"
+pass "fm-playbot-lanes: a null taskId is absent, not the literal task id null"
 
 # A taskId that could not key a check is refused BEFORE anything is created or
 # sent, because discovering it afterwards is exactly the unwatched worker.
@@ -2167,6 +2217,44 @@ NODE
 [ "$(cat "$foreign")" = "$foreign_before" ] || fail "a refused arming still rewrote another owner's check"
 check_is_registered fm-autoarm-foreign || fail "a refused arming broke the foreign check's own trust binding"
 pass "fm-playbot-lanes: arming never replaces a check this server did not generate"
+
+# The mirror of that rule, and the ordinary lifecycle it protects: the worker
+# opens a PR, firstmate records it, and bin/fm-pr-check.sh arms a merged-PR poll
+# on the same state/<id>.check.sh name. Left unguarded that publish replaces the
+# lane poll and orphans its trust binding, which is the same unwatched worker
+# moved later in the task's life, so the publish has to refuse by name instead.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-10\"},\"title\":\"PR collision\",\"message\":\"Do the reviewable work\",\"taskId\":\"fm-autoarm-pr\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the collision fixture's dispatch did not arm a poll"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== true) process.exit(1);
+NODE
+lane_check="$FM_HOME_FIXTURE/state/fm-autoarm-pr.check.sh"
+lane_before=$(cat "$lane_check")
+fm_write_meta "$FM_HOME_FIXTURE/state/fm-autoarm-pr.meta" \
+  "window=fm-fm-autoarm-pr" "endpoint_task_id=fm-autoarm-pr"
+chmod 0600 "$FM_HOME_FIXTURE/state/fm-autoarm-pr.meta"
+pr_status=0
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-pr-check.sh" fm-autoarm-pr \
+  https://github.com/o/r/pull/41 > "$FIXTURE_ROOT/pr-collide.out" 2>&1 || pr_status=$?
+[ "$pr_status" != 0 ] || fail "arming a merged-PR poll over a lane poll reported success: $(cat "$FIXTURE_ROOT/pr-collide.out")"
+collide=$(cat "$FIXTURE_ROOT/pr-collide.out")
+case "$collide" in
+  *"fm-playbot-lanes.mjs"*"fm-autoarm-pr"*) ;;
+  *) fail "the refusal did not name both owners and the task id: $collide" ;;
+esac
+case "$collide" in
+  *"armed: state/fm-autoarm-pr.check.sh"*) fail "the refused publish still reported the poll as armed: $collide" ;;
+  *) ;;
+esac
+[ "$(cat "$lane_check")" = "$lane_before" ] || fail "the refused PR poll still replaced the lane poll's program"
+[ "$(check_file_mode "$lane_check")" = 700 ] || fail "the refused PR poll changed the lane poll's mode"
+check_is_registered fm-autoarm-pr || fail "the refused PR poll broke the lane poll's trust binding"
+for leftover in fm-autoarm-pr.pr-poll fm-autoarm-pr.pr-poll-registration; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the refused PR poll left $leftover behind beside another owner's check"
+done
+pass "fm-playbot-lanes: arming a merged-PR poll over a lane poll refuses by name and leaves it intact"
 
 # A Playbot-chat caller has routed wakes already, so it must get none of this -
 # and the result must say which path it took rather than leaving the caller to
