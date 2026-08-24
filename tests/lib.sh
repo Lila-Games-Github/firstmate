@@ -89,6 +89,13 @@ fm_test_node_usable() {
     return 1
   fi
   version=$("$candidate" -p 'process.versions.node' 2>/dev/null) || version=
+  # A non-Node executable can still print something on stdout - `echo` echoes the
+  # probe's own arguments back - and a bare emptiness check would take that for a
+  # version and hand the suite a runtime that cannot run it. Only a dotted
+  # numeric version is a Node version.
+  case "$version" in
+    *[!0-9.]* | '' | *..* | .* | *.) version= ;;
+  esac
   if [ -z "$version" ]; then
     FM_TEST_NODE_REJECTION="did not report a Node version, so it is not a Node runtime"
     return 1

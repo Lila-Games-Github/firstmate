@@ -1711,6 +1711,18 @@ case "$refusal" in
   *) fail "the FM_TEST_NODE refusal did not name the rejected path and why: $refusal" ;;
 esac
 
+# An executable that is not Node but still prints something: `node -p ...` run
+# against `echo` echoes the probe's own arguments back, and a runtime accepted on
+# that basis cannot run a single check in this suite.
+noisy_runtime="$TMP_ROOT/noisy-not-node"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@"\n' > "$noisy_runtime"
+chmod +x "$noisy_runtime"
+refusal=$(node_probe_refusal "$noisy_runtime") && fail "an FM_TEST_NODE that printed non-version output was accepted as a Node runtime"
+case "$refusal" in
+  *"$noisy_runtime"*"not a Node runtime"*) ;;
+  *) fail "the non-version FM_TEST_NODE refusal did not name the rejected path and why: $refusal" ;;
+esac
+
 old_runtime="$TMP_ROOT/old-node"
 printf '#!/bin/sh\nprintf "18.20.4\\n"\n' > "$old_runtime"
 chmod +x "$old_runtime"
