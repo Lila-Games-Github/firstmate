@@ -79,6 +79,10 @@ insertThread.run('chat-controller', 'ws-controller', 'Firstmate', 0, 1, 'control
 insertThread.run('chat-worker', 'ws-worker', 'Greeting', 0, 1, 'worker-session', 'full-access', 0, 0, '', null, 'ready', 0, now, now, now, 0);
 insertThread.run('chat-worker-alt', 'ws-worker-alt', 'Alt greeting', 0, 1, 'worker-alt-session', 'full-access', 0, 0, '', null, 'pending_input', 0, now, now, now, 0);
 insertThread.run('chat-worker-archived', 'ws-worker-archived', 'Greeting', 0, 0, 'worker-archived-session', 'full-access', 0, 0, '', null, 'ready', 0, older, older, older, 0);
+// A chat in that same ARCHIVED workspace which persisted state still calls
+// pending_input. The parked detector must not offer it, because the confirming
+// read it hands back cannot resolve a chat outside the default thread scope.
+insertThread.run('chat-worker-retired-parked', 'ws-worker-archived', 'Retired parked', 1, 0, 'worker-retired-session', 'full-access', 0, 0, '', null, 'pending_input', 0, older, older, older, 0);
 app.close();
 
 const rollout = path.join(harness, 'worker-rollout.jsonl');
@@ -338,6 +342,10 @@ const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
 // read in the same tool call.
 const afterDropFile = path.join(process.env.FIXTURE_ROOT, 'after-drop-key');
 const sendFailsFile = path.join(process.env.FIXTURE_ROOT, 'send-fails');
+// A modern Playbot whose send path returns something that is not a snapshot at
+// all: the verdict is unknown for the same reason a legacy Playbot's is, but on
+// a version that can report one, so the two have to be told apart.
+const sendNonObjectFile = path.join(process.env.FIXTURE_ROOT, 'send-non-object');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
@@ -553,6 +561,7 @@ async function electronInvoke(channel, payload) {
       // unconfirmed; a modern one returns the thread snapshot and holds the
       // message whenever the chat is parked on a card or already has a queue.
       if (mode !== 'modern') return null;
+      if (readFileOr(sendNonObjectFile, '')) return 'accepted';
       const store = loadSnapshots();
       const snapshot = store[payload.threadId] ?? emptySnapshot(payload.threadId);
       sendCounter += 1;
@@ -887,15 +896,25 @@ fs.writeFileSync(path.join(process.env.FIXTURE_ROOT, 'snapshots.json'), `${JSON.
 NODE
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+# The detector and its own confirming read share one scope, so every candidate it
+# offers is resolvable by the get_thread_card pointer it hands back: the parked
+# chat in the ARCHIVED workspace is out of scope for both, and the parked chat in
+# an active-but-unselected workspace is in scope for both.
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_parked_threads\",\"arguments\":{\"project\":$worker_json}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads did not report the parked candidate with a confirm pointer"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.candidates.length !== 1) process.exit(1);
 if (value.candidates[0].id !== 'chat-worker-alt' || value.candidates[0].workspaceId !== 'ws-worker-alt') process.exit(1);
 if (value.candidates[0].status !== 'pending_input' || value.candidates[0].queuedCount !== 0) process.exit(1);
+if (value.candidates.some(candidate => candidate.id === 'chat-worker-retired-parked')) process.exit(1);
 if (value.confirmWith !== 'get_thread_card' || !value.note.includes('confirm each candidate')) process.exit(1);
 NODE
 [ -f "$FIXTURE_ROOT/ipc-calls.jsonl" ] && fail "list_parked_threads talked to Playbot instead of staying a persisted read"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-retired-parked\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the confirming read resolved a chat the detector must therefore never offer"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('Thread not found in project project-worker')) process.exit(1);
+NODE
 pass "fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot"
 
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
@@ -1492,6 +1511,56 @@ printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
 after=$(cksum "$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json")
 [ "$before" = "$after" ] || fail "an accepted-but-unreadable wake was resent on the next hook run"
 pass "fm-playbot-lanes: an accepted wake with an unreadable verdict counts as notified and is never resent"
+
+# An "unknown" verdict means opposite things on the two Playbot generations, and
+# the wake is classified with the chat-creation detection the adapter already has.
+# On a Playbot whose send path CAN report a verdict, no snapshot back is a real
+# anomaly, and advancing the turn would lose the wake silently; on a pre-0.94
+# Playbot threads:send returns nothing by design, so unknown carries no
+# information and the wake must still land. The same turn drives both halves, so
+# the only difference between them is the Playbot generation.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const rollout = path.join(process.env.FIXTURE_ROOT, 'harness', 'worker-rollout.jsonl');
+const at = '2026-07-29T12:07:00.000Z';
+fs.appendFileSync(rollout, [
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'agent_message', message: 'FIFTH ACK', phase: 'final_answer' } }),
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-worker-5', last_agent_message: 'FIFTH ACK', completed_at: 1785326640, duration_ms: 100 } }),
+].join('\n') + '\n');
+NODE
+
+rm -f "$PLAYBOT_LANES_STATE_DIR/last-hook-error.json"
+printf 'yes\n' > "$FIXTURE_ROOT/send-non-object"
+printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
+  | node --no-warnings "$SCRIPT" hook-stop >/dev/null
+rm -f "$FIXTURE_ROOT/send-non-object"
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json" ERR_FILE="$PLAYBOT_LANES_STATE_DIR/last-hook-error.json" node --no-warnings <<'NODE' || fail "an unconfirmed wake on a verdict-reporting Playbot was recorded as notified"
+const fs = require('node:fs');
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.lastNotifiedTurnId === 'turn-worker-5') process.exit(1);
+// The route still describes the previous turn's accepted-but-unreadable wake,
+// untouched, so the next hook run resends this one.
+if (route.lastNotifiedDelivery !== 'unreadable' || !route.lastNotifiedError) process.exit(1);
+const error = JSON.parse(fs.readFileSync(process.env.ERR_FILE, 'utf8'));
+if (error.turnId !== 'turn-worker-5' || error.delivery.state !== 'unknown') process.exit(1);
+if (!error.error.includes('delivery is unconfirmed')) process.exit(1);
+NODE
+printf 'legacy\n' > "$FIXTURE_ROOT/ipc-mode"
+printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
+  | node --no-warnings "$SCRIPT" hook-stop >/dev/null
+printf 'modern\n' > "$FIXTURE_ROOT/ipc-mode"
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json" node --no-warnings <<'NODE' || fail "a wake to a pre-0.94 Playbot was withheld because its send path cannot report a verdict"
+const fs = require('node:fs');
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.lastNotifiedTurnId !== 'turn-worker-5' || route.lastNotifiedDelivery !== 'unknown') process.exit(1);
+NODE
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json" node --no-warnings <<'NODE' || fail "a successful wake still carried the previous notification's error"
+const fs = require('node:fs');
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.lastNotifiedError !== undefined) process.exit(1);
+NODE
+pass "fm-playbot-lanes: an unconfirmed wake advances only on a Playbot whose send path cannot report a verdict"
 
 # ---------------------------------------------------------------------------
 # The shared node resolver must name what it rejected.

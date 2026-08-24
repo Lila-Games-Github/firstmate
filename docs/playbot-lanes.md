@@ -80,6 +80,7 @@ The wake reads the same delivery verdict as every other send, and a `failed` ver
 A `queued` verdict is recorded as notified, because Playbot does deliver it once the controller's turn frees up.
 A send Playbot accepted whose verdict could not be read is recorded as notified on that same rule - Playbot has the message - with the unreadable verdict kept on the route and in `last-hook-error.json`.
 Only a send that never reached Playbot stays eligible for retry, because resending a wake Playbot already holds would grow the very queue this surface exists to expose.
+An `unknown` verdict is classified by the chat-creation API this Playbot exposes: a pre-0.94 Playbot returns nothing from `threads:send`, so `unknown` carries no information there and the wake is recorded, while a Playbot whose send path can report a verdict returning no snapshot is a real anomaly, so that wake is recorded in `last-hook-error.json` and stays eligible for retry rather than being lost silently.
 
 `close_lane` disables notification without archiving either chat.
 `archive_chat` is a separate explicit action and requires `confirm=true`.
@@ -89,6 +90,7 @@ Only a send that never reached Playbot stays eligible for retry, because resendi
 A Playbot worker that asks a question parks until someone chooses an option, and no text channel reaches it while it waits.
 `list_parked_threads` is the cheap fleet-wide detector: it reads persisted status only, resumes nothing, and contacts Playbot not at all.
 Its results are candidates rather than findings, because Playbot reports a merely rehydrated chat as `pending_input` whether or not it is actually parked.
+It shares one scope with the thread resolution described above, so every candidate it offers is resolvable by the `get_thread_card` pointer it hands back, and a chat in an archived workspace is offered by neither.
 
 `get_thread_card` is the confirming live read for one named chat, returning each pending question's exact text and option labels alongside the chat's held messages.
 Reading a live snapshot resumes a chat that has not been resumed since Playbot started, exactly as opening that chat in the Playbot window does, and starts no agent turn.

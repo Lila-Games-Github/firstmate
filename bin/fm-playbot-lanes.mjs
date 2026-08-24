@@ -282,8 +282,18 @@ function resolveWorkspace(project, selector) {
 // workspaces, so the unscoped project-wide search applies the same filter: a
 // chat in an archived workspace is out of scope, so it is neither addressable
 // nor able to make an active chat's title ambiguous.
-function threadsForProject(projectId, workspaceId = null, includeArchived = false) {
-  return threadRows().filter((row) => row.project_id === projectId
+//
+// This is the ONE place that owns which chats are in scope, and every reader
+// that offers a chat to a caller goes through it - with a project id to scope to
+// one project, or with null to serve every live project - so a chat one reader
+// offers is by construction resolvable by another. Copying the scope rule per
+// call site is what let the parked detector hand back candidates its own
+// confirming read then refused. A reader that genuinely needs a wider scope asks
+// for it explicitly against threadRows().
+function threadsForProject(projectId = null, workspaceId = null, includeArchived = false) {
+  const liveProjects = new Set(topology().map((project) => project.id));
+  return threadRows().filter((row) => liveProjects.has(row.project_id)
+    && (!projectId || row.project_id === projectId)
     && (workspaceId ? row.workspace_id === workspaceId : row.archive_state === "active")
     && (includeArchived || !row.archived));
 }
@@ -995,6 +1005,8 @@ function consumeCaller(toolName) {
 }
 
 function rowForSession(sessionId) {
+  // Deliberately the raw rows, not the scoped accessor: a chat must be able to
+  // identify itself wherever it lives, including an archived workspace.
   const rows = threadRows().filter((row) => row.session_id === sessionId && !row.archived);
   if (rows.length === 1) return rows[0];
   if (rows.length > 1) throw new Error(`Codex session ${sessionId} maps to multiple Playbot chats`);
@@ -1065,6 +1077,21 @@ function bounded(text, max = 4_000) {
   return value.length <= max ? value : `${value.slice(0, max)}\n[truncated]`;
 }
 
+// A persisted route is read back on every hook run and returned verbatim by
+// list_lanes, so one writer owns the whole last-notification record: every field
+// describing a notification is set or removed together here, and no field from
+// an earlier one survives to contradict the wake beside it.
+function recordNotified(route, worker, eventId, deliveryState, error = null) {
+  route.lastNotifiedTurnId = eventId;
+  route.lastNotifiedAt = nowIso();
+  route.lastNotifiedDelivery = deliveryState;
+  if (error) route.lastNotifiedError = error;
+  else delete route.lastNotifiedError;
+  route.updatedAt = nowIso();
+  route.worker = publicThread(worker);
+  atomicWriteJson(routePath(route.id), route);
+}
+
 async function processStop(payload) {
   const sessionId = payload.session_id ?? payload.sessionId;
   if (!sessionId) return { matched: 0, notified: 0 };
@@ -1084,6 +1111,8 @@ async function processStop(payload) {
       eventKind = "input request";
     }
     if (route.lastNotifiedTurnId === eventId) continue;
+    // Deliberately the raw rows, not the scoped accessor: a registered
+    // supervisor is addressed by exact id and stays wakeable wherever it lives.
     const supervisorRows = threadRows().filter((row) => row.thread_id === route.supervisor?.id && !row.archived);
     if (supervisorRows.length !== 1 || supervisorRows[0].thread_id === currentWorker.thread_id) continue;
     const message = [
@@ -1125,12 +1154,28 @@ async function processStop(payload) {
         });
         continue;
       }
-      route.lastNotifiedTurnId = eventId;
-      route.lastNotifiedAt = nowIso();
-      route.lastNotifiedDelivery = delivery?.state ?? null;
-      route.updatedAt = nowIso();
-      route.worker = publicThread(currentWorker);
-      atomicWriteJson(routePath(route.id), route);
+      // "unknown" means opposite things on the two Playbot generations, so it is
+      // classified with the detection the adapter already has rather than a new
+      // probe: on a pre-0.94 Playbot threads:send returns nothing, so unknown is
+      // the normal, information-free result and the wake must advance; on a
+      // Playbot whose send path CAN report a verdict, unknown means it returned
+      // something it should not have, which is a real anomaly. Wrongly advancing
+      // loses a wake silently - the worker finishes, nobody is told, and there is
+      // no retry and no error - while wrongly refusing only repeats a
+      // self-announcing wake. Silent loss is the worse failure, so an
+      // unclassifiable unknown stays eligible for retry and is recorded.
+      if (delivery?.state === "unknown" && await chatCreationApi() !== "openThread") {
+        atomicWriteJson(path.join(stateDir(), "last-hook-error.json"), {
+          at: nowIso(),
+          routeId: route.id,
+          workerThreadId: currentWorker.thread_id,
+          turnId: eventId,
+          delivery,
+          error: `Playbot returned no thread snapshot for the lane wake, so delivery is unconfirmed on a Playbot whose send path reports a verdict. Check list_queued_messages for ${supervisorRows[0].thread_id} before the next hook run resends it.`,
+        });
+        continue;
+      }
+      recordNotified(route, currentWorker, eventId, delivery?.state ?? null);
       notified += 1;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -1150,13 +1195,7 @@ async function processStop(payload) {
       // written to remove. Only a send that never reached Playbot stays
       // eligible for retry.
       if (sendReachedPlaybot(error)) {
-        route.lastNotifiedTurnId = eventId;
-        route.lastNotifiedAt = nowIso();
-        route.lastNotifiedDelivery = "unreadable";
-        route.lastNotifiedError = reason;
-        route.updatedAt = nowIso();
-        route.worker = publicThread(currentWorker);
-        atomicWriteJson(routePath(route.id), route);
+        recordNotified(route, currentWorker, eventId, "unreadable", reason);
         notified += 1;
       }
     }
@@ -1409,10 +1448,8 @@ async function handleTool(name, args = {}) {
 
   if (name === "list_parked_threads") {
     const scope = args.project ? resolveProject(args.project, projects).id : null;
-    const candidates = threadRows()
-      .filter((row) => (!scope || row.project_id === scope)
-        && (args.includeArchived ? true : !row.archived)
-        && row.agent_status === "pending_input")
+    const candidates = threadsForProject(scope, null, Boolean(args.includeArchived))
+      .filter((row) => row.agent_status === "pending_input")
       .map(publicThread);
     return {
       candidates,
