@@ -56,9 +56,18 @@ for (const [projectId, name, rootId, repoPath, workspaceId] of projects) {
   app.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(workspaceId, projectId, null, 'local', 1, 'active', now, now);
   app.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)').run(workspaceId, rootId, repoPath, 'main');
 }
+// A second ACTIVE but NOT selected workspace in the worker project, holding the
+// only chat that is parked on a question card. Thread resolution and parked
+// detection both have to reach it without an explicit workspace selector.
+app.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-worker-alt', 'project-worker', 'alt', 'worktree', 0, 'active', now, now);
+app.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-worker-alt', 'root-worker', path.join(root, 'worker', '.worktrees', 'alt'), 'alt');
+
 const insertThread = app.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 insertThread.run('chat-controller', 'ws-controller', 'Firstmate', 0, 1, 'controller-session', 'full-access', 0, 0, '', null, 'working', 0, now, now, now, 0);
 insertThread.run('chat-worker', 'ws-worker', 'Greeting', 0, 1, 'worker-session', 'full-access', 0, 0, '', null, 'ready', 0, now, now, now, 0);
+insertThread.run('chat-worker-alt', 'ws-worker-alt', 'Alt greeting', 0, 1, 'worker-alt-session', 'full-access', 0, 0, '', null, 'pending_input', 0, now, now, now, 0);
 app.close();
 
 const rollout = path.join(harness, 'worker-rollout.jsonl');
@@ -143,6 +152,29 @@ const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.thread.id !== 'chat-worker' || value.thread.status !== 'ready') process.exit(1);
 NODE
 pass "fm-playbot-lanes: normal-terminal callers can poll thread status"
+
+# Resolving the workspace before the thread made every request without an
+# explicit workspace fall back to the UI-selected workspace and then scope the
+# lookup to it, so a named chat living anywhere else reported "Thread not found".
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a thread in a non-selected workspace did not resolve without an explicit workspace"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const thread = value.result.structuredContent.thread;
+if (thread.id !== 'chat-worker-alt' || thread.workspaceId !== 'ws-worker-alt') process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_thread\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Alt greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a title in a non-selected workspace did not resolve without an explicit workspace"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+if (value.result.structuredContent.thread.id !== 'chat-worker-alt') process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"workspace\":\"ws-worker\",\"thread\":\"chat-worker-alt\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an explicit wrong workspace did not still fail closed"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('Thread not found in workspace ws-worker')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it"
 
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"read_thread\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\",\"turnLimit\":2}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller could not read a thread without a controller project"

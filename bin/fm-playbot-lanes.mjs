@@ -295,10 +295,25 @@ function resolveThread(projectId, workspaceId, selector, includeArchived = false
   const raw = String(selector).trim();
   const exact = rows.filter((row) => row.thread_id === raw || row.session_id === raw);
   if (exact.length === 1) return exact[0];
+  if (exact.length > 1) throw new Error(`Ambiguous thread id '${raw}': ${exact.map((row) => row.thread_id).join(", ")}`);
   const byTitle = rows.filter((row) => row.title.toLowerCase() === raw.toLowerCase());
   if (byTitle.length === 1) return byTitle[0];
   if (byTitle.length > 1) throw new Error(`Ambiguous thread title '${raw}': ${byTitle.map((row) => row.thread_id).join(", ")}`);
-  throw new Error(`Thread not found: ${raw}`);
+  const scope = workspaceId ? `workspace ${workspaceId}` : `project ${projectId}`;
+  throw new Error(`Thread not found in ${scope}: ${raw}; use list_threads to see the chats it holds`);
+}
+
+// A thread selector already identifies one chat, so the workspace it lives in
+// is derived from the matched row rather than guessed. Resolving the workspace
+// first made every request without an explicit workspace fall back to whichever
+// workspace happened to be selected in the Playbot UI, and then scoped the
+// thread lookup to that one workspace - so a chat anywhere else reported
+// "Thread not found" even though the caller had named it exactly. An explicit
+// workspace selector still narrows the lookup and still fails closed when it
+// does not match.
+function resolveThreadInProject(project, workspaceSelector, threadSelector, includeArchived = false) {
+  const workspaceId = workspaceSelector ? resolveWorkspace(project, workspaceSelector).id : null;
+  return resolveThread(project.id, workspaceId, threadSelector, includeArchived);
 }
 
 class CdpClient {
@@ -897,29 +912,29 @@ function toolDefinitions() {
     {
       name: "send_message",
       description: "Send a message to an existing Playbot chat in any project without selecting or focusing that chat.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send") }, ["project", "thread", "message"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send") }, ["project", "thread", "message"]),
     },
     {
       name: "read_thread",
       description: "Read a bounded recent Playbot conversation directly from its persisted Codex rollout without resuming the chat.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), thread: string("Thread id, Codex session id, or unique exact title"), turnLimit: { type: "integer", minimum: 1, maximum: 30, default: 8 } }, ["project", "thread"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title"), turnLimit: { type: "integer", minimum: 1, maximum: 30, default: 8 } }, ["project", "thread"]),
       annotations: { readOnlyHint: true },
     },
     {
       name: "get_thread_status",
       description: "Get one Playbot chat's persisted status and route membership without resuming it.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
       annotations: { readOnlyHint: true },
     },
     {
       name: "register_lane",
       description: "Bind an existing worker chat to the current controller chat so its future completed turns wake the controller.",
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name"), thread: string("Worker thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Worker thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
     },
     {
       name: "dispatch",
       description: "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status and read_thread.",
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -935,7 +950,7 @@ function toolDefinitions() {
     {
       name: "archive_chat",
       description: "Archive one Playbot chat. Requires confirm=true and never archives the current controller implicitly.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), thread: string("Thread id, Codex session id, or unique exact title"), confirm: { type: "boolean", const: true } }, ["project", "thread", "confirm"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project"), thread: string("Thread id, Codex session id, or unique exact title"), confirm: { type: "boolean", const: true } }, ["project", "thread", "confirm"]),
     },
   ];
 }
@@ -974,10 +989,10 @@ async function handleTool(name, args = {}) {
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
     let worker = null;
     if (!wantsNewWorkspace) {
-      const workspace = resolveWorkspace(project, args.workspace);
       if (args.thread) {
-        worker = resolveThread(project.id, workspace.id, args.thread);
+        worker = resolveThreadInProject(project, args.workspace, args.thread);
       } else if (args.title) {
+        const workspace = resolveWorkspace(project, args.workspace);
         const matches = threadsForProject(project.id, workspace.id).filter((row) => row.title.toLowerCase() === String(args.title).trim().toLowerCase());
         if (matches.length > 1) throw new Error(`Ambiguous worker title '${args.title}': ${matches.map((row) => row.thread_id).join(", ")}`);
         worker = matches[0] ?? null;
@@ -1011,11 +1026,11 @@ async function handleTool(name, args = {}) {
     }
   }
 
-  const workspace = resolveWorkspace(project, args.workspace);
   if (name === "list_threads") {
+    const workspace = resolveWorkspace(project, args.workspace);
     return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
   }
-  const thread = resolveThread(project.id, workspace.id, args.thread, name === "archive_chat");
+  const thread = resolveThreadInProject(project, args.workspace, args.thread, name === "archive_chat");
   if (name === "send_message") return { thread: await sendMessage(thread, args.message) };
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
   if (name === "get_thread_status") {
