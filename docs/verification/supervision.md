@@ -605,7 +605,7 @@ ok - fm-playbot-lanes: setup readiness does not require a controller project
 ok - fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision
 ```
 
-The suite self-skips where node is absent; this run was performed in the author environment because the pipeline environment lacks node.
+That run was performed in the author environment because the pipeline environment lacks node, and the suite self-skipped when node was off `PATH` at the time; the 2026-08-24 entry above replaced that skip with a hard failure and is the current owner of the suite's node-resolution behavior.
 
 On 2026-08-20, Playbot 0.94.0 on Linux was verified to have removed the `threads:openThread` and `workspace:create` IPC handlers and folded chat and workspace creation into one strict `threads:launch` call.
 The facts were confirmed from the running app's extracted `.vite/build/main.js`: IPC channels are registered as `${module}:${key}` from per-module tables, `threads:launch` takes `{destination: existing-workspace | new-workspace, thread: {title (trim min 1), approvalMode ("default"|"auto-review"|"full-access"), planMode, ...} (strict, no caller-chosen id), message?, activate?}` and returns the persisted `workspace` and `thread`, the new-workspace `workspace` field reuses the exact pre-0.94 `{strategy: "project", projectId, name?, branch?, baseBranch?}` shape, the `workspace` module registers no bare creation channel, and `threads:send` (`{threadId, text, ...}`) plus `threads:archiveThread` (`{threadId, nextActiveThreadId?}`) are unchanged.

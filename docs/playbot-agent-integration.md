@@ -375,23 +375,18 @@ sqlite3 ~/.playbot/harness/logs_2.sqlite \
 ```
 When it works, the CLI opens/starts a chat visible in the Playbot window and the agent acts through the same tools described here (engine, browser, assets).
 
-### 8.1 ✅ WORKING METHOD — drive the agent + chat via the Electron DevTools (CDP) port
+### 8.1 ✅ WORKING TRANSPORT — reach the agent + chat over the Electron DevTools (CDP) port
 
-Since the CLI handoff is unreliable, the **verified** way to start/continue a chat and make Playbot's built-in agent do work is to automate the renderer through Playbot's **Chrome DevTools Protocol** endpoint. This mimics a human typing in the chat, so it works whenever the GUI works.
+Since the CLI handoff is unreliable, the **verified** way to start/continue a chat and make Playbot's built-in agent do work is to attach to Playbot's **Chrome DevTools Protocol** endpoint and call the renderer's own IPC bridge, so every action names the chat it targets.
 
 **How it works**
 - Playbot's Electron process exposes a CDP endpoint on a `127.0.0.1` port. **It is a *different* port from the MCP server:** the MCP port answers `GET /` with `ok`; the **DevTools port** answers `GET /json/version` with a JSON blob containing `webSocketDebuggerUrl` and serves `GET /json` (the list of debuggable `page` targets).
-- The project window's renderer (`file://…/main_window/index.html`) contains the chat composer — a TipTap `contenteditable` with class `.ui-tiptap-composer` — and a button with `aria-label="Send message"`.
-- Attach to that page target's `webSocketDebuggerUrl`, then:
-  1. focus the composer (`el.focus()` via `Runtime.evaluate`),
-  2. type with CDP **`Input.insertText`** (plain `innerText=` does *not* update ProseMirror state — `Input.insertText` does),
-  3. click the **Send message** button.
-- That starts (or continues) a real agent thread — identical to a user message. Read the agent's replies from the **rollout transcript** JSONL at `threads.rollout_path` (`~/.playbot/harness/sessions/YYYY/MM/DD/rollout-*-<threadId>.jsonl`), which contains user/assistant messages, reasoning summaries, and tool calls.
-
-**Verified (v0.79.0):** sending *"make all enemies render as circles instead of squares…"* this way spawned thread **"Render All Enemies as Circles"** (`gpt-5.6-sol`, `xhigh`), `agent_status=working`, and the agent began inspecting scenes and editing the project — all without the GUI CLI and without touching the keyboard.
+- The target to attach to is the project window's renderer (`file://…/main_window/index.html`), identified by the one `page` target whose `window.electronAPI.invoke` is a function rather than by any UI selector.
+- Attach to that page target's `webSocketDebuggerUrl`, then call `window.electronAPI.invoke(channel, payload)` through `Runtime.evaluate`; §8.2 documents the channels and their payload schemas.
+- A send through that bridge starts (or continues) a real agent thread — identical to a user message. Read the agent's replies from the **rollout transcript** JSONL at `threads.rollout_path` (`~/.playbot/harness/sessions/YYYY/MM/DD/rollout-*-<threadId>.jsonl`), which contains user/assistant messages, reasoning summaries, and tool calls.
 
 **Do not drive the composer to send a message.**
-Typing into the composer reaches whichever conversation the window happens to be showing, and nothing in this method can name a target.
+Typing into the composer reaches whichever conversation the window happens to be showing, and nothing in that route can name a target.
 A guard used to make that survivable by refusing whenever the visible thread had no mounted composer, which was the case while it showed a question or approval card.
 Playbot 0.95.0 keeps the composer mounted alongside a card, so that guard no longer fires and an untargeted send lands silently on an unrelated conversation.
 This repo therefore ships no composer-driving tool.
@@ -401,10 +396,10 @@ It reaches the same renderer over the same DevTools socket, but calls Playbot's 
 It also reports whether Playbot delivered a message or is only holding it, which composer automation cannot observe at all.
 
 **Caveats**
-- Requires a **project window open** in Playbot (the composer must exist). The engine can be headless; the app window can be minimized but must not be closed.
+- Requires a **project window open** in Playbot, because `electronAPI.invoke` lives in that renderer. The engine can be headless; the app window can be minimized but must not be closed.
 - Relies on Playbot's Electron **remote-debugging port being enabled** — it is in v0.78–0.79. If a future build ships with it disabled, this method stops working (fall back to typing in the GUI, or direct MCP engine calls per §6–§7).
 - The model used is whatever the chat has selected (per §8's model note) — still not settable programmatically.
-- Selectors (`.ui-tiptap-composer`, `aria-label="Send message"`) are UI-version-specific; re-inspect `GET /json` targets if a Playbot update changes them.
+- The IPC channel names and payload schemas are version-specific, not a published surface; [playbot-lanes.md](playbot-lanes.md#state-and-compatibility) owns the compatibility posture and the refusal rules for a changed channel or snapshot shape.
 
 **Model selection — important limitation:**
 - The chat-creation payload is only `{ initialPrompt, planMode }`. **There is no way to choose the model via CLI, deep link, or MCP.**
