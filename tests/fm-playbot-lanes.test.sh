@@ -1457,6 +1457,42 @@ if (route.lastNotifiedDelivery !== 'sending' && route.lastNotifiedDelivery !== '
 NODE
 pass "fm-playbot-lanes: a rejected lane wake stays eligible for retry and is recorded, then lands on retry"
 
+# An accepted send whose verdict cannot be read is NOT a rejected send: Playbot
+# has the message. Leaving the turn unnotified would resend the identical wake on
+# the next hook run and grow the very invisible queue this surface exposes, so
+# the wake counts as notified and the unreadable verdict is recorded instead.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const rollout = path.join(process.env.FIXTURE_ROOT, 'harness', 'worker-rollout.jsonl');
+const at = '2026-07-29T12:06:00.000Z';
+fs.appendFileSync(rollout, [
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'agent_message', message: 'FOURTH ACK', phase: 'final_answer' } }),
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-worker-4', last_agent_message: 'FOURTH ACK', completed_at: 1785326580, duration_ms: 100 } }),
+].join('\n') + '\n');
+NODE
+
+rm -f "$PLAYBOT_LANES_STATE_DIR/last-hook-error.json"
+printf 'pendingMessages\n' > "$FIXTURE_ROOT/send-drop-key"
+printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
+  | node --no-warnings "$SCRIPT" hook-stop >/dev/null
+rm -f "$FIXTURE_ROOT/send-drop-key"
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json" ERR_FILE="$PLAYBOT_LANES_STATE_DIR/last-hook-error.json" node --no-warnings <<'NODE' || fail "an accepted wake with an unreadable verdict was left eligible for a duplicate resend"
+const fs = require('node:fs');
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.lastNotifiedTurnId !== 'turn-worker-4') process.exit(1);
+if (route.lastNotifiedDelivery !== 'unreadable' || !route.lastNotifiedError) process.exit(1);
+const error = JSON.parse(fs.readFileSync(process.env.ERR_FILE, 'utf8'));
+if (error.turnId !== 'turn-worker-4' || error.sendReachedPlaybot !== true) process.exit(1);
+NODE
+# Re-running the hook must not send that wake a second time.
+before=$(cksum "$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json")
+printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
+  | node --no-warnings "$SCRIPT" hook-stop >/dev/null
+after=$(cksum "$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json")
+[ "$before" = "$after" ] || fail "an accepted-but-unreadable wake was resent on the next hook run"
+pass "fm-playbot-lanes: an accepted wake with an unreadable verdict counts as notified and is never resent"
+
 # ---------------------------------------------------------------------------
 # The shared node resolver must name what it rejected.
 #

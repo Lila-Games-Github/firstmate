@@ -1133,12 +1133,32 @@ async function processStop(payload) {
       atomicWriteJson(routePath(route.id), route);
       notified += 1;
     } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
       atomicWriteJson(path.join(stateDir(), "last-hook-error.json"), {
         at: nowIso(),
         routeId: route.id,
         workerThreadId: currentWorker.thread_id,
-        error: error instanceof Error ? error.message : String(error),
+        turnId: eventId,
+        sendReachedPlaybot: sendReachedPlaybot(error),
+        error: reason,
       });
+      // A send Playbot accepted counts as notified even when its verdict could
+      // not be read, on the same rule that makes a queued wake a success:
+      // Playbot has the message. Leaving the turn unnotified would resend the
+      // identical wake on the next hook run and grow the very invisible queue
+      // this surface exists to expose - a change feeding the defect it was
+      // written to remove. Only a send that never reached Playbot stays
+      // eligible for retry.
+      if (sendReachedPlaybot(error)) {
+        route.lastNotifiedTurnId = eventId;
+        route.lastNotifiedAt = nowIso();
+        route.lastNotifiedDelivery = "unreadable";
+        route.lastNotifiedError = reason;
+        route.updatedAt = nowIso();
+        route.worker = publicThread(currentWorker);
+        atomicWriteJson(routePath(route.id), route);
+        notified += 1;
+      }
     }
   }
   return { matched: matches.length, notified };

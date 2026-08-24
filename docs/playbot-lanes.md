@@ -78,6 +78,8 @@ For a routed worker, it reads the completed Codex turn id and final message from
 Playbot queues that follow-up when the controller is busy, so the controller receives another turn without a fixed polling interval.
 The wake reads the same delivery verdict as every other send, and a `failed` verdict does not record the turn as notified, so a wake Playbot rejected stays eligible for the next hook run and is written to `last-hook-error.json` instead of disappearing silently.
 A `queued` verdict is recorded as notified, because Playbot does deliver it once the controller's turn frees up.
+A send Playbot accepted whose verdict could not be read is recorded as notified on that same rule - Playbot has the message - with the unreadable verdict kept on the route and in `last-hook-error.json`.
+Only a send that never reached Playbot stays eligible for retry, because resending a wake Playbot already holds would grow the very queue this surface exists to expose.
 
 `close_lane` disables notification without archiving either chat.
 `archive_chat` is a separate explicit action and requires `confirm=true`.
