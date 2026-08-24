@@ -50,6 +50,99 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# --- node runtime resolution ------------------------------------------------
+#
+# A suite that needs Node must not conclude Node is absent just because it is
+# missing from PATH. The normal case for a hook, a git subprocess, or a
+# validation-pipeline step is an inherited PATH without the package-manager bin
+# directory that owns the runtime, which is the same gap that hides shellcheck
+# and actionlint from those environments. A suite that treated that as "tool
+# absent" would self-skip and report ok, so a green run would prove nothing
+# about the code it covers.
+#
+# fm_test_find_node echoes the newest usable Node it can locate, or nothing.
+# Version directories are globbed and version-sorted rather than pinned, so a
+# runtime upgrade cannot silently strip the runtime again. FM_TEST_NODE
+# overrides the search for an operator who wants an exact runtime.
+#
+# fm_test_require_node puts that runtime's directory on PATH - so both `node`
+# and a `#!/usr/bin/env node` shebang resolve - publishes it as
+# FM_TEST_NODE_BIN, and FAILS LOUDLY when no usable runtime exists. Absence is a
+# failure, never a pass. It must be called directly rather than through command
+# substitution, because a subshell's PATH never reaches the caller.
+
+FM_TEST_NODE_MIN=22.5
+
+fm_test_node_usable() {
+  local candidate=$1 version
+  [ -n "$candidate" ] && [ -x "$candidate" ] || return 1
+  version=$("$candidate" -p 'process.versions.node' 2>/dev/null) || return 1
+  [ -n "$version" ] || return 1
+  [ "$(printf '%s\n%s\n' "$FM_TEST_NODE_MIN" "$version" | sort -V | head -1)" = "$FM_TEST_NODE_MIN" ]
+}
+
+fm_test_find_node() {
+  local candidate
+  if [ -n "${FM_TEST_NODE:-}" ]; then
+    fm_test_node_usable "$FM_TEST_NODE" && printf '%s\n' "$FM_TEST_NODE"
+    return 0
+  fi
+  candidate=$(command -v node 2>/dev/null || true)
+  if fm_test_node_usable "$candidate"; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  # Fixed install roots first, then version-managed ones newest-first. Every
+  # version segment is a glob; nothing here names a version.
+  local root roots=()
+  for root in \
+    "${HOMEBREW_PREFIX:-}/bin" \
+    /opt/homebrew/bin \
+    /home/linuxbrew/.linuxbrew/bin \
+    /var/home/linuxbrew/.linuxbrew/bin \
+    /usr/local/bin \
+    /usr/bin \
+    "$HOME/.local/bin" \
+    "$HOME/.volta/bin"
+  do
+    roots+=("$root/node")
+  done
+  local pattern versioned
+  for pattern in \
+    "/home/linuxbrew/.linuxbrew/Cellar/node/"*"/bin/node" \
+    "/var/home/linuxbrew/.linuxbrew/Cellar/node/"*"/bin/node" \
+    "$HOME/.nvm/versions/node/"*"/bin/node" \
+    "$HOME/.fnm/node-versions/"*"/installation/bin/node" \
+    "$HOME/.local/share/fnm/node-versions/"*"/installation/bin/node"
+  do
+    while IFS= read -r versioned; do
+      [ -n "$versioned" ] && roots+=("$versioned")
+    done < <(compgen -G "$pattern" 2>/dev/null | sort -Vr || true)
+  done
+  for candidate in "${roots[@]}"; do
+    if fm_test_node_usable "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 0
+}
+
+fm_test_require_node() {
+  local subject=${1:-this suite} resolved dir
+  resolved=$(fm_test_find_node)
+  if [ -z "$resolved" ]; then
+    fail "$subject requires Node $FM_TEST_NODE_MIN or newer and none was found on PATH or in any known install root; set FM_TEST_NODE to an explicit runtime"
+  fi
+  dir=$(dirname "$resolved")
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) PATH="$dir:$PATH"; export PATH ;;
+  esac
+  FM_TEST_NODE_BIN=$resolved
+  export FM_TEST_NODE_BIN
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal

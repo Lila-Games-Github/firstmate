@@ -76,6 +76,8 @@ Every chat view also carries `queuedCount` from the persisted queue, so a pile i
 The global Stop hook is inert for every chat that has no active route.
 For a routed worker, it reads the completed Codex turn id and final message from the persisted rollout, ignores an already delivered turn, and sends one marked follow-up to the controller chat.
 Playbot queues that follow-up when the controller is busy, so the controller receives another turn without a fixed polling interval.
+The wake reads the same delivery verdict as every other send, and a `failed` verdict does not record the turn as notified, so a wake Playbot rejected stays eligible for the next hook run and is written to `last-hook-error.json` instead of disappearing silently.
+A `queued` verdict is recorded as notified, because Playbot does deliver it once the controller's turn frees up.
 
 `close_lane` disables notification without archiving either chat.
 `archive_chat` is a separate explicit action and requires `confirm=true`.
@@ -92,7 +94,10 @@ Keeping the detector persisted and the confirmation live is what keeps that resu
 
 `answer_thread_card` answers one question card, which is the same call Playbot makes when a human clicks an option.
 Playbot resolves a request id against a single process-wide registry, so a valid id paired with the wrong chat would answer a different worker's card; the tool therefore re-reads the named chat's live cards and sends only an id that read found on that chat.
-An answer is the option label passed through exactly as it was read, because Playbot's own renderer uses each option's label as its answer value, and skipping a card is an explicit `skip` rather than an empty answer set.
+An answer is the option label passed through byte for byte as it was read, untrimmed and unrewritten, because Playbot's own renderer uses each option's label as its answer value and an altered label no longer matches the option.
+Skipping a card is an explicit `skip` rather than an empty answer set, so an empty object cannot skip by accident.
+Answering only some questions on a multi-question card is allowed, because Playbot's own renderer allows it, and the result reports `partial` with the question ids that received no answer so a partial response can never read as a complete one.
+A response Playbot already had in flight for that request is reported rather than refused: the underlying call refuses a second response to an already-resolved request on its own, and refusing here would also block a legitimate retry after a response that stalled.
 Approval and MCP cards are reported for context but are not answerable through this tool.
 
 `list_queued_messages` and `drop_queued_message` make the held queue visible and withdraw a superseded instruction instead of resending it.

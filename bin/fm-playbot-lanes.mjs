@@ -756,34 +756,42 @@ function readJsonText(text) {
   }
 }
 
-function normalizeAnswerValues(questionId, value) {
+// Playbot uses each option's LABEL as its answer value, so a value is sent
+// byte-for-byte as get_thread_card reported it: nothing here trims, cases, or
+// otherwise rewrites it, because an altered label no longer matches the option.
+// Only a value with no content at all is rejected.
+function answerValues(questionId, value) {
   const values = Array.isArray(value) ? value : [value];
-  const cleaned = values.map((entry) => {
+  for (const entry of values) {
     if (typeof entry !== "string") throw new Error(`Answer for question '${questionId}' must be a string or an array of strings`);
-    return entry.trim();
-  }).filter((entry) => entry.length > 0);
-  if (cleaned.length === 0) throw new Error(`Answer for question '${questionId}' must not be empty; use skip=true to skip the card instead`);
-  return cleaned;
+  }
+  const present = values.filter((entry) => entry.trim().length > 0);
+  if (present.length === 0) throw new Error(`Answer for question '${questionId}' must not be empty; use skip=true to skip the card instead`);
+  return present;
 }
 
-// Playbot's own renderer uses each option's LABEL as its answer value, so an
-// answer is passed through exactly as get_thread_card reported it rather than
-// normalized or reconstructed here.
+// Playbot's own renderer lets a human answer some questions on a card and skip
+// the rest, so a partial answer is reported rather than refused: refusing would
+// be stricter than Playbot itself, but a caller must never read a partial
+// response as a complete one.
 function buildCardResponse(card, answers, skip) {
+  const asked = card.questions.map((question) => question.id);
   if (skip) {
     if (answers !== undefined && Object.keys(answers).length > 0) throw new Error("skip=true answers the card with no selection; omit answers");
-    return { answers: {} };
+    return { response: { answers: {} }, answered: [], unanswered: asked, partial: false };
   }
   const entries = Object.entries(answers ?? {});
   if (entries.length === 0) throw new Error("answers must name at least one question id, or pass skip=true to skip the card");
-  const known = new Set(card.questions.map((question) => question.id));
+  const known = new Set(asked);
   const unknown = entries.map(([id]) => id).filter((id) => !known.has(id));
   if (unknown.length > 0) {
-    throw new Error(`Question not on request ${card.requestId}: ${unknown.join(", ")}; this card asks ${[...known].join(", ")}`);
+    throw new Error(`Question not on request ${card.requestId}: ${unknown.join(", ")}; this card asks ${asked.join(", ")}`);
   }
   const response = { answers: {} };
-  for (const [id, value] of entries) response.answers[id] = { answers: normalizeAnswerValues(id, value) };
-  return response;
+  for (const [id, value] of entries) response.answers[id] = { answers: answerValues(id, value) };
+  const answered = entries.map(([id]) => id);
+  const unanswered = asked.filter((id) => !answered.includes(id));
+  return { response, answered, unanswered, partial: unanswered.length > 0 };
 }
 
 function findAnswerableCard(snapshot, requestId) {
@@ -1028,6 +1036,7 @@ async function processStop(payload) {
       "Read or continue the worker through the playbot_lanes MCP tools.",
     ].join("\n");
     try {
+      let delivery = null;
       if (process.env.PLAYBOT_LANES_DRY_RUN === "1") {
         atomicWriteJson(path.join(stateDir(), "last-dry-run-wake.json"), {
           at: nowIso(),
@@ -1038,10 +1047,26 @@ async function processStop(payload) {
           message,
         });
       } else {
-        await sendMessage(supervisorRows[0], message);
+        ({ delivery } = await sendMessage(supervisorRows[0], message));
+      }
+      // A wake Playbot rejected must stay eligible for retry. Nothing throws on
+      // a rejection, so recording the turn as notified would suppress it
+      // permanently and leave no trace anywhere. A queued wake is fine: Playbot
+      // delivers it when the controller's turn frees up.
+      if (delivery?.state === "failed") {
+        atomicWriteJson(path.join(stateDir(), "last-hook-error.json"), {
+          at: nowIso(),
+          routeId: route.id,
+          workerThreadId: currentWorker.thread_id,
+          turnId: eventId,
+          delivery,
+          error: `Playbot rejected the lane wake: ${delivery.reason ?? "no reason reported"}`,
+        });
+        continue;
       }
       route.lastNotifiedTurnId = eventId;
       route.lastNotifiedAt = nowIso();
+      route.lastNotifiedDelivery = delivery?.state ?? null;
       route.updatedAt = nowIso();
       route.worker = publicThread(currentWorker);
       atomicWriteJson(routePath(route.id), route);
@@ -1224,7 +1249,7 @@ function toolDefinitions() {
     },
     {
       name: "answer_thread_card",
-      description: `Answer one named chat's pending question card, the same call Playbot makes when a human clicks an option. Re-reads the chat's live cards first and refuses unless requestId is pending on THAT chat, because Playbot resolves a request id globally and a mismatched pair would answer another worker's card. Pass each answer as the option label exactly as get_thread_card reported it, or as free text where the question allows it, or skip=true to skip the card. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
+      description: `Answer one named chat's pending question card, the same call Playbot makes when a human clicks an option. Re-reads the chat's live cards first and refuses unless requestId is pending on THAT chat, because Playbot resolves a request id globally and a mismatched pair would answer another worker's card. Pass each answer as the option label exactly as get_thread_card reported it, byte for byte and untrimmed, or as free text where the question allows it, or skip=true to skip the card. Answering only some of a multi-question card is allowed, as it is in Playbot, and is reported as partial with the question ids that received no answer. A response Playbot already had in flight is reported rather than refused. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
         workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"),
@@ -1403,7 +1428,18 @@ async function handleTool(name, args = {}) {
     if (args.expectItemId !== undefined && String(args.expectItemId) !== String(card.itemId)) {
       throw new Error(`Request ${card.requestId} now belongs to item ${card.itemId}, not ${args.expectItemId}; re-read get_thread_card before answering`);
     }
-    const response = buildCardResponse(card, args.answers, args.skip === true);
+    const { response, answered, unanswered, partial } = buildCardResponse(card, args.answers, args.skip === true);
+    // Playbot's own registry refuses a second response to an already-resolved
+    // request, so a response already in flight is reported rather than blocking
+    // the answer: refusing here would also refuse a legitimate retry after a
+    // response that stalled, which is the likelier case than a genuine race.
+    const warnings = [];
+    if (card.responding) {
+      warnings.push(`Playbot already had a response in flight for request ${card.requestId} when this answer was sent; if a human answered it first, Playbot rejects the duplicate rather than applying it twice.`);
+    }
+    if (partial) {
+      warnings.push(`Partial answer: this card asked ${card.questions.map((question) => question.id).join(", ")} and ${unanswered.join(", ")} received no answer, so the worker resumes with those unanswered.`);
+    }
     const after = await cardInvoke("threads:respondToUserInput", {
       threadId: thread.thread_id,
       requestId: request.id,
@@ -1416,10 +1452,15 @@ async function handleTool(name, args = {}) {
       playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
       requestId: request.id,
       skipped: args.skip === true,
+      partial,
+      answeredQuestions: answered,
+      unansweredQuestions: unanswered,
+      alreadyResponding: card.responding,
       sentAnswers: response.answers,
       statusAfter: after?.agentStatus ?? null,
       phaseAfter: after?.phase ?? null,
       cardsRemaining: remaining,
+      warnings,
     };
   }
   if (name === "list_queued_messages") {

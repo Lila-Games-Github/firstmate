@@ -5,10 +5,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v node >/dev/null 2>&1 || {
-  printf 'ok - fm-playbot-lanes: skipped (node unavailable)\n'
-  exit 0
-}
+# This suite is entirely Node-driven, so a missing runtime used to make it
+# print one ok line and exit 0 - a green run that proved nothing. Resolve a real
+# runtime even when PATH lacks it, and fail loudly when there genuinely is none.
+fm_test_require_node "fm-playbot-lanes"
+pass "fm-playbot-lanes: node $("$FM_TEST_NODE_BIN" -p 'process.versions.node') resolved at $FM_TEST_NODE_BIN"
 
 TMP_ROOT=$(fm_test_tmproot fm-playbot-lanes)
 export FIXTURE_ROOT="$TMP_ROOT/fixture"
@@ -331,6 +332,7 @@ const missingFile = path.join(process.env.FIXTURE_ROOT, 'ipc-missing');
 const reconcileFile = path.join(process.env.FIXTURE_ROOT, 'send-reconciles');
 const metadataFlakyFile = path.join(process.env.FIXTURE_ROOT, 'metadata-flaky');
 const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
+const sendFailsFile = path.join(process.env.FIXTURE_ROOT, 'send-fails');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
@@ -530,7 +532,9 @@ async function electronInvoke(channel, payload) {
       if (!readFileOr(reconcileFile, '')) {
         const held = (snapshot.userInputRequests ?? []).length > 0 || (snapshot.pendingMessages ?? []).length > 0;
         // Playbot's queued projection carries no createdAtMs; its outbound one does.
-        if (held) snapshot.pendingMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text });
+        if (readFileOr(sendFailsFile, '')) {
+          snapshot.outboundMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text, status: 'failed', reason: 'Message not sent', createdAtMs: 1000 + sendCounter });
+        } else if (held) snapshot.pendingMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text });
         else snapshot.outboundMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text, status: 'sending', createdAtMs: 1000 + sendCounter });
       }
       store[payload.threadId] = snapshot;
@@ -1126,3 +1130,106 @@ if (value.error) process.exit(1);
 if (value.result.structuredContent.thread.queuedCount !== 0) process.exit(1);
 NODE
 pass "fm-playbot-lanes: an unreadable persisted queue reads as unknown, never as empty"
+
+# ---------------------------------------------------------------------------
+# Answering: verbatim values, partial answers, and an in-flight response.
+# ---------------------------------------------------------------------------
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const store = JSON.parse(fs.readFileSync(file, 'utf8'));
+// A two-question card whose first option label carries surrounding whitespace,
+// and whose request Playbot already has a response in flight for.
+store['chat-worker-alt'] = {
+  threadId: 'chat-worker-alt',
+  phase: { kind: 'prompting', threadId: 'worker-alt-session', turnId: 'turn-alt-2' },
+  agentStatus: 'pending_input',
+  userInputRequests: [{
+    id: 11,
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'worker-alt-session',
+      turnId: 'turn-alt-2',
+      itemId: 'call_alt_2',
+      questions: [
+        { id: 'payout', header: 'Payout', question: 'Keep it?', isOther: false, isSecret: false,
+          options: [{ label: '  Keep 0.0 (Recommended)  ', description: 'Padded on purpose.' }, { label: 'Fix now', description: '' }] },
+        { id: 'comments', header: 'Comments', question: 'Where?', isOther: false, isSecret: false,
+          options: [{ label: 'Block', description: '' }, { label: 'Inline', description: '' }] },
+      ],
+    },
+  }],
+  approvalRequests: [],
+  mcpElicitationRequests: [],
+  respondingRequestIds: [11],
+  pendingMessages: [],
+  outboundMessages: [],
+};
+fs.writeFileSync(file, `${JSON.stringify(store, null, 2)}\n`);
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"requestId\":11,\"answers\":{\"payout\":\"  Keep 0.0 (Recommended)  \"}}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "a partial answer with a padded option label was not sent verbatim and reported as partial"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const respond = calls.filter(call => call.channel === 'threads:respondToUserInput');
+if (respond.length !== 1) process.exit(1);
+// Playbot uses the option label as the answer value, so the padding must survive.
+if (JSON.stringify(respond[0].payload.response) !== JSON.stringify({ answers: { payout: { answers: ['  Keep 0.0 (Recommended)  '] } } })) process.exit(1);
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.answered !== true || value.partial !== true) process.exit(1);
+if (value.answeredQuestions.join(',') !== 'payout') process.exit(1);
+if (value.unansweredQuestions.join(',') !== 'comments') process.exit(1);
+if (value.alreadyResponding !== true) process.exit(1);
+if (!value.warnings.some(warning => warning.includes('response in flight'))) process.exit(1);
+if (!value.warnings.some(warning => warning.includes('Partial answer'))) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a partial answer sends its option label verbatim and reports what went unanswered"
+
+# ---------------------------------------------------------------------------
+# The Stop-hook wake must not record a rejected wake as notified.
+# ---------------------------------------------------------------------------
+
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\"}}}")
+wake_lane=$(OUT="$out" node -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.lane.id)')
+[ -n "$wake_lane" ] || fail "could not register a lane for the wake-delivery test"
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const rollout = path.join(process.env.FIXTURE_ROOT, 'harness', 'worker-rollout.jsonl');
+const at = '2026-07-29T12:05:00.000Z';
+fs.appendFileSync(rollout, [
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'agent_message', message: 'THIRD ACK', phase: 'final_answer' } }),
+  JSON.stringify({ timestamp: at, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-worker-3', last_agent_message: 'THIRD ACK', completed_at: 1785326520, duration_ms: 100 } }),
+].join('\n') + '\n');
+NODE
+
+rm -f "$PLAYBOT_LANES_STATE_DIR/last-hook-error.json"
+printf 'yes\n' > "$FIXTURE_ROOT/send-fails"
+printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
+  | node --no-warnings "$SCRIPT" hook-stop >/dev/null
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json" ERR_FILE="$PLAYBOT_LANES_STATE_DIR/last-hook-error.json" node --no-warnings <<'NODE' || fail "a rejected lane wake was recorded as notified and left no trace"
+const fs = require('node:fs');
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+// Advancing this would suppress the retry forever, and nothing throws on a rejection.
+if (route.lastNotifiedTurnId === 'turn-worker-3') process.exit(1);
+const error = JSON.parse(fs.readFileSync(process.env.ERR_FILE, 'utf8'));
+if (error.turnId !== 'turn-worker-3' || error.delivery.state !== 'failed') process.exit(1);
+if (!error.error.includes('Playbot rejected the lane wake')) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/send-fails"
+printf '%s\n' '{"session_id":"worker-session","stop_hook_active":false}' \
+  | node --no-warnings "$SCRIPT" hook-stop >/dev/null
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$wake_lane.json" node --no-warnings <<'NODE' || fail "the retried wake did not land once Playbot accepted it"
+const fs = require('node:fs');
+const route = JSON.parse(fs.readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.lastNotifiedTurnId !== 'turn-worker-3') process.exit(1);
+if (route.lastNotifiedDelivery !== 'sending' && route.lastNotifiedDelivery !== 'delivered') process.exit(1);
+NODE
+pass "fm-playbot-lanes: a rejected lane wake stays eligible for retry and is recorded, then lands on retry"
