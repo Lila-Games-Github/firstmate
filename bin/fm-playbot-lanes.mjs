@@ -18,10 +18,22 @@
 // invokes Playbot's own IPC handlers: threads:launch for chat and workspace
 // creation on Playbot 0.94.0 and newer, with a detected fallback to the
 // pre-0.94 threads:openThread and workspace:create channels, plus the
-// unchanged threads:send and threads:archiveThread channels. It reads
+// unchanged threads:send and threads:archiveThread channels, whose send response
+// is the thread snapshot that says whether Playbot delivered the message or is
+// only holding it. It reads
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
 // directly.
+//
+// The question-card and pending-queue tools use four more of Playbot's own
+// channels - app:metadata, threads:getSnapshot, threads:respondToUserInput, and
+// threads:recallMessage - and every one of them is INTERNAL Playbot IPC rather
+// than a published API, verified against the versions VERIFIED_PLAYBOT_VERSIONS
+// names. A renamed channel or a changed snapshot shape refuses and names what is
+// missing instead of guessing. Reading a snapshot RESUMES a chat that has not
+// been resumed since Playbot started, exactly as opening it in the Playbot
+// window does, and starts no agent turn; list_parked_threads is the persisted,
+// non-resuming detector that keeps that cost off the fleet-wide poll.
 //
 // Durable private state defaults to ~/.playbot/mcp/project-chat. Routes are one
 // file each so independent Stop hooks do not contend on one shared JSON blob.
@@ -140,6 +152,7 @@ function threadRows() {
         t.workspace_id,
         t.session_id,
         t.agent_status,
+        t.pending_queue_json,
         t.has_unread,
         t.is_active,
         t.archived,
@@ -265,10 +278,43 @@ function resolveWorkspace(project, selector) {
   throw new Error(`Project ${project.id} has multiple active workspaces; provide workspace id or path`);
 }
 
-function threadsForProject(projectId, workspaceId = null, includeArchived = false) {
-  return threadRows().filter((row) => row.project_id === projectId
-    && (!workspaceId || row.workspace_id === workspaceId)
+// An explicit workspace selector is resolved against the project's ACTIVE
+// workspaces, so the unscoped project-wide search applies the same filter: a
+// chat in an archived workspace is out of scope, so it is neither addressable
+// nor able to make an active chat's title ambiguous.
+//
+// This is the ONE place that owns which chats are in scope, and every reader
+// that offers a chat to a caller goes through it - with a project id to scope to
+// one project, or with null to serve every live project - so a chat one reader
+// offers is by construction resolvable by another. Copying the scope rule per
+// call site is what let the parked detector hand back candidates its own
+// confirming read then refused. A reader that genuinely needs a wider scope asks
+// for it explicitly against threadRows().
+function threadsForProject(projectId = null, workspaceId = null, includeArchived = false) {
+  const liveProjects = new Set(topology().map((project) => project.id));
+  return threadRows().filter((row) => liveProjects.has(row.project_id)
+    && (!projectId || row.project_id === projectId)
+    && (workspaceId ? row.workspace_id === workspaceId : row.archive_state === "active")
     && (includeArchived || !row.archived));
+}
+
+// The explicit wider scope threadsForProject's note points at, and the ONE place
+// that owns it: an exact thread id, wherever that chat lives. Selecting a chat
+// out of a caller's request is resolution and belongs in the scoped accessor;
+// this is for a chat that is already identified - a registered lane's supervisor
+// or worker, or a row being re-read for fresh persisted state after it was
+// resolved and acted on. Re-applying the resolution scope there would refuse a
+// chat the caller was already acting on, and after a completed write it would
+// report a failure for work that succeeded.
+function threadRowById(threadId) {
+  const rows = threadId ? threadRows().filter((row) => row.thread_id === threadId && !row.archived) : [];
+  return rows.length === 1 ? rows[0] : null;
+}
+
+function refreshThread(row) {
+  const fresh = threadRowById(row.thread_id);
+  if (!fresh) throw new Error(`Thread ${row.thread_id} is no longer readable in Playbot state; use list_threads to see the chats its project holds`);
+  return fresh;
 }
 
 function publicThread(row) {
@@ -281,6 +327,9 @@ function publicThread(row) {
     workspace: row.workspace_name || (row.workspace_kind === "local" ? "Main" : row.workspace_id),
     sessionId: row.session_id,
     status: row.agent_status,
+    // Playbot holds undeliverable messages in a persisted queue the sender never
+    // sees, so every chat view reports how many are still waiting.
+    queuedCount: queuedMessageCount(row.pending_queue_json),
     hasUnread: Boolean(row.has_unread),
     isActive: Boolean(row.is_active),
     archived: Boolean(row.archived),
@@ -295,10 +344,25 @@ function resolveThread(projectId, workspaceId, selector, includeArchived = false
   const raw = String(selector).trim();
   const exact = rows.filter((row) => row.thread_id === raw || row.session_id === raw);
   if (exact.length === 1) return exact[0];
+  if (exact.length > 1) throw new Error(`Ambiguous thread id '${raw}': ${exact.map((row) => row.thread_id).join(", ")}`);
   const byTitle = rows.filter((row) => row.title.toLowerCase() === raw.toLowerCase());
   if (byTitle.length === 1) return byTitle[0];
   if (byTitle.length > 1) throw new Error(`Ambiguous thread title '${raw}': ${byTitle.map((row) => row.thread_id).join(", ")}`);
-  throw new Error(`Thread not found: ${raw}`);
+  const scope = workspaceId ? `workspace ${workspaceId}` : `project ${projectId}`;
+  throw new Error(`Thread not found in ${scope}: ${raw}; use list_threads to see the chats it holds`);
+}
+
+// A thread selector already identifies one chat, so the workspace it lives in
+// is derived from the matched row rather than guessed. Resolving the workspace
+// first made every request without an explicit workspace fall back to whichever
+// workspace happened to be selected in the Playbot UI, and then scoped the
+// thread lookup to that one workspace - so a chat anywhere else reported
+// "Thread not found" even though the caller had named it exactly. An explicit
+// workspace selector still narrows the lookup and still fails closed when it
+// does not match.
+function resolveThreadInProject(project, workspaceSelector, threadSelector, includeArchived = false) {
+  const workspaceId = workspaceSelector ? resolveWorkspace(project, workspaceSelector).id : null;
+  return resolveThread(project.id, workspaceId, threadSelector, includeArchived);
 }
 
 class CdpClient {
@@ -492,12 +556,345 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
   return publicThread(row);
 }
 
+// Every read of a Playbot snapshot projection goes through this one accessor. A
+// projection is a list or it is unreadable; it is never silently empty, because
+// an empty list is a positive claim - "nothing is held", "no card remains" -
+// that an unreadable shape has not earned. The caller picks the mode: a
+// PRE-ACTION read collects the unreadable names and refuses by name, while a
+// POST-ACTION read must not throw, because the write already succeeded, so it
+// reports the affected field as null and warns naming the projection.
+const UNREADABLE_PROJECTION = Symbol("unreadable projection");
+
+function snapshotProjection(snapshot, key, unreadable) {
+  const value = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) ? snapshot[key] : undefined;
+  if (Array.isArray(value)) return value;
+  if (unreadable && !unreadable.includes(key)) unreadable.push(key);
+  return UNREADABLE_PROJECTION;
+}
+
+function unreadableProjections(snapshot, keys) {
+  const unreadable = [];
+  for (const key of keys) snapshotProjection(snapshot, key, unreadable);
+  return unreadable;
+}
+
+// Playbot accepts a send it cannot deliver yet and holds it in a queue the
+// sender is never told about, so a bare "the channel returned" is not evidence
+// the worker saw anything. The send response is Playbot's own thread snapshot,
+// and it distinguishes held from in-flight from accepted; report that verdict
+// instead of implying success.
+const SEND_SNAPSHOT_REQUIRED_KEYS = ["pendingMessages", "outboundMessages"];
+
+async function deliveryVerdict(response, text, threadId) {
+  if (!response || typeof response !== "object") {
+    return {
+      state: "unknown",
+      messageId: null,
+      queuedTotal: null,
+      note: "Playbot returned no thread snapshot for this send, so delivery is unconfirmed. Check list_queued_messages before resending, because a resend compounds the queue.",
+    };
+  }
+  // A snapshot that IS returned without a readable queue projection is a
+  // renamed shape, not a legacy Playbot, so it is refused by name. A projection
+  // that is present but not a list is just as unreadable as a removed one, and
+  // treating it as an empty list would claim delivery for a held message.
+  const missing = unreadableProjections(response, SEND_SNAPSHOT_REQUIRED_KEYS);
+  if (missing.length > 0) {
+    throw new Error(`${playbotVersionLabel(await playbotVersion())} returned a send snapshot for ${threadId} without ${missing.join(", ")}, so whether the message was delivered or is only held cannot be read. `
+      + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape, and check list_queued_messages before resending.`);
+  }
+  const queued = snapshotProjection(response, "pendingMessages");
+  const outbound = snapshotProjection(response, "outboundMessages");
+  // Playbot projects both lists in arrival order and omits createdAtMs from the
+  // queued one, so the most recent match is the last one, not the newest stamp.
+  const newestMatch = (list) => {
+    const matches = list.filter((message) => message?.text === text);
+    return matches[matches.length - 1] ?? null;
+  };
+
+  const held = newestMatch(queued);
+  if (held) {
+    return {
+      state: "queued",
+      messageId: held.id ?? null,
+      queuedTotal: queued.length,
+      queuedAhead: queued.findIndex((message) => message === held),
+      note: "Playbot is HOLDING this message and the worker has not seen it. It stays held until the running turn ends or the chat's pending card is answered. Do not resend: use get_thread_card to answer the card, or drop_queued_message to withdraw a superseded instruction.",
+    };
+  }
+  const inFlight = newestMatch(outbound);
+  if (inFlight) {
+    return {
+      state: inFlight.status === "failed" ? "failed" : "sending",
+      messageId: inFlight.id ?? null,
+      queuedTotal: queued.length,
+      ...inFlight.reason ? { reason: inFlight.reason } : {},
+    };
+  }
+  return { state: "delivered", messageId: null, queuedTotal: queued.length };
+}
+
+// The invoke returning is the only evidence a send reached Playbot. Everything
+// after it - reading back the row, refusing an unreadable verdict - can still
+// throw on a message Playbot may already have delivered, so those failures are
+// marked and must never be treated as "the send did not happen".
+function sendReachedPlaybot(error) {
+  return Boolean(error && typeof error === "object" && error.sendReachedPlaybot);
+}
+
 async function sendMessage(row, text) {
   if (row.archived) throw new Error(`Cannot send to archived thread ${row.thread_id}`);
   const value = String(text ?? "").trim();
   if (!value) throw new Error("message must not be empty");
-  await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
-  return publicThread(resolveThread(row.project_id, row.workspace_id, row.thread_id));
+  const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
+  try {
+    return {
+      thread: publicThread(refreshThread(row)),
+      delivery: await deliveryVerdict(response, value, row.thread_id),
+    };
+  } catch (error) {
+    const accepted = error instanceof Error ? error : new Error(String(error));
+    accepted.sendReachedPlaybot = true;
+    throw accepted;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Question cards, live snapshots, and the pending-message queue.
+//
+// These channels are Playbot's INTERNAL app IPC, not a published API. Playbot's
+// own built-in MCP surface is read-only, so there is no supported write route to
+// a parked card; this is the same call Playbot's UI makes when a human clicks an
+// option. Everything here is verified against the Playbot versions named below,
+// so a renamed channel or a dropped snapshot field must refuse and name what is
+// missing rather than answer from a half-understood shape.
+// ---------------------------------------------------------------------------
+
+const VERIFIED_PLAYBOT_VERSIONS = "0.95.x";
+const SNAPSHOT_REQUIRED_KEYS = ["agentStatus", "phase"];
+// Every projection below must be a list. One that arrives as anything else is
+// as unreadable as a removed one, and reading it as empty would report a card
+// or a held message as absent.
+const SNAPSHOT_REQUIRED_LIST_KEYS = [
+  "userInputRequests",
+  "approvalRequests",
+  "mcpElicitationRequests",
+  "respondingRequestIds",
+  "pendingMessages",
+  "outboundMessages",
+];
+let detectedPlaybotVersion;
+
+async function playbotVersion() {
+  if (detectedPlaybotVersion !== undefined) return detectedPlaybotVersion;
+  let metadata;
+  try {
+    metadata = await playbotInvoke("app:metadata", undefined);
+  } catch {
+    // Only a successful read is cached; this process outlives one bad moment.
+    return null;
+  }
+  const version = metadata?.version;
+  if (typeof version !== "string" || !version.trim()) return null;
+  detectedPlaybotVersion = version.trim();
+  return detectedPlaybotVersion;
+}
+
+function playbotVersionLabel(version) {
+  return version ? `Playbot ${version}` : "this Playbot (version unreadable)";
+}
+
+// A renamed or removed channel is the exact upgrade failure this surface has to
+// survive, and Playbot reports it as a distinct missing-handler rejection.
+async function cardInvoke(channel, payload) {
+  try {
+    return await playbotInvoke(channel, payload);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/No handler registered/i.test(message)) {
+      throw new Error(`${playbotVersionLabel(await playbotVersion())} does not register the '${channel}' channel this tool needs. `
+        + `The card, snapshot, and queue tools are verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC. `
+        + "Answer or clear the card in the Playbot window and re-verify the channel names against the installed Playbot before using this tool again.");
+    }
+    throw error;
+  }
+}
+
+function assertSnapshotShape(snapshot, threadId, version) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error(`Playbot returned no thread snapshot for ${threadId}; expected an object from 'threads:getSnapshot'`);
+  }
+  const missing = [
+    ...SNAPSHOT_REQUIRED_KEYS.filter((key) => snapshot[key] === undefined),
+    ...unreadableProjections(snapshot, SNAPSHOT_REQUIRED_LIST_KEYS),
+  ];
+  if (missing.length > 0) {
+    throw new Error(`${playbotVersionLabel(version)} returned a thread snapshot without ${missing.join(", ")}. `
+      + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape before trusting these tools.`);
+  }
+  return snapshot;
+}
+
+// Reading a snapshot resumes a chat that has not been resumed in this Playbot
+// run, exactly as opening it in the Playbot window does. list_parked_threads is
+// the non-resuming detector; this is the confirming read.
+async function threadSnapshot(row) {
+  const version = await playbotVersion();
+  const snapshot = await cardInvoke("threads:getSnapshot", { threadId: row.thread_id });
+  return { snapshot: assertSnapshotShape(snapshot, row.thread_id, version), version };
+}
+
+function publicQuestion(question) {
+  return {
+    id: question?.id ?? null,
+    header: question?.header ?? null,
+    question: question?.question ?? null,
+    isOther: Boolean(question?.isOther),
+    isSecret: Boolean(question?.isSecret),
+    // Playbot renders a free-text field instead of options when a question
+    // carries none, and an extra free-text slot alongside them when isOther.
+    freeTextOnly: question?.options === null || question?.options === undefined,
+    options: (question?.options ?? []).map((option) => ({
+      label: option?.label ?? null,
+      description: option?.description ?? null,
+    })),
+  };
+}
+
+function publicCard(request, kind, snapshot, unreadable) {
+  const params = request?.params ?? {};
+  const responding = snapshotProjection(snapshot, "respondingRequestIds", unreadable);
+  return {
+    requestId: request?.id ?? null,
+    kind,
+    method: request?.method ?? null,
+    // params.threadId is the Codex session id, not the Playbot chat id.
+    sessionId: params.threadId ?? null,
+    turnId: params.turnId ?? null,
+    itemId: params.itemId ?? null,
+    answerable: kind === "question",
+    responding: responding === UNREADABLE_PROJECTION ? null : responding.some((id) => String(id) === String(request?.id)),
+    questions: (params.questions ?? []).map(publicQuestion),
+  };
+}
+
+const CARD_PROJECTIONS = [
+  ["userInputRequests", "question"],
+  ["approvalRequests", "approval"],
+  ["mcpElicitationRequests", "elicitation"],
+];
+
+// null, never [], when any card projection was unreadable: an empty card list
+// reads as "the card is cleared", which an unreadable shape has not shown.
+function publicCards(snapshot, unreadable) {
+  const groups = CARD_PROJECTIONS.map(([key, kind]) => [snapshotProjection(snapshot, key, unreadable), kind]);
+  if (groups.some(([list]) => list === UNREADABLE_PROJECTION)) return null;
+  return groups.flatMap(([list, kind]) => list.map((request) => publicCard(request, kind, snapshot, unreadable)));
+}
+
+function publicQueuedMessage(message, status) {
+  return {
+    id: message?.id ?? null,
+    text: message?.text ?? null,
+    status,
+    createdAtMs: message?.createdAtMs ?? null,
+    ...message?.steering ? { steering: true } : {},
+    ...message?.reason ? { reason: message.reason } : {},
+  };
+}
+
+// Playbot holds a message it cannot deliver yet in pendingMessages and reports
+// an in-flight or rejected one in outboundMessages, so a message id that is in
+// neither list has actually reached the agent's turn.
+function publicQueue(snapshot, unreadable) {
+  const queued = snapshotProjection(snapshot, "pendingMessages", unreadable);
+  const outbound = snapshotProjection(snapshot, "outboundMessages", unreadable);
+  const withStatus = (status) => outbound === UNREADABLE_PROJECTION
+    ? null
+    : outbound.filter((message) => message?.status === status).map((message) => publicQueuedMessage(message, status));
+  return {
+    queued: queued === UNREADABLE_PROJECTION ? null : queued.map((message) => publicQueuedMessage(message, "queued")),
+    sending: withStatus("sending"),
+    failed: withStatus("failed"),
+  };
+}
+
+// "not-recallable" means Playbot had already delivered the message, so a warning
+// about the snapshot must never carry "the recall was applied" past that path: a
+// supervisor would read a superseded instruction as withdrawn when it was not.
+function recallOutcomeClause(outcome) {
+  return outcome === "recalled"
+    ? "The recall was applied"
+    : `The recall was NOT applied - Playbot reported outcome ${outcome ?? "none"}`;
+}
+
+// null means the ledger is present but unreadable, never that nothing is held;
+// 0 is reserved for an absent or empty queue.
+function queuedMessageCount(pendingQueueJson) {
+  if (typeof pendingQueueJson !== "string" || !pendingQueueJson.trim()) return 0;
+  const ledger = readJsonText(pendingQueueJson);
+  return Array.isArray(ledger?.messages) ? ledger.messages.length : null;
+}
+
+function readJsonText(text) {
+  if (typeof text !== "string" || !text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+// Playbot uses each option's LABEL as its answer value, so a value is sent
+// byte-for-byte as get_thread_card reported it: nothing here trims, cases, or
+// otherwise rewrites it, because an altered label no longer matches the option.
+// Only a value with no content at all is rejected.
+function answerValues(questionId, value) {
+  const values = Array.isArray(value) ? value : [value];
+  for (const entry of values) {
+    if (typeof entry !== "string") throw new Error(`Answer for question '${questionId}' must be a string or an array of strings`);
+  }
+  const present = values.filter((entry) => entry.trim().length > 0);
+  if (present.length === 0) throw new Error(`Answer for question '${questionId}' must not be empty; use skip=true to skip the card instead`);
+  return present;
+}
+
+// Playbot's own renderer lets a human answer some questions on a card and skip
+// the rest, so a partial answer is reported rather than refused: refusing would
+// be stricter than Playbot itself, but a caller must never read a partial
+// response as a complete one.
+function buildCardResponse(card, answers, skip) {
+  const asked = card.questions.map((question) => question.id);
+  if (skip) {
+    if (answers !== undefined && Object.keys(answers).length > 0) throw new Error("skip=true answers the card with no selection; omit answers");
+    return { response: { answers: {} }, answered: [], unanswered: asked, partial: false };
+  }
+  const entries = Object.entries(answers ?? {});
+  if (entries.length === 0) throw new Error("answers must name at least one question id, or pass skip=true to skip the card");
+  const known = new Set(asked);
+  const unknown = entries.map(([id]) => id).filter((id) => !known.has(id));
+  if (unknown.length > 0) {
+    throw new Error(`Question not on request ${card.requestId}: ${unknown.join(", ")}; this card asks ${asked.join(", ")}`);
+  }
+  const response = { answers: {} };
+  for (const [id, value] of entries) response.answers[id] = { answers: answerValues(id, value) };
+  const answered = entries.map(([id]) => id);
+  const unanswered = asked.filter((id) => !answered.includes(id));
+  return { response, answered, unanswered, partial: unanswered.length > 0 };
+}
+
+function findAnswerableCard(snapshot, requestId) {
+  const cards = publicCards(snapshot);
+  const requests = snapshotProjection(snapshot, "userInputRequests");
+  const match = requests === UNREADABLE_PROJECTION ? null : requests.find((request) => String(request?.id) === String(requestId));
+  if (match) return { request: match, card: publicCard(match, "question", snapshot) };
+  const other = cards.find((card) => String(card.requestId) === String(requestId));
+  if (other) {
+    throw new Error(`Request ${requestId} is a ${other.kind} card, not a question card; answer_thread_card only answers question cards`);
+  }
+  const available = cards.map((card) => `${card.requestId} (${card.kind})`);
+  throw new Error(`No pending request ${requestId} on this chat${available.length > 0 ? `; it currently holds ${available.join(", ")}` : " and it holds no pending card at all"}. `
+    + "Re-read get_thread_card: the card may already have been answered, or Playbot may have restarted and dropped it.");
 }
 
 function codexSession(sessionId) {
@@ -627,6 +1024,8 @@ function consumeCaller(toolName) {
 }
 
 function rowForSession(sessionId) {
+  // Deliberately the raw rows, not the scoped accessor: a chat must be able to
+  // identify itself wherever it lives, including an archived workspace.
   const rows = threadRows().filter((row) => row.session_id === sessionId && !row.archived);
   if (rows.length === 1) return rows[0];
   if (rows.length > 1) throw new Error(`Codex session ${sessionId} maps to multiple Playbot chats`);
@@ -697,6 +1096,21 @@ function bounded(text, max = 4_000) {
   return value.length <= max ? value : `${value.slice(0, max)}\n[truncated]`;
 }
 
+// A persisted route is read back on every hook run and returned verbatim by
+// list_lanes, so one writer owns the whole last-notification record: every field
+// describing a notification is set or removed together here, and no field from
+// an earlier one survives to contradict the wake beside it.
+function recordNotified(route, worker, eventId, deliveryState, error = null) {
+  route.lastNotifiedTurnId = eventId;
+  route.lastNotifiedAt = nowIso();
+  route.lastNotifiedDelivery = deliveryState;
+  if (error) route.lastNotifiedError = error;
+  else delete route.lastNotifiedError;
+  route.updatedAt = nowIso();
+  route.worker = publicThread(worker);
+  atomicWriteJson(routePath(route.id), route);
+}
+
 async function processStop(payload) {
   const sessionId = payload.session_id ?? payload.sessionId;
   if (!sessionId) return { matched: 0, notified: 0 };
@@ -704,8 +1118,13 @@ async function processStop(payload) {
   if (!worker) return { matched: 0, notified: 0 };
   const matches = loadRoutes().filter((route) => route.active && route.worker?.id === worker.thread_id);
   let notified = 0;
+  // A routed worker must stay wakeable wherever its chat lives, exactly as
+  // rowForSession found it, so this is the exact-id accessor rather than the
+  // scoped one, and an unreadable row ends the run instead of throwing through
+  // the routes still waiting to be processed.
+  const currentWorker = threadRowById(worker.thread_id);
+  if (!currentWorker) return { matched: matches.length, notified };
   for (const route of matches) {
-    const currentWorker = resolveThread(worker.project_id, worker.workspace_id, worker.thread_id);
     const conversation = recentConversation(currentWorker, 2);
     const completedTurnId = conversation.completion?.turnId ?? null;
     let eventId = completedTurnId;
@@ -716,8 +1135,10 @@ async function processStop(payload) {
       eventKind = "input request";
     }
     if (route.lastNotifiedTurnId === eventId) continue;
-    const supervisorRows = threadRows().filter((row) => row.thread_id === route.supervisor?.id && !row.archived);
-    if (supervisorRows.length !== 1 || supervisorRows[0].thread_id === currentWorker.thread_id) continue;
+    // A registered supervisor is addressed by exact id and stays wakeable
+    // wherever it lives, so this is the exact-id accessor too.
+    const supervisor = threadRowById(route.supervisor?.id);
+    if (!supervisor || supervisor.thread_id === currentWorker.thread_id) continue;
     const message = [
       WAKE_PREFIX,
       `Lane: ${route.id}`,
@@ -729,31 +1150,93 @@ async function processStop(payload) {
       "Read or continue the worker through the playbot_lanes MCP tools.",
     ].join("\n");
     try {
+      let delivery = null;
       if (process.env.PLAYBOT_LANES_DRY_RUN === "1") {
         atomicWriteJson(path.join(stateDir(), "last-dry-run-wake.json"), {
           at: nowIso(),
           routeId: route.id,
-          supervisorThreadId: supervisorRows[0].thread_id,
+          supervisorThreadId: supervisor.thread_id,
           workerThreadId: currentWorker.thread_id,
           turnId: eventId,
           message,
         });
       } else {
-        await sendMessage(supervisorRows[0], message);
+        ({ delivery } = await sendMessage(supervisor, message));
       }
-      route.lastNotifiedTurnId = eventId;
-      route.lastNotifiedAt = nowIso();
-      route.updatedAt = nowIso();
-      route.worker = publicThread(currentWorker);
-      atomicWriteJson(routePath(route.id), route);
+      // A wake Playbot rejected must stay eligible for retry. Nothing throws on
+      // a rejection, so recording the turn as notified would suppress it
+      // permanently and leave no trace anywhere. A queued wake is fine: Playbot
+      // delivers it when the controller's turn frees up.
+      if (delivery?.state === "failed") {
+        atomicWriteJson(path.join(stateDir(), "last-hook-error.json"), {
+          at: nowIso(),
+          routeId: route.id,
+          workerThreadId: currentWorker.thread_id,
+          turnId: eventId,
+          delivery,
+          error: `Playbot rejected the lane wake: ${delivery.reason ?? "no reason reported"}`,
+        });
+        continue;
+      }
+      // "unknown" means opposite things on the two Playbot generations, so it is
+      // classified with the detection the adapter already has rather than a new
+      // probe: on a pre-0.94 Playbot threads:send returns nothing, so unknown is
+      // the normal, information-free result and the wake must advance; on a
+      // Playbot whose send path CAN report a verdict, unknown means it returned
+      // something it should not have, which is a real anomaly. Wrongly advancing
+      // loses a wake silently - the worker finishes, nobody is told, and there is
+      // no retry and no error - while wrongly refusing only repeats a
+      // self-announcing wake. Silent loss is the worse failure, so an
+      // unclassifiable unknown stays eligible for retry and is recorded.
+      // The detection is resolved into a local here rather than awaited inside
+      // the branch: the send has already returned, so a throw from the probe is
+      // not a send failure and must not be recorded as one.
+      let legacySendPath = false;
+      let detectionError = null;
+      if (delivery?.state === "unknown") {
+        try {
+          legacySendPath = await chatCreationApi() === "openThread";
+        } catch (error) {
+          detectionError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      if (delivery?.state === "unknown" && !legacySendPath) {
+        const unconfirmed = detectionError
+          ? `Playbot returned no thread snapshot for the lane wake, and the chat-creation detection that would say whether this Playbot can report a verdict at all failed: ${detectionError}`
+          : "Playbot returned no thread snapshot for the lane wake, so delivery is unconfirmed on a Playbot whose send path reports a verdict";
+        atomicWriteJson(path.join(stateDir(), "last-hook-error.json"), {
+          at: nowIso(),
+          routeId: route.id,
+          workerThreadId: currentWorker.thread_id,
+          turnId: eventId,
+          delivery,
+          error: `${unconfirmed}. Check list_queued_messages for ${supervisor.thread_id} before the next hook run resends it.`,
+        });
+        continue;
+      }
+      recordNotified(route, currentWorker, eventId, delivery?.state ?? null);
       notified += 1;
     } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
       atomicWriteJson(path.join(stateDir(), "last-hook-error.json"), {
         at: nowIso(),
         routeId: route.id,
         workerThreadId: currentWorker.thread_id,
-        error: error instanceof Error ? error.message : String(error),
+        turnId: eventId,
+        sendReachedPlaybot: sendReachedPlaybot(error),
+        error: reason,
       });
+      // A send Playbot accepted counts as notified even when its verdict could
+      // not be read, on the same rule that makes a queued wake a success:
+      // Playbot has the message. Leaving the turn unnotified would resend the
+      // identical wake on the next hook run and grow the very invisible queue
+      // this surface exists to expose - a change feeding the defect it was
+      // written to remove. Only a send that never reached Playbot stays
+      // eligible for retry.
+      if (sendReachedPlaybot(error)) {
+        recordNotified(route, currentWorker, eventId, "unreadable", reason);
+        notified += 1;
+      }
     }
   }
   return { matched: matches.length, notified };
@@ -896,30 +1379,71 @@ function toolDefinitions() {
     },
     {
       name: "send_message",
-      description: "Send a message to an existing Playbot chat in any project without selecting or focusing that chat.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send") }, ["project", "thread", "message"]),
+      description: "Send a message to an existing Playbot chat in any project without selecting or focusing that chat. Reports delivery from Playbot's own send response: state \"delivered\" means the worker accepted it, \"sending\" means it is in flight, \"queued\" means Playbot is HOLDING it and the worker has not seen it, \"failed\" carries Playbot's reason, and \"unknown\" means delivery could not be confirmed. Never treat a queued or unknown send as delivered.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send") }, ["project", "thread", "message"]),
     },
     {
       name: "read_thread",
       description: "Read a bounded recent Playbot conversation directly from its persisted Codex rollout without resuming the chat.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), thread: string("Thread id, Codex session id, or unique exact title"), turnLimit: { type: "integer", minimum: 1, maximum: 30, default: 8 } }, ["project", "thread"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), turnLimit: { type: "integer", minimum: 1, maximum: 30, default: 8 } }, ["project", "thread"]),
       annotations: { readOnlyHint: true },
     },
     {
       name: "get_thread_status",
       description: "Get one Playbot chat's persisted status and route membership without resuming it.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
       annotations: { readOnlyHint: true },
+    },
+    {
+      name: "list_parked_threads",
+      description: `Cheap detector for chats that may be parked on a question or approval card, read from persisted state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
+      inputSchema: object({ project: string("Optional project id, root path, or unique project name; every project when omitted") }),
+      // The only one of the three card reads that is genuinely side-effect-free:
+      // it never contacts Playbot. get_thread_card and list_queued_messages
+      // deliberately carry no readOnlyHint, because that hint is what lets a
+      // client call a tool freely without approval, and the resume those two
+      // perform is the exact cost this cheap persisted detector exists to keep
+      // off an unbounded poll.
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: "get_thread_card",
+      description: `Read the pending question, approval, and MCP cards for one named chat, with every question's exact text and option labels, plus its live queued messages. Addresses the chat explicitly and never acts on the visibly selected one. This is the confirming read for list_parked_threads and it RESUMES a chat that has not been resumed since Playbot started, exactly as opening that chat in the Playbot window does; it starts no agent turn. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC and refuses if the channel or snapshot shape has changed.`,
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+    },
+    {
+      name: "answer_thread_card",
+      description: `Answer one named chat's pending question card, the same call Playbot makes when a human clicks an option. Re-reads the chat's live cards first and refuses unless requestId is pending on THAT chat, because Playbot resolves a request id globally and a mismatched pair would answer another worker's card. Pass each answer as the option label exactly as get_thread_card reported it, byte for byte and untrimmed, or as free text where the question allows it, or skip=true to skip the card. Answering only some of a multi-question card is allowed, as it is in Playbot, and is reported as partial with the question ids that received no answer. A response Playbot already had in flight is reported rather than refused. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
+      inputSchema: object({
+        project: string("Project id, root path, or unique project name"),
+        workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"),
+        thread: string("Thread id, Codex session id, or unique exact title"),
+        requestId: { description: "Pending question requestId exactly as get_thread_card returned it", type: ["integer", "string"] },
+        answers: { description: "Answer per question id: the exact option label, free text, or an array of either", type: "object", additionalProperties: { type: ["string", "array"], items: { type: "string" } } },
+        skip: boolean("Skip the card without choosing any option; answers must then be omitted", false),
+        expectTurnId: string("Refuse unless the card still belongs to this turn id"),
+        expectItemId: string("Refuse unless the card still belongs to this tool-call item id"),
+      }, ["project", "thread", "requestId"]),
+    },
+    {
+      name: "list_queued_messages",
+      description: `List one named chat's undelivered messages: queued, in flight, and failed. Playbot holds a message it cannot deliver yet and tells the sender nothing, so this is how a pile becomes visible. Resumes an unresumed chat the same way get_thread_card does. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+    },
+    {
+      name: "drop_queued_message",
+      description: `Recall one queued or in-flight message from a named chat so a superseded instruction is removed instead of resent, the same call Playbot's own recall control makes. Returns outcome "recalled" when it was removed and "not-recallable" when it had already been delivered; neither is an error. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), messageId: string("Message id from list_queued_messages") }, ["project", "thread", "messageId"]),
     },
     {
       name: "register_lane",
       description: "Bind an existing worker chat to the current controller chat so its future completed turns wake the controller.",
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name"), thread: string("Worker thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Worker thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
     },
     {
       name: "dispatch",
-      description: "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status and read_thread.",
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      description: "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status, read_thread, and get_thread_card.",
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -935,7 +1459,7 @@ function toolDefinitions() {
     {
       name: "archive_chat",
       description: "Archive one Playbot chat. Requires confirm=true and never archives the current controller implicitly.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), thread: string("Thread id, Codex session id, or unique exact title"), confirm: { type: "boolean", const: true } }, ["project", "thread", "confirm"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), confirm: { type: "boolean", const: true } }, ["project", "thread", "confirm"]),
     },
   ];
 }
@@ -961,6 +1485,21 @@ async function handleTool(name, args = {}) {
     return { lane: route };
   }
 
+  if (name === "list_parked_threads") {
+    const scope = args.project ? resolveProject(args.project, projects).id : null;
+    // No scope-widening parameter: the confirming read this hands back has no
+    // matching one, so an archived chat offered here would be a candidate
+    // get_thread_card then refuses to resolve.
+    const candidates = threadsForProject(scope, null)
+      .filter((row) => row.agent_status === "pending_input")
+      .map(publicThread);
+    return {
+      candidates,
+      confirmWith: "get_thread_card",
+      note: "Persisted status only. Playbot reports a rehydrated chat as pending_input even when it is not parked, so confirm each candidate with get_thread_card before answering anything.",
+    };
+  }
+
   const project = resolveProject(args.project, projects);
   if (name === "create_workspace") {
     return { workspace: await createWorkspace(project, args) };
@@ -974,10 +1513,10 @@ async function handleTool(name, args = {}) {
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
     let worker = null;
     if (!wantsNewWorkspace) {
-      const workspace = resolveWorkspace(project, args.workspace);
       if (args.thread) {
-        worker = resolveThread(project.id, workspace.id, args.thread);
+        worker = resolveThreadInProject(project, args.workspace, args.thread);
       } else if (args.title) {
+        const workspace = resolveWorkspace(project, args.workspace);
         const matches = threadsForProject(project.id, workspace.id).filter((row) => row.title.toLowerCase() === String(args.title).trim().toLowerCase());
         if (matches.length > 1) throw new Error(`Ambiguous worker title '${args.title}': ${matches.map((row) => row.thread_id).join(", ")}`);
         worker = matches[0] ?? null;
@@ -989,19 +1528,24 @@ async function handleTool(name, args = {}) {
     }
     const lane = caller ? registerLane(caller, worker) : null;
     try {
-      const thread = await sendMessage(worker, args.message);
+      const { thread, delivery } = await sendMessage(worker, args.message);
       return caller
-        ? { lane, thread }
+        ? { lane, thread, delivery }
         : {
             lane: null,
             thread,
+            delivery,
             supervision: {
               mode: "poll",
-              tools: ["get_thread_status", "read_thread"],
+              tools: ["get_thread_status", "read_thread", "get_thread_card"],
             },
           };
     } catch (error) {
-      if (lane) {
+      // Only a send that never reached Playbot may tear the lane down. When the
+      // send was accepted the message may already be with the worker, so the
+      // route must survive to carry every later wake even though the refusal
+      // still reaches the caller.
+      if (lane && !sendReachedPlaybot(error)) {
         lane.active = false;
         lane.updatedAt = nowIso();
         lane.error = error instanceof Error ? error.message : String(error);
@@ -1011,16 +1555,122 @@ async function handleTool(name, args = {}) {
     }
   }
 
-  const workspace = resolveWorkspace(project, args.workspace);
   if (name === "list_threads") {
+    const workspace = resolveWorkspace(project, args.workspace);
     return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
   }
-  const thread = resolveThread(project.id, workspace.id, args.thread, name === "archive_chat");
-  if (name === "send_message") return { thread: await sendMessage(thread, args.message) };
+  const thread = resolveThreadInProject(project, args.workspace, args.thread, name === "archive_chat");
+  if (name === "send_message") return sendMessage(thread, args.message);
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
   if (name === "get_thread_status") {
     const publicValue = publicThread(thread);
     return { thread: publicValue, lanes: loadRoutes().filter((route) => route.supervisor?.id === thread.thread_id || route.worker?.id === thread.thread_id) };
+  }
+  if (name === "get_thread_card") {
+    const { snapshot, version } = await threadSnapshot(thread);
+    const cards = publicCards(snapshot);
+    return {
+      thread: publicThread(thread),
+      playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
+      parked: cards.length > 0,
+      status: snapshot.agentStatus ?? null,
+      phase: snapshot.phase ?? null,
+      cards,
+      queue: publicQueue(snapshot),
+      warnings: cards.length === 0 && thread.agent_status === "pending_input"
+        ? ["Persisted status says pending_input but the live chat holds no pending card; treat it as not parked."]
+        : [],
+    };
+  }
+  if (name === "answer_thread_card") {
+    // The re-read is the safety property, not a courtesy: Playbot resolves a
+    // request id against one process-wide registry, so a stale or borrowed id
+    // paired with this chat would answer a different worker's card. Only an id
+    // this read found on THIS chat is ever sent, and it is sent as the value
+    // Playbot itself reported.
+    const { snapshot, version } = await threadSnapshot(thread);
+    const { request, card } = findAnswerableCard(snapshot, args.requestId);
+    if (args.expectTurnId !== undefined && String(args.expectTurnId) !== String(card.turnId)) {
+      throw new Error(`Request ${card.requestId} now belongs to turn ${card.turnId}, not ${args.expectTurnId}; re-read get_thread_card before answering`);
+    }
+    if (args.expectItemId !== undefined && String(args.expectItemId) !== String(card.itemId)) {
+      throw new Error(`Request ${card.requestId} now belongs to item ${card.itemId}, not ${args.expectItemId}; re-read get_thread_card before answering`);
+    }
+    const { response, answered, unanswered, partial } = buildCardResponse(card, args.answers, args.skip === true);
+    // Playbot's own registry refuses a second response to an already-resolved
+    // request, so a response already in flight is reported rather than blocking
+    // the answer: refusing here would also refuse a legitimate retry after a
+    // response that stalled, which is the likelier case than a genuine race.
+    const warnings = [];
+    if (card.responding) {
+      warnings.push(`Playbot already had a response in flight for request ${card.requestId} when this answer was sent; if a human answered it first, Playbot rejects the duplicate rather than applying it twice.`);
+    }
+    if (partial) {
+      warnings.push(`Partial answer: this card asked ${card.questions.map((question) => question.id).join(", ")} and ${unanswered.join(", ")} received no answer, so the worker resumes with those unanswered.`);
+    }
+    const after = await cardInvoke("threads:respondToUserInput", {
+      threadId: thread.thread_id,
+      requestId: request.id,
+      response,
+    });
+    // The answer already reached Playbot, so an unreadable response snapshot is
+    // reported, never thrown: throwing would call a completed answer a failure.
+    const unreadableAfter = [];
+    const remaining = publicCards(after, unreadableAfter);
+    // Only the card projections decide whether cardsRemaining could be read. An
+    // unreadable respondingRequestIds leaves it populated and correct, and each
+    // card already carries responding: null, so claiming otherwise here would
+    // contradict the payload shipped beside it.
+    if (remaining === null) {
+      const unreadableCards = unreadableAfter.filter((key) => CARD_PROJECTIONS.some(([projection]) => projection === key));
+      warnings.push(`The answer was sent, but Playbot's response snapshot carried no readable ${unreadableCards.join(", ")}, so cardsRemaining is null rather than empty: whether this chat still holds a card is unknown, and get_thread_card is the way to find out.`);
+    }
+    return {
+      answered: true,
+      thread: publicThread(refreshThread(thread)),
+      playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
+      requestId: request.id,
+      skipped: args.skip === true,
+      partial,
+      answeredQuestions: answered,
+      unansweredQuestions: unanswered,
+      alreadyResponding: card.responding,
+      sentAnswers: response.answers,
+      statusAfter: after?.agentStatus ?? null,
+      phaseAfter: after?.phase ?? null,
+      cardsRemaining: remaining,
+      warnings,
+    };
+  }
+  if (name === "list_queued_messages") {
+    const { snapshot, version } = await threadSnapshot(thread);
+    return {
+      thread: publicThread(thread),
+      playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
+      ...publicQueue(snapshot),
+    };
+  }
+  if (name === "drop_queued_message") {
+    const messageId = String(args.messageId ?? "").trim();
+    if (!messageId) throw new Error("messageId must not be empty; use list_queued_messages to choose one");
+    const version = await playbotVersion();
+    const result = await cardInvoke("threads:recallMessage", { threadId: thread.thread_id, messageId });
+    // The recall already happened, so an unreadable queue projection is reported
+    // as null and warned about rather than thrown, and never as an empty queue: a
+    // supervisor reads an empty queueAfter as "the pile is gone" and acts on it.
+    const unreadableAfter = [];
+    const queueAfter = publicQueue(result?.snapshot, unreadableAfter);
+    return {
+      thread: publicThread(refreshThread(thread)),
+      playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
+      messageId,
+      outcome: result?.outcome ?? null,
+      recalled: result?.outcome === "recalled" ? result.message ?? null : null,
+      queueAfter,
+      warnings: unreadableAfter.length > 0
+        ? [`${recallOutcomeClause(result?.outcome)}, and Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so that part of queueAfter is null rather than empty: what remains held is unknown, and list_queued_messages is the way to find out.`]
+        : [],
+    };
   }
   if (name === "register_lane") {
     if (!caller) throw new Error("register_lane requires a Playbot controller chat; external-terminal callers supervise with get_thread_status and read_thread");
@@ -1124,12 +1774,14 @@ async function doctor() {
   } catch {
     renderer = false;
   }
+  let playbotApp = null;
   if (renderer) {
     try {
       chatCreation = await chatCreationApi();
     } catch {
       chatCreation = null;
     }
+    playbotApp = { version: await playbotVersion(), verifiedVersions: VERIFIED_PLAYBOT_VERSIONS };
   }
   return {
     server: `${SERVER_NAME}@${SERVER_VERSION}`,
@@ -1141,6 +1793,7 @@ async function doctor() {
     renderer,
     mcpServer,
     chatCreation,
+    playbotApp,
     hooks: installedHookStatus(),
     projects: projects.map((project) => ({ id: project.id, name: project.name, paths: [...projectPaths(project)] })),
     routes: loadRoutes().length,

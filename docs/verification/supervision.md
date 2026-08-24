@@ -539,6 +539,55 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
+On 2026-08-24, Playbot 0.95.0 on Linux was verified to expose the question-card, snapshot, and pending-queue channels the card tools use, and to have kept the composer mounted while a card is displayed.
+`app:metadata` returned `{name: "Playbot", version: "0.95.0"}`, matching the extracted `resources/app.asar` `/package.json` and the crashpad `--annotation=_version=0.95.0`.
+The channel names and payload shapes were confirmed from the running app's extracted `.vite/build/main.js`, where `threads:respondToUserInput` takes `{threadId, requestId, response, composerContext?}` and resolves the pending Codex `item/tool/requestUserInput` request, `threads:getSnapshot` takes `{threadId}` and returns `userInputRequests`, `pendingMessages`, and `outboundMessages` among its fields, `threads:recallMessage` takes `{threadId, messageId}` and returns `{outcome, message?, snapshot}`, and `threads:send` returns that same thread snapshot.
+
+`threads:respondToUserInput`'s RETURN shape is live-verified, not only read from the bundle, because several tools depend on it: `cardsRemaining`, `statusAfter`, `phaseAfter`, and the post-action unreadable-projection warning all assume it resolves with a thread snapshot rather than void.
+Answering five live cards on 2026-08-24 against Playbot 0.95.0 - `chat-7975fcb9` request ids 10, 14, 15, 16, and 17, and `chat-3bbd9805` request ids 12 and 13 - resolved a full thread snapshot object each time, with `agentStatus` plus array-valued `userInputRequests`, `respondingRequestIds`, and `pendingMessages` observed on the resolved value.
+Immediately after answering, `respondingRequestIds` contained the answered id and `agentStatus` had moved off `pending_input` by the following read.
+Answering an already-resolved id returns `No pending user input request with id N` rather than double-resolving, so the call is idempotency-safe by construction.
+The payload sent was `{threadId, requestId, response: {answers: {<questionId>: {answers: [<string>]}}}}`.
+Both this channel's return shape and `threads:send`'s are observed behaviour of one version at one moment rather than a published contract, the same caveat that governs every internal-IPC surface this adapter reaches.
+The only precondition on the answer path is that the chat's workspace is not archived; nothing on it inspects the selected workspace or the visible chat.
+
+Live evidence against the running Playbot 0.95.0 on the same date, taken with a real worker parked on a real card:
+
+- `get_thread_card` on a chat in a NON-selected workspace returned that chat's own card, with `requestId: 10`, question id `gate_ruling`, and option labels `Proceed (Recommended)` and `Keep current commit`.
+- `answer_thread_card` with a request id that was not pending on the named chat was refused without any IPC write, and the card was still pending with `responding: false` afterwards.
+- `answer_thread_card` with request id `10`, which was genuinely pending on a DIFFERENT chat, was refused when paired with the wrong chat rather than answering that other worker's card. This is the property that makes a process-wide request-id registry safe to use.
+- The card was later answered by a human in the Playbot window, and the Codex rollout recorded the resulting tool output as `{"answers":{"gate_ruling":{"answers":["Proceed (Recommended)"]}}}`, byte-identical to the payload `answer_thread_card` constructs from an option label.
+- `send_message` to a chat whose turn was running reported `state: "queued"` with `queuedTotal: 1` and a message id, `list_queued_messages` showed that exact held message, and `drop_queued_message` returned `outcome: "recalled"` and left the queue empty. The worker never saw the message, which is the held-and-invisible behavior the delivery verdict exists to report.
+- Playbot's queued projection carries no `createdAtMs`, unlike the outbound one, so the delivery verdict matches the most recent message by list order rather than by timestamp.
+- All six snapshot projections came back as real arrays on both Frogpile chats: `userInputRequests`, `pendingMessages`, `outboundMessages`, `approvalRequests`, `mcpElicitationRequests`, and `respondingRequestIds`, each `array(0)` on `chat-7975fcb9` and `chat-3bbd9805`. This is why the shape guard requires a list rather than mere presence and refuses a non-array by name. It is one version observed at one moment, not a contract.
+- `threadRows()` selects `t.pending_queue_json` unconditionally, and that one query backs every tool and both hooks, so the column's presence across the supported range was settled by evidence rather than by a defensive probe. Parsing `resources/app.asar` and reading every `/migrations/*/migration.sql` shows `workspace_threads` is created already carrying `pending_queue_json` by migration `20260414225126_medical_lilandra`, dated 2026-04-14, and that this is the only migration among the 33 in the 0.95.0 bundle that creates that table. Playbot 0.93.1, the oldest version this adapter's detected fallback targets, shipped around 2026-08-18, four months later, and Playbot runs its migrations forward on app start. No Playbot in the supported 0.93.1-to-0.95.0 range can therefore present a `workspace_threads` without that column. This says nothing about versions outside that range.
+
+The same day, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 56 checks, including twenty-eight added for the thread-resolution scope, the card and queue surfaces, the delivery verdict, and the lane-wake delivery rules:
+
+```text
+ok - fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it
+ok - fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot
+ok - fm-playbot-lanes: the parked detector cannot be widened past its confirming read's scope
+ok - fm-playbot-lanes: get_thread_card enumerates a named chat's card without focusing it
+ok - fm-playbot-lanes: answer_thread_card refuses a borrowed request id, an unknown question, a moved turn, and an implicit skip
+ok - fm-playbot-lanes: answer_thread_card answers the card once and reports a second attempt as already answered
+ok - fm-playbot-lanes: get_thread_card contradicts a persisted pending_input that holds no live card
+ok - fm-playbot-lanes: queued messages are listable and one can be dropped instead of resent
+ok - fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and names what is missing
+ok - fm-playbot-lanes: send_message reports held, in-flight, and delivered separately
+ok - fm-playbot-lanes: dispatch onto a parked worker reports the task as held, not delivered
+ok - fm-playbot-lanes: a Playbot that returns no send snapshot leaves delivery explicitly unconfirmed
+ok - fm-playbot-lanes: an unconfirmed wake advances only on a Playbot whose send path cannot report a verdict
+ok - fm-playbot-lanes: a chat-creation probe that fails after the send does not mislabel the wake as undelivered
+ok - fm-playbot-lanes: a worker in a project Playbot no longer marks active still wakes its supervisor
+```
+
+Those checks run against the hermetic fake DevTools endpoint described below, extended to serve the card channels, to reject a named channel as unregistered, and to omit a snapshot field, so the loud-refusal paths are enforced without waiting for a real Playbot upgrade.
+
+This suite previously printed `ok - fm-playbot-lanes: skipped (node unavailable)` and exited 0 whenever `node` was absent from `PATH`, which made a green run prove nothing: the same inherited-`PATH` gap that hides `shellcheck` and `actionlint` from a hook or validation-pipeline subprocess also hid the Node runtime, and one review round on this branch reported "there is no Node runtime anywhere on this machine" while `/home/linuxbrew/.linuxbrew/bin/node` was installed and in use.
+`fm_test_require_node` in `tests/lib.sh` now resolves a runtime from `FM_TEST_NODE`, then `PATH`, then the known fixed and version-managed install roots, version-sorting each globbed directory so no version is pinned, and it fails the suite when none is usable rather than skipping.
+It was verified on 2026-08-24 by running the suite under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 56 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.
+
 On 2026-07-30, Playbot 0.81.0 on Windows exposed one shared Codex app-server process for multiple persisted chat threads.
 The Windows session-lock verification proved that Git Bash can recover that host process through PowerShell while `CODEX_THREAD_ID` plus the Playbot database narrows ownership to the exact unarchived Firstmate thread.
 The regression command was `"C:\Program Files\Git\bin\bash.exe" tests/fm-playbot-session-lock.test.sh`.
@@ -556,7 +605,7 @@ ok - fm-playbot-lanes: setup readiness does not require a controller project
 ok - fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision
 ```
 
-The suite self-skips where node is absent; this run was performed in the author environment because the pipeline environment lacks node.
+That run was performed in the author environment because the pipeline environment lacks node, and the suite self-skipped when node was off `PATH` at the time; the 2026-08-24 entry above replaced that skip with a hard failure and is the current owner of the suite's node-resolution behavior.
 
 On 2026-08-20, Playbot 0.94.0 on Linux was verified to have removed the `threads:openThread` and `workspace:create` IPC handlers and folded chat and workspace creation into one strict `threads:launch` call.
 The facts were confirmed from the running app's extracted `.vite/build/main.js`: IPC channels are registered as `${module}:${key}` from per-module tables, `threads:launch` takes `{destination: existing-workspace | new-workspace, thread: {title (trim min 1), approvalMode ("default"|"auto-review"|"full-access"), planMode, ...} (strict, no caller-chosen id), message?, activate?}` and returns the persisted `workspace` and `thread`, the new-workspace `workspace` field reuses the exact pre-0.94 `{strategy: "project", projectId, name?, branch?, baseBranch?}` shape, the `workspace` module registers no bare creation channel, and `threads:send` (`{threadId, text, ...}`) plus `threads:archiveThread` (`{threadId, nextActiveThreadId?}`) are unchanged.
