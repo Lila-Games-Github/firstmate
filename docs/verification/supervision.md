@@ -553,7 +553,7 @@ Live evidence against the running Playbot 0.95.0 on the same date, taken with a 
 - `send_message` to a chat whose turn was running reported `state: "queued"` with `queuedTotal: 1` and a message id, `list_queued_messages` showed that exact held message, and `drop_queued_message` returned `outcome: "recalled"` and left the queue empty. The worker never saw the message, which is the held-and-invisible behavior the delivery verdict exists to report.
 - Playbot's queued projection carries no `createdAtMs`, unlike the outbound one, so the delivery verdict matches the most recent message by list order rather than by timestamp.
 
-The same day, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 46 checks, including eighteen added for the thread-resolution scope, the card and queue surfaces, and the delivery verdict:
+The same day, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 49 checks, including eighteen added for the thread-resolution scope, the card and queue surfaces, and the delivery verdict:
 
 ```text
 ok - fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it
@@ -573,7 +573,7 @@ Those checks run against the hermetic fake DevTools endpoint described below, ex
 
 This suite previously printed `ok - fm-playbot-lanes: skipped (node unavailable)` and exited 0 whenever `node` was absent from `PATH`, which made a green run prove nothing: the same inherited-`PATH` gap that hides `shellcheck` and `actionlint` from a hook or validation-pipeline subprocess also hid the Node runtime, and one review round on this branch reported "there is no Node runtime anywhere on this machine" while `/home/linuxbrew/.linuxbrew/bin/node` was installed and in use.
 `fm_test_require_node` in `tests/lib.sh` now resolves a runtime from `FM_TEST_NODE`, then `PATH`, then the known fixed and version-managed install roots, version-sorting each globbed directory so no version is pinned, and it fails the suite when none is usable rather than skipping.
-It was verified on 2026-08-24 by running the suite under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 46 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.
+It was verified on 2026-08-24 by running the suite under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 49 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.
 
 On 2026-07-30, Playbot 0.81.0 on Windows exposed one shared Codex app-server process for multiple persisted chat threads.
 The Windows session-lock verification proved that Git Bash can recover that host process through PowerShell while `CODEX_THREAD_ID` plus the Playbot database narrows ownership to the exact unarchived Firstmate thread.

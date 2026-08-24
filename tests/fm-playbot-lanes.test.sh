@@ -331,12 +331,14 @@ const versionFile = path.join(process.env.FIXTURE_ROOT, 'app-version');
 const missingFile = path.join(process.env.FIXTURE_ROOT, 'ipc-missing');
 const reconcileFile = path.join(process.env.FIXTURE_ROOT, 'send-reconciles');
 const metadataFlakyFile = path.join(process.env.FIXTURE_ROOT, 'metadata-flaky');
+const metadataVersionlessFile = path.join(process.env.FIXTURE_ROOT, 'metadata-versionless');
 const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
 const sendFailsFile = path.join(process.env.FIXTURE_ROOT, 'send-fails');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
 let metadataFailures = 0;
+let metadataVersionlessReads = 0;
 
 function currentMode() {
   try {
@@ -464,6 +466,12 @@ async function electronInvoke(channel, payload) {
       if (readFileOr(metadataFlakyFile, '') && metadataFailures === 0) {
         metadataFailures += 1;
         throw new Error('Playbot window is not available');
+      }
+      // A read that RESOLVES but carries no version string is the same bad
+      // moment reached through the other branch, and must recover the same way.
+      if (readFileOr(metadataVersionlessFile, '') && metadataVersionlessReads === 0) {
+        metadataVersionlessReads += 1;
+        return { name: 'Playbot' };
       }
       return { name: 'Playbot', version: readFileOr(versionFile, '0.95.0') };
     }
@@ -1017,8 +1025,9 @@ NODE
 rm -f "$FIXTURE_ROOT/snapshot-drop-key"
 pass "fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and names what is missing"
 
-# serve is one long-lived process, so a single failed version read must not pin
-# the provenance stamp to null for the rest of its life.
+# serve is one long-lived process, so a single unreadable version read must not
+# pin the provenance stamp to null for the rest of its life - neither when the
+# read fails nor when it resolves carrying no version string.
 printf 'yes\n' > "$FIXTURE_ROOT/metadata-flaky"
 card_request_one="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}"
 card_request_two="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}"
@@ -1033,7 +1042,19 @@ if (first.result.structuredContent.playbot.version !== null) process.exit(1);
 if (second.result.structuredContent.playbot.version !== '0.95.0') process.exit(1);
 NODE
 rm -f "$FIXTURE_ROOT/metadata-flaky"
-pass "fm-playbot-lanes: a transient version read recovers instead of sticking at unreadable"
+printf 'yes\n' > "$FIXTURE_ROOT/metadata-versionless"
+out=$(printf '%s\n%s\n' "$card_request_one" "$card_request_two" | node --no-warnings "$SCRIPT" serve)
+OUT="$out" node --no-warnings <<'NODE' || fail "a version read that resolved without a version string was cached for the life of the server process"
+const responses = process.env.OUT.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+if (responses.length !== 2) process.exit(1);
+const first = responses.find(response => response.id === 1);
+const second = responses.find(response => response.id === 2);
+if (first.error || second.error) process.exit(1);
+if (first.result.structuredContent.playbot.version !== null) process.exit(1);
+if (second.result.structuredContent.playbot.version !== '0.95.0') process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/metadata-versionless"
+pass "fm-playbot-lanes: a version read that failed or carried no version recovers instead of sticking at unreadable"
 
 # ---------------------------------------------------------------------------
 # Delivery verdicts: a message Playbot only holds must never read as delivered.

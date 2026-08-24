@@ -640,7 +640,8 @@ async function playbotVersion() {
     return null;
   }
   const version = metadata?.version;
-  detectedPlaybotVersion = typeof version === "string" && version.trim() ? version.trim() : null;
+  if (typeof version !== "string" || !version.trim()) return null;
+  detectedPlaybotVersion = version.trim();
   return detectedPlaybotVersion;
 }
 
