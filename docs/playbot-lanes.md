@@ -60,18 +60,27 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 
 ## Lane lifecycle
 
-`dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x and 0.94.0.
+`dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x through 0.95.x.
 With `newWorkspace`, it creates the isolated workspace and creates the worker chat inside it.
 The message can enter a non-selected project and does not require changing UI focus.
 For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.
 For a normal-terminal caller, it returns `lane: null` plus the `get_thread_status`, `read_thread`, and `get_thread_card` supervision tools instead of inventing a chat route that cannot deliver a wake.
 
 Playbot accepts a message it cannot deliver yet and holds it in a queue the sender is never told about, so `send_message` and `dispatch` report a `delivery` verdict taken from the thread snapshot Playbot returns.
-`delivered` means the agent's turn accepted the message, `sending` means it is in flight, `queued` means Playbot is holding it and the worker has not seen it, `failed` carries Playbot's own reason, and `unknown` means Playbot returned no snapshot so delivery could not be confirmed.
-`unknown` covers only a Playbot that returns no snapshot at all; a snapshot that is returned without the queued or outbound projection is refused by name, like every other changed shape, rather than passing as an old Playbot.
-Only `delivered` and `sending` mean the message is on its way; a `queued` verdict is cured by answering the chat's card or dropping the held message, never by resending, because a resend adds to the pile and a later drain replays superseded instructions in order.
+`delivered` means the agent's turn accepted the message, `sending` means it is in flight, `queued` means Playbot is holding it and the worker has not seen it, `steering` means Playbot marked that exact message for the active turn, `failed` carries Playbot's own reason, and `unknown` means Playbot returned no usable confirmation.
+For the initial send verdict, `unknown` covers only a Playbot that returns no snapshot at all; an initial snapshot returned without the queued or outbound projection is refused by name, like every other changed shape, rather than passing as an old Playbot.
+Only `delivered`, `sending`, and `steering` mean the message is on its way.
+A `queued` verdict is cured by answering the chat's card, dropping the held message, or deliberately promoting that exact message with `force=true`, never by an ordinary resend, because a resend adds to the pile and a later drain replays superseded instructions in order.
 Every chat view also carries `queuedCount` from the persisted queue, so a pile is visible without asking for it.
 `queuedCount` is `null`, never `0`, when that persisted ledger is present but not in a shape these tools can read, so an unreadable queue can never be mistaken for an empty one.
+
+`send_message` accepts `force=true` as an explicit opt-in for a message that Playbot's first send response reports as queued.
+The MCP then addresses that exact thread and exact returned message id through Playbot 0.95.x's `threads:steerMessage`, which calls Codex `turn/steer` for the current turn rather than stopping it.
+The active turn continues, and the result reports `delivery.state: steering` plus `force.state: applied` only when Playbot's own response snapshot marks that exact message `steering: true`.
+If the turn ended before promotion, Playbot can instead report the message still queued, in flight, or delivered, and the MCP reports that observed state without claiming force was applied.
+If the steering response is missing or unreadable, both immediate steering and delivery remain `unknown`, because the original send already reached Playbot but its post-action state cannot be proved safely.
+`dispatch` exposes the same flag because its existing-thread path is the same steering surface; a newly created or idle chat normally reports force as not needed.
+Force never selects or focuses a chat or workspace, never calls `threads:stop`, and never creates or archives anything beyond the normal `dispatch` request itself.
 
 The global Stop hook is inert for every chat that has no active route.
 For a routed worker, it reads the completed Codex turn id and final message from the persisted rollout, ignores an already delivered turn, and sends one marked follow-up to the controller chat.
@@ -87,7 +96,8 @@ An `unknown` verdict is classified by the chat-creation API this Playbot exposes
 
 ## Question cards and held messages
 
-A Playbot worker that asks a question parks until someone chooses an option, and no text channel reaches it while it waits.
+A Playbot worker that asks a question parks until someone chooses an option, and an ordinary text send does not reach it while it waits.
+Forced steering can attach an instruction to that active turn, but it does not answer or dismiss the card, so the worker remains parked until the card is resolved through the dedicated answer surface.
 `list_parked_threads` is the cheap fleet-wide detector: it reads persisted status only, resumes nothing, and contacts Playbot not at all.
 Its results are candidates rather than findings, because Playbot reports a merely rehydrated chat as `pending_input` whether or not it is actually parked.
 It shares one scope with the thread resolution described above and takes no parameter that widens it, because the confirming read has none to match, so every candidate it offers is resolvable by the `get_thread_card` pointer it hands back; an archived chat, and any chat in an archived workspace, is offered by neither.
@@ -114,7 +124,7 @@ The integration reads Playbot's application and Codex SQLite databases but never
 Chat creation, message delivery, and archive operations go through Playbot's Electron IPC handlers over the local DevTools socket.
 
 The current adapter targets Playbot 0.94.0 and Node.js 22.5 or newer, with a detected fallback to the pre-0.94 channels that were verified against Playbot 0.93.1 on Linux.
-The card, snapshot, and queue channels are verified against Playbot 0.95.x, and every result from those tools carries both the version Playbot reports through `app:metadata` and the verified range, so a mismatch is visible in the output rather than inferred.
+The card, snapshot, queue, and forced-steering channels are verified against Playbot 0.95.x, and every version-sensitive result names the verified range or the exact internal mechanism, so a mismatch is visible rather than inferred.
 A channel Playbot no longer registers, or a snapshot missing a field these tools read, is refused with the missing channel or field and the observed version named; nothing falls back to driving the visible window.
 `doctor` reports the same observed version as `playbotApp`.
 Playbot's private IPC is not a published compatibility surface, so a Playbot update requires rerunning `doctor` and the focused test before relying on cross-project delivery.

@@ -20,7 +20,9 @@
 // pre-0.94 threads:openThread and workspace:create channels, plus the
 // unchanged threads:send and threads:archiveThread channels, whose send response
 // is the thread snapshot that says whether Playbot delivered the message or is
-// only holding it. It reads
+// only holding it. On Playbot 0.95.x an explicit forced send promotes that exact
+// held message through threads:steerMessage into the active turn without
+// interrupting it. It reads
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
 // directly.
@@ -49,7 +51,7 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.4.0";
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
 
@@ -642,15 +644,178 @@ function sendReachedPlaybot(error) {
   return Boolean(error && typeof error === "object" && error.sendReachedPlaybot);
 }
 
-async function sendMessage(row, text) {
+function forcedDeliveryVerdict(response, priorDelivery) {
+  const messageId = priorDelivery.messageId;
+  if (!response || typeof response !== "object") {
+    return {
+      delivery: {
+        state: "unknown",
+        messageId,
+        queuedTotal: null,
+        note: "Playbot accepted the force request but returned no thread snapshot, so immediate steering is unconfirmed. Read list_queued_messages before acting again.",
+      },
+      force: {
+        requested: true,
+        state: "unknown",
+        mechanism: "threads:steerMessage",
+        activeTurn: "not interrupted",
+      },
+    };
+  }
+  const missing = unreadableProjections(response, SEND_SNAPSHOT_REQUIRED_KEYS);
+  if (missing.length > 0) {
+    return {
+      delivery: {
+        state: "unknown",
+        messageId,
+        queuedTotal: null,
+        note: `Playbot accepted the force request but its response carried no readable ${missing.join(", ")}, so immediate steering is unconfirmed. Read list_queued_messages before acting again.`,
+      },
+      force: {
+        requested: true,
+        state: "unknown",
+        mechanism: "threads:steerMessage",
+        activeTurn: "not interrupted",
+      },
+    };
+  }
+  const queued = snapshotProjection(response, "pendingMessages");
+  const outbound = snapshotProjection(response, "outboundMessages");
+  const held = queued.find((message) => message?.id === messageId) ?? null;
+  if (held?.steering === true) {
+    return {
+      delivery: {
+        state: "steering",
+        messageId,
+        queuedTotal: queued.length,
+        queuedAhead: queued.findIndex((message) => message === held),
+        note: "Playbot marked this exact message as steering into the active turn. The turn continues and is not interrupted.",
+      },
+      force: {
+        requested: true,
+        state: "applied",
+        mechanism: "threads:steerMessage",
+        activeTurn: "continues",
+        evidence: "Playbot's response snapshot marked the exact queued message steering=true",
+      },
+    };
+  }
+  if (held) {
+    return {
+      delivery: {
+        state: "queued",
+        messageId,
+        queuedTotal: queued.length,
+        queuedAhead: queued.findIndex((message) => message === held),
+        note: "Playbot still reports this exact message as held, so force was not applied and the worker has not seen it.",
+      },
+      force: {
+        requested: true,
+        state: "not-applied",
+        mechanism: "threads:steerMessage",
+        activeTurn: "unchanged",
+        evidence: "Playbot's response snapshot still marked the exact message queued without steering",
+      },
+    };
+  }
+  const inFlight = outbound.find((message) => message?.id === messageId) ?? null;
+  if (inFlight) {
+    return {
+      delivery: {
+        state: inFlight.status === "failed" ? "failed" : "sending",
+        messageId,
+        queuedTotal: queued.length,
+        ...inFlight.reason ? { reason: inFlight.reason } : {},
+      },
+      force: {
+        requested: true,
+        state: "not-needed",
+        mechanism: "threads:steerMessage",
+        activeTurn: "unchanged",
+        evidence: `Playbot's response snapshot moved the exact message to outbound state ${inFlight.status ?? "unknown"}`,
+      },
+    };
+  }
+  return {
+    delivery: { state: "delivered", messageId, queuedTotal: queued.length },
+    force: {
+      requested: true,
+      state: "not-needed",
+      mechanism: "threads:steerMessage",
+      activeTurn: "unchanged",
+      evidence: "Playbot's response snapshot no longer held the exact message in pending or outbound delivery",
+    },
+  };
+}
+
+async function sendMessage(row, text, force = false) {
   if (row.archived) throw new Error(`Cannot send to archived thread ${row.thread_id}`);
   const value = String(text ?? "").trim();
   if (!value) throw new Error("message must not be empty");
   const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
   try {
+    const delivery = await deliveryVerdict(response, value, row.thread_id);
+    const thread = publicThread(refreshThread(row));
+    if (!force) return { thread, delivery };
+    if (delivery.state !== "queued") {
+      const forceState = delivery.state === "delivered" || delivery.state === "sending"
+        ? "not-needed"
+        : delivery.state === "failed" ? "not-applied" : "unknown";
+      return {
+        thread,
+        delivery,
+        force: {
+          requested: true,
+          state: forceState,
+          mechanism: "threads:steerMessage",
+          activeTurn: "unchanged",
+          evidence: `Playbot's send response reported delivery state ${delivery.state}, so no exact queued message was available to promote`,
+        },
+      };
+    }
+    if (!delivery.messageId) {
+      return {
+        thread,
+        delivery: {
+          ...delivery,
+          note: "Playbot confirmed the message is queued but returned no message id, so force was not attempted because the exact held message cannot be addressed safely.",
+        },
+        force: {
+          requested: true,
+          state: "not-applied",
+          mechanism: "threads:steerMessage",
+          activeTurn: "unchanged",
+          reason: "Playbot returned no exact queued message id",
+        },
+      };
+    }
+    let forcedResponse;
+    try {
+      forcedResponse = await playbotInvoke("threads:steerMessage", {
+        threadId: row.thread_id,
+        messageId: delivery.messageId,
+      });
+    } catch (error) {
+      return {
+        thread: publicThread(refreshThread(row)),
+        delivery: {
+          state: "unknown",
+          messageId: delivery.messageId,
+          queuedTotal: null,
+          note: "The message was queued before the force request, but Playbot returned no confirming force response. Immediate steering is unconfirmed; read list_queued_messages before acting again.",
+        },
+        force: {
+          requested: true,
+          state: "unknown",
+          mechanism: "threads:steerMessage",
+          activeTurn: "unknown",
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
     return {
       thread: publicThread(refreshThread(row)),
-      delivery: await deliveryVerdict(response, value, row.thread_id),
+      ...forcedDeliveryVerdict(forcedResponse, delivery),
     };
   } catch (error) {
     const accepted = error instanceof Error ? error : new Error(String(error));
@@ -1379,8 +1544,8 @@ function toolDefinitions() {
     },
     {
       name: "send_message",
-      description: "Send a message to an existing Playbot chat in any project without selecting or focusing that chat. Reports delivery from Playbot's own send response: state \"delivered\" means the worker accepted it, \"sending\" means it is in flight, \"queued\" means Playbot is HOLDING it and the worker has not seen it, \"failed\" carries Playbot's reason, and \"unknown\" means delivery could not be confirmed. Never treat a queued or unknown send as delivered.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send") }, ["project", "thread", "message"]),
+      description: `Send a message to an existing Playbot chat in any project without selecting or focusing that chat. Reports delivery from Playbot's own response: state "delivered" means the worker accepted it, "sending" means it is in flight, "queued" means Playbot is HOLDING it and the worker has not seen it, "steering" means Playbot marked the exact message for the current active turn, "failed" carries Playbot's reason, and "unknown" means delivery could not be confirmed. force=true explicitly promotes a queued message into the active turn through Playbot ${VERIFIED_PLAYBOT_VERSIONS} threads:steerMessage without interrupting that turn; it does not answer a pending card. Never treat a queued or unknown send as delivered.`,
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send"), force: boolean("Promote this exact message into a currently active turn instead of leaving it queued; Playbot 0.95.x only", false) }, ["project", "thread", "message"]),
     },
     {
       name: "read_thread",
@@ -1442,8 +1607,8 @@ function toolDefinitions() {
     },
     {
       name: "dispatch",
-      description: "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status, read_thread, and get_thread_card.",
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status, read_thread, and get_thread_card.`,
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -1528,13 +1693,12 @@ async function handleTool(name, args = {}) {
     }
     const lane = caller ? registerLane(caller, worker) : null;
     try {
-      const { thread, delivery } = await sendMessage(worker, args.message);
+      const sent = await sendMessage(worker, args.message, args.force === true);
       return caller
-        ? { lane, thread, delivery }
+        ? { lane, ...sent }
         : {
             lane: null,
-            thread,
-            delivery,
+            ...sent,
             supervision: {
               mode: "poll",
               tools: ["get_thread_status", "read_thread", "get_thread_card"],
@@ -1560,7 +1724,7 @@ async function handleTool(name, args = {}) {
     return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
   }
   const thread = resolveThreadInProject(project, args.workspace, args.thread, name === "archive_chat");
-  if (name === "send_message") return sendMessage(thread, args.message);
+  if (name === "send_message") return sendMessage(thread, args.message, args.force === true);
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
   if (name === "get_thread_status") {
     const publicValue = publicThread(thread);
