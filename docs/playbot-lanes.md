@@ -77,7 +77,8 @@ Every chat view also carries `queuedCount` from the persisted queue, so a pile i
 `send_message` accepts `force=true` as an explicit opt-in for a message that Playbot's first send response reports as queued.
 The MCP then addresses that exact thread and exact returned message id through Playbot 0.95.x's `threads:steerMessage`, which calls Codex `turn/steer` for the current turn rather than stopping it.
 The active turn continues, and the result reports `delivery.state: steering` plus `force.state: applied` only when Playbot's own response snapshot marks that exact message `steering: true`.
-If the turn ended before promotion, Playbot can instead report the message still queued, in flight, or delivered, and the MCP reports that observed state without claiming force was applied.
+If the post-steer snapshot retains that exact message id without marking it as steering, the MCP reports the message as queued, sending, or failed from Playbot's evidence without claiming force was applied.
+If a readable post-steer snapshot omits that exact message id or substitutes a different id, the MCP reports `delivery.state: unknown` and `force.state: not-applied` rather than treating absence as delivery evidence.
 If the steering response is missing or unreadable, both immediate steering and delivery remain `unknown`, because the original send already reached Playbot but its post-action state cannot be proved safely.
 `dispatch` exposes the same flag because its existing-thread path is the same steering surface; a newly created or idle chat normally reports force as not needed.
 Force never selects or focuses a chat or workspace, never calls `threads:stop`, and never creates or archives anything beyond the normal `dispatch` request itself.
