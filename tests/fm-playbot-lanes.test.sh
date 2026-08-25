@@ -344,6 +344,7 @@ const metadataVersionlessFile = path.join(process.env.FIXTURE_ROOT, 'metadata-ve
 const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
 const steerResponseFile = path.join(process.env.FIXTURE_ROOT, 'steer-response');
 const refreshFailureFile = path.join(process.env.FIXTURE_ROOT, 'refresh-failure');
+const mcpSchemaVersionFile = path.join(process.env.FIXTURE_ROOT, 'mcp-schema-version');
 // The same drop mechanism aimed at the snapshot Playbot returns WITH a completed
 // write, so the post-action reads can be driven without touching the pre-action
 // read in the same tool call.
@@ -545,7 +546,14 @@ async function electronInvoke(channel, payload) {
       };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      return [{ name: 'playbot_lanes', enabled: true, error: null, toolCount: 18 }];
+      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.4.0\n');
+      return [{
+        name: 'playbot_lanes',
+        enabled: true,
+        error: null,
+        toolCount: 18,
+        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.4.0') },
+      }];
     }
     if (channel === 'threads:launch') {
       if (mode !== 'modern') throw new Error("No handler registered for 'threads:launch'");
@@ -739,11 +747,39 @@ done
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
 OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup required the external terminal root to be a Playbot project"
 const value = JSON.parse(process.env.OUT);
-if (value.ready !== true || value.changed !== false) process.exit(1);
+if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
 if (!value.checks.hooks.ready || value.checks.toolCount !== 18) process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup readiness does not require a controller project"
+
+printf '0.3.0\n' > "$FIXTURE_ROOT/mcp-schema-version"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
+OUT="$setup_out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "setup accepted a stale MCP schema without using Playbot's supported reload"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const mcpCalls = calls.filter(call => call.channel.startsWith('codex:mcpServers:'));
+if (value.ready !== true || value.changed !== true) process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
+if (!value.installation.reload.startsWith('reloaded ')) process.exit(1);
+if (mcpCalls.filter(call => call.channel === 'codex:mcpServers:reload').length !== 1) process.exit(1);
+if (mcpCalls.some(call => !['codex:mcpServers:list', 'codex:mcpServers:reload'].includes(call.channel))) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
+OUT="$setup_out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "setup reloaded an already-current MCP schema"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (value.ready !== true || value.changed !== false) process.exit(1);
+if (calls.some(call => call.channel === 'codex:mcpServers:reload')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: setup reloads stale MCP schemas exactly once"
 
 worker_json=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path")
 

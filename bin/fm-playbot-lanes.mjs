@@ -52,6 +52,7 @@ import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
 const SERVER_VERSION = "0.4.0";
+const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
 
@@ -1460,6 +1461,7 @@ async function install() {
     `[mcp_servers.${SERVER_NAME}.env]`,
     `PLAYBOT_LANES_CONTROLLER_ROOT = ${tomlString(controllerRoot())}`,
     `PLAYBOT_LANES_STATE_DIR = ${tomlString(stateDir())}`,
+    `PLAYBOT_LANES_SCHEMA_VERSION = ${tomlString(MCP_SCHEMA_VERSION)}`,
   ].join("\n");
   const config = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
   fs.writeFileSync(configPath, replaceTomlSection(config, `mcp_servers.${SERVER_NAME}`, block), "utf8");
@@ -1475,6 +1477,15 @@ async function install() {
     hooks: [{ type: "command", command: `${commandBase} hook-stop`, timeout: 20 }],
   }, "fm-playbot-lanes.mjs\" hook-stop");
   atomicWriteJson(hooksPath, hooks);
+  let reload = "not attempted";
+  let schemaVersion = null;
+  try {
+    const servers = await playbotInvoke("codex:mcpServers:reload", undefined);
+    reload = Array.isArray(servers) ? `reloaded ${servers.length} MCP server record(s)` : "reload requested";
+    schemaVersion = MCP_SCHEMA_VERSION;
+  } catch (error) {
+    reload = `reload deferred: ${error instanceof Error ? error.message : String(error)}`;
+  }
   atomicWriteJson(path.join(stateDir(), "installation.json"), {
     version: 1,
     installedAt: nowIso(),
@@ -1483,15 +1494,8 @@ async function install() {
     controllerRoot: controllerRoot(),
     configPath,
     hooksPath,
+    schemaVersion,
   });
-
-  let reload = "not attempted";
-  try {
-    const servers = await playbotInvoke("codex:mcpServers:reload", undefined);
-    reload = Array.isArray(servers) ? `reloaded ${servers.length} MCP server record(s)` : "reload requested";
-  } catch (error) {
-    reload = `reload deferred: ${error instanceof Error ? error.message : String(error)}`;
-  }
   return { installed: true, configPath, hooksPath, stateDir: stateDir(), reload };
 }
 
@@ -1939,6 +1943,7 @@ async function readStdinJson() {
 
 async function doctor() {
   const projects = topology();
+  const installation = readJson(path.join(stateDir(), "installation.json"));
   let renderer = false;
   let mcpServer = null;
   let chatCreation = null;
@@ -1969,6 +1974,7 @@ async function doctor() {
     mcpServer,
     chatCreation,
     playbotApp,
+    installation,
     hooks: installedHookStatus(),
     projects: projects.map((project) => ({ id: project.id, name: project.name, paths: [...projectPaths(project)] })),
     routes: loadRoutes().length,
@@ -1978,11 +1984,15 @@ async function doctor() {
 function readiness(diagnostics) {
   const controllerPresent = diagnostics.projects.some((project) => project.paths.includes(controllerRoot()));
   const expectedToolCount = toolDefinitions().length;
+  const configuredSchemaVersion = diagnostics.mcpServer?.env?.PLAYBOT_LANES_SCHEMA_VERSION ?? null;
+  const schemaVersion = diagnostics.installation?.schemaVersion ?? null;
   const ready = diagnostics.renderer
     && diagnostics.hooks.ready
     && diagnostics.mcpServer?.enabled === true
     && diagnostics.mcpServer?.error == null
-    && diagnostics.mcpServer?.toolCount === expectedToolCount;
+    && diagnostics.mcpServer?.toolCount === expectedToolCount
+    && configuredSchemaVersion === MCP_SCHEMA_VERSION
+    && schemaVersion === MCP_SCHEMA_VERSION;
   return {
     ready,
     checks: {
@@ -1993,6 +2003,9 @@ function readiness(diagnostics) {
       mcpError: diagnostics.mcpServer?.error ?? null,
       toolCount: diagnostics.mcpServer?.toolCount ?? null,
       expectedToolCount,
+      configuredSchemaVersion,
+      schemaVersion,
+      expectedSchemaVersion: MCP_SCHEMA_VERSION,
     },
   };
 }
