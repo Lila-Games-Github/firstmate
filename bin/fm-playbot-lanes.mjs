@@ -164,6 +164,7 @@ function threadRows() {
         t.archived,
         t.approval_mode,
         t.plan_mode,
+        t.last_user_activity_at,
         t.created_at,
         t.updated_at,
         w.project_id,
@@ -769,15 +770,25 @@ async function sendMessage(row, text, force = false) {
     }
   };
   const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
+  let fresh = null;
   try {
+    try {
+      fresh = refreshThread(row);
+    } catch {
+      fresh = null;
+    }
+    const sendResult = () => ({
+      thread: resultThread(),
+      supervisionAcceptance: fresh ? supervisionArmingBaseline(fresh) : null,
+    });
     const delivery = await deliveryVerdict(response, value, row.thread_id);
-    if (!force) return { thread: resultThread(), delivery };
+    if (!force) return { ...sendResult(), delivery };
     if (delivery.state !== "queued") {
       const forceState = delivery.state === "delivered" || delivery.state === "sending"
         ? "not-needed"
         : delivery.state === "failed" ? "not-applied" : "unknown";
       return {
-        thread: resultThread(),
+        ...sendResult(),
         delivery,
         force: {
           requested: true,
@@ -790,7 +801,7 @@ async function sendMessage(row, text, force = false) {
     }
     if (!delivery.messageId) {
       return {
-        thread: resultThread(),
+        ...sendResult(),
         delivery: {
           ...delivery,
           note: "Playbot confirmed the message is queued but returned no message id, so force was not attempted because the exact held message cannot be addressed safely.",
@@ -812,7 +823,7 @@ async function sendMessage(row, text, force = false) {
       });
     } catch (error) {
       return {
-        thread: resultThread(),
+        ...sendResult(),
         delivery: {
           state: "unknown",
           messageId: delivery.messageId,
@@ -829,12 +840,13 @@ async function sendMessage(row, text, force = false) {
       };
     }
     return {
-      thread: resultThread(),
+      ...sendResult(),
       ...forcedDeliveryVerdict(forcedResponse, delivery),
     };
   } catch (error) {
     const accepted = error instanceof Error ? error : new Error(String(error));
     accepted.sendReachedPlaybot = true;
+    if (fresh) accepted.supervisionAcceptance = supervisionArmingBaseline(fresh);
     throw accepted;
   }
 }
@@ -1305,12 +1317,13 @@ function registerLane(supervisor, worker) {
 const SUPERVISION_CHECK_MARKER = "# fm-playbot-lane-supervision-poll v1";
 const SUPERVISION_TOOLS = ["get_thread_status", "read_thread", "get_thread_card"];
 const SUPERVISION_CHECK_SHEBANG = "#!/usr/bin/env bash";
-const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v6";
+const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v7";
+const SUPERVISION_SIDECAR_VERSION_V6 = "fm-playbot-lane-poll-v6";
 const SUPERVISION_SIDECAR_VERSION_V5 = "fm-playbot-lane-poll-v5";
 const SUPERVISION_SIDECAR_VERSION_V4 = "fm-playbot-lane-poll-v4";
 const SUPERVISION_SIDECAR_VERSION_V3 = "fm-playbot-lane-poll-v3";
 const SUPERVISION_SIDECAR_VERSION_V2 = "fm-playbot-lane-poll-v2";
-const SUPERVISION_DELIVERY_STATES = new Set(["delivered", "queued", "sending", "failed", "unknown", "unconfirmed"]);
+const SUPERVISION_DELIVERY_STATES = new Set(["delivered", "queued", "sending", "recall-pending", "recalled", "failed", "unknown", "unconfirmed"]);
 // The status a chat that Playbot no longer holds is recorded under. It is not
 // one of Playbot's own agent_status values, so it can never collide with one.
 const SUPERVISION_ABSENT = "chat-absent";
@@ -1460,10 +1473,16 @@ function supervisionMessageKey(value) {
   return `sha256:${crypto.createHash("sha256").update(value).digest("hex")}`;
 }
 
+function supervisionTimestampMs(value) {
+  const parsed = Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function supervisionWriteSidecar(state, taskId, observation) {
   const delivery = supervisionDeliveryState(observation.deliveryState);
   const messageKey = observation.messageKey ?? "none";
-  const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n${delivery}\n${supervisionField(observation.generation)}\n${messageKey}\n`;
+  const acceptanceMs = observation.acceptanceMs ?? "none";
+  const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n${delivery}\n${supervisionField(observation.generation)}\n${messageKey}\n${acceptanceMs}\n`;
   return supervisionPublish(state, `${taskId}.lane-poll`, body, 0o600);
 }
 
@@ -1473,6 +1492,7 @@ function supervisionSameObservation(left, right) {
     && left.updatedAt === supervisionField(right.updatedAt)
     && supervisionDeliveryState(left.deliveryState) === supervisionDeliveryState(right.deliveryState)
     && (left.messageKey ?? null) === (right.messageKey ?? null)
+    && (left.acceptanceMs ?? null) === (right.acceptanceMs ?? null)
     && (left.generation ?? null) === (right.generation ?? null);
 }
 
@@ -1522,16 +1542,31 @@ function supervisionReadSidecar(state, taskId) {
       || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")) return null;
     return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: lines[4], messageKey: null };
   }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V6) {
+    if (!SUPERVISION_DELIVERY_STATES.has(lines[3])
+      || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")
+      || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")) return null;
+    return {
+      status: lines[1],
+      updatedAt: lines[2] ?? "",
+      deliveryState: lines[3],
+      generation: lines[4],
+      messageKey: lines[5] === "none" ? null : lines[5],
+      acceptanceMs: null,
+    };
+  }
   if (lines[0] !== SUPERVISION_SIDECAR_VERSION
     || !SUPERVISION_DELIVERY_STATES.has(lines[3])
     || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")
-    || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")) return null;
+    || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")
+    || !/^(?:none|[0-9]+)$/.test(lines[6] ?? "")) return null;
   return {
     status: lines[1],
     updatedAt: lines[2] ?? "",
     deliveryState: lines[3],
     generation: lines[4],
     messageKey: lines[5] === "none" ? null : lines[5],
+    acceptanceMs: lines[6] === "none" ? null : Number(lines[6]),
   };
 }
 
@@ -1610,21 +1645,21 @@ async function supervisionWithCheckLock(state, taskId, callback) {
 // way through fm_pr_poll_retirement_publish, and for the same reason: a check
 // nothing will act on again must stop being armed rather than re-waking
 // firstmate every check interval for news it has already handled.
-function supervisionRetireProblem(state, taskId) {
+function supervisionRetire(state, taskId) {
   const checkName = `${taskId}.check.sh`;
   const checkPath = path.join(state, checkName);
   try {
     fs.rmSync(checkPath, { force: true });
     try {
       fs.lstatSync(checkPath);
-      return `${checkName}: removal reported success but the check still exists`;
+      return { checkRemoved: false, problems: [`${checkName}: removal reported success but the check still exists`] };
     } catch (error) {
       if (!(error instanceof Error) || error.code !== "ENOENT") {
-        return `${checkName}: could not confirm removal: ${error instanceof Error ? error.message : String(error)}`;
+        return { checkRemoved: false, problems: [`${checkName}: could not confirm removal: ${error instanceof Error ? error.message : String(error)}`] };
       }
     }
   } catch (error) {
-    return `${checkName}: ${error instanceof Error ? error.message : String(error)}`;
+    return { checkRemoved: false, problems: [`${checkName}: ${error instanceof Error ? error.message : String(error)}`] };
   }
 
   const problems = [];
@@ -1639,7 +1674,7 @@ function supervisionRetireProblem(state, taskId) {
       problems.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return problems.length ? problems.join("; ") : null;
+  return { checkRemoved: true, problems };
 }
 
 // Write the sidecar and bind the check, in that order, so a poll can never run
@@ -1679,12 +1714,13 @@ function supervisionRestore({ state, taskId, register, existed, previousCheck, p
   }
 }
 
-// The pre-send observation is recorded before the poll ever runs so a worker
-// that completes before arming still differs from the baseline it started on.
+// The accepted row is recorded before the poll ever runs so its task-specific
+// activity boundary separates this turn from any turn that finished before it.
 function supervisionArmingBaseline(worker) {
   return {
     status: String(worker.agent_status ?? "unknown"),
     updatedAt: String(worker.updated_at ?? ""),
+    acceptanceMs: supervisionTimestampMs(worker.last_user_activity_at),
   };
 }
 
@@ -1693,8 +1729,58 @@ function supervisionArmingObservation(baseline, delivery, generation) {
     ...baseline,
     deliveryState: supervisionDeliveryState(delivery?.state),
     messageKey: supervisionMessageKey(delivery?.messageId),
+    acceptanceMs: baseline.acceptanceMs ?? null,
     generation,
   };
+}
+
+async function supervisionPrepareRecall(messageId) {
+  const messageKey = supervisionMessageKey(messageId);
+  if (!messageKey) return [];
+  const state = path.join(controllerRoot(), "state");
+  let stat;
+  try {
+    stat = fs.lstatSync(state);
+  } catch {
+    return [];
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return [];
+  const tasks = fs.readdirSync(state)
+    .filter((name) => name.endsWith(".lane-poll"))
+    .map((name) => name.slice(0, -".lane-poll".length))
+    .filter(supervisionTaskIdValid);
+  const prepared = [];
+  for (const taskId of tasks) {
+    await supervisionWithCheckLock(state, taskId, () => {
+      const previous = supervisionReadSidecar(state, taskId);
+      if (!previous
+        || previous.messageKey !== messageKey
+        || !["queued", "sending"].includes(previous.deliveryState)) return;
+      supervisionWriteSidecar(state, taskId, { ...previous, deliveryState: "recall-pending" });
+      prepared.push({ state, taskId, generation: previous.generation, messageKey, deliveryState: previous.deliveryState });
+    });
+  }
+  return prepared;
+}
+
+async function supervisionResolveRecall(prepared, outcome) {
+  const problems = [];
+  const nextState = outcome === "recalled" ? "recalled" : outcome === "not-recallable" ? "delivered" : "recall-pending";
+  for (const item of prepared) {
+    try {
+      await supervisionWithCheckLock(item.state, item.taskId, () => {
+        const current = supervisionReadSidecar(item.state, item.taskId);
+        if (!current
+          || current.generation !== item.generation
+          || current.messageKey !== item.messageKey
+          || current.deliveryState !== "recall-pending") return;
+        supervisionWriteSidecar(item.state, item.taskId, { ...current, deliveryState: nextState });
+      });
+    } catch (error) {
+      problems.push(`state/${item.taskId}.lane-poll: ${supervisionErrorDetail(error)}`);
+    }
+  }
+  return problems;
 }
 
 // Arm one worker's watcher poll and report exactly what happened. Never throws
@@ -1817,14 +1903,9 @@ function supervisionHeldClause(queued) {
 // standing condition rather than a transition and keeps firing every interval,
 // because it genuinely still needs its supervisor.
 //
-// The change is decided against the whole observation the previous run recorded,
-// status and updated_at together, never the status alone. A worker dispatched
-// onto an already-idle chat is recorded at 'ready' because a send does not wait
-// for its turn to start, and it finishes back at 'ready'; comparing statuses
-// would read that completed worker as no change at all and drop the one wake
-// this surface exists to deliver. Its updated_at has moved, so the pair sees the
-// change while a worker that genuinely never started, whose row is untouched,
-// still holds the poll silent.
+// The change is decided against status and updated_at beyond the task-specific
+// activity boundary. That keeps a prior turn's completion out of this task while
+// retaining a ready-to-working-to-ready completion the poll never sampled.
 //
 // Retirement is irreversible - there is no re-arm tool - so it may only ever
 // happen once the worker has actually RECEIVED its task. A dispatch onto a busy
@@ -1850,8 +1931,24 @@ function supervisionPollDecision(taskId, threadId, previous) {
   const status = row ? supervisionField(row.agent_status ?? "unknown") : SUPERVISION_ABSENT;
   const updatedAt = row ? supervisionField(row.updated_at) : "";
   const priorDelivery = supervisionDeliveryState(previous?.deliveryState);
-  const delivered = priorDelivery === "delivered";
-  const observed = { status, updatedAt, deliveryState: priorDelivery, messageKey: previous?.messageKey ?? null, generation: previous?.generation ?? null };
+  const afterAcceptance = previous?.acceptanceMs !== null
+    && previous?.acceptanceMs !== undefined
+    && supervisionTimestampMs(updatedAt) > previous.acceptanceMs;
+  const deliveryAdvanced = ["queued", "sending"].includes(priorDelivery)
+    && Boolean(previous?.messageKey)
+    && Array.isArray(messages)
+    && !taskQueued
+    && afterAcceptance;
+  const deliveryState = deliveryAdvanced ? "delivered" : priorDelivery;
+  const delivered = deliveryState === "delivered";
+  const observed = {
+    status,
+    updatedAt,
+    deliveryState,
+    messageKey: previous?.messageKey ?? null,
+    acceptanceMs: previous?.acceptanceMs ?? null,
+    generation: previous?.generation ?? null,
+  };
   if (status === "working") return { ...observed, line: null, retire: false, remember: true };
   const held = supervisionHeldClause(queued);
   if (status === "pending_input") {
@@ -1862,7 +1959,8 @@ function supervisionPollDecision(taskId, threadId, previous) {
       remember: true,
     };
   }
-  if (supervisionSameObservation(previous, observed)) {
+  const changed = !supervisionSameObservation(previous, observed);
+  if (!changed && !(delivered && row && afterAcceptance)) {
     return { ...observed, line: null, retire: false, remember: false };
   }
   if (!delivered) {
@@ -1882,7 +1980,11 @@ function supervisionPollDecision(taskId, threadId, previous) {
       delivery = "the worker may not have seen the task";
     } else {
       unreadable = `worker ${threadId} is idle (status ${status}) while task delivery remains ${priorDelivery}`;
-      delivery = priorDelivery === "failed" ? "Playbot reported that the task was not sent" : "the worker may not have seen the task";
+      delivery = priorDelivery === "failed"
+        ? "Playbot reported that the task was not sent"
+        : ["recall-pending", "recalled"].includes(priorDelivery)
+          ? "the task was recalled or its recall is still being resolved"
+          : "the worker may not have seen the task";
     }
     return {
       ...observed,
@@ -1891,10 +1993,13 @@ function supervisionPollDecision(taskId, threadId, previous) {
       remember: true,
     };
   }
+  if (row && previous?.acceptanceMs !== null && previous?.acceptanceMs !== undefined && !afterAcceptance) {
+    return { ...observed, line: null, retire: false, remember: true };
+  }
   const stopped = row
     ? `playbot lane ${taskId}: worker ${threadId} stopped without a card (status ${status})${held}`
     : `playbot lane ${taskId}: worker chat ${threadId} is no longer readable in Playbot state (archived or removed)`;
-  return { ...observed, line: `${stopped}; this poll has retired itself`, retire: true, remember: false };
+  return { ...observed, line: stopped, retire: true, remember: false };
 }
 
 function supervisionPollArgs(argv) {
@@ -1934,8 +2039,15 @@ async function supervisionPoll(argv) {
         const decision = supervisionPollDecision(task, thread, previous);
         let line = decision.line;
         if (decision.retire) {
-          const problem = supervisionRetireProblem(state, task);
-          if (problem) line = `${line}; retirement failed and this check is still armed: ${problem}`;
+          const retirement = supervisionRetire(state, task);
+          if (!retirement.checkRemoved) {
+            line = `${line}; retirement failed and this check is still armed: ${retirement.problems.join("; ")}`;
+          } else {
+            line = `${line}; this poll has retired itself`;
+            if (retirement.problems.length > 0) {
+              line = `${line}; the executable check was removed, but cleanup left orphaned artifacts: ${retirement.problems.join("; ")}`;
+            }
+          }
         } else if (decision.remember && !supervisionSameObservation(previous, decision)) {
           try {
             supervisionWriteSidecar(state, task, decision);
@@ -1951,11 +2063,17 @@ async function supervisionPoll(argv) {
         const detail = supervisionErrorDetail(error);
         let line = `playbot lane ${task}: worker ${thread} is unreadable because the supervision poll failed: ${detail}`;
         if (previous.deliveryState === "delivered") {
-          line = `${line}; the task was delivered, so this poll has retired itself`;
-          const retirement = supervisionRetireProblem(state, task);
-          if (retirement) line = `${line}; retirement failed and this check is still armed: ${retirement}`;
+          const retirement = supervisionRetire(state, task);
+          if (!retirement.checkRemoved) {
+            line = `${line}; the task was delivered, but retirement failed and this check is still armed: ${retirement.problems.join("; ")}`;
+          } else {
+            line = `${line}; the task was delivered, so this poll has retired itself`;
+            if (retirement.problems.length > 0) {
+              line = `${line}; the executable check was removed, but cleanup left orphaned artifacts: ${retirement.problems.join("; ")}`;
+            }
+          }
         } else {
-          const observed = { status: "poll-unreadable", updatedAt: "", deliveryState: previous.deliveryState, messageKey: previous.messageKey ?? null, generation };
+          const observed = { status: "poll-unreadable", updatedAt: "", deliveryState: previous.deliveryState, messageKey: previous.messageKey ?? null, acceptanceMs: previous.acceptanceMs ?? null, generation };
           if (supervisionSameObservation(previous, observed)) return { line: null };
           line = `${line}; task delivery or its queue is unconfirmed, so this poll stays armed`;
           try {
@@ -2434,6 +2552,7 @@ async function handleTool(name, args = {}) {
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
       const sent = await sendMessage(worker, args.message, args.force === true);
+      const { supervisionAcceptance, ...sent } = await sendMessage(worker, args.message, args.force === true);
       if (caller) {
         return {
           lane,
@@ -2445,7 +2564,7 @@ async function handleTool(name, args = {}) {
           },
         };
       }
-      const supervision = await armSupervisionPoll({ requestedTaskId, worker, baseline: armingBaseline, delivery: sent.delivery });
+      const supervision = await armSupervisionPoll({ requestedTaskId, worker, baseline: supervisionAcceptance ?? armingBaseline, delivery: sent.delivery });
       const result = { lane: null, ...sent, supervision };
       if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
       return result;
@@ -2466,7 +2585,7 @@ async function handleTool(name, args = {}) {
       // caller. The thrown message carries the arming outcome, because a refusal
       // has no result body to report it in.
       if (!lane && sendReachedPlaybot(error)) {
-        const supervision = await armSupervisionPoll({ requestedTaskId, worker, baseline: armingBaseline });
+        const supervision = await armSupervisionPoll({ requestedTaskId, worker, baseline: error.supervisionAcceptance ?? armingBaseline });
         const suffix = supervision.armed
           ? `Playbot accepted the task, so its watcher poll was armed as ${supervision.check}.`
           : supervisionArmWarning(supervision);
@@ -2481,7 +2600,10 @@ async function handleTool(name, args = {}) {
     return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
   }
   const thread = resolveThreadInProject(project, args.workspace, args.thread, name === "archive_chat");
-  if (name === "send_message") return sendMessage(thread, args.message, args.force === true);
+  if (name === "send_message") {
+    const { supervisionAcceptance: _supervisionAcceptance, ...sent } = await sendMessage(thread, args.message, args.force === true);
+    return sent;
+  }
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
   if (name === "get_thread_status") {
     const publicValue = publicThread(thread);
@@ -2575,7 +2697,9 @@ async function handleTool(name, args = {}) {
     const messageId = String(args.messageId ?? "").trim();
     if (!messageId) throw new Error("messageId must not be empty; use list_queued_messages to choose one");
     const version = await playbotVersion();
+    const preparedRecalls = await supervisionPrepareRecall(messageId);
     const result = await cardInvoke("threads:recallMessage", { threadId: thread.thread_id, messageId });
+    const supervisionProblems = await supervisionResolveRecall(preparedRecalls, result?.outcome);
     // The recall already happened, so an unreadable queue projection is reported
     // as null and warned about rather than thrown, and never as an empty queue: a
     // supervisor reads an empty queueAfter as "the pile is gone" and acts on it.
@@ -2588,9 +2712,14 @@ async function handleTool(name, args = {}) {
       outcome: result?.outcome ?? null,
       recalled: result?.outcome === "recalled" ? result.message ?? null : null,
       queueAfter,
-      warnings: unreadableAfter.length > 0
-        ? [`${recallOutcomeClause(result?.outcome)}, and Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so that part of queueAfter is null rather than empty: what remains held is unknown, and list_queued_messages is the way to find out.`]
-        : [],
+      warnings: [
+        ...unreadableAfter.length > 0
+          ? [`${recallOutcomeClause(result?.outcome)}, and Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so that part of queueAfter is null rather than empty: what remains held is unknown, and list_queued_messages is the way to find out.`]
+          : [],
+        ...supervisionProblems.length > 0
+          ? [`${recallOutcomeClause(result?.outcome)}, but its watcher delivery record could not be finalized and remains fail-safe: ${supervisionProblems.join("; ")}`]
+          : [],
+      ],
     };
   }
   if (name === "register_lane") {
