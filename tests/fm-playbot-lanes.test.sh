@@ -1949,6 +1949,37 @@ wait_for_file() {  # <path>
   return 1
 }
 
+orphan_publication_lock() {  # <state> <task-id>
+  local state=$1 task_id=$2 fifo ready holder_pid attempts=100
+  fifo="$FIXTURE_ROOT/$task_id.lock-input"
+  ready="$FIXTURE_ROOT/$task_id.lock-ready"
+  rm -f "$fifo" "$ready"
+  mkfifo "$fifo" || return 1
+  exec 9<> "$fifo"
+  "$ROOT/bin/fm-check-publish-lock.sh" "$state" "$task_id" < "$fifo" > "$ready" &
+  holder_pid=$!
+  while ! grep -qx locked "$ready" 2>/dev/null; do
+    kill -0 "$holder_pid" 2>/dev/null || {
+      exec 9>&-
+      rm -f "$fifo" "$ready"
+      return 1
+    }
+    attempts=$((attempts - 1))
+    if [ "$attempts" -le 0 ]; then
+      kill "$holder_pid" 2>/dev/null || true
+      wait "$holder_pid" 2>/dev/null || true
+      exec 9>&-
+      rm -f "$fifo" "$ready"
+      return 1
+    fi
+    sleep 0.05
+  done
+  kill -9 "$holder_pid" 2>/dev/null || return 1
+  wait "$holder_pid" 2>/dev/null || true
+  exec 9>&-
+  rm -f "$fifo" "$ready"
+}
+
 set_thread_status() {  # <thread-id> <agent-status>
   FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$1" STATUS="$2" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -2179,6 +2210,9 @@ pass "fm-playbot-lanes: a fired poll reports held messages and keeps firing whil
 
 # Re-arming the same task is the ordinary re-dispatch case and must converge
 # rather than refuse or double-register.
+stale_generation_check="$FIXTURE_ROOT/fm-autoarm-probe.stale.check.sh"
+cp "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh" "$stale_generation_check"
+chmod 0700 "$stale_generation_check"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-2\"},\"title\":\"Autoarm again\",\"message\":\"Do the rearmed work\",\"taskId\":\"fm-autoarm-probe\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "re-dispatching the same task did not re-arm its poll"
@@ -2188,6 +2222,19 @@ NODE
 rearmed_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 [ "$rearmed_thread" != "$armed_thread" ] || fail "the re-dispatch did not create a new worker to re-arm on"
 check_is_registered fm-autoarm-probe || fail "the re-armed check was not re-bound in the trust store"
+rearmed_artifacts_before=$(cksum \
+  "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh" \
+  "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check-trust" \
+  "$FM_HOME_FIXTURE/state/fm-autoarm-probe.lane-poll")
+set_thread_status "$armed_thread" error || fail "could not stop the stale-generation worker"
+poll_line=$(bash "$stale_generation_check")
+[ -z "$poll_line" ] || fail "a stale poll generation emitted a wake after re-arm: $poll_line"
+[ "$(cksum \
+  "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh" \
+  "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check-trust" \
+  "$FM_HOME_FIXTURE/state/fm-autoarm-probe.lane-poll")" = "$rearmed_artifacts_before" ] \
+  || fail "a stale poll generation changed the replacement check, binding, or sidecar"
+check_is_registered fm-autoarm-probe || fail "a stale poll generation retired the replacement binding"
 set_thread_status "$rearmed_thread" pending_input || fail "could not park the re-armed worker"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh")
 case "$poll_line" in
@@ -2199,6 +2246,7 @@ pass "fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new work
 restore_bin="$FIXTURE_ROOT/restore-bin"
 mkdir -p "$restore_bin"
 cp "$SCRIPT" "$restore_bin/fm-playbot-lanes.mjs"
+cp "$ROOT/bin/fm-check-publish-lock.sh" "$ROOT/bin/fm-wake-lib.sh" "$restore_bin/"
 cat > "$restore_bin/fm-check-register.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -2214,9 +2262,20 @@ fi
 exec "$FM_TEST_REAL_REGISTER" "$@"
 SH
 chmod 0700 "$restore_bin/fm-check-register.sh"
+restore_generation="$FIXTURE_ROOT/restore-generation.cjs"
+cat > "$restore_generation" <<'NODE'
+'use strict';
+const crypto = require('node:crypto');
+const originalRandomBytes = crypto.randomBytes;
+crypto.randomBytes = function(size, ...args) {
+  if (size === 16 && args.length === 0) return Buffer.alloc(16, 1);
+  return originalRandomBytes.call(this, size, ...args);
+};
+NODE
 restore_rpc() {
   printf '%s\n' "$1" | FM_TEST_REGISTER_COUNT="$FIXTURE_ROOT/register-count" \
     FM_TEST_REAL_REGISTER="$ROOT/bin/fm-check-register.sh" \
+    NODE_OPTIONS="--require=$restore_generation" \
     node --no-warnings "$restore_bin/fm-playbot-lanes.mjs" serve
 }
 rm -f "$FIXTURE_ROOT/register-count" "$FIXTURE_ROOT/ipc-calls.jsonl"
@@ -2614,6 +2673,27 @@ const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== true) process.exit(1);
 NODE
 check_is_registered "$lane_first_id" || fail "the waiting PR owner overwrote the lane poll or its binding"
+
+dead_lane_id=fm-autoarm-dead-lock-lane
+orphan_publication_lock "$FM_HOME_FIXTURE/state" "$dead_lane_id" \
+  || fail "could not leave a dead lane-owner publication lock"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$dead_lane_id\"},\"title\":\"Dead lock lane\",\"message\":\"Recover the dead lane lock\",\"taskId\":\"$dead_lane_id\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "lane arming did not recover a verifiably dead publication lock"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== true) process.exit(1);
+NODE
+check_is_registered "$dead_lane_id" || fail "dead-lock recovery did not leave the lane poll registered"
+
+dead_pr_id=fm-autoarm-dead-lock-pr
+fm_write_meta "$FM_HOME_FIXTURE/state/$dead_pr_id.meta" \
+  "window=fm-$dead_pr_id" "endpoint_task_id=$dead_pr_id"
+chmod 0600 "$FM_HOME_FIXTURE/state/$dead_pr_id.meta"
+orphan_publication_lock "$FM_HOME_FIXTURE/state" "$dead_pr_id" \
+  || fail "could not leave a dead PR-owner publication lock"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-pr-check.sh" "$dead_pr_id" \
+  https://github.com/o/r/pull/53 > "$FIXTURE_ROOT/dead-pr.out" 2>&1 \
+  || fail "PR publication did not recover a verifiably dead lock: $(cat "$FIXTURE_ROOT/dead-pr.out")"
+pr_poll_is_valid "$dead_pr_id" || fail "dead-lock recovery did not publish a valid PR poll"
 pass "fm-playbot-lanes: concurrent check owners cannot overwrite across inspect, publish, or bind"
 
 # A Playbot-chat caller has routed wakes already, so it must get none of this -

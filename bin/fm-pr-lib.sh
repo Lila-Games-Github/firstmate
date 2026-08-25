@@ -64,7 +64,6 @@ FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 FM_PR_POLL_REFUSAL=
 FM_PR_POLL_LOCK_DIR=
-FM_PR_POLL_LOCK_TOKEN=
 # The exit status bin/fm-pr-check.sh reserves for the poll-collision refusal
 # alone, and the only status bin/fm-pr-merge.sh is allowed to continue past.
 # Both read it from here so neither can drift from the other, and no other
@@ -484,43 +483,37 @@ fm_pr_poll_cleanup() {
 }
 
 fm_pr_poll_lock_acquire() {
-  local state=$1 id=$2 attempts=200 token owner
+  local state=$1 id=$2 attempts=50 lib_dir had_override=0 saved_override=
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
+    if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
+      had_override=1
+      saved_override=$FM_STATE_OVERRIDE
+    fi
+    FM_STATE_OVERRIDE=$state
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$lib_dir/fm-wake-lib.sh"
+    if [ "$had_override" = 1 ]; then
+      FM_STATE_OVERRIDE=$saved_override
+    else
+      unset FM_STATE_OVERRIDE
+    fi
+  fi
   FM_PR_POLL_LOCK_DIR="$state/.$id.check-publish.lock"
-  FM_PR_POLL_LOCK_TOKEN="${BASHPID:-$$}.${RANDOM}.${RANDOM}"
-  while ! mkdir -m 0700 -- "$FM_PR_POLL_LOCK_DIR" 2>/dev/null; do
+  while ! fm_lock_try_acquire "$FM_PR_POLL_LOCK_DIR"; do
     attempts=$((attempts - 1))
     if [ "$attempts" -le 0 ]; then
       FM_PR_POLL_LOCK_DIR=
-      FM_PR_POLL_LOCK_TOKEN=
       return 1
     fi
     sleep 0.1
   done
-  token=$FM_PR_POLL_LOCK_TOKEN
-  if ! printf '%s\n' "$token" > "$FM_PR_POLL_LOCK_DIR/owner" \
-    || ! chmod 0600 "$FM_PR_POLL_LOCK_DIR/owner"; then
-    rm -f -- "$FM_PR_POLL_LOCK_DIR/owner"
-    rmdir -- "$FM_PR_POLL_LOCK_DIR" 2>/dev/null || true
-    FM_PR_POLL_LOCK_DIR=
-    FM_PR_POLL_LOCK_TOKEN=
-    return 1
-  fi
-  owner=$(cat "$FM_PR_POLL_LOCK_DIR/owner" 2>/dev/null || true)
-  if [ "$owner" != "$token" ]; then
-    fm_pr_poll_lock_release || true
-    return 1
-  fi
 }
 
 fm_pr_poll_lock_release() {
-  local owner
   [ -n "$FM_PR_POLL_LOCK_DIR" ] || return 0
-  owner=$(cat "$FM_PR_POLL_LOCK_DIR/owner" 2>/dev/null || true)
-  [ "$owner" = "$FM_PR_POLL_LOCK_TOKEN" ] || return 1
-  rm -f -- "$FM_PR_POLL_LOCK_DIR/owner" || return 1
-  rmdir -- "$FM_PR_POLL_LOCK_DIR" || return 1
+  fm_lock_release "$FM_PR_POLL_LOCK_DIR"
   FM_PR_POLL_LOCK_DIR=
-  FM_PR_POLL_LOCK_TOKEN=
 }
 
 fm_pr_poll_revoke_final() {
