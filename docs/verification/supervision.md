@@ -600,7 +600,7 @@ ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while
 ok - fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker
 ok - fm-playbot-lanes: failed restoration re-registration is loud even for identical check bytes
 ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself
-ok - fm-playbot-lanes: queued work can progress, while failed delivery stays armed
+ok - fm-playbot-lanes: empty or recalled queues and failed delivery stay armed
 ok - fm-playbot-lanes: delivered unreadability retires while restored unknown delivery stays armed
 ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace
 ok - fm-playbot-lanes: null and non-string taskIds take the workspace fallback
@@ -627,7 +627,7 @@ Not verified against a live Playbot: creating a real throwaway workspace and dri
 Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
 
 A parked worker is a standing condition and a finished one is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
-An idle worker whose dispatched task is still held in Playbot's queue, or whose queue cannot be read, never retires, because retirement is irreversible and a task that was never delivered still needs its supervisor.
+A queued or sending task remains armed even after its aggregate queue empties or its exact message is recalled, because only Playbot's task-specific delivered verdict authorizes irreversible retirement.
 It is reported when it appears and then stays quiet, because every branch that can print fires on a difference from the last observation rather than on a condition still being true, and `pending_input` is the one deliberate exception since answering the card is what resolves it.
 That change is decided on the pair of `agent_status` and the row's `updated_at`, which `threadRows()` already selects, because a send does not wait for the turn to start.
 A worker dispatched onto an already-idle chat is armed at `ready` and finishes back at `ready`, so a status compared on its own would report that completed worker as no change at all and drop the one wake this surface exists to deliver; the fixture drives exactly that sequence, with the intermediate `working` never observed by the poll, and the suite fails without the pair.

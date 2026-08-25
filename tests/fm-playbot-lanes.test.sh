@@ -350,6 +350,7 @@ const mcpSchemaVersionFile = path.join(process.env.FIXTURE_ROOT, 'mcp-schema-ver
 // read in the same tool call.
 const afterDropFile = path.join(process.env.FIXTURE_ROOT, 'after-drop-key');
 const sendFailsFile = path.join(process.env.FIXTURE_ROOT, 'send-fails');
+const sendHoldsWorkingFile = path.join(process.env.FIXTURE_ROOT, 'send-holds-working');
 const sendCompletesFile = path.join(process.env.FIXTURE_ROOT, 'send-completes-at');
 // A modern Playbot whose send path returns something that is not a snapshot at
 // all: the verdict is unknown for the same reason a legacy Playbot's is, but on
@@ -540,6 +541,8 @@ async function electronInvoke(channel, payload) {
       const [message] = snapshot.pendingMessages.splice(index, 1);
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
+      db.prepare('UPDATE workspace_threads SET pending_queue_json = ? WHERE id = ?')
+        .run(JSON.stringify({ messages: snapshot.pendingMessages }), payload.threadId);
       return {
         outcome: 'recalled',
         message: { id: message.id, input: { text: message.text } },
@@ -622,7 +625,10 @@ async function electronInvoke(channel, payload) {
       const snapshot = store[payload.threadId] ?? emptySnapshot(payload.threadId);
       sendCounter += 1;
       if (!readFileOr(reconcileFile, '')) {
-        const held = (snapshot.userInputRequests ?? []).length > 0 || (snapshot.pendingMessages ?? []).length > 0;
+        const workerStatus = db.prepare('SELECT agent_status FROM workspace_threads WHERE id = ?').get(payload.threadId)?.agent_status;
+        const held = (readFileOr(sendHoldsWorkingFile, '') && workerStatus === 'working')
+          || (snapshot.userInputRequests ?? []).length > 0
+          || (snapshot.pendingMessages ?? []).length > 0;
         // Playbot's queued projection carries no createdAtMs; its outbound one does.
         if (readFileOr(sendFailsFile, '')) {
           snapshot.outboundMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text, status: 'failed', reason: 'Message not sent', createdAtMs: 1000 + sendCounter });
@@ -636,6 +642,8 @@ async function electronInvoke(channel, payload) {
       if (readFileOr(refreshFailureFile, '') === 'send') {
         db.prepare('UPDATE workspace_threads SET archived = 1 WHERE id = ?').run(payload.threadId);
       }
+      db.prepare('UPDATE workspace_threads SET pending_queue_json = ? WHERE id = ?')
+        .run(JSON.stringify({ messages: snapshot.pendingMessages }), payload.threadId);
       const completesAt = readFileOr(sendCompletesFile, '');
       if (completesAt) {
         db.prepare('UPDATE workspace_threads SET agent_status = ?, updated_at = ? WHERE id = ?')
@@ -2130,7 +2138,9 @@ for leftover in fm-autoarm-fast-turn.check.sh fm-autoarm-fast-turn.check-trust f
 done
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-turn\"},\"title\":\"Completed turn\",\"message\":\"Do the completed work\",\"taskId\":\"fm-autoarm-turn\"}")
+rm -f "$FIXTURE_ROOT/send-reconciles"
 turn_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-turn || fail "the completed-turn worker's poll was not armed"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-turn.check.sh")
@@ -2160,7 +2170,9 @@ pass "fm-playbot-lanes: fast and unsampled completed turns are reported while an
 # turns the still-executable check into a rejected unauthenticated check, which
 # wakes firstmate on every watcher interval until teardown.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-retire-failure\"},\"title\":\"Retirement failure\",\"message\":\"Do the retirement work\",\"taskId\":\"fm-autoarm-retire-failure\"}")
+rm -f "$FIXTURE_ROOT/send-reconciles"
 retire_failure_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-retire-failure || fail "the retirement-failure worker's poll was not armed"
 set_thread_turn "$retire_failure_thread" error 2026-08-25T09:45:00.000Z \
@@ -2268,7 +2280,9 @@ stale_generation_check="$FIXTURE_ROOT/fm-autoarm-probe.stale.check.sh"
 cp "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh" "$stale_generation_check"
 chmod 0700 "$stale_generation_check"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-2\"},\"title\":\"Autoarm again\",\"message\":\"Do the rearmed work\",\"taskId\":\"fm-autoarm-probe\"}")
+rm -f "$FIXTURE_ROOT/send-reconciles"
 OUT="$out" node --no-warnings <<'NODE' || fail "re-dispatching the same task did not re-arm its poll"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== true || value.supervision.rearmed !== true) process.exit(1);
@@ -2380,6 +2394,7 @@ pass "fm-playbot-lanes: the armed poll reports a stopped worker once and then re
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-11\"},\"title\":\"Queued task\",\"message\":\"Do the queued work\",\"taskId\":\"fm-autoarm-queued\"}")
 queued_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+queued_message=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.delivery.messageId)')
 check_is_registered fm-autoarm-queued || fail "the queued-task worker's poll was not armed"
 set_thread_queue() {  # <thread-id> <pending-queue-json-or-empty>
   FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$1" QUEUE="$2" node --no-warnings <<'NODE'
@@ -2392,7 +2407,7 @@ db.close();
 if (changed.changes !== 1) process.exit(1);
 NODE
 }
-set_thread_queue "$queued_thread" '{"messages":[{"id":"held-queued","text":"Do the queued work"}]}' \
+set_thread_queue "$queued_thread" "{\"messages\":[{\"id\":\"$queued_message\",\"text\":\"Do the queued work\"}]}" \
   || fail "could not hold the dispatched task in the worker's queue"
 set_thread_turn "$queued_thread" ready 2026-08-25T10:00:00.000Z || fail "could not idle the queued-task worker"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
@@ -2436,19 +2451,63 @@ for kept in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-
 done
 check_is_registered fm-autoarm-queued || fail "the poll disarmed a worker whose queue could not be read"
 
-# Once the queue is genuinely empty the worker really has stopped, so the
-# ordinary terminal report and retirement are unchanged.
 set_thread_queue "$queued_thread" '' || fail "could not drain the worker's queue"
 set_thread_turn "$queued_thread" ready 2026-08-25T10:30:00.000Z || fail "could not settle the queued-task worker"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
 case "$poll_line" in
-  *"playbot lane fm-autoarm-queued"*"stopped without a card"*"status ready"*"retired itself"*) ;;
-  *) fail "a worker with a drained queue was not reported as stopped and retired: $poll_line" ;;
+  *"playbot lane fm-autoarm-queued"*"delivery remains sending"*"stays armed"*) ;;
+  *) fail "an empty aggregate queue fabricated delivery for the queued-task worker: $poll_line" ;;
 esac
-for leftover in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-queued.lane-poll; do
-  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
-    || fail "the retired poll left $leftover armed after the queue drained"
+for kept in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-queued.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "the empty aggregate queue retired $kept without task-specific delivery proof"
 done
+check_is_registered fm-autoarm-queued \
+  || fail "the empty aggregate queue retired the queued-task trust binding"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-recalled\"},\"title\":\"Recall queued task\"}}}")
+recalled_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+recalled_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+set_thread_turn "$recalled_thread" working 2026-08-25T10:32:00.000Z \
+  || fail "could not stage turn A as working before dispatching task B"
+printf 'yes\n' > "$FIXTURE_ROOT/send-holds-working"
+out=$(home_dispatch "{\"project\":$worker_json,\"workspace\":\"$recalled_workspace\",\"thread\":\"$recalled_thread\",\"message\":\"Task B must be recalled\",\"taskId\":\"fm-autoarm-recalled\"}")
+rm -f "$FIXTURE_ROOT/send-holds-working"
+recalled_message=$(OUT="$out" node --no-warnings <<'NODE'
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'queued' || !value.delivery.messageId || value.supervision.armed !== true) process.exit(1);
+process.stdout.write(value.delivery.messageId);
+NODE
+)
+[ -n "$recalled_message" ] || fail "task B was not queued with a task-specific message id"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"$recalled_workspace\",\"thread\":\"$recalled_thread\",\"messageId\":\"$recalled_message\"}}}")
+OUT="$out" MESSAGE_ID="$recalled_message" node --no-warnings <<'NODE' || fail "task B was not recalled through the public queue interface"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.outcome !== 'recalled' || value.messageId !== process.env.MESSAGE_ID) process.exit(1);
+if (value.recalled?.id !== process.env.MESSAGE_ID) process.exit(1);
+NODE
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-recalled.check.sh")
+[ -z "$poll_line" ] || fail "recalling task B while turn A worked emitted a false completion: $poll_line"
+set_thread_turn "$recalled_thread" ready 2026-08-25T10:35:00.000Z \
+  || fail "could not finish turn A after recalling task B"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-recalled.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-recalled"*"delivery remains queued"*"stays armed"*) ;;
+  *) fail "finishing turn A fabricated delivery or completion for recalled task B: $poll_line" ;;
+esac
+case "$poll_line" in
+  *"retired itself"*|*"stopped without a card"*) fail "recalled task B was reported completed or retired: $poll_line" ;;
+  *) ;;
+esac
+for kept in fm-autoarm-recalled.check.sh fm-autoarm-recalled.check-trust fm-autoarm-recalled.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "recalled task B lost $kept when turn A finished"
+done
+check_is_registered fm-autoarm-recalled \
+  || fail "recalled task B lost its trust binding when turn A finished"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-recalled.check.sh")
+[ -z "$poll_line" ] || fail "an unchanged recalled-task observation repeated its wake: $poll_line"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-failed-send\"},\"title\":\"Failed busy delivery\"}}}")
@@ -2478,7 +2537,7 @@ check_is_registered fm-autoarm-failed-send \
   || fail "the failed-delivery poll lost its trust binding"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-failed-send.check.sh")
 [ -z "$poll_line" ] || fail "an unchanged failed-delivery observation repeated its wake: $poll_line"
-pass "fm-playbot-lanes: queued work can progress, while failed delivery stays armed"
+pass "fm-playbot-lanes: empty or recalled queues and failed delivery stay armed"
 
 # A worker whose chat is gone must not read as a silent, healthy worker, and it
 # is just as finished as one that stopped, so it retires the same way.

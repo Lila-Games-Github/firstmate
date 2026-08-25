@@ -1010,10 +1010,15 @@ function recallOutcomeClause(outcome) {
 
 // null means the ledger is present but unreadable, never that nothing is held;
 // 0 is reserved for an absent or empty queue.
-function queuedMessageCount(pendingQueueJson) {
-  if (typeof pendingQueueJson !== "string" || !pendingQueueJson.trim()) return 0;
+function queuedMessages(pendingQueueJson) {
+  if (typeof pendingQueueJson !== "string" || !pendingQueueJson.trim()) return [];
   const ledger = readJsonText(pendingQueueJson);
-  return Array.isArray(ledger?.messages) ? ledger.messages.length : null;
+  return Array.isArray(ledger?.messages) ? ledger.messages : null;
+}
+
+function queuedMessageCount(pendingQueueJson) {
+  const messages = queuedMessages(pendingQueueJson);
+  return messages === null ? null : messages.length;
 }
 
 function readJsonText(text) {
@@ -1300,7 +1305,8 @@ function registerLane(supervisor, worker) {
 const SUPERVISION_CHECK_MARKER = "# fm-playbot-lane-supervision-poll v1";
 const SUPERVISION_TOOLS = ["get_thread_status", "read_thread", "get_thread_card"];
 const SUPERVISION_CHECK_SHEBANG = "#!/usr/bin/env bash";
-const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v5";
+const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v6";
+const SUPERVISION_SIDECAR_VERSION_V5 = "fm-playbot-lane-poll-v5";
 const SUPERVISION_SIDECAR_VERSION_V4 = "fm-playbot-lane-poll-v4";
 const SUPERVISION_SIDECAR_VERSION_V3 = "fm-playbot-lane-poll-v3";
 const SUPERVISION_SIDECAR_VERSION_V2 = "fm-playbot-lane-poll-v2";
@@ -1449,9 +1455,15 @@ function supervisionDeliveryState(value) {
   return SUPERVISION_DELIVERY_STATES.has(value) ? value : "unconfirmed";
 }
 
+function supervisionMessageKey(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return `sha256:${crypto.createHash("sha256").update(value).digest("hex")}`;
+}
+
 function supervisionWriteSidecar(state, taskId, observation) {
   const delivery = supervisionDeliveryState(observation.deliveryState);
-  const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n${delivery}\n${supervisionField(observation.generation)}\n`;
+  const messageKey = observation.messageKey ?? "none";
+  const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n${delivery}\n${supervisionField(observation.generation)}\n${messageKey}\n`;
   return supervisionPublish(state, `${taskId}.lane-poll`, body, 0o600);
 }
 
@@ -1460,6 +1472,7 @@ function supervisionSameObservation(left, right) {
     && left.status === supervisionField(right.status)
     && left.updatedAt === supervisionField(right.updatedAt)
     && supervisionDeliveryState(left.deliveryState) === supervisionDeliveryState(right.deliveryState)
+    && (left.messageKey ?? null) === (right.messageKey ?? null)
     && (left.generation ?? null) === (right.generation ?? null);
 }
 
@@ -1504,10 +1517,22 @@ function supervisionReadSidecar(state, taskId) {
     && /^[a-f0-9]{32}$/.test(lines[4] ?? "")) {
     return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: lines[4] };
   }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V5) {
+    if (!SUPERVISION_DELIVERY_STATES.has(lines[3])
+      || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")) return null;
+    return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: lines[4], messageKey: null };
+  }
   if (lines[0] !== SUPERVISION_SIDECAR_VERSION
     || !SUPERVISION_DELIVERY_STATES.has(lines[3])
-    || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")) return null;
-  return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: lines[4] };
+    || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")
+    || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")) return null;
+  return {
+    status: lines[1],
+    updatedAt: lines[2] ?? "",
+    deliveryState: lines[3],
+    generation: lines[4],
+    messageKey: lines[5] === "none" ? null : lines[5],
+  };
 }
 
 function supervisionCheckLockAcquire(state, taskId) {
@@ -1667,6 +1692,7 @@ function supervisionArmingObservation(baseline, delivery, generation) {
   return {
     ...baseline,
     deliveryState: supervisionDeliveryState(delivery?.state),
+    messageKey: supervisionMessageKey(delivery?.messageId),
     generation,
   };
 }
@@ -1816,20 +1842,16 @@ function supervisionHeldClause(queued) {
 // where a queue firstmate has already seen is not.
 function supervisionPollDecision(taskId, threadId, previous) {
   const row = threadRowById(threadId);
-  const queued = row ? queuedMessageCount(row.pending_queue_json) : 0;
+  const messages = row ? queuedMessages(row.pending_queue_json) : [];
+  const queued = messages === null ? null : messages.length;
+  const taskQueued = Array.isArray(messages)
+    && previous?.messageKey
+    && messages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey);
   const status = row ? supervisionField(row.agent_status ?? "unknown") : SUPERVISION_ABSENT;
   const updatedAt = row ? supervisionField(row.updated_at) : "";
-  const changed = Boolean(previous)
-    && (previous.status !== status || previous.updatedAt !== updatedAt);
   const priorDelivery = supervisionDeliveryState(previous?.deliveryState);
-  const deliveryTransition = previous?.status !== "poll-unreadable"
-    && ["queued", "sending"].includes(priorDelivery)
-    && row
-    && queued === 0
-    && (changed || status === "working" || status === "pending_input");
-  const deliveryState = priorDelivery === "delivered" || deliveryTransition ? "delivered" : priorDelivery;
-  const delivered = deliveryState === "delivered";
-  const observed = { status, updatedAt, deliveryState, generation: previous?.generation ?? null };
+  const delivered = priorDelivery === "delivered";
+  const observed = { status, updatedAt, deliveryState: priorDelivery, messageKey: previous?.messageKey ?? null, generation: previous?.generation ?? null };
   if (status === "working") return { ...observed, line: null, retire: false, remember: true };
   const held = supervisionHeldClause(queued);
   if (status === "pending_input") {
@@ -1852,9 +1874,12 @@ function supervisionPollDecision(taskId, threadId, previous) {
     } else if (queued === null) {
       unreadable = `worker ${threadId} is idle (status ${status}) with its task queue unreadable${held}`;
       delivery = "the worker may not have seen the task";
-    } else if (queued > 0) {
+    } else if (taskQueued) {
       unreadable = `worker ${threadId} is idle (status ${status}) with its dispatched task still queued${held}`;
       delivery = "the worker has not seen it and has not started";
+    } else if (queued > 0) {
+      unreadable = `worker ${threadId} is idle (status ${status}) with other messages still queued${held} while task delivery remains ${priorDelivery}`;
+      delivery = "the worker may not have seen the task";
     } else {
       unreadable = `worker ${threadId} is idle (status ${status}) while task delivery remains ${priorDelivery}`;
       delivery = priorDelivery === "failed" ? "Playbot reported that the task was not sent" : "the worker may not have seen the task";
@@ -1930,7 +1955,7 @@ async function supervisionPoll(argv) {
           const retirement = supervisionRetireProblem(state, task);
           if (retirement) line = `${line}; retirement failed and this check is still armed: ${retirement}`;
         } else {
-          const observed = { status: "poll-unreadable", updatedAt: "", deliveryState: previous.deliveryState, generation };
+          const observed = { status: "poll-unreadable", updatedAt: "", deliveryState: previous.deliveryState, messageKey: previous.messageKey ?? null, generation };
           if (supervisionSameObservation(previous, observed)) return { line: null };
           line = `${line}; task delivery or its queue is unconfirmed, so this poll stays armed`;
           try {
