@@ -2081,9 +2081,14 @@ esac
 pass "fm-playbot-lanes: the armed poll wakes the real watcher when the worker parks, naming the task"
 
 # Held messages are the PL-017 defect, so a fired poll carries the pile rather
-# than making firstmate go looking for it. A parked worker is a standing
-# condition rather than news, so the poll also has to keep firing every interval
-# for as long as it stays parked.
+# than making firstmate go looking for it.
+#
+# The second probe below changes nothing before running, which pins the ONE
+# deliberate exception to this poll's fire-on-a-difference rule: a parked card is
+# resolved by the supervisor answering it, so repeating that wake is actionable
+# and pending_input alone keeps firing every interval. Every other branch that
+# can print stays quiet on an unchanged observation. Do not "fix" this into
+# silence without moving the exception somewhere it is still pinned.
 FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$armed_thread" node --no-warnings <<'NODE' || fail "could not stage held messages"
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
@@ -2180,9 +2185,18 @@ for kept in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-
     || fail "the poll retired $kept while the dispatched task was still queued"
 done
 check_is_registered fm-autoarm-queued || fail "the poll disarmed a worker whose task was still queued"
+# A queue that is still held is not news a second time. Nothing changed since
+# the line above, so this probe must be silent rather than costing firstmate a
+# turn every check interval for a state it has already been told about.
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
+[ -z "$poll_line" ] || fail "an unchanged held queue was reported a second time: $poll_line"
+for kept in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-queued.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "the silent re-probe retired $kept while the dispatched task was still queued"
+done
 
 # An unreadable queue is not proof of delivery either, so it holds the poll
-# armed for the same reason.
+# armed for the same reason, and it is reported once and then quiet too.
 set_thread_queue "$queued_thread" 'not-json' || fail "could not stage an unreadable queue"
 set_thread_turn "$queued_thread" ready 2026-08-25T10:15:00.000Z || fail "could not re-idle the queued-task worker"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
@@ -2190,6 +2204,12 @@ case "$poll_line" in
   *"playbot lane fm-autoarm-queued"*"held messages unreadable"*) ;;
   *) fail "an unreadable queue was not reported on the idle-worker path: $poll_line" ;;
 esac
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
+[ -z "$poll_line" ] || fail "an unchanged unreadable queue was reported a second time: $poll_line"
+for kept in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-queued.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "the silent re-probe retired $kept while the queue could not be read"
+done
 check_is_registered fm-autoarm-queued || fail "the poll disarmed a worker whose queue could not be read"
 
 # Once the queue is genuinely empty the worker really has stopped, so the

@@ -2634,7 +2634,7 @@ test_teardown_removes_poll_artifacts() {
   # A Playbot lane supervision poll keeps its observed-state record beside the
   # check it belongs to, so a task torn down while its worker was still working
   # must leave that behind no more than it leaves the check.
-  printf 'fm-playbot-lane-poll-v1\nworking\n' > "$dir/home/state/task-a.lane-poll"
+  printf 'fm-playbot-lane-poll-v2\nworking\n2026-08-25T09:00:00.000Z\n' > "$dir/home/state/task-a.lane-poll"
   chmod 0600 "$dir/home/state/task-a.lane-poll"
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   chmod 0700 "$dir/home/state/.pr-check-quarantine"

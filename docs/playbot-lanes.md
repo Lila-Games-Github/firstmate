@@ -70,9 +70,9 @@ It writes `state/<taskId>.check.sh` under the configured controller root, binds 
 The armed poll reads persisted Playbot state only, so it contacts Playbot not at all and resumes nothing.
 It stays silent while the worker is `working` and prints one line when the worker parks on a card, stops without one, becomes unreadable, or cannot be read at all, which is why a poll that failed reports the failure instead of passing as silence.
 A persisted `pending_input` is a candidate on exactly the terms `list_parked_threads` describes, so the wake line says so and names `get_thread_card` as the confirming read.
-A parked worker is a standing condition, so it keeps firing each check interval, because a worker that is still parked still needs its supervisor.
+Every branch that can print fires on a difference from the last observation and never on a condition merely still being true, with one deliberate exception: a parked worker keeps firing each check interval, because answering the card is what resolves it and a worker that is still parked still needs its supervisor.
 A worker that stopped or became unreadable is news exactly once, so that is reported on the change into it and the poll then retires itself, removing the check, its trust binding, and its private `state/<taskId>.lane-poll` record of what it last saw.
-An idle worker whose dispatched task Playbot is still holding has not stopped, it has not started, so it is reported as that and the poll stays armed until the worker receives the task.
+An idle worker whose dispatched task Playbot is still holding has not stopped, it has not started, so it is reported as that once and the poll stays armed and then quiet until something changes or the worker receives the task.
 A queue that cannot be read counts the same way, because unreadable is not proof of delivery, and retirement is irreversible while an extra wake is not.
 That record holds the status and the row's `updated_at` together, and arming writes the pair it observed.
 Both halves are needed because a send does not wait for the turn to start: a worker dispatched onto an already-idle chat is armed at `ready` and a worker that runs and finishes lands back at `ready`, so a status on its own would read a completed worker as no change at all.

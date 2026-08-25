@@ -1674,10 +1674,16 @@ function supervisionHeldClause(queued) {
 // happen once the worker has actually RECEIVED its task. A dispatch onto a busy
 // chat is held in Playbot's queue, and that worker's earlier turn can end before
 // the queue drains, so an idle worker with a held message has not stopped: its
-// task has not started. That is a standing condition like a parked card, and it
-// keeps the poll armed and firing. A queue that cannot be read counts the same
-// way, because unreadable is not proof of delivery, and keeping a poll armed
-// costs one wake while dropping one costs the supervision entirely.
+// task has not started, and the poll stays armed. A queue that cannot be read
+// counts the same way, because unreadable is not proof of delivery, and keeping
+// a poll armed costs one wake while dropping one costs the supervision entirely.
+//
+// Every branch that can print fires on a DIFFERENCE from the last observation
+// and never on a condition merely still being true, so an undrained queue is
+// reported when it appears and then stays quiet. The single exception is
+// pending_input, which keeps firing every interval on purpose: a parked card is
+// resolved by the supervisor answering it, so that repeated wake is actionable
+// where a queue firstmate has already seen is not.
 function supervisionPollDecision(taskId, threadId, previous) {
   const row = threadRowById(threadId);
   const observed = row
@@ -1695,6 +1701,9 @@ function supervisionPollDecision(taskId, threadId, previous) {
       remember: true,
     };
   }
+  if (supervisionSameObservation(previous, observed)) {
+    return { ...observed, line: null, retire: false, remember: false };
+  }
   if (row && queued !== 0) {
     return {
       ...observed,
@@ -1702,9 +1711,6 @@ function supervisionPollDecision(taskId, threadId, previous) {
       retire: false,
       remember: true,
     };
-  }
-  if (supervisionSameObservation(previous, observed)) {
-    return { ...observed, line: null, retire: false, remember: false };
   }
   const stopped = row
     ? `playbot lane ${taskId}: worker ${threadId} stopped without a card (status ${status})${held}`
