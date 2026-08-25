@@ -1943,6 +1943,21 @@ if (changed.changes !== 1) process.exit(1);
 NODE
 }
 
+# A turn that Playbot ran and finished: the status lands back where it started
+# and updated_at moves. Driving both is what separates a completed worker from
+# one that never began, which is the whole difference the poll has to see.
+set_thread_turn() {  # <thread-id> <agent-status> <updated-at>
+  FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$1" STATUS="$2" UPDATED="$3" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const changed = db.prepare('UPDATE workspace_threads SET agent_status = ?, updated_at = ? WHERE id = ?')
+  .run(process.env.STATUS, process.env.UPDATED, process.env.THREAD);
+db.close();
+if (changed.changes !== 1) process.exit(1);
+NODE
+}
+
 # One bounded foreground run of the real watcher over this home. Echoes its
 # output and returns its exit status, so a wake and a deliberate silence are
 # told apart by the watcher itself rather than by re-implementing its sweep.
@@ -2005,16 +2020,38 @@ check_is_registered fm-autoarm-probe \
   || fail "the armed check was not bound in the watcher's trust store by fm-check-register.sh"
 pass "fm-playbot-lanes: an external-terminal dispatch arms and registers that worker's watcher poll"
 
-# A freshly dispatched worker sits at `ready` until its turn starts, which is a
-# state the poll otherwise reports as a worker that stopped. Arming records what
-# it saw, so that state is not a change into stopping and the poll must neither
-# fire nor disarm a worker that has not begun.
-poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh")
-[ -z "$poll_line" ] || fail "the poll fired for the state its own arming had already observed: $poll_line"
-[ -f "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh" ] \
-  || fail "the poll retired a worker that had not started its turn yet"
-check_is_registered fm-autoarm-probe || fail "the poll disarmed a worker that had not started its turn yet"
-pass "fm-playbot-lanes: the armed poll neither fires nor retires on the state its arming observed"
+# The two cases a status alone cannot tell apart, on one worker.
+#
+# A send does not wait for the turn to start, so a worker dispatched onto an
+# already-idle chat is armed at `ready` and a worker that runs and finishes
+# lands back at `ready`. First, the worker that has NOT begun: its row is
+# untouched, so the poll must stay silent and stay armed rather than disarm a
+# worker that never started.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-turn\"},\"title\":\"Completed turn\",\"message\":\"Do the completed work\",\"taskId\":\"fm-autoarm-turn\"}")
+turn_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+check_is_registered fm-autoarm-turn || fail "the completed-turn worker's poll was not armed"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-turn.check.sh")
+[ -z "$poll_line" ] || fail "the poll fired for a worker that had not started its turn yet: $poll_line"
+check_is_registered fm-autoarm-turn || fail "the poll disarmed a worker that had not started its turn yet"
+
+# Now the SAME worker runs its turn and finishes, landing back on the same
+# status with updated_at advanced. The watcher samples once per check interval,
+# so the intermediate `working` is never observed by the poll - which is exactly
+# how a completed worker goes unreported when only the status is compared. It
+# must fire once for the completion and retire.
+set_thread_turn "$turn_thread" working 2026-08-25T09:00:00.000Z || fail "could not start the completed-turn worker"
+set_thread_turn "$turn_thread" ready 2026-08-25T09:30:00.000Z || fail "could not finish the completed-turn worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-turn.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-turn"*"stopped without a card"*"status ready"*"retired itself"*) ;;
+  *) fail "a worker that ran and finished back on its starting status was not reported: $poll_line" ;;
+esac
+for leftover in fm-autoarm-turn.check.sh fm-autoarm-turn.check-trust fm-autoarm-turn.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the completed worker's poll left $leftover armed"
+done
+pass "fm-playbot-lanes: a worker that finishes back on its starting status is reported once, and one that never started is not"
 
 # Silent while the worker works. Asserted through the real watcher, not by
 # reading the check's output: a check the watcher rejects is also silent, and
@@ -2113,6 +2150,11 @@ rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-8\"},\"title\":\"Vanishing worker\",\"message\":\"Do the vanishing work\",\"taskId\":\"fm-autoarm-vanish\"}")
 vanish_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-vanish || fail "the vanishing worker's poll was not armed"
+# Also the case where the poll's own record of what it last saw is gone, by hand
+# or through a retirement that only half completed. A finished worker is still
+# finished, so it must be reported and retired on the persisted state alone
+# rather than left armed with nothing that could ever act on it.
+rm -f "$FM_HOME_FIXTURE/state/fm-autoarm-vanish.lane-poll"
 FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$vanish_thread" node --no-warnings <<'NODE' || fail "could not archive the armed worker"
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');

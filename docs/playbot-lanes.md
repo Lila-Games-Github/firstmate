@@ -72,7 +72,10 @@ It stays silent while the worker is `working` and prints one line when the worke
 A persisted `pending_input` is a candidate on exactly the terms `list_parked_threads` describes, so the wake line says so and names `get_thread_card` as the confirming read.
 A parked worker is a standing condition, so it keeps firing each check interval, because a worker that is still parked still needs its supervisor.
 A worker that stopped or became unreadable is news exactly once, so that is reported on the change into it and the poll then retires itself, removing the check, its trust binding, and its private `state/<taskId>.lane-poll` record of what it last saw.
-That record is why arming stores the status it observed: a worker dispatched but not yet started sits at `ready`, and without a prior observation to compare against, the first poll would disarm a worker that never began.
+That record holds the status and the row's `updated_at` together, and arming writes the pair it observed.
+Both halves are needed because a send does not wait for the turn to start: a worker dispatched onto an already-idle chat is armed at `ready` and a worker that runs and finishes lands back at `ready`, so a status on its own would read a completed worker as no change at all.
+A worker that genuinely never began leaves its row untouched, so the pair holds the poll silent and armed for it while still reporting the one that finished.
+If that record is missing the poll reports the stopped worker on the persisted state alone and retires anyway, because a check nothing will act on again must not stay armed.
 Firstmate's task teardown removes the record with the rest of the task's state, so a task torn down while its worker was still working leaves nothing behind.
 
 `taskId` is optional and the workspace id is used when it is absent, so the poll always exists; a workspace-keyed poll is not retired by firstmate's task teardown and the result says so.
@@ -80,6 +83,8 @@ A `taskId` that is not a string is treated as absent and takes that same fallbac
 `state/<taskId>.check.sh` is a name firstmate's merged-PR poll owns too, so neither owner may overwrite the other and both refuse by name instead.
 Arming only ever replaces a check this server generated, so a merged-PR poll or any other check already armed for that task id is left untouched and the arming is refused instead.
 In the other direction `bin/fm-pr-check.sh` refuses to arm over a lane supervision poll, naming both owners and the task id and exiting non-zero, rather than silently destroying the only supervision a dispatched worker has.
+That refusal costs merge detection and nothing else: `bin/fm-pr-check.sh` records `pr=` before it publishes the poll, so `bin/fm-pr-merge.sh` reports the unarmed detection and what to do about it and then merges as it would have.
+A supervision poll never blocks a merge, because losing detection is a degradation firstmate recovers from by hand while a blocked merge stops real work.
 A failed arming never turns a delivered task into an error: the result carries the delivery verdict beside `armed: false`, the reason, and a warning that nothing is polling the worker.
 A Playbot-chat caller is reported as `mode: "routed-wake"` and arms nothing, because its lane already delivers.
 `create_chat` arms nothing either: it starts no agent turn, so there is no worker to supervise until a `dispatch` sends one a task.

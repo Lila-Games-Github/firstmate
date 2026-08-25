@@ -592,7 +592,7 @@ The firstmate-side half is enforced end to end in `tests/fm-playbot-lanes.test.s
 
 ```text
 ok - fm-playbot-lanes: an external-terminal dispatch arms and registers that worker's watcher poll
-ok - fm-playbot-lanes: the armed poll neither fires nor retires on the state its arming observed
+ok - fm-playbot-lanes: a worker that finishes back on its starting status is reported once, and one that never started is not
 ok - fm-playbot-lanes: the armed poll keeps the real watcher silent while the worker is working
 ok - fm-playbot-lanes: the armed poll wakes the real watcher when the worker parks, naming the task
 ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while the worker stays parked
@@ -623,12 +623,16 @@ Not verified against a live Playbot: creating a real throwaway workspace and dri
 Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
 
 A parked worker is a standing condition and a finished one is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
+That change is decided on the pair of `agent_status` and the row's `updated_at`, which `threadRows()` already selects, because a send does not wait for the turn to start.
+A worker dispatched onto an already-idle chat is armed at `ready` and finishes back at `ready`, so a status compared on its own would report that completed worker as no change at all and drop the one wake this surface exists to deliver; the fixture drives exactly that sequence, with the intermediate `working` never observed by the poll, and the suite fails without the pair.
 That transition rule was added after the live run above, and it gave the generated check a third argument, `--state`, so the live lines recorded here were produced by the earlier two-argument invocation and the transition and retirement behaviour itself is proved against the hermetic fixture rather than live.
 The check's bytes are hash-bound by `bin/fm-check-register.sh`, so that record is a separate private file rather than a rewrite of the check, and `bin/fm-teardown.sh` removes it with the rest of a task's state.
 `bash tests/fm-pr-check-security.test.sh` covers that removal and passed all 36 checks on the same date.
 `state/<id>.check.sh` is also the name firstmate's merged-PR poll owns, so both directions of that shared boundary refuse rather than overwrite.
 The lane arming leaves a foreign check byte-identical, and `bin/fm-pr-check.sh` refuses by name and exits non-zero when it would publish over a lane poll.
 The suite proves that second direction by arming a real generated lane poll and then running the real `bin/fm-pr-check.sh` for the same task id, which leaves the lane poll intact and its trust binding valid.
+That refusal costs merge detection only, never the merge: `bin/fm-pr-check.sh` commits `pr=` to the task metadata before it publishes the poll, so `bin/fm-pr-merge.sh` reports the unarmed detection on stderr and merges on the recorded URL.
+`bash tests/fm-pr-merge.test.sh` proves that with a lane poll armed through the real `bin/fm-check-register.sh` and a recording fake forge on PATH, and passed all 11 checks on the same date.
 
 On 2026-08-25, forced steering was live-verified against Playbot 0.95.0 on Linux with `playbot_lanes@0.4.0` and Node v26.7.0.
 `node --no-warnings bin/fm-playbot-lanes.mjs doctor` reported `renderer: true`, `chatCreation: "launch"`, and `playbotApp: {version: "0.95.0", verifiedVersions: "0.95.x"}`.

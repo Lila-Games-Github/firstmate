@@ -14,6 +14,7 @@
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
+#   (i) a merge poll that could not be armed is reported but never blocks the merge
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -301,8 +302,66 @@ test_parses_pr_url_for_gh_axi() {
   pass "fm-pr-merge parses a GitHub PR URL into gh-axi number and --repo arguments"
 }
 
+# A Playbot lane supervision poll (bin/fm-playbot-lanes.mjs) keys its watcher
+# check on the same state/<id>.check.sh name the merge poll owns, and
+# bin/fm-pr-lib.sh refuses to publish over it rather than destroying the only
+# supervision a dispatched worker has. That refusal must cost merge DETECTION
+# and nothing else: losing detection is a degradation firstmate recovers from by
+# hand, while a supervision poll that blocks the merge blocks real work. The
+# check is the other owner's artifact here, recognised by the marker line the
+# two owners share, and it is bound through the real bin/fm-check-register.sh so
+# the migration prepass treats it as the registered check it is.
+arm_lane_poll() {  # <case-dir> <task-id>
+  local case_dir=$1 id=$2
+  cat > "$case_dir/state/$id.check.sh" <<'SH'
+#!/usr/bin/env bash
+# fm-playbot-lane-supervision-poll v1
+set -u
+printf 'lane poll fixture\n'
+SH
+  chmod 0700 "$case_dir/state/$id.check.sh"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null
+}
+
+test_lane_poll_collision_does_not_block_merge() {
+  local case_dir rc before
+  case_dir=$(make_case lane-poll-collision)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  : > "$case_dir/gh-axi.log"
+  arm_lane_poll "$case_dir" task-x1 || fail "lane-poll-collision: could not arm the lane poll fixture"
+  before=$(cat "$case_dir/state/task-x1.check.sh")
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "lane-poll-collision: an unarmable merge poll must not block the merge"
+  grep -qxF 'pr merge 31 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "lane-poll-collision: gh-axi pr merge was never invoked"
+  assert_grep 'pr=https://github.com/example/repo/pull/31' "$case_dir/state/task-x1.meta" \
+    "lane-poll-collision: pr= was not recorded, so teardown could not verify landed work"
+  assert_grep 'merge detection is NOT armed for task-x1' "$case_dir/stderr" \
+    "lane-poll-collision: the arming failure was swallowed instead of surfaced"
+  assert_grep 'fm-playbot-lanes.mjs' "$case_dir/stderr" \
+    "lane-poll-collision: the refusal did not name the owner that holds the check"
+  [ "$(cat "$case_dir/state/task-x1.check.sh")" = "$before" ] \
+    || fail "lane-poll-collision: the refused merge poll still replaced the lane poll"
+  bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    . "$1/bin/fm-check-lib.sh"
+    fm_custom_check_registered "$2" task-x1
+  ' _ "$ROOT" "$case_dir/state" \
+    || fail "lane-poll-collision: the refused merge poll broke the lane poll's trust binding"
+  pass "fm-pr-merge merges and reports when a lane poll leaves merge detection unarmed"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
+test_lane_poll_collision_does_not_block_merge
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge

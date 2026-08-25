@@ -447,6 +447,13 @@ fm_pr_poll_check_is_lane_poll() {
 # the caller reports which two things wanted the same file rather than picking a
 # winner. Leaves FM_PR_POLL_REFUSAL empty on every other failure so the caller's
 # own generic wording still applies there.
+#
+# This belongs to the publish half and must not be hoisted into preparation or
+# any earlier preflight. bin/fm-pr-check.sh commits pr= to the task metadata
+# between preparing and publishing, and bin/fm-pr-merge.sh merges on that
+# recorded pr= while reporting the unarmed detection. Refusing before the
+# metadata was committed would leave pr= unwritten and block the merge instead
+# of only the merge poll, which is the failure this guard must never cause.
 fm_pr_poll_destination_unclaimed() {
   local path=$1 id=$2
   # Consumed by bin/fm-pr-check.sh, which reports the refusal it names.
@@ -527,9 +534,6 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_EXPECT_PATH=$path
   FM_PR_POLL_EXPECT_NUMBER=$number
   FM_PR_POLL_TEMPLATE=$template
-  # Refuse before a single temp file is created, so the collision is reported
-  # rather than discovered halfway through a publish.
-  fm_pr_poll_destination_unclaimed "$FM_PR_POLL_CHECK_DEST" "$id" || return 1
   FM_PR_POLL_STATE_DEVICE=$(fm_pr_file_device "$state") || return 1
   [ -n "$FM_PR_POLL_STATE_DEVICE" ] || return 1
   FM_PR_POLL_DATA_TMP=$(mktemp "$state/.fm-pr-poll-data.XXXXXX") || return 1

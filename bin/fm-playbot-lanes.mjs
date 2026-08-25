@@ -1300,7 +1300,7 @@ function registerLane(supervisor, worker) {
 const SUPERVISION_CHECK_MARKER = "# fm-playbot-lane-supervision-poll v1";
 const SUPERVISION_TOOLS = ["get_thread_status", "read_thread", "get_thread_card"];
 const SUPERVISION_CHECK_SHEBANG = "#!/usr/bin/env bash";
-const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v1";
+const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v2";
 // The status a chat that Playbot no longer holds is recorded under. It is not
 // one of Playbot's own agent_status values, so it can never collide with one.
 const SUPERVISION_ABSENT = "chat-absent";
@@ -1425,8 +1425,23 @@ function supervisionSidecarPath(state, taskId) {
   return path.join(state, `${taskId}.lane-poll`);
 }
 
-function supervisionWriteSidecar(state, taskId, status) {
-  return supervisionPublish(state, `${taskId}.lane-poll`, `${SUPERVISION_SIDECAR_VERSION}\n${status}\n`, 0o600);
+// One observation is a status AND the row's updated_at, because a bare status
+// cannot tell a worker that ran and finished from one that never started: both
+// read back as 'ready'. threadRows() already selects t.updated_at, so the pair
+// costs no extra read and no extra file.
+function supervisionField(value) {
+  return String(value ?? "").replace(/[\r\n]+/g, " ");
+}
+
+function supervisionWriteSidecar(state, taskId, observation) {
+  const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n`;
+  return supervisionPublish(state, `${taskId}.lane-poll`, body, 0o600);
+}
+
+function supervisionSameObservation(left, right) {
+  return Boolean(left) && Boolean(right)
+    && left.status === supervisionField(right.status)
+    && left.updatedAt === supervisionField(right.updatedAt);
 }
 
 function supervisionPublish(state, name, contents, mode) {
@@ -1446,16 +1461,20 @@ function supervisionPublish(state, name, contents, mode) {
   return target;
 }
 
-function supervisionReadSidecar(state, taskId) {
-  let text;
+function supervisionReadSidecarText(state, taskId) {
   try {
-    text = fs.readFileSync(supervisionSidecarPath(state, taskId), "utf8");
+    return fs.readFileSync(supervisionSidecarPath(state, taskId), "utf8");
   } catch {
     return null;
   }
+}
+
+function supervisionReadSidecar(state, taskId) {
+  const text = supervisionReadSidecarText(state, taskId);
+  if (text === null) return null;
   const lines = text.split("\n");
-  if (lines[0] !== SUPERVISION_SIDECAR_VERSION) return null;
-  return lines[1] ? lines[1] : null;
+  if (lines[0] !== SUPERVISION_SIDECAR_VERSION || !lines[1]) return null;
+  return { status: lines[1], updatedAt: lines[2] ?? "" };
 }
 
 // Retire exactly what arming created. The merged-PR poll retires itself the same
@@ -1476,9 +1495,9 @@ function supervisionRetireProblem(state, taskId) {
 
 // Write the sidecar and bind the check, in that order, so a poll can never run
 // against a state directory that has no record of what it last saw.
-function supervisionBind({ state, taskId, register, status }) {
+function supervisionBind({ state, taskId, register, observation }) {
   try {
-    supervisionWriteSidecar(state, taskId, status);
+    supervisionWriteSidecar(state, taskId, observation);
   } catch (error) {
     return { ok: false, detail: `the poll's observed-state record could not be written: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -1500,7 +1519,7 @@ function supervisionRestore({ state, taskId, register, existed, previousCheck, p
     if (existed) {
       supervisionWriteCheck(state, taskId, previousCheck);
       if (previousSidecar === null) fs.rmSync(supervisionSidecarPath(state, taskId), { force: true });
-      else supervisionWriteSidecar(state, taskId, previousSidecar);
+      else supervisionPublish(state, `${taskId}.lane-poll`, previousSidecar, 0o600);
       supervisionRegister(taskId, register);
       return;
     }
@@ -1511,17 +1530,19 @@ function supervisionRestore({ state, taskId, register, existed, previousCheck, p
   }
 }
 
-// The status this arming observed. It is recorded before the poll ever runs so
+// The observation this arming made. It is recorded before the poll ever runs so
 // that a freshly dispatched worker sitting at 'ready' before its turn starts is
-// not read as a worker that just finished and disarmed on its first poll.
-function supervisionArmingStatus(worker) {
+// not read as a worker that just finished and disarmed on its first poll, and
+// so that the same worker finishing back at 'ready' is still a change.
+function supervisionArmingObservation(worker) {
   let fresh = null;
   try {
     fresh = threadRowById(worker.thread_id);
   } catch {
     fresh = null;
   }
-  return String((fresh ?? worker).agent_status ?? "unknown");
+  const row = fresh ?? worker;
+  return { status: String(row.agent_status ?? "unknown"), updatedAt: String(row.updated_at ?? "") };
 }
 
 // Arm one worker's watcher poll and report exactly what happened. Never throws
@@ -1585,9 +1606,9 @@ function armSupervisionPoll({ requestedTaskId, worker }) {
       previous = text;
       report.rearmed = true;
     }
-    const previousSidecar = existed ? supervisionReadSidecar(state, taskId) : null;
+    const previousSidecar = existed ? supervisionReadSidecarText(state, taskId) : null;
     if (previous !== desired) supervisionWriteCheck(state, taskId, desired);
-    const bound = supervisionBind({ state, taskId, register, status: supervisionArmingStatus(worker) });
+    const bound = supervisionBind({ state, taskId, register, observation: supervisionArmingObservation(worker) });
     if (!bound.ok) {
       supervisionRestore({ state, taskId, register, existed, previousCheck: previous, previousSidecar });
       supervisionRefuse(bound.detail);
@@ -1639,39 +1660,46 @@ function supervisionHeldClause(row) {
 // A finished worker is news exactly once, so a stop is reported on the CHANGE
 // into it and the poll then retires itself. A worker that is still parked is a
 // standing condition rather than a transition and keeps firing every interval,
-// because it genuinely still needs its supervisor. Whether a stop is a change is
-// decided against the status the previous run recorded, and arming records the
-// status it observed, so a worker that was dispatched and has not started its
-// turn yet is never mistaken for one that just finished.
+// because it genuinely still needs its supervisor.
+//
+// The change is decided against the whole observation the previous run recorded,
+// status and updated_at together, never the status alone. A worker dispatched
+// onto an already-idle chat is recorded at 'ready' because a send does not wait
+// for its turn to start, and it finishes back at 'ready'; comparing statuses
+// would read that completed worker as no change at all and drop the one wake
+// this surface exists to deliver. Its updated_at has moved, so the pair sees the
+// change while a worker that genuinely never started, whose row is untouched,
+// still holds the poll silent.
 function supervisionPollDecision(taskId, threadId, previous) {
   const row = threadRowById(threadId);
-  const status = row ? (row.agent_status ?? "unknown") : SUPERVISION_ABSENT;
-  if (status === "working") return { status, line: null, retire: false, remember: true };
+  const observed = row
+    ? { status: supervisionField(row.agent_status ?? "unknown"), updatedAt: supervisionField(row.updated_at) }
+    : { status: SUPERVISION_ABSENT, updatedAt: "" };
+  const { status } = observed;
+  if (status === "working") return { ...observed, line: null, retire: false, remember: true };
   const held = row ? supervisionHeldClause(row) : "";
   if (status === "pending_input") {
     return {
-      status,
+      ...observed,
       line: `playbot lane ${taskId}: worker ${threadId} may be parked on a card${held}; confirm with get_thread_card before answering anything`,
       retire: false,
       remember: true,
     };
   }
+  if (supervisionSameObservation(previous, observed)) {
+    return { ...observed, line: null, retire: false, remember: false };
+  }
   const stopped = row
     ? `playbot lane ${taskId}: worker ${threadId} stopped without a card (status ${status})${held}`
     : `playbot lane ${taskId}: worker chat ${threadId} is no longer readable in Playbot state (archived or removed)`;
-  if (previous === null) {
-    // Arming records what it saw, so no record at all means something removed
-    // it. Report that loudly once and stay armed rather than retiring a poll on
-    // a transition that cannot be established.
-    return {
-      status,
-      line: `${stopped}; the poll's record of what it last saw is missing, so it stays armed until this state changes`,
-      retire: false,
-      remember: true,
-    };
-  }
-  if (previous === status) return { status, line: null, retire: false, remember: false };
-  return { status, line: `${stopped}; this poll has retired itself`, retire: true, remember: false };
+  // Arming records what it saw, so no record at all means something removed it.
+  // A stopped worker with no prior observation is still a stopped worker, and
+  // leaving it armed would keep a check nothing will ever act on again, so it
+  // is reported on the state alone and retired the same way.
+  const context = previous === null
+    ? "; the poll's record of what it last saw was missing, so this is reported on the persisted state alone"
+    : "";
+  return { ...observed, line: `${stopped}${context}; this poll has retired itself`, retire: true, remember: false };
 }
 
 function supervisionPollArgs(argv) {
@@ -1706,9 +1734,9 @@ function supervisionPoll(argv) {
     if (decision.retire) {
       const problem = supervisionRetireProblem(state, task);
       if (problem) line = `${line}; retirement failed and this check is still armed: ${problem}`;
-    } else if (decision.remember && previous !== decision.status) {
+    } else if (decision.remember && !supervisionSameObservation(previous, decision)) {
       try {
-        supervisionWriteSidecar(state, task, decision.status);
+        supervisionWriteSidecar(state, task, decision);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         line = line

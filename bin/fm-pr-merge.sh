@@ -70,11 +70,23 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+# Recording pr= is what this path exists for and stays mandatory, but ARMING the
+# merge poll is supervision, and losing supervision must never block real work.
+# fm-pr-check.sh commits pr= before it publishes the poll, so a failure in the
+# publish half - a Playbot lane supervision poll already owning
+# state/<id>.check.sh, most of all - leaves the metadata recorded and only merge
+# detection unarmed. Its own refusal has already reached stderr; this names what
+# was lost and what to do, and the pr= guard below still fails closed for every
+# failure that happened before the metadata was committed.
+PR_CHECK_STATUS=0
+"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" || PR_CHECK_STATUS=$?
 grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+if [ "$PR_CHECK_STATUS" -ne 0 ]; then
+  echo "warning: merge detection is NOT armed for $ID (fm-pr-check.sh exited $PR_CHECK_STATUS); the merge proceeds and pr= is recorded, so watch this PR by hand, or retire whatever owns state/$ID.check.sh and re-run fm-pr-check.sh $ID $URL" >&2
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
