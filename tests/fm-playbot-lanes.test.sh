@@ -343,6 +343,7 @@ const metadataFlakyFile = path.join(process.env.FIXTURE_ROOT, 'metadata-flaky');
 const metadataVersionlessFile = path.join(process.env.FIXTURE_ROOT, 'metadata-versionless');
 const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
 const steerResponseFile = path.join(process.env.FIXTURE_ROOT, 'steer-response');
+const refreshFailureFile = path.join(process.env.FIXTURE_ROOT, 'refresh-failure');
 // The same drop mechanism aimed at the snapshot Playbot returns WITH a completed
 // write, so the post-action reads can be driven without touching the pre-action
 // read in the same tool call.
@@ -578,6 +579,9 @@ async function electronInvoke(channel, payload) {
       }
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
+      if (readFileOr(refreshFailureFile, '') === 'steer') {
+        db.prepare('UPDATE workspace_threads SET archived = 1 WHERE id = ?').run(payload.threadId);
+      }
       const responseMode = readFileOr(steerResponseFile, '');
       if (responseMode === 'omit') {
         return {
@@ -620,6 +624,9 @@ async function electronInvoke(channel, payload) {
       }
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
+      if (readFileOr(refreshFailureFile, '') === 'send') {
+        db.prepare('UPDATE workspace_threads SET archived = 1 WHERE id = ?').run(payload.threadId);
+      }
       const sendDrop = readFileOr(sendDropFile, '');
       if (sendDrop) return applyDropSpec(snapshot, sendDrop);
       return snapshot;
@@ -1242,6 +1249,32 @@ if (value.thread.id !== 'chat-worker-alt' || value.delivery.state !== 'steering'
 if (value.force.state !== 'applied' || value.supervision.mode !== 'poll') process.exit(1);
 NODE
 pass "fm-playbot-lanes: force steers the exact queued message without interrupting or retargeting another chat"
+
+for failure_phase in send steer; do
+  printf '%s\n' "$failure_phase" > "$FIXTURE_ROOT/refresh-failure"
+  rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+  out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"$failure_phase refresh failure\",\"force\":true}}}")
+  rm -f "$FIXTURE_ROOT/refresh-failure"
+  FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET archived = 0 WHERE id = ?').run('chat-worker-alt');
+db.close();
+NODE
+  OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "a $failure_phase-time local refresh prevented or hid exact-message steering"
+const fs = require('node:fs');
+const response = JSON.parse(process.env.OUT);
+const value = response.result?.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (!value || response.error) process.exit(1);
+if (calls.map(call => call.channel).join(',') !== 'threads:send,threads:steerMessage') process.exit(1);
+if (calls[1].payload.messageId !== value.delivery.messageId) process.exit(1);
+if (value.thread.id !== 'chat-worker-alt' || value.thread.workspaceId !== 'ws-worker-alt') process.exit(1);
+if (value.delivery.state !== 'steering' || value.force.state !== 'applied') process.exit(1);
+NODE
+done
+pass "fm-playbot-lanes: local refresh failures cannot prevent or hide exact-message steering"
 
 # A force action happens after Playbot has accepted the ordinary send. If the
 # steering response cannot be observed, the result must remain unknown rather

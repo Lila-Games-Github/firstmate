@@ -757,17 +757,23 @@ async function sendMessage(row, text, force = false) {
   if (row.archived) throw new Error(`Cannot send to archived thread ${row.thread_id}`);
   const value = String(text ?? "").trim();
   if (!value) throw new Error("message must not be empty");
+  const resultThread = () => {
+    try {
+      return publicThread(refreshThread(row));
+    } catch {
+      return publicThread(row);
+    }
+  };
   const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
   try {
     const delivery = await deliveryVerdict(response, value, row.thread_id);
-    const thread = publicThread(refreshThread(row));
-    if (!force) return { thread, delivery };
+    if (!force) return { thread: resultThread(), delivery };
     if (delivery.state !== "queued") {
       const forceState = delivery.state === "delivered" || delivery.state === "sending"
         ? "not-needed"
         : delivery.state === "failed" ? "not-applied" : "unknown";
       return {
-        thread,
+        thread: resultThread(),
         delivery,
         force: {
           requested: true,
@@ -780,7 +786,7 @@ async function sendMessage(row, text, force = false) {
     }
     if (!delivery.messageId) {
       return {
-        thread,
+        thread: resultThread(),
         delivery: {
           ...delivery,
           note: "Playbot confirmed the message is queued but returned no message id, so force was not attempted because the exact held message cannot be addressed safely.",
@@ -802,7 +808,7 @@ async function sendMessage(row, text, force = false) {
       });
     } catch (error) {
       return {
-        thread: publicThread(refreshThread(row)),
+        thread: resultThread(),
         delivery: {
           state: "unknown",
           messageId: delivery.messageId,
@@ -819,7 +825,7 @@ async function sendMessage(row, text, force = false) {
       };
     }
     return {
-      thread: publicThread(refreshThread(row)),
+      thread: resultThread(),
       ...forcedDeliveryVerdict(forcedResponse, delivery),
     };
   } catch (error) {
