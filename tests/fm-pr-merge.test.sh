@@ -15,6 +15,7 @@
 #   (g) explicit merge method is not overridden by the default --squash
 #   (h) repo override args fail fast because the repo comes from the URL
 #   (i) a merge poll that could not be armed is reported but never blocks the merge
+#   (j) every other fm-pr-check.sh failure still blocks the merge, re-runs included
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -359,9 +360,42 @@ test_lane_poll_collision_does_not_block_merge() {
   pass "fm-pr-merge merges and reports when a lane poll leaves merge detection unarmed"
 }
 
+# Only the poll collision is non-fatal. A failure in one of fm-pr-check.sh's
+# state-integrity prepasses happens BEFORE the metadata commit and has nothing to
+# do with supervision, so it must still abort - including on a re-run after an
+# earlier success, where `pr=` is already recorded and so proves nothing about
+# this run. A crash-left retirement receipt that cannot be validated is one such
+# prepass failure.
+test_pre_metadata_failure_still_blocks_merge_on_rerun() {
+  local case_dir rc
+  case_dir=$(make_case pre-metadata-rerun)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  : > "$case_dir/gh-axi.log"
+  printf 'pr=%s\n' https://github.com/example/repo/pull/44 >> "$case_dir/state/task-x1.meta"
+  printf 'crash-left receipt\n' > "$case_dir/state/task-x1.pr-poll-retirement"
+  chmod 0600 "$case_dir/state/task-x1.pr-poll-retirement"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/44 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pre-metadata-rerun: a failed state-integrity prepass must still abort the merge"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "pre-metadata-rerun: gh-axi pr merge ran despite a failed prepass: $(cat "$case_dir/gh-axi.log")"
+  assert_grep 'pending PR poll retirement could not be validated' "$case_dir/stderr" \
+    "pre-metadata-rerun: the prepass failure was not reported"
+  grep -q 'merge detection is NOT armed' "$case_dir/stderr" \
+    && fail "pre-metadata-rerun: a prepass failure was misreported as a supervision-only loss"
+  pass "fm-pr-merge still refuses when a pre-metadata prepass fails and pr= is already recorded"
+}
+
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_lane_poll_collision_does_not_block_merge
+test_pre_metadata_failure_still_blocks_merge_on_rerun
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge

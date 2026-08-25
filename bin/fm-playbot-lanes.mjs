@@ -1650,8 +1650,7 @@ function supervisionOneLine(text, max = 400) {
   return value.length <= max ? value : `${value.slice(0, max - 12)} [truncated]`;
 }
 
-function supervisionHeldClause(row) {
-  const queued = queuedMessageCount(row.pending_queue_json);
+function supervisionHeldClause(queued) {
   if (queued === null) return ", held messages unreadable";
   if (queued > 0) return `, ${queued} held message${queued === 1 ? "" : "s"}`;
   return "";
@@ -1670,6 +1669,15 @@ function supervisionHeldClause(row) {
 // this surface exists to deliver. Its updated_at has moved, so the pair sees the
 // change while a worker that genuinely never started, whose row is untouched,
 // still holds the poll silent.
+//
+// Retirement is irreversible - there is no re-arm tool - so it may only ever
+// happen once the worker has actually RECEIVED its task. A dispatch onto a busy
+// chat is held in Playbot's queue, and that worker's earlier turn can end before
+// the queue drains, so an idle worker with a held message has not stopped: its
+// task has not started. That is a standing condition like a parked card, and it
+// keeps the poll armed and firing. A queue that cannot be read counts the same
+// way, because unreadable is not proof of delivery, and keeping a poll armed
+// costs one wake while dropping one costs the supervision entirely.
 function supervisionPollDecision(taskId, threadId, previous) {
   const row = threadRowById(threadId);
   const observed = row
@@ -1677,11 +1685,20 @@ function supervisionPollDecision(taskId, threadId, previous) {
     : { status: SUPERVISION_ABSENT, updatedAt: "" };
   const { status } = observed;
   if (status === "working") return { ...observed, line: null, retire: false, remember: true };
-  const held = row ? supervisionHeldClause(row) : "";
+  const queued = row ? queuedMessageCount(row.pending_queue_json) : 0;
+  const held = supervisionHeldClause(queued);
   if (status === "pending_input") {
     return {
       ...observed,
       line: `playbot lane ${taskId}: worker ${threadId} may be parked on a card${held}; confirm with get_thread_card before answering anything`,
+      retire: false,
+      remember: true,
+    };
+  }
+  if (row && queued !== 0) {
+    return {
+      ...observed,
+      line: `playbot lane ${taskId}: worker ${threadId} is idle (status ${status}) with its dispatched task still queued${held}, so the worker has not seen it and has not started; this poll stays armed, and list_queued_messages reads the queue`,
       retire: false,
       remember: true,
     };

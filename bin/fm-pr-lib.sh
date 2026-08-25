@@ -63,6 +63,12 @@ FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 FM_PR_POLL_REFUSAL=
+# The exit status bin/fm-pr-check.sh reserves for the poll-collision refusal
+# alone, and the only status bin/fm-pr-merge.sh is allowed to continue past.
+# Both read it from here so neither can drift from the other, and no other
+# failure may ever be given this status: everything else stays fatal to a merge.
+# shellcheck disable=SC2034
+FM_PR_POLL_COLLISION_STATUS=3
 FM_PR_POLL_SNAPSHOT_ID=
 FM_PR_POLL_SNAPSHOT_PROVIDER=
 FM_PR_POLL_SNAPSHOT_URL=

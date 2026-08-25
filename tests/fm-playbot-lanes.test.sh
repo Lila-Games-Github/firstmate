@@ -2144,6 +2144,69 @@ done
 ! check_is_registered fm-autoarm-probe || fail "a retired poll was still bound in the watcher's trust store"
 pass "fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself"
 
+# An idle worker whose dispatched task Playbot is still holding has not stopped:
+# its task has not started. Retirement is irreversible and there is no re-arm
+# tool, so disarming here would strand the real task with nothing watching it -
+# the exact defect this surface exists to remove.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-11\"},\"title\":\"Queued task\",\"message\":\"Do the queued work\",\"taskId\":\"fm-autoarm-queued\"}")
+queued_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+check_is_registered fm-autoarm-queued || fail "the queued-task worker's poll was not armed"
+set_thread_queue() {  # <thread-id> <pending-queue-json-or-empty>
+  FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$1" QUEUE="$2" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const changed = db.prepare('UPDATE workspace_threads SET pending_queue_json = ? WHERE id = ?')
+  .run(process.env.QUEUE === '' ? null : process.env.QUEUE, process.env.THREAD);
+db.close();
+if (changed.changes !== 1) process.exit(1);
+NODE
+}
+set_thread_queue "$queued_thread" '{"messages":[{"id":"held-queued","text":"Do the queued work"}]}' \
+  || fail "could not hold the dispatched task in the worker's queue"
+set_thread_turn "$queued_thread" ready 2026-08-25T10:00:00.000Z || fail "could not idle the queued-task worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-queued"*"still queued"*"1 held message"*"has not seen it"*) ;;
+  *) fail "an idle worker whose task was never delivered was misreported: $poll_line" ;;
+esac
+case "$poll_line" in
+  *"stopped without a card"*) fail "a worker whose task never started was reported as stopped: $poll_line" ;;
+  *) ;;
+esac
+for kept in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-queued.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "the poll retired $kept while the dispatched task was still queued"
+done
+check_is_registered fm-autoarm-queued || fail "the poll disarmed a worker whose task was still queued"
+
+# An unreadable queue is not proof of delivery either, so it holds the poll
+# armed for the same reason.
+set_thread_queue "$queued_thread" 'not-json' || fail "could not stage an unreadable queue"
+set_thread_turn "$queued_thread" ready 2026-08-25T10:15:00.000Z || fail "could not re-idle the queued-task worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-queued"*"held messages unreadable"*) ;;
+  *) fail "an unreadable queue was not reported on the idle-worker path: $poll_line" ;;
+esac
+check_is_registered fm-autoarm-queued || fail "the poll disarmed a worker whose queue could not be read"
+
+# Once the queue is genuinely empty the worker really has stopped, so the
+# ordinary terminal report and retirement are unchanged.
+set_thread_queue "$queued_thread" '' || fail "could not drain the worker's queue"
+set_thread_turn "$queued_thread" ready 2026-08-25T10:30:00.000Z || fail "could not settle the queued-task worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-queued"*"stopped without a card"*"status ready"*"retired itself"*) ;;
+  *) fail "a worker with a drained queue was not reported as stopped and retired: $poll_line" ;;
+esac
+for leftover in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-queued.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the retired poll left $leftover armed after the queue drained"
+done
+pass "fm-playbot-lanes: the poll keeps itself armed while the dispatched task is still queued or unreadable"
+
 # A worker whose chat is gone must not read as a silent, healthy worker, and it
 # is just as finished as one that stopped, so it retires the same way.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"

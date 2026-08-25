@@ -562,7 +562,7 @@ Live evidence against the running Playbot 0.95.0 on the same date, taken with a 
 - All six snapshot projections came back as real arrays on both Frogpile chats: `userInputRequests`, `pendingMessages`, `outboundMessages`, `approvalRequests`, `mcpElicitationRequests`, and `respondingRequestIds`, each `array(0)` on `chat-7975fcb9` and `chat-3bbd9805`. This is why the shape guard requires a list rather than mere presence and refuses a non-array by name. It is one version observed at one moment, not a contract.
 - `threadRows()` selects `t.pending_queue_json` unconditionally, and that one query backs every tool and both hooks, so the column's presence across the supported range was settled by evidence rather than by a defensive probe. Parsing `resources/app.asar` and reading every `/migrations/*/migration.sql` shows `workspace_threads` is created already carrying `pending_queue_json` by migration `20260414225126_medical_lilandra`, dated 2026-04-14, and that this is the only migration among the 33 in the 0.95.0 bundle that creates that table. Playbot 0.93.1, the oldest version this adapter's detected fallback targets, shipped around 2026-08-18, four months later, and Playbot runs its migrations forward on app start. No Playbot in the supported 0.93.1-to-0.95.0 range can therefore present a `workspace_threads` without that column. This says nothing about versions outside that range.
 
-The same day, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 72 checks, including twenty-eight added for the thread-resolution scope, the card and queue surfaces, the delivery verdict, and the lane-wake delivery rules, and sixteen for the dispatch-armed supervision poll recorded below:
+The same day, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 73 checks, including twenty-eight added for the thread-resolution scope, the card and queue surfaces, the delivery verdict, and the lane-wake delivery rules, and seventeen for the dispatch-armed supervision poll recorded below:
 
 ```text
 ok - fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it
@@ -598,6 +598,7 @@ ok - fm-playbot-lanes: the armed poll wakes the real watcher when the worker par
 ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while the worker stays parked
 ok - fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker
 ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself
+ok - fm-playbot-lanes: the poll keeps itself armed while the dispatched task is still queued or unreadable
 ok - fm-playbot-lanes: a poll that cannot read the worker reports that instead of passing as silence
 ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace
 ok - fm-playbot-lanes: a null taskId is absent, not the literal task id null
@@ -623,6 +624,7 @@ Not verified against a live Playbot: creating a real throwaway workspace and dri
 Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
 
 A parked worker is a standing condition and a finished one is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
+An idle worker whose dispatched task is still held in Playbot's queue, or whose queue cannot be read, is a standing condition too and never retires, because retirement is irreversible and a task that was never delivered still needs its supervisor.
 That change is decided on the pair of `agent_status` and the row's `updated_at`, which `threadRows()` already selects, because a send does not wait for the turn to start.
 A worker dispatched onto an already-idle chat is armed at `ready` and finishes back at `ready`, so a status compared on its own would report that completed worker as no change at all and drop the one wake this surface exists to deliver; the fixture drives exactly that sequence, with the intermediate `working` never observed by the poll, and the suite fails without the pair.
 That transition rule was added after the live run above, and it gave the generated check a third argument, `--state`, so the live lines recorded here were produced by the earlier two-argument invocation and the transition and retirement behaviour itself is proved against the hermetic fixture rather than live.
@@ -631,8 +633,8 @@ The check's bytes are hash-bound by `bin/fm-check-register.sh`, so that record i
 `state/<id>.check.sh` is also the name firstmate's merged-PR poll owns, so both directions of that shared boundary refuse rather than overwrite.
 The lane arming leaves a foreign check byte-identical, and `bin/fm-pr-check.sh` refuses by name and exits non-zero when it would publish over a lane poll.
 The suite proves that second direction by arming a real generated lane poll and then running the real `bin/fm-pr-check.sh` for the same task id, which leaves the lane poll intact and its trust binding valid.
-That refusal costs merge detection only, never the merge: `bin/fm-pr-check.sh` commits `pr=` to the task metadata before it publishes the poll, so `bin/fm-pr-merge.sh` reports the unarmed detection on stderr and merges on the recorded URL.
-`bash tests/fm-pr-merge.test.sh` proves that with a lane poll armed through the real `bin/fm-check-register.sh` and a recording fake forge on PATH, and passed all 11 checks on the same date.
+That refusal costs merge detection only, never the merge: it exits with the status `bin/fm-pr-lib.sh` reserves for it, and `bin/fm-pr-merge.sh` continues past that one status while every other failure still aborts the merge.
+`bash tests/fm-pr-merge.test.sh` proves both halves with a recording fake forge on PATH, one case arming a real lane poll through the real `bin/fm-check-register.sh` and merging anyway, and one case failing a state-integrity prepass on a re-run whose `pr=` is already recorded and never reaching the forge at all, and passed all 12 checks on the same date.
 
 On 2026-08-25, forced steering was live-verified against Playbot 0.95.0 on Linux with `playbot_lanes@0.4.0` and Node v26.7.0.
 `node --no-warnings bin/fm-playbot-lanes.mjs doctor` reported `renderer: true`, `chatCreation: "launch"`, and `playbotApp: {version: "0.95.0", verifiedVersions: "0.95.x"}`.
@@ -676,7 +678,7 @@ The three force-specific checks exercised the executable MCP against its fake De
 
 This suite previously printed `ok - fm-playbot-lanes: skipped (node unavailable)` and exited 0 whenever `node` was absent from `PATH`, which made a green run prove nothing: the same inherited-`PATH` gap that hides `shellcheck` and `actionlint` from a hook or validation-pipeline subprocess also hid the Node runtime, and one review round on this branch reported "there is no Node runtime anywhere on this machine" while `/home/linuxbrew/.linuxbrew/bin/node` was installed and in use.
 `fm_test_require_node` in `tests/lib.sh` now resolves a runtime from `FM_TEST_NODE`, then `PATH`, then the known fixed and version-managed install roots, version-sorting each globbed directory so no version is pinned, and it fails the suite when none is usable rather than skipping.
-It was verified on 2026-08-24 by running the suite under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 72 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.
+It was verified on 2026-08-24 by running the suite under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 73 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.
 
 On 2026-07-30, Playbot 0.81.0 on Windows exposed one shared Codex app-server process for multiple persisted chat threads.
 The Windows session-lock verification proved that Git Bash can recover that host process through PowerShell while `CODEX_THREAD_ID` plus the Playbot database narrows ownership to the exact unarchived Firstmate thread.

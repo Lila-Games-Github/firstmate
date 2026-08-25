@@ -72,14 +72,21 @@ fi
 
 # Recording pr= is what this path exists for and stays mandatory, but ARMING the
 # merge poll is supervision, and losing supervision must never block real work.
-# fm-pr-check.sh commits pr= before it publishes the poll, so a failure in the
-# publish half - a Playbot lane supervision poll already owning
-# state/<id>.check.sh, most of all - leaves the metadata recorded and only merge
-# detection unarmed. Its own refusal has already reached stderr; this names what
-# was lost and what to do, and the pr= guard below still fails closed for every
-# failure that happened before the metadata was committed.
+# Exactly one failure is treated that way: the poll collision fm-pr-check.sh
+# reports with FM_PR_POLL_COLLISION_STATUS, raised when a Playbot lane
+# supervision poll already owns state/<id>.check.sh. Its own refusal has already
+# reached stderr; this names what was lost and what to do.
+#
+# The decision keys on that status and never on whether pr= is present, because
+# fm-pr-check.sh rewrites the pr= line on every successful run and a re-run after
+# an earlier success would find it already there. Every other non-zero exit stays
+# fatal exactly as it was, including the state-integrity prepasses that run
+# before the metadata is committed and have nothing to do with supervision.
 PR_CHECK_STATUS=0
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" || PR_CHECK_STATUS=$?
+if [ "$PR_CHECK_STATUS" -ne 0 ] && [ "$PR_CHECK_STATUS" -ne "$FM_PR_POLL_COLLISION_STATUS" ]; then
+  exit "$PR_CHECK_STATUS"
+fi
 grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1

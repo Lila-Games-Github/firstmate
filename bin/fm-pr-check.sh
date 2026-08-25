@@ -133,8 +133,15 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
+# A poll collision is the one failure here that costs merge detection and
+# nothing else, so it exits with its own reserved status and every other failure
+# keeps exiting 1. bin/fm-pr-merge.sh continues past that status alone.
 fm_pr_poll_publish_prepared || {
-  echo "error: ${FM_PR_POLL_REFUSAL:-could not publish PR poll}" >&2
+  if [ -n "$FM_PR_POLL_REFUSAL" ]; then
+    echo "error: $FM_PR_POLL_REFUSAL" >&2
+    exit "$FM_PR_POLL_COLLISION_STATUS"
+  fi
+  echo "error: could not publish PR poll" >&2
   exit 1
 }
 printf 'armed: state/%s.check.sh\n' "$ID"
