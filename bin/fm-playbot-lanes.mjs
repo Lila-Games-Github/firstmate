@@ -1482,8 +1482,28 @@ function supervisionReadSidecar(state, taskId) {
 // nothing will act on again must stop being armed rather than re-waking
 // firstmate every check interval for news it has already handled.
 function supervisionRetireProblem(state, taskId) {
+  const checkName = `${taskId}.check.sh`;
+  const checkPath = path.join(state, checkName);
+  try {
+    fs.rmSync(checkPath, { force: true });
+    try {
+      fs.lstatSync(checkPath);
+      return `${checkName}: removal reported success but the check still exists`;
+    } catch (error) {
+      if (!(error instanceof Error) || error.code !== "ENOENT") {
+        return `${checkName}: could not confirm removal: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+  } catch (error) {
+    return `${checkName}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
   const problems = [];
-  for (const name of [`${taskId}.check.sh`, `${taskId}.check-trust`, `${taskId}.lane-poll`]) {
+  // The executable check is what fires, so its trust binding and observed-state
+  // record are removed only after the check is confirmed gone. If check removal
+  // fails, leaving all three artifacts intact keeps the poll armed and registered
+  // instead of turning it into a rejected unauthenticated check on every sweep.
+  for (const name of [`${taskId}.check-trust`, `${taskId}.lane-poll`]) {
     try {
       fs.rmSync(path.join(state, name), { force: true });
     } catch (error) {

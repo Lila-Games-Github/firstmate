@@ -2053,6 +2053,56 @@ for leftover in fm-autoarm-turn.check.sh fm-autoarm-turn.check-trust fm-autoarm-
 done
 pass "fm-playbot-lanes: a worker that finishes back on its starting status is reported once, and one that never started is not"
 
+# A retirement that cannot remove the executable check must leave the complete
+# registered poll intact. Removing its trust file after the check removal fails
+# turns the still-executable check into a rejected unauthenticated check, which
+# wakes firstmate on every watcher interval until teardown.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-retire-failure\"},\"title\":\"Retirement failure\",\"message\":\"Do the retirement work\",\"taskId\":\"fm-autoarm-retire-failure\"}")
+retire_failure_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+check_is_registered fm-autoarm-retire-failure || fail "the retirement-failure worker's poll was not armed"
+set_thread_turn "$retire_failure_thread" error 2026-08-25T09:45:00.000Z \
+  || fail "could not stop the retirement-failure worker"
+retire_failure_check="$FM_HOME_FIXTURE/state/fm-autoarm-retire-failure.check.sh"
+retire_blocker="$FIXTURE_ROOT/block-check-removal.cjs"
+printf '%s\n' \
+  "'use strict';" \
+  "const fs = require('node:fs');" \
+  "const path = require('node:path');" \
+  "const originalRmSync = fs.rmSync;" \
+  "fs.rmSync = function(target, options) {" \
+  "  if (path.resolve(String(target)) === path.resolve(process.env.FM_TEST_BLOCK_RM)) {" \
+  "    const error = new Error('simulated check removal failure');" \
+  "    error.code = 'EACCES';" \
+  "    throw error;" \
+  "  }" \
+  "  return originalRmSync.call(this, target, options);" \
+  "};" > "$retire_blocker"
+poll_line=$(FM_TEST_BLOCK_RM="$retire_failure_check" NODE_OPTIONS="--require=$retire_blocker" \
+  bash "$retire_failure_check")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-retire-failure"*"retirement failed and this check is still armed"*"simulated check removal failure"*) ;;
+  *) fail "a failed check removal was not reported as an armed retirement failure: $poll_line" ;;
+esac
+for kept in fm-autoarm-retire-failure.check.sh fm-autoarm-retire-failure.check-trust fm-autoarm-retire-failure.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "failed check removal still deleted $kept"
+done
+check_is_registered fm-autoarm-retire-failure \
+  || fail "failed check removal left the executable poll without its trust binding"
+# With the injected filesystem failure gone, the same terminal transition can
+# retire cleanly and leave no fixture artifacts behind.
+poll_line=$(bash "$retire_failure_check")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-retire-failure"*"retired itself"*) ;;
+  *) fail "the preserved poll did not retire after check removal recovered: $poll_line" ;;
+esac
+for leftover in fm-autoarm-retire-failure.check.sh fm-autoarm-retire-failure.check-trust fm-autoarm-retire-failure.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the recovered retirement left $leftover behind"
+done
+pass "fm-playbot-lanes: failed check removal leaves the poll armed and registered"
+
 # Silent while the worker works. Asserted through the real watcher, not by
 # reading the check's output: a check the watcher rejects is also silent, and
 # only the watcher can tell those two apart.
@@ -2367,6 +2417,14 @@ collide=$(cat "$FIXTURE_ROOT/pr-collide.out")
 case "$collide" in
   *"fm-playbot-lanes.mjs"*"fm-autoarm-pr"*) ;;
   *) fail "the refusal did not name both owners and the task id: $collide" ;;
+esac
+case "$collide" in
+  *"pr= was recorded for task fm-autoarm-pr"*"merge detection was not armed"*"self-retires"*) ;;
+  *) fail "the refusal did not say what was recorded, what was lost, and why the collision is transient: $collide" ;;
+esac
+case "$collide" in
+  *"different task id"*|*"retire that lane poll"*) fail "the refusal advised an unsupported or identity-breaking workaround: $collide" ;;
+  *) ;;
 esac
 case "$collide" in
   *"armed: state/fm-autoarm-pr.check.sh"*) fail "the refused publish still reported the poll as armed: $collide" ;;
