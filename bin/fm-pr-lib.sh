@@ -63,6 +63,8 @@ FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 FM_PR_POLL_REFUSAL=
+FM_PR_POLL_LOCK_DIR=
+FM_PR_POLL_LOCK_TOKEN=
 # The exit status bin/fm-pr-check.sh reserves for the poll-collision refusal
 # alone, and the only status bin/fm-pr-merge.sh is allowed to continue past.
 # Both read it from here so neither can drift from the other, and no other
@@ -475,9 +477,50 @@ fm_pr_poll_cleanup() {
   [ -z "$FM_PR_POLL_DATA_TMP" ] || rm -f -- "$FM_PR_POLL_DATA_TMP"
   [ -z "$FM_PR_POLL_CHECK_TMP" ] || rm -f -- "$FM_PR_POLL_CHECK_TMP"
   [ -z "$FM_PR_POLL_REG_TMP" ] || rm -f -- "$FM_PR_POLL_REG_TMP"
+  fm_pr_poll_lock_release || true
   FM_PR_POLL_DATA_TMP=
   FM_PR_POLL_CHECK_TMP=
   FM_PR_POLL_REG_TMP=
+}
+
+fm_pr_poll_lock_acquire() {
+  local state=$1 id=$2 attempts=200 token owner
+  FM_PR_POLL_LOCK_DIR="$state/.$id.check-publish.lock"
+  FM_PR_POLL_LOCK_TOKEN="${BASHPID:-$$}.${RANDOM}.${RANDOM}"
+  while ! mkdir -m 0700 -- "$FM_PR_POLL_LOCK_DIR" 2>/dev/null; do
+    attempts=$((attempts - 1))
+    if [ "$attempts" -le 0 ]; then
+      FM_PR_POLL_LOCK_DIR=
+      FM_PR_POLL_LOCK_TOKEN=
+      return 1
+    fi
+    sleep 0.1
+  done
+  token=$FM_PR_POLL_LOCK_TOKEN
+  if ! printf '%s\n' "$token" > "$FM_PR_POLL_LOCK_DIR/owner" \
+    || ! chmod 0600 "$FM_PR_POLL_LOCK_DIR/owner"; then
+    rm -f -- "$FM_PR_POLL_LOCK_DIR/owner"
+    rmdir -- "$FM_PR_POLL_LOCK_DIR" 2>/dev/null || true
+    FM_PR_POLL_LOCK_DIR=
+    FM_PR_POLL_LOCK_TOKEN=
+    return 1
+  fi
+  owner=$(cat "$FM_PR_POLL_LOCK_DIR/owner" 2>/dev/null || true)
+  if [ "$owner" != "$token" ]; then
+    fm_pr_poll_lock_release || true
+    return 1
+  fi
+}
+
+fm_pr_poll_lock_release() {
+  local owner
+  [ -n "$FM_PR_POLL_LOCK_DIR" ] || return 0
+  owner=$(cat "$FM_PR_POLL_LOCK_DIR/owner" 2>/dev/null || true)
+  [ "$owner" = "$FM_PR_POLL_LOCK_TOKEN" ] || return 1
+  rm -f -- "$FM_PR_POLL_LOCK_DIR/owner" || return 1
+  rmdir -- "$FM_PR_POLL_LOCK_DIR" || return 1
+  FM_PR_POLL_LOCK_DIR=
+  FM_PR_POLL_LOCK_TOKEN=
 }
 
 fm_pr_poll_revoke_final() {
@@ -588,7 +631,7 @@ fm_pr_poll_prepare() {
   fi
 }
 
-fm_pr_poll_publish_prepared() {
+fm_pr_poll_publish_prepared_locked() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
   fm_pr_poll_destination_unclaimed "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_EXPECT_ID" || return 1
@@ -652,6 +695,15 @@ fm_pr_poll_publish_prepared() {
     fm_pr_poll_revoke_final || true
     return 1
   fi
+}
+
+fm_pr_poll_publish_prepared() {
+  local status=0
+  [ -n "$FM_PR_POLL_CHECK_DEST" ] && [ -n "$FM_PR_POLL_EXPECT_ID" ] || return 1
+  fm_pr_poll_lock_acquire "${FM_PR_POLL_CHECK_DEST%/*}" "$FM_PR_POLL_EXPECT_ID" || return 1
+  fm_pr_poll_publish_prepared_locked || status=$?
+  fm_pr_poll_lock_release || status=1
+  return "$status"
 }
 
 fm_pr_poll_artifacts_valid() {

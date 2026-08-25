@@ -345,8 +345,12 @@ test_lane_poll_collision_does_not_block_merge() {
     || fail "lane-poll-collision: gh-axi pr merge was never invoked"
   assert_grep 'pr=https://github.com/example/repo/pull/31' "$case_dir/state/task-x1.meta" \
     "lane-poll-collision: pr= was not recorded, so teardown could not verify landed work"
-  assert_grep 'merge detection is NOT armed for task-x1' "$case_dir/stderr" \
+  assert_grep 'pr= was recorded for task-x1, but merge detection was NOT armed' "$case_dir/stderr" \
     "lane-poll-collision: the arming failure was swallowed instead of surfaced"
+  assert_grep 'collision is transient because it self-retires when its worker reaches a terminal state' "$case_dir/stderr" \
+    "lane-poll-collision: the warning did not explain the lane poll's automatic retirement"
+  grep -q 'retire whatever owns\|watch this PR by hand' "$case_dir/stderr" \
+    && fail "lane-poll-collision: the warning still advised manual retirement: $(cat "$case_dir/stderr")"
   assert_grep 'fm-playbot-lanes.mjs' "$case_dir/stderr" \
     "lane-poll-collision: the refusal did not name the owner that holds the check"
   [ "$(cat "$case_dir/state/task-x1.check.sh")" = "$before" ] \

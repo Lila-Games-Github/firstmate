@@ -1932,6 +1932,23 @@ check_is_registered() {  # <task-id>
   ' _ "$ROOT" "$FM_HOME_FIXTURE" "$1"
 }
 
+pr_poll_is_valid() {  # <task-id>
+  bash -c '
+    . "$1/bin/fm-pr-lib.sh"
+    fm_pr_poll_artifacts_valid "$2/state" "$3" "$1/bin/fm-pr-poll.sh"
+  ' _ "$ROOT" "$FM_HOME_FIXTURE" "$1"
+}
+
+wait_for_file() {  # <path>
+  local attempts=100
+  while [ "$attempts" -gt 0 ]; do
+    [ -e "$1" ] && return 0
+    attempts=$((attempts - 1))
+    sleep 0.05
+  done
+  return 1
+}
+
 set_thread_status() {  # <thread-id> <agent-status>
   FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$1" STATUS="$2" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -2179,6 +2196,50 @@ case "$poll_line" in
 esac
 pass "fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker"
 
+restore_bin="$FIXTURE_ROOT/restore-bin"
+mkdir -p "$restore_bin"
+cp "$SCRIPT" "$restore_bin/fm-playbot-lanes.mjs"
+cat > "$restore_bin/fm-check-register.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+count=0
+[ ! -f "$FM_TEST_REGISTER_COUNT" ] || count=$(cat "$FM_TEST_REGISTER_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_TEST_REGISTER_COUNT"
+if [ "$count" -ge 2 ]; then
+  rm -f -- "$FM_HOME/state/$1.check-trust"
+  echo "simulated registration failure $count" >&2
+  exit 1
+fi
+exec "$FM_TEST_REAL_REGISTER" "$@"
+SH
+chmod 0700 "$restore_bin/fm-check-register.sh"
+restore_rpc() {
+  printf '%s\n' "$1" | FM_TEST_REGISTER_COUNT="$FIXTURE_ROOT/register-count" \
+    FM_TEST_REAL_REGISTER="$ROOT/bin/fm-check-register.sh" \
+    node --no-warnings "$restore_bin/fm-playbot-lanes.mjs" serve
+}
+rm -f "$FIXTURE_ROOT/register-count" "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" restore_rpc \
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-restore\"},\"title\":\"Restore binding\",\"message\":\"Do the restore work\",\"taskId\":\"fm-autoarm-restore\"}}}")
+restore_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+restore_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+check_is_registered fm-autoarm-restore || fail "the restoration fixture did not establish its prior binding"
+restore_before=$(cat "$FM_HOME_FIXTURE/state/fm-autoarm-restore.check.sh")
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" restore_rpc \
+  "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"$restore_workspace\",\"thread\":\"$restore_thread\",\"message\":\"Re-arm the same worker\",\"taskId\":\"fm-autoarm-restore\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a failed restoration re-registration was not surfaced"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== false) process.exit(1);
+if (!value.supervision.problem.includes('restoration re-registration failed')) process.exit(1);
+if (!value.supervision.problem.includes('simulated registration failure 3')) process.exit(1);
+NODE
+[ "$(cat "$FM_HOME_FIXTURE/state/fm-autoarm-restore.check.sh")" = "$restore_before" ] \
+  || fail "the failed identical-byte re-arm did not restore the prior check bytes"
+! check_is_registered fm-autoarm-restore \
+  || fail "the restoration-failure fixture unexpectedly retained a valid binding"
+pass "fm-playbot-lanes: failed restoration re-registration is loud even for identical check bytes"
+
 # A worker that stopped without a card is the other half of the contract: an
 # armed poll that only ever reported parked workers would leave a finished or
 # failed worker unwatched. That is news exactly once, so the poll reports the
@@ -2280,14 +2341,11 @@ pass "fm-playbot-lanes: the poll keeps itself armed while the dispatched task is
 # A worker whose chat is gone must not read as a silent, healthy worker, and it
 # is just as finished as one that stopped, so it retires the same way.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-8\"},\"title\":\"Vanishing worker\",\"message\":\"Do the vanishing work\",\"taskId\":\"fm-autoarm-vanish\"}")
+rm -f "$FIXTURE_ROOT/send-reconciles"
 vanish_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-vanish || fail "the vanishing worker's poll was not armed"
-# Also the case where the poll's own record of what it last saw is gone, by hand
-# or through a retirement that only half completed. A finished worker is still
-# finished, so it must be reported and retired on the persisted state alone
-# rather than left armed with nothing that could ever act on it.
-rm -f "$FM_HOME_FIXTURE/state/fm-autoarm-vanish.lane-poll"
 FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$vanish_thread" node --no-warnings <<'NODE' || fail "could not archive the armed worker"
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
@@ -2304,15 +2362,36 @@ for leftover in fm-autoarm-vanish.check.sh fm-autoarm-vanish.check-trust fm-auto
   [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
     || fail "the retired poll left $leftover armed for a worker whose chat is gone"
 done
-# A poll that cannot read Playbot at all must say so too, for the same reason.
-poll_line=$(PLAYBOT_DESKTOP_DIR="$FIXTURE_ROOT/no-such-desktop" \
-  node --no-warnings "$SCRIPT" supervision-poll --task fm-autoarm-vanish --thread "$vanish_thread" \
-  --state "$FM_HOME_FIXTURE/state")
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-db-unreadable\"},\"title\":\"Unreadable delivered worker\",\"message\":\"Do the unreadable work\",\"taskId\":\"fm-autoarm-db-delivered\"}")
+rm -f "$FIXTURE_ROOT/send-reconciles"
+mv "$PLAYBOT_DESKTOP_DIR/playbot.db" "$PLAYBOT_DESKTOP_DIR/playbot.db.unreadable"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-db-delivered.check.sh")
+mv "$PLAYBOT_DESKTOP_DIR/playbot.db.unreadable" "$PLAYBOT_DESKTOP_DIR/playbot.db"
 case "$poll_line" in
-  *"fm-autoarm-vanish"*"supervision poll failed"*) ;;
-  *) fail "a poll that could not read Playbot state was silent instead of loud: $poll_line" ;;
+  *"fm-autoarm-db-delivered"*"supervision poll failed"*"task was delivered"*"retired itself"*) ;;
+  *) fail "a delivered worker whose database became unreadable did not report and retire: $poll_line" ;;
 esac
-pass "fm-playbot-lanes: a poll that cannot read the worker reports that instead of passing as silence"
+for leftover in fm-autoarm-db-delivered.check.sh fm-autoarm-db-delivered.check-trust fm-autoarm-db-delivered.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the delivered unreadable worker left $leftover armed"
+done
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-db-unconfirmed\"},\"title\":\"Unreadable unconfirmed worker\",\"message\":\"Do the unconfirmed work\",\"taskId\":\"fm-autoarm-db-unconfirmed\"}")
+mv "$PLAYBOT_DESKTOP_DIR/playbot.db" "$PLAYBOT_DESKTOP_DIR/playbot.db.unreadable"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-db-unconfirmed.check.sh")
+case "$poll_line" in
+  *"fm-autoarm-db-unconfirmed"*"supervision poll failed"*"unconfirmed"*"stays armed"*) ;;
+  *) fail "an unreadable worker with unconfirmed delivery did not stay armed: $poll_line" ;;
+esac
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-db-unconfirmed.check.sh")
+mv "$PLAYBOT_DESKTOP_DIR/playbot.db.unreadable" "$PLAYBOT_DESKTOP_DIR/playbot.db"
+[ -z "$poll_line" ] || fail "an unchanged unreadable worker repeated its wake: $poll_line"
+check_is_registered fm-autoarm-db-unconfirmed \
+  || fail "an unreadable worker with unconfirmed delivery lost its binding"
+pass "fm-playbot-lanes: delivered unreadability retires while unconfirmed unreadability stays armed"
 
 # Without a taskId the poll still has to exist, keyed on the workspace, and the
 # result has to say that task teardown will not retire it.
@@ -2438,6 +2517,104 @@ for leftover in fm-autoarm-pr.pr-poll fm-autoarm-pr.pr-poll-registration; do
     || fail "the refused PR poll left $leftover behind beside another owner's check"
 done
 pass "fm-playbot-lanes: arming a merged-PR poll over a lane poll refuses by name and leaves it intact"
+
+race_bin="$FIXTURE_ROOT/race-bin"
+mkdir -p "$race_bin"
+cat > "$race_bin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+source_path=${@: -2:1}
+destination=${@: -1}
+case "$source_path:$destination" in
+  *"/.fm-pr-poll-check."*":$FM_TEST_BLOCK_PR_CHECK")
+    : > "$FM_TEST_RACE_ENTERED"
+    while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.05; done
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod 0700 "$race_bin/mv"
+
+pr_first_id=fm-autoarm-race-pr-first
+fm_write_meta "$FM_HOME_FIXTURE/state/$pr_first_id.meta" \
+  "window=fm-$pr_first_id" "endpoint_task_id=$pr_first_id"
+chmod 0600 "$FM_HOME_FIXTURE/state/$pr_first_id.meta"
+pr_first_entered="$FIXTURE_ROOT/pr-first-entered"
+pr_first_release="$FIXTURE_ROOT/pr-first-release"
+rm -f "$pr_first_entered" "$pr_first_release"
+FM_TEST_REAL_MV=$(command -v mv) FM_TEST_BLOCK_PR_CHECK="$FM_HOME_FIXTURE/state/$pr_first_id.check.sh" \
+  FM_TEST_RACE_ENTERED="$pr_first_entered" FM_TEST_RACE_RELEASE="$pr_first_release" \
+  FM_HOME="$FM_HOME_FIXTURE" PATH="$race_bin:$PATH" \
+  "$ROOT/bin/fm-pr-check.sh" "$pr_first_id" https://github.com/o/r/pull/51 \
+  > "$FIXTURE_ROOT/pr-first.out" 2>&1 &
+pr_first_pid=$!
+wait_for_file "$pr_first_entered" || fail "the PR-first race never reached its publish boundary"
+home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$pr_first_id\"},\"title\":\"PR-first collision\",\"message\":\"Do the PR-first work\",\"taskId\":\"$pr_first_id\"}" \
+  > "$FIXTURE_ROOT/pr-first-lane.out" &
+pr_first_lane_pid=$!
+sleep 0.5
+kill -0 "$pr_first_lane_pid" 2>/dev/null \
+  || fail "lane arming crossed the PR owner's inspect-to-publish boundary instead of waiting"
+: > "$pr_first_release"
+wait "$pr_first_pid" || fail "the PR-first owner failed after its publication lock was released: $(cat "$FIXTURE_ROOT/pr-first.out")"
+wait "$pr_first_lane_pid" || fail "the PR-first collision dispatch failed"
+OUT=$(cat "$FIXTURE_ROOT/pr-first-lane.out") node --no-warnings <<'NODE' \
+  || fail "lane arming did not refuse the PR poll that won the publication lock"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== false) process.exit(1);
+if (!value.supervision.problem.includes('did not generate')) process.exit(1);
+NODE
+pr_poll_is_valid "$pr_first_id" || fail "the lane owner overwrote the PR poll after waiting for its lock"
+
+lane_pause="$FIXTURE_ROOT/pause-lane-rename.cjs"
+cat > "$lane_pause" <<'NODE'
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const originalRenameSync = fs.renameSync;
+fs.renameSync = function(source, destination) {
+  if (path.resolve(String(destination)) === path.resolve(process.env.FM_TEST_BLOCK_LANE_CHECK)) {
+    fs.writeFileSync(process.env.FM_TEST_RACE_ENTERED, 'entered\n');
+    while (!fs.existsSync(process.env.FM_TEST_RACE_RELEASE)) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  return originalRenameSync.call(this, source, destination);
+};
+NODE
+lane_first_id=fm-autoarm-race-lane-first
+fm_write_meta "$FM_HOME_FIXTURE/state/$lane_first_id.meta" \
+  "window=fm-$lane_first_id" "endpoint_task_id=$lane_first_id"
+chmod 0600 "$FM_HOME_FIXTURE/state/$lane_first_id.meta"
+lane_first_entered="$FIXTURE_ROOT/lane-first-entered"
+lane_first_release="$FIXTURE_ROOT/lane-first-release"
+rm -f "$lane_first_entered" "$lane_first_release"
+FM_TEST_BLOCK_LANE_CHECK="$FM_HOME_FIXTURE/state/$lane_first_id.check.sh" \
+  FM_TEST_RACE_ENTERED="$lane_first_entered" FM_TEST_RACE_RELEASE="$lane_first_release" \
+  NODE_OPTIONS="--require=$lane_pause" \
+  home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$lane_first_id\"},\"title\":\"Lane-first collision\",\"message\":\"Do the lane-first work\",\"taskId\":\"$lane_first_id\"}" \
+  > "$FIXTURE_ROOT/lane-first.out" &
+lane_first_pid=$!
+wait_for_file "$lane_first_entered" || fail "the lane-first race never reached its publish boundary"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-pr-check.sh" "$lane_first_id" \
+  https://github.com/o/r/pull/52 > "$FIXTURE_ROOT/lane-first-pr.out" 2>&1 &
+lane_first_pr_pid=$!
+sleep 0.5
+kill -0 "$lane_first_pr_pid" 2>/dev/null \
+  || fail "PR publication crossed the lane owner's inspect-to-bind boundary instead of waiting"
+: > "$lane_first_release"
+wait "$lane_first_pid" || fail "the lane-first dispatch failed after its publication lock was released"
+lane_first_pr_status=0
+wait "$lane_first_pr_pid" || lane_first_pr_status=$?
+[ "$lane_first_pr_status" = 3 ] \
+  || fail "the PR owner returned $lane_first_pr_status instead of collision after the lane won: $(cat "$FIXTURE_ROOT/lane-first-pr.out")"
+OUT=$(cat "$FIXTURE_ROOT/lane-first.out") node --no-warnings <<'NODE' \
+  || fail "the lane owner that won the publication lock did not remain armed"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== true) process.exit(1);
+NODE
+check_is_registered "$lane_first_id" || fail "the waiting PR owner overwrote the lane poll or its binding"
+pass "fm-playbot-lanes: concurrent check owners cannot overwrite across inspect, publish, or bind"
 
 # A Playbot-chat caller has routed wakes already, so it must get none of this -
 # and the result must say which path it took rather than leaving the caller to
