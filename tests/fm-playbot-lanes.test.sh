@@ -350,6 +350,7 @@ const mcpSchemaVersionFile = path.join(process.env.FIXTURE_ROOT, 'mcp-schema-ver
 // read in the same tool call.
 const afterDropFile = path.join(process.env.FIXTURE_ROOT, 'after-drop-key');
 const sendFailsFile = path.join(process.env.FIXTURE_ROOT, 'send-fails');
+const sendCompletesFile = path.join(process.env.FIXTURE_ROOT, 'send-completes-at');
 // A modern Playbot whose send path returns something that is not a snapshot at
 // all: the verdict is unknown for the same reason a legacy Playbot's is, but on
 // a version that can report one, so the two have to be told apart.
@@ -634,6 +635,11 @@ async function electronInvoke(channel, payload) {
       saveSnapshots(store);
       if (readFileOr(refreshFailureFile, '') === 'send') {
         db.prepare('UPDATE workspace_threads SET archived = 1 WHERE id = ?').run(payload.threadId);
+      }
+      const completesAt = readFileOr(sendCompletesFile, '');
+      if (completesAt) {
+        db.prepare('UPDATE workspace_threads SET agent_status = ?, updated_at = ? WHERE id = ?')
+          .run('ready', completesAt, payload.threadId);
       }
       const sendDrop = readFileOr(sendDropFile, '');
       if (sendDrop) return applyDropSpec(snapshot, sendDrop);
@@ -2107,6 +2113,23 @@ pass "fm-playbot-lanes: an external-terminal dispatch arms and registers that wo
 # untouched, so the poll must stay silent and stay armed rather than disarm a
 # worker that never started.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
+printf '2099-08-25T09:30:00.000Z\n' > "$FIXTURE_ROOT/send-completes-at"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-fast-turn\"},\"title\":\"Fast completed turn\",\"message\":\"Do the fast completed work\",\"taskId\":\"fm-autoarm-fast-turn\"}")
+rm -f "$FIXTURE_ROOT/send-reconciles" "$FIXTURE_ROOT/send-completes-at"
+fast_turn_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+check_is_registered fm-autoarm-fast-turn || fail "the fast-completed worker's poll was not armed"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-fast-turn.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-fast-turn"*"$fast_turn_thread"*"stopped without a card"*"status ready"*"retired itself"*) ;;
+  *) fail "a worker that completed before arming sampled it was not reported: $poll_line" ;;
+esac
+for leftover in fm-autoarm-fast-turn.check.sh fm-autoarm-fast-turn.check-trust fm-autoarm-fast-turn.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the fast-completed worker left $leftover armed"
+done
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-turn\"},\"title\":\"Completed turn\",\"message\":\"Do the completed work\",\"taskId\":\"fm-autoarm-turn\"}")
 turn_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-turn || fail "the completed-turn worker's poll was not armed"
@@ -2130,7 +2153,7 @@ for leftover in fm-autoarm-turn.check.sh fm-autoarm-turn.check-trust fm-autoarm-
   [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
     || fail "the completed worker's poll left $leftover armed"
 done
-pass "fm-playbot-lanes: a worker that finishes back on its starting status is reported once, and one that never started is not"
+pass "fm-playbot-lanes: fast and unsampled completed turns are reported while an untouched worker is not"
 
 # A retirement that cannot remove the executable check must leave the complete
 # registered poll intact. Removing its trust file after the check removal fails
@@ -2426,7 +2449,36 @@ for leftover in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-auto
   [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
     || fail "the retired poll left $leftover armed after the queue drained"
 done
-pass "fm-playbot-lanes: the poll keeps itself armed while the dispatched task is still queued or unreadable"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-failed-send\"},\"title\":\"Failed busy delivery\"}}}")
+failed_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+failed_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+set_thread_turn "$failed_thread" working 2026-08-25T10:40:00.000Z \
+  || fail "could not stage the failed-delivery worker as busy"
+printf 'yes\n' > "$FIXTURE_ROOT/send-fails"
+out=$(home_dispatch "{\"project\":$worker_json,\"workspace\":\"$failed_workspace\",\"thread\":\"$failed_thread\",\"message\":\"Do not deliver this task\",\"taskId\":\"fm-autoarm-failed-send\"}")
+rm -f "$FIXTURE_ROOT/send-fails"
+OUT="$out" node --no-warnings <<'NODE' || fail "the failed-delivery dispatch did not preserve its verdict beside armed supervision"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'failed' || value.supervision.armed !== true) process.exit(1);
+NODE
+set_thread_turn "$failed_thread" ready 2026-08-25T10:45:00.000Z \
+  || fail "could not settle the failed-delivery worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-failed-send.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-failed-send"*"delivery remains failed"*"task was not sent"*"stays armed"*) ;;
+  *) fail "a definitively failed delivery was promoted and retired from unrelated worker activity: $poll_line" ;;
+esac
+for kept in fm-autoarm-failed-send.check.sh fm-autoarm-failed-send.check-trust fm-autoarm-failed-send.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "the failed-delivery poll retired $kept"
+done
+check_is_registered fm-autoarm-failed-send \
+  || fail "the failed-delivery poll lost its trust binding"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-failed-send.check.sh")
+[ -z "$poll_line" ] || fail "an unchanged failed-delivery observation repeated its wake: $poll_line"
+pass "fm-playbot-lanes: queued work can progress, while failed delivery stays armed"
 
 # A worker whose chat is gone must not read as a silent, healthy worker, and it
 # is just as finished as one that stopped, so it retires the same way.
@@ -2469,7 +2521,13 @@ for leftover in fm-autoarm-db-delivered.check.sh fm-autoarm-db-delivered.check-t
 done
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/send-non-object"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-db-unconfirmed\"},\"title\":\"Unreadable unconfirmed worker\",\"message\":\"Do the unconfirmed work\",\"taskId\":\"fm-autoarm-db-unconfirmed\"}")
+rm -f "$FIXTURE_ROOT/send-non-object"
+OUT="$out" node --no-warnings <<'NODE' || fail "the unreadable-restoration fixture did not begin with unknown delivery"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'unknown' || value.supervision.armed !== true) process.exit(1);
+NODE
 mv "$PLAYBOT_DESKTOP_DIR/playbot.db" "$PLAYBOT_DESKTOP_DIR/playbot.db.unreadable"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-db-unconfirmed.check.sh")
 case "$poll_line" in
@@ -2479,9 +2537,16 @@ esac
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-db-unconfirmed.check.sh")
 mv "$PLAYBOT_DESKTOP_DIR/playbot.db.unreadable" "$PLAYBOT_DESKTOP_DIR/playbot.db"
 [ -z "$poll_line" ] || fail "an unchanged unreadable worker repeated its wake: $poll_line"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-db-unconfirmed.check.sh")
+case "$poll_line" in
+  *"fm-autoarm-db-unconfirmed"*"delivery remains unknown"*"stays armed"*) ;;
+  *) fail "restoring an unreadable database fabricated delivery and retired the poll: $poll_line" ;;
+esac
 check_is_registered fm-autoarm-db-unconfirmed \
   || fail "an unreadable worker with unconfirmed delivery lost its binding"
-pass "fm-playbot-lanes: delivered unreadability retires while unconfirmed unreadability stays armed"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-db-unconfirmed.check.sh")
+[ -z "$poll_line" ] || fail "an unchanged restored worker repeated its unconfirmed wake: $poll_line"
+pass "fm-playbot-lanes: delivered unreadability retires while restored unknown delivery stays armed"
 
 # Without a taskId the poll still has to exist, keyed on the workspace, and the
 # result has to say that task teardown will not retire it.

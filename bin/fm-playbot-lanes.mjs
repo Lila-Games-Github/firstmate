@@ -1300,9 +1300,11 @@ function registerLane(supervisor, worker) {
 const SUPERVISION_CHECK_MARKER = "# fm-playbot-lane-supervision-poll v1";
 const SUPERVISION_TOOLS = ["get_thread_status", "read_thread", "get_thread_card"];
 const SUPERVISION_CHECK_SHEBANG = "#!/usr/bin/env bash";
-const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v4";
+const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v5";
+const SUPERVISION_SIDECAR_VERSION_V4 = "fm-playbot-lane-poll-v4";
 const SUPERVISION_SIDECAR_VERSION_V3 = "fm-playbot-lane-poll-v3";
 const SUPERVISION_SIDECAR_VERSION_V2 = "fm-playbot-lane-poll-v2";
+const SUPERVISION_DELIVERY_STATES = new Set(["delivered", "queued", "sending", "failed", "unknown", "unconfirmed"]);
 // The status a chat that Playbot no longer holds is recorded under. It is not
 // one of Playbot's own agent_status values, so it can never collide with one.
 const SUPERVISION_ABSENT = "chat-absent";
@@ -1443,8 +1445,12 @@ function supervisionField(value) {
   return String(value ?? "").replace(/[\r\n]+/g, " ");
 }
 
+function supervisionDeliveryState(value) {
+  return SUPERVISION_DELIVERY_STATES.has(value) ? value : "unconfirmed";
+}
+
 function supervisionWriteSidecar(state, taskId, observation) {
-  const delivery = observation.delivered ? "delivered" : "unconfirmed";
+  const delivery = supervisionDeliveryState(observation.deliveryState);
   const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n${delivery}\n${supervisionField(observation.generation)}\n`;
   return supervisionPublish(state, `${taskId}.lane-poll`, body, 0o600);
 }
@@ -1453,7 +1459,7 @@ function supervisionSameObservation(left, right) {
   return Boolean(left) && Boolean(right)
     && left.status === supervisionField(right.status)
     && left.updatedAt === supervisionField(right.updatedAt)
-    && Boolean(left.delivered) === Boolean(right.delivered)
+    && supervisionDeliveryState(left.deliveryState) === supervisionDeliveryState(right.deliveryState)
     && (left.generation ?? null) === (right.generation ?? null);
 }
 
@@ -1488,15 +1494,20 @@ function supervisionReadSidecar(state, taskId) {
   const lines = text.split("\n");
   if (!lines[1]) return null;
   if (lines[0] === SUPERVISION_SIDECAR_VERSION_V2) {
-    return { status: lines[1], updatedAt: lines[2] ?? "", delivered: false, generation: null };
+    return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: "unconfirmed", generation: null };
   }
   if (lines[0] === SUPERVISION_SIDECAR_VERSION_V3 && ["delivered", "unconfirmed"].includes(lines[3])) {
-    return { status: lines[1], updatedAt: lines[2] ?? "", delivered: lines[3] === "delivered", generation: null };
+    return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: null };
+  }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V4
+    && ["delivered", "unconfirmed"].includes(lines[3])
+    && /^[a-f0-9]{32}$/.test(lines[4] ?? "")) {
+    return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: lines[4] };
   }
   if (lines[0] !== SUPERVISION_SIDECAR_VERSION
-    || !["delivered", "unconfirmed"].includes(lines[3])
+    || !SUPERVISION_DELIVERY_STATES.has(lines[3])
     || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")) return null;
-  return { status: lines[1], updatedAt: lines[2] ?? "", delivered: lines[3] === "delivered", generation: lines[4] };
+  return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: lines[4] };
 }
 
 function supervisionCheckLockAcquire(state, taskId) {
@@ -1643,31 +1654,28 @@ function supervisionRestore({ state, taskId, register, existed, previousCheck, p
   }
 }
 
-// The observation this arming made. It is recorded before the poll ever runs so
-// that a freshly dispatched worker sitting at 'ready' before its turn starts is
-// not read as a worker that just finished and disarmed on its first poll, and
-// so that the same worker finishing back at 'ready' is still a change.
-function supervisionArmingObservation(worker, delivery, generation) {
-  let fresh = null;
-  try {
-    fresh = threadRowById(worker.thread_id);
-  } catch {
-    fresh = null;
-  }
-  const row = fresh ?? worker;
+// The pre-send observation is recorded before the poll ever runs so a worker
+// that completes before arming still differs from the baseline it started on.
+function supervisionArmingBaseline(worker) {
   return {
-    status: String(row.agent_status ?? "unknown"),
-    updatedAt: String(row.updated_at ?? ""),
-    delivered: delivery?.state === "delivered",
+    status: String(worker.agent_status ?? "unknown"),
+    updatedAt: String(worker.updated_at ?? ""),
+  };
+}
+
+function supervisionArmingObservation(baseline, delivery, generation) {
+  return {
+    ...baseline,
+    deliveryState: supervisionDeliveryState(delivery?.state),
     generation,
   };
 }
 
 // Arm one worker's watcher poll and report exactly what happened. Never throws
-// into the caller's dispatch: the task has already been delivered by the time
+// into the caller's dispatch: the send has already reached Playbot by the time
 // this runs, so a failure here is reported loudly in the result rather than
 // turning a completed dispatch into an error.
-async function armSupervisionPoll({ requestedTaskId, worker, delivery = null }) {
+async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, delivery = null }) {
   const taskId = requestedTaskId ?? worker.workspace_id;
   const taskIdSource = requestedTaskId ? "argument" : "workspace-id";
   const report = {
@@ -1727,7 +1735,8 @@ async function armSupervisionPoll({ requestedTaskId, worker, delivery = null }) 
       }
       const previousSidecar = existed ? supervisionReadSidecarText(state, taskId) : null;
       if (previous !== desired) supervisionWriteCheck(state, taskId, desired);
-      const registration = supervisionBind({ state, taskId, register, observation: supervisionArmingObservation(worker, delivery, generation) });
+      const observation = supervisionArmingObservation(baseline ?? supervisionArmingBaseline(worker), delivery, generation);
+      const registration = supervisionBind({ state, taskId, register, observation });
       if (!registration.ok) {
         const restored = supervisionRestore({ state, taskId, register, existed, previousCheck: previous, previousSidecar });
         supervisionRefuse(restored.ok ? registration.detail : `${registration.detail}; ${restored.detail}`);
@@ -1812,9 +1821,15 @@ function supervisionPollDecision(taskId, threadId, previous) {
   const updatedAt = row ? supervisionField(row.updated_at) : "";
   const changed = Boolean(previous)
     && (previous.status !== status || previous.updatedAt !== updatedAt);
-  const delivered = Boolean(previous?.delivered)
-    || Boolean(row && queued === 0 && (changed || status === "working" || status === "pending_input"));
-  const observed = { status, updatedAt, delivered, generation: previous?.generation ?? null };
+  const priorDelivery = supervisionDeliveryState(previous?.deliveryState);
+  const deliveryTransition = previous?.status !== "poll-unreadable"
+    && ["queued", "sending"].includes(priorDelivery)
+    && row
+    && queued === 0
+    && (changed || status === "working" || status === "pending_input");
+  const deliveryState = priorDelivery === "delivered" || deliveryTransition ? "delivered" : priorDelivery;
+  const delivered = deliveryState === "delivered";
+  const observed = { status, updatedAt, deliveryState, generation: previous?.generation ?? null };
   if (status === "working") return { ...observed, line: null, retire: false, remember: true };
   const held = supervisionHeldClause(queued);
   if (status === "pending_input") {
@@ -1829,12 +1844,21 @@ function supervisionPollDecision(taskId, threadId, previous) {
     return { ...observed, line: null, retire: false, remember: false };
   }
   if (!delivered) {
-    const unreadable = row
-      ? `worker ${threadId} is idle (status ${status}) with its dispatched task still queued${held}`
-      : `worker chat ${threadId} is no longer readable in Playbot state while task delivery is unconfirmed`;
-    const delivery = row && queued > 0
-      ? "the worker has not seen it and has not started"
-      : "the worker may not have seen the task";
+    let unreadable;
+    let delivery;
+    if (!row) {
+      unreadable = `worker chat ${threadId} is no longer readable in Playbot state while task delivery is ${priorDelivery}`;
+      delivery = "the worker may not have seen the task";
+    } else if (queued === null) {
+      unreadable = `worker ${threadId} is idle (status ${status}) with its task queue unreadable${held}`;
+      delivery = "the worker may not have seen the task";
+    } else if (queued > 0) {
+      unreadable = `worker ${threadId} is idle (status ${status}) with its dispatched task still queued${held}`;
+      delivery = "the worker has not seen it and has not started";
+    } else {
+      unreadable = `worker ${threadId} is idle (status ${status}) while task delivery remains ${priorDelivery}`;
+      delivery = priorDelivery === "failed" ? "Playbot reported that the task was not sent" : "the worker may not have seen the task";
+    }
     return {
       ...observed,
       line: `playbot lane ${taskId}: ${unreadable}, so ${delivery}; this poll stays armed, and list_queued_messages reads the queue`,
@@ -1901,12 +1925,12 @@ async function supervisionPoll(argv) {
       } catch (error) {
         const detail = supervisionErrorDetail(error);
         let line = `playbot lane ${task}: worker ${thread} is unreadable because the supervision poll failed: ${detail}`;
-        if (previous.delivered) {
+        if (previous.deliveryState === "delivered") {
           line = `${line}; the task was delivered, so this poll has retired itself`;
           const retirement = supervisionRetireProblem(state, task);
           if (retirement) line = `${line}; retirement failed and this check is still armed: ${retirement}`;
         } else {
-          const observed = { status: "poll-unreadable", updatedAt: "", delivered: false, generation };
+          const observed = { status: "poll-unreadable", updatedAt: "", deliveryState: previous.deliveryState, generation };
           if (supervisionSameObservation(previous, observed)) return { line: null };
           line = `${line}; task delivery or its queue is unconfirmed, so this poll stays armed`;
           try {
@@ -2382,6 +2406,7 @@ async function handleTool(name, args = {}) {
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
     const lane = caller ? registerLane(caller, worker) : null;
+    const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
       const sent = await sendMessage(worker, args.message, args.force === true);
       if (caller) {
@@ -2395,7 +2420,7 @@ async function handleTool(name, args = {}) {
           },
         };
       }
-      const supervision = await armSupervisionPoll({ requestedTaskId, worker, delivery: sent.delivery });
+      const supervision = await armSupervisionPoll({ requestedTaskId, worker, baseline: armingBaseline, delivery: sent.delivery });
       const result = { lane: null, ...sent, supervision };
       if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
       return result;
@@ -2416,7 +2441,7 @@ async function handleTool(name, args = {}) {
       // caller. The thrown message carries the arming outcome, because a refusal
       // has no result body to report it in.
       if (!lane && sendReachedPlaybot(error)) {
-        const supervision = await armSupervisionPoll({ requestedTaskId, worker });
+        const supervision = await armSupervisionPoll({ requestedTaskId, worker, baseline: armingBaseline });
         const suffix = supervision.armed
           ? `Playbot accepted the task, so its watcher poll was armed as ${supervision.check}.`
           : supervisionArmWarning(supervision);

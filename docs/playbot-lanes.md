@@ -74,8 +74,9 @@ Every branch that can print fires on a difference from the last observation and 
 A worker that stopped or became unreadable is news exactly once, so that is reported on the change into it and the poll then retires itself, removing the check, its trust binding, and its private `state/<taskId>.lane-poll` record of what it last saw.
 An idle worker whose dispatched task Playbot is still holding has not stopped, it has not started, so it is reported as that once and the poll stays armed and then quiet until something changes or the worker receives the task.
 A queue that cannot be read counts the same way, because unreadable is not proof of delivery, and retirement is irreversible while an extra wake is not.
-That record holds the status and the row's `updated_at` together, and arming writes the pair it observed.
-Both halves are needed because a send does not wait for the turn to start: a worker dispatched onto an already-idle chat is armed at `ready` and a worker that runs and finishes lands back at `ready`, so a status on its own would read a completed worker as no change at all.
+That record holds the pre-send status and the row's `updated_at` together with Playbot's task-specific delivery verdict.
+Both observation fields are needed because a send does not wait for the turn to start: a worker dispatched onto an already-idle chat is armed from its pre-send `ready` baseline and a worker that runs and finishes lands back at `ready`, so a status on its own would read a completed worker as no change at all.
+A `queued` or `sending` verdict can advance to delivered when the worker transition and readable empty queue agree, while a `failed`, `unknown`, or otherwise unconfirmed verdict never advances from generic worker-state activity.
 A worker that genuinely never began leaves its row untouched, so the pair holds the poll silent and armed for it while still reporting the one that finished.
 If that record is missing the poll reports the observation state as unreadable and remains armed, because it cannot prove that the executing snapshot still owns the live check generation or that the task was delivered.
 Firstmate's task teardown removes the record with the rest of the task's state, so a task torn down while its worker was still working leaves nothing behind.

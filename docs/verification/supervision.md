@@ -592,7 +592,7 @@ The firstmate-side half is enforced end to end in `tests/fm-playbot-lanes.test.s
 
 ```text
 ok - fm-playbot-lanes: an external-terminal dispatch arms and registers that worker's watcher poll
-ok - fm-playbot-lanes: a worker that finishes back on its starting status is reported once, and one that never started is not
+ok - fm-playbot-lanes: fast and unsampled completed turns are reported while an untouched worker is not
 ok - fm-playbot-lanes: failed check removal leaves the poll armed and registered
 ok - fm-playbot-lanes: the armed poll keeps the real watcher silent while the worker is working
 ok - fm-playbot-lanes: the armed poll wakes the real watcher when the worker parks, naming the task
@@ -600,8 +600,8 @@ ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while
 ok - fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker
 ok - fm-playbot-lanes: failed restoration re-registration is loud even for identical check bytes
 ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself
-ok - fm-playbot-lanes: the poll keeps itself armed while the dispatched task is still queued or unreadable
-ok - fm-playbot-lanes: delivered unreadability retires while unconfirmed unreadability stays armed
+ok - fm-playbot-lanes: queued work can progress, while failed delivery stays armed
+ok - fm-playbot-lanes: delivered unreadability retires while restored unknown delivery stays armed
 ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace
 ok - fm-playbot-lanes: null and non-string taskIds take the workspace fallback
 ok - fm-playbot-lanes: an unusable taskId is refused before any worker is created or sent to
