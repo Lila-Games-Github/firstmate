@@ -2017,6 +2017,30 @@ orphan_publication_lock() {  # <state> <task-id>
   rm -f "$fifo" "$ready"
 }
 
+hold_publication_lock() {  # <state> <task-id>
+  local state=$1 task_id=$2 attempts=100
+  HELD_LOCK_FIFO="$FIXTURE_ROOT/$task_id.held-lock-input"
+  HELD_LOCK_READY="$FIXTURE_ROOT/$task_id.held-lock-ready"
+  rm -f "$HELD_LOCK_FIFO" "$HELD_LOCK_READY"
+  mkfifo "$HELD_LOCK_FIFO" || return 1
+  exec 8<> "$HELD_LOCK_FIFO"
+  "$ROOT/bin/fm-check-publish-lock.sh" "$state" "$task_id" < "$HELD_LOCK_FIFO" > "$HELD_LOCK_READY" &
+  HELD_LOCK_PID=$!
+  while ! grep -qx locked "$HELD_LOCK_READY" 2>/dev/null; do
+    kill -0 "$HELD_LOCK_PID" 2>/dev/null || return 1
+    attempts=$((attempts - 1))
+    [ "$attempts" -gt 0 ] || return 1
+    sleep 0.05
+  done
+}
+
+release_publication_lock() {
+  printf 'release\n' >&8
+  wait "$HELD_LOCK_PID" || return 1
+  exec 8>&-
+  rm -f "$HELD_LOCK_FIFO" "$HELD_LOCK_READY"
+}
+
 stage_pid_reused_publication_lock() {  # <state> <task-id>
   local state=$1 task_id=$2 lock owner
   orphan_publication_lock "$state" "$task_id" || return 1
@@ -2474,6 +2498,28 @@ db.close();
 if (changed.changes !== 1) process.exit(1);
 NODE
 }
+
+remove_fixture_message() {  # <thread-id> <message-id>
+  FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$1" MESSAGE_ID="$2" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const snapshotsPath = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const snapshots = JSON.parse(fs.readFileSync(snapshotsPath, 'utf8'));
+const snapshot = snapshots[process.env.THREAD];
+if (!snapshot || !Array.isArray(snapshot.pendingMessages) || !Array.isArray(snapshot.outboundMessages)) process.exit(1);
+const queue = [snapshot.pendingMessages, snapshot.outboundMessages]
+  .find(messages => messages.some(message => message.id === process.env.MESSAGE_ID));
+if (!queue) process.exit(1);
+queue.splice(queue.findIndex(message => message.id === process.env.MESSAGE_ID), 1);
+fs.writeFileSync(snapshotsPath, `${JSON.stringify(snapshots, null, 2)}\n`);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const changed = db.prepare('UPDATE workspace_threads SET pending_queue_json = ? WHERE id = ?')
+  .run(JSON.stringify({ messages: snapshot.pendingMessages }), process.env.THREAD);
+db.close();
+if (changed.changes !== 1) process.exit(1);
+NODE
+}
 set_thread_queue "$queued_thread" "{\"messages\":[{\"id\":\"$queued_message\",\"text\":\"Do the queued work\"}]}" \
   || fail "could not hold the dispatched task in the worker's queue"
 set_thread_turn "$queued_thread" ready 2026-08-25T10:00:00.000Z || fail "could not idle the queued-task worker"
@@ -2518,7 +2564,12 @@ for kept in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-
 done
 check_is_registered fm-autoarm-queued || fail "the poll disarmed a worker whose queue could not be read"
 
-set_thread_queue "$queued_thread" '' || fail "could not drain the worker's queue"
+remove_fixture_message "$queued_thread" "$queued_message" || fail "could not stage exact-message delivery"
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"$queued_thread\",\"messageId\":\"$queued_message\"}}}")
+OUT="$out" MESSAGE_ID="$queued_message" node --no-warnings <<'NODE' || fail "same-thread exact-message acceptance was not confirmed"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.outcome !== 'not-recallable' || value.messageId !== process.env.MESSAGE_ID) process.exit(1);
+NODE
 set_thread_turn "$queued_thread" ready 2026-08-25T10:30:00.000Z || fail "could not settle the queued-task worker"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
 case "$poll_line" in
@@ -2604,7 +2655,60 @@ check_is_registered fm-autoarm-failed-send \
   || fail "the failed-delivery poll lost its trust binding"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-failed-send.check.sh")
 [ -z "$poll_line" ] || fail "an unchanged failed-delivery observation repeated its wake: $poll_line"
-pass "fm-playbot-lanes: drained tasks retire while recalled and failed deliveries stay armed"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-ui-recall\"},\"title\":\"UI recalled task\"}}}")
+ui_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+ui_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+set_thread_turn "$ui_thread" working 2026-08-25T10:50:00.000Z || fail "could not stage the UI-recall worker as busy"
+printf 'yes\n' > "$FIXTURE_ROOT/send-holds-working"
+printf '2026-08-25T10:51:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(home_dispatch "{\"project\":$worker_json,\"workspace\":\"$ui_workspace\",\"thread\":\"$ui_thread\",\"message\":\"Task recalled outside MCP\",\"taskId\":\"fm-autoarm-ui-recall\"}")
+rm -f "$FIXTURE_ROOT/send-holds-working" "$FIXTURE_ROOT/send-accepted-at"
+ui_message=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.delivery.messageId)')
+[ -n "$ui_message" ] || fail "the UI-recall task had no exact message id"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-cross-recall\"},\"title\":\"Cross-thread recall\"}}}")
+cross_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+cross_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"$cross_workspace\",\"thread\":\"$cross_thread\",\"messageId\":\"$ui_message\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a cross-thread message id did not remain non-recallable on that thread"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.outcome !== 'not-recallable') process.exit(1);
+NODE
+set_thread_turn "$ui_thread" ready 2026-08-25T10:52:00.000Z || fail "could not finish the prior UI-recall turn"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-ui-recall.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-ui-recall"*"still queued"*"stays armed"*) ;;
+  *) fail "a cross-thread message id fabricated delivery for the queued task: $poll_line" ;;
+esac
+remove_fixture_message "$ui_thread" "$ui_message" || fail "could not emulate Playbot's UI recall"
+set_thread_turn "$ui_thread" ready 2026-08-25T10:53:00.000Z || fail "could not settle the UI-recalled worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-ui-recall.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-ui-recall"*"delivery remains queued"*"stays armed"*) ;;
+  *) fail "a UI-side recall fabricated exact-message delivery: $poll_line" ;;
+esac
+for kept in fm-autoarm-ui-recall.check.sh fm-autoarm-ui-recall.check-trust fm-autoarm-ui-recall.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] || fail "the UI-recalled task lost $kept"
+done
+check_is_registered fm-autoarm-ui-recall || fail "the UI-recalled task lost its trust binding"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-lock-target\"},\"title\":\"Recall with unrelated lock\"}}}")
+lock_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+lock_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+set_thread_turn "$lock_thread" working 2026-08-25T10:55:00.000Z || fail "could not stage the lock-target worker as busy"
+printf 'yes\n' > "$FIXTURE_ROOT/send-holds-working"
+out=$(home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lock_workspace\",\"thread\":\"$lock_thread\",\"message\":\"Recall despite unrelated lock\",\"taskId\":\"fm-autoarm-lock-target\"}")
+rm -f "$FIXTURE_ROOT/send-holds-working"
+lock_message=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.delivery.messageId)')
+hold_publication_lock "$FM_HOME_FIXTURE/state" fm-autoarm-failed-send || fail "could not hold an unrelated publication lock"
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"$lock_workspace\",\"thread\":\"$lock_thread\",\"messageId\":\"$lock_message\"}}}")
+release_publication_lock || fail "could not release the unrelated publication lock"
+OUT="$out" MESSAGE_ID="$lock_message" node --no-warnings <<'NODE' || fail "an unrelated publication lock blocked exact-message recall"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.outcome !== 'recalled' || value.messageId !== process.env.MESSAGE_ID) process.exit(1);
+NODE
+pass "fm-playbot-lanes: exact-thread delivery and recall evidence stay ownership-safe"
 
 # A worker whose chat is gone must not read as a silent, healthy worker, and it
 # is just as finished as one that stopped, so it retires the same way.

@@ -75,9 +75,9 @@ A worker that stopped or became unreadable is news exactly once, so that is repo
 If executable-check removal succeeds but trust or sidecar cleanup fails, the wake reports those files as orphaned artifacts instead of claiming the removed check remains armed.
 An idle worker whose dispatched task Playbot is still holding has not stopped, it has not started, so it is reported as that once and the poll stays armed and then quiet until the persisted observation changes.
 A queue that cannot be read counts the same way, because unreadable is not proof of delivery, and retirement is irreversible while an extra wake is not.
-That record holds the observed status and `updated_at`, Playbot's task-specific delivery verdict and message identity, and the task acceptance boundary from `last_user_activity_at`.
+That record holds the observed status and `updated_at`, Playbot's task-specific delivery verdict, worker and message identities, and the task acceptance boundary from `last_user_activity_at`.
 A terminal observation must fall after that acceptance boundary, so an earlier turn reaching `ready` cannot retire the new task while a fast accepted turn that finishes before the first poll remains visible.
-A queued or sending verdict advances only when its exact message has left the queue after acceptance, while `drop_queued_message` marks that same sidecar before recall so recalled work never advances from queue disappearance.
+A queued or sending verdict advances only when same-worker `drop_queued_message` receives `not-recallable` for its exact message, while bare queue disappearance remains armed because Playbot's UI may have recalled the message.
 A worker that genuinely never began leaves its row untouched, so the pair holds the poll silent and armed for it while still reporting the one that finished.
 If that record is missing the poll reports the observation state as unreadable and remains armed, because it cannot prove that the executing snapshot still owns the live check generation or that the task was delivered.
 Firstmate's task teardown removes the record with the rest of the task's state, so a task torn down while its worker was still working leaves nothing behind.

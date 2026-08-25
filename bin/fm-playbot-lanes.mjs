@@ -1317,7 +1317,8 @@ function registerLane(supervisor, worker) {
 const SUPERVISION_CHECK_MARKER = "# fm-playbot-lane-supervision-poll v1";
 const SUPERVISION_TOOLS = ["get_thread_status", "read_thread", "get_thread_card"];
 const SUPERVISION_CHECK_SHEBANG = "#!/usr/bin/env bash";
-const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v7";
+const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v8";
+const SUPERVISION_SIDECAR_VERSION_V7 = "fm-playbot-lane-poll-v7";
 const SUPERVISION_SIDECAR_VERSION_V6 = "fm-playbot-lane-poll-v6";
 const SUPERVISION_SIDECAR_VERSION_V5 = "fm-playbot-lane-poll-v5";
 const SUPERVISION_SIDECAR_VERSION_V4 = "fm-playbot-lane-poll-v4";
@@ -1473,6 +1474,10 @@ function supervisionMessageKey(value) {
   return `sha256:${crypto.createHash("sha256").update(value).digest("hex")}`;
 }
 
+function supervisionThreadKey(value) {
+  return supervisionMessageKey(value);
+}
+
 function supervisionTimestampMs(value) {
   const parsed = Date.parse(String(value ?? ""));
   return Number.isFinite(parsed) ? parsed : null;
@@ -1482,7 +1487,8 @@ function supervisionWriteSidecar(state, taskId, observation) {
   const delivery = supervisionDeliveryState(observation.deliveryState);
   const messageKey = observation.messageKey ?? "none";
   const acceptanceMs = observation.acceptanceMs ?? "none";
-  const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n${delivery}\n${supervisionField(observation.generation)}\n${messageKey}\n${acceptanceMs}\n`;
+  const threadKey = observation.threadKey ?? "none";
+  const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n${delivery}\n${supervisionField(observation.generation)}\n${messageKey}\n${acceptanceMs}\n${threadKey}\n`;
   return supervisionPublish(state, `${taskId}.lane-poll`, body, 0o600);
 }
 
@@ -1493,6 +1499,7 @@ function supervisionSameObservation(left, right) {
     && supervisionDeliveryState(left.deliveryState) === supervisionDeliveryState(right.deliveryState)
     && (left.messageKey ?? null) === (right.messageKey ?? null)
     && (left.acceptanceMs ?? null) === (right.acceptanceMs ?? null)
+    && (left.threadKey ?? null) === (right.threadKey ?? null)
     && (left.generation ?? null) === (right.generation ?? null);
 }
 
@@ -1555,11 +1562,27 @@ function supervisionReadSidecar(state, taskId) {
       acceptanceMs: null,
     };
   }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V7) {
+    if (!SUPERVISION_DELIVERY_STATES.has(lines[3])
+      || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")
+      || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")
+      || !/^(?:none|[0-9]+)$/.test(lines[6] ?? "")) return null;
+    return {
+      status: lines[1],
+      updatedAt: lines[2] ?? "",
+      deliveryState: lines[3],
+      generation: lines[4],
+      messageKey: lines[5] === "none" ? null : lines[5],
+      acceptanceMs: lines[6] === "none" ? null : Number(lines[6]),
+      threadKey: null,
+    };
+  }
   if (lines[0] !== SUPERVISION_SIDECAR_VERSION
     || !SUPERVISION_DELIVERY_STATES.has(lines[3])
     || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")
     || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")
-    || !/^(?:none|[0-9]+)$/.test(lines[6] ?? "")) return null;
+    || !/^(?:none|[0-9]+)$/.test(lines[6] ?? "")
+    || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[7] ?? "")) return null;
   return {
     status: lines[1],
     updatedAt: lines[2] ?? "",
@@ -1567,6 +1590,7 @@ function supervisionReadSidecar(state, taskId) {
     generation: lines[4],
     messageKey: lines[5] === "none" ? null : lines[5],
     acceptanceMs: lines[6] === "none" ? null : Number(lines[6]),
+    threadKey: lines[7] === "none" ? null : lines[7],
   };
 }
 
@@ -1721,6 +1745,7 @@ function supervisionArmingBaseline(worker) {
     status: String(worker.agent_status ?? "unknown"),
     updatedAt: String(worker.updated_at ?? ""),
     acceptanceMs: supervisionTimestampMs(worker.last_user_activity_at),
+    threadKey: supervisionThreadKey(worker.thread_id),
   };
 }
 
@@ -1734,9 +1759,10 @@ function supervisionArmingObservation(baseline, delivery, generation) {
   };
 }
 
-async function supervisionPrepareRecall(messageId) {
+async function supervisionPrepareRecall(threadId, messageId) {
   const messageKey = supervisionMessageKey(messageId);
-  if (!messageKey) return [];
+  const threadKey = supervisionThreadKey(threadId);
+  if (!messageKey || !threadKey) return [];
   const state = path.join(controllerRoot(), "state");
   let stat;
   try {
@@ -1748,16 +1774,23 @@ async function supervisionPrepareRecall(messageId) {
   const tasks = fs.readdirSync(state)
     .filter((name) => name.endsWith(".lane-poll"))
     .map((name) => name.slice(0, -".lane-poll".length))
-    .filter(supervisionTaskIdValid);
+    .filter(supervisionTaskIdValid)
+    .filter((taskId) => {
+      const previous = supervisionReadSidecar(state, taskId);
+      return previous?.threadKey === threadKey
+        && previous.messageKey === messageKey
+        && ["queued", "sending"].includes(previous.deliveryState);
+    });
   const prepared = [];
   for (const taskId of tasks) {
     await supervisionWithCheckLock(state, taskId, () => {
       const previous = supervisionReadSidecar(state, taskId);
       if (!previous
         || previous.messageKey !== messageKey
+        || previous.threadKey !== threadKey
         || !["queued", "sending"].includes(previous.deliveryState)) return;
       supervisionWriteSidecar(state, taskId, { ...previous, deliveryState: "recall-pending" });
-      prepared.push({ state, taskId, generation: previous.generation, messageKey, deliveryState: previous.deliveryState });
+      prepared.push({ state, taskId, generation: previous.generation, messageKey, threadKey, deliveryState: previous.deliveryState });
     });
   }
   return prepared;
@@ -1773,6 +1806,7 @@ async function supervisionResolveRecall(prepared, outcome) {
         if (!current
           || current.generation !== item.generation
           || current.messageKey !== item.messageKey
+          || current.threadKey !== item.threadKey
           || current.deliveryState !== "recall-pending") return;
         supervisionWriteSidecar(item.state, item.taskId, { ...current, deliveryState: nextState });
       });
@@ -1934,12 +1968,7 @@ function supervisionPollDecision(taskId, threadId, previous) {
   const afterAcceptance = previous?.acceptanceMs !== null
     && previous?.acceptanceMs !== undefined
     && supervisionTimestampMs(updatedAt) > previous.acceptanceMs;
-  const deliveryAdvanced = ["queued", "sending"].includes(priorDelivery)
-    && Boolean(previous?.messageKey)
-    && Array.isArray(messages)
-    && !taskQueued
-    && afterAcceptance;
-  const deliveryState = deliveryAdvanced ? "delivered" : priorDelivery;
+  const deliveryState = priorDelivery;
   const delivered = deliveryState === "delivered";
   const observed = {
     status,
@@ -1947,6 +1976,7 @@ function supervisionPollDecision(taskId, threadId, previous) {
     deliveryState,
     messageKey: previous?.messageKey ?? null,
     acceptanceMs: previous?.acceptanceMs ?? null,
+    threadKey: previous?.threadKey ?? null,
     generation: previous?.generation ?? null,
   };
   if (status === "working") return { ...observed, line: null, retire: false, remember: true };
@@ -2073,7 +2103,7 @@ async function supervisionPoll(argv) {
             }
           }
         } else {
-          const observed = { status: "poll-unreadable", updatedAt: "", deliveryState: previous.deliveryState, messageKey: previous.messageKey ?? null, acceptanceMs: previous.acceptanceMs ?? null, generation };
+          const observed = { status: "poll-unreadable", updatedAt: "", deliveryState: previous.deliveryState, messageKey: previous.messageKey ?? null, acceptanceMs: previous.acceptanceMs ?? null, threadKey: previous.threadKey ?? null, generation };
           if (supervisionSameObservation(previous, observed)) return { line: null };
           line = `${line}; task delivery or its queue is unconfirmed, so this poll stays armed`;
           try {
@@ -2551,7 +2581,6 @@ async function handleTool(name, args = {}) {
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
-      const sent = await sendMessage(worker, args.message, args.force === true);
       const { supervisionAcceptance, ...sent } = await sendMessage(worker, args.message, args.force === true);
       if (caller) {
         return {
@@ -2697,7 +2726,7 @@ async function handleTool(name, args = {}) {
     const messageId = String(args.messageId ?? "").trim();
     if (!messageId) throw new Error("messageId must not be empty; use list_queued_messages to choose one");
     const version = await playbotVersion();
-    const preparedRecalls = await supervisionPrepareRecall(messageId);
+    const preparedRecalls = await supervisionPrepareRecall(thread.thread_id, messageId);
     const result = await cardInvoke("threads:recallMessage", { threadId: thread.thread_id, messageId });
     const supervisionProblems = await supervisionResolveRecall(preparedRecalls, result?.outcome);
     // The recall already happened, so an unreadable queue projection is reported
