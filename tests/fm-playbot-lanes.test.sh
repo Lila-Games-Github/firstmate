@@ -342,6 +342,7 @@ const reconcileFile = path.join(process.env.FIXTURE_ROOT, 'send-reconciles');
 const metadataFlakyFile = path.join(process.env.FIXTURE_ROOT, 'metadata-flaky');
 const metadataVersionlessFile = path.join(process.env.FIXTURE_ROOT, 'metadata-versionless');
 const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
+const steerResponseFile = path.join(process.env.FIXTURE_ROOT, 'steer-response');
 // The same drop mechanism aimed at the snapshot Playbot returns WITH a completed
 // write, so the post-action reads can be driven without touching the pre-action
 // read in the same tool call.
@@ -577,6 +578,25 @@ async function electronInvoke(channel, payload) {
       }
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
+      const responseMode = readFileOr(steerResponseFile, '');
+      if (responseMode === 'omit') {
+        return {
+          ...snapshot,
+          pendingMessages: snapshot.pendingMessages.filter((candidate) => candidate.id !== payload.messageId),
+          outboundMessages: snapshot.outboundMessages.filter((candidate) => candidate.id !== payload.messageId),
+        };
+      }
+      if (responseMode === 'substitute') {
+        return {
+          ...snapshot,
+          pendingMessages: snapshot.pendingMessages.map((candidate) => candidate.id === payload.messageId
+            ? { ...candidate, id: `substitute-${payload.messageId}` }
+            : candidate),
+          outboundMessages: snapshot.outboundMessages.map((candidate) => candidate.id === payload.messageId
+            ? { ...candidate, id: `substitute-${payload.messageId}` }
+            : candidate),
+        };
+      }
       return snapshot;
     }
     if (channel === 'threads:send') {
@@ -1235,6 +1255,23 @@ if (value.delivery.state !== 'unknown' || value.force.state !== 'unknown') proce
 if (!value.force.reason.includes("No handler registered for 'threads:steerMessage'")) process.exit(1);
 if (!value.delivery.note.includes('Immediate steering is unconfirmed')) process.exit(1);
 NODE
+
+for response_mode in omit substitute; do
+  printf '%s\n' "$response_mode" > "$FIXTURE_ROOT/steer-response"
+  rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+  out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"$response_mode force evidence\",\"force\":true}}}")
+  OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "force with a $response_mode exact message id was reported as delivered"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:send,threads:steerMessage') process.exit(1);
+if (!value.delivery.messageId || calls[1].payload.messageId !== value.delivery.messageId) process.exit(1);
+if (value.delivery.state !== 'unknown' || value.force.state !== 'not-applied') process.exit(1);
+if (!value.delivery.note.includes('exact queued message id')) process.exit(1);
+if (!value.force.evidence.includes('did not contain the exact queued message id')) process.exit(1);
+NODE
+done
+rm -f "$FIXTURE_ROOT/steer-response"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Idless force\",\"force\":true}}}")

@@ -737,13 +737,18 @@ function forcedDeliveryVerdict(response, priorDelivery) {
     };
   }
   return {
-    delivery: { state: "delivered", messageId, queuedTotal: queued.length },
+    delivery: {
+      state: "unknown",
+      messageId,
+      queuedTotal: queued.length,
+      note: "Playbot accepted the force request but its response did not confirm the exact queued message id, so immediate steering and delivery remain unconfirmed. Read list_queued_messages before acting again.",
+    },
     force: {
       requested: true,
-      state: "not-needed",
+      state: "not-applied",
       mechanism: "threads:steerMessage",
-      activeTurn: "unchanged",
-      evidence: "Playbot's response snapshot no longer held the exact message in pending or outbound delivery",
+      activeTurn: "not interrupted",
+      evidence: "Playbot's response snapshot did not contain the exact queued message id",
     },
   };
 }
