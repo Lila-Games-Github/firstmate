@@ -77,7 +77,7 @@ A queue that cannot be read counts the same way, because unreadable is not proof
 That record holds the status and the row's `updated_at` together, and arming writes the pair it observed.
 Both halves are needed because a send does not wait for the turn to start: a worker dispatched onto an already-idle chat is armed at `ready` and a worker that runs and finishes lands back at `ready`, so a status on its own would read a completed worker as no change at all.
 A worker that genuinely never began leaves its row untouched, so the pair holds the poll silent and armed for it while still reporting the one that finished.
-If that record is missing the poll reports the stopped worker on the persisted state alone and retires anyway, because a check nothing will act on again must not stay armed.
+If that record is missing the poll reports the observation state as unreadable and remains armed, because it cannot prove that the executing snapshot still owns the live check generation or that the task was delivered.
 Firstmate's task teardown removes the record with the rest of the task's state, so a task torn down while its worker was still working leaves nothing behind.
 
 `taskId` is optional and the workspace id is used when it is absent, so the poll always exists; a workspace-keyed poll is not retired by firstmate's task teardown and the result says so.

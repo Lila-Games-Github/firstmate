@@ -483,7 +483,7 @@ fm_pr_poll_cleanup() {
 }
 
 fm_pr_poll_lock_acquire() {
-  local state=$1 id=$2 attempts=50 lib_dir had_override=0 saved_override=
+  local state=$1 id=$2 attempts=50 lib_dir had_override=0 saved_override='' had_identity=0 saved_identity=''
   if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
     lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
     if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
@@ -500,14 +500,21 @@ fm_pr_poll_lock_acquire() {
     fi
   fi
   FM_PR_POLL_LOCK_DIR="$state/.$id.check-publish.lock"
+  if [ "${FM_LOCK_REQUIRE_IDENTITY+x}" = x ]; then
+    had_identity=1
+    saved_identity=$FM_LOCK_REQUIRE_IDENTITY
+  fi
+  FM_LOCK_REQUIRE_IDENTITY=1
   while ! fm_lock_try_acquire "$FM_PR_POLL_LOCK_DIR"; do
     attempts=$((attempts - 1))
     if [ "$attempts" -le 0 ]; then
       FM_PR_POLL_LOCK_DIR=
+      if [ "$had_identity" = 1 ]; then FM_LOCK_REQUIRE_IDENTITY=$saved_identity; else unset FM_LOCK_REQUIRE_IDENTITY; fi
       return 1
     fi
     sleep 0.1
   done
+  if [ "$had_identity" = 1 ]; then FM_LOCK_REQUIRE_IDENTITY=$saved_identity; else unset FM_LOCK_REQUIRE_IDENTITY; fi
 }
 
 fm_pr_poll_lock_release() {

@@ -1379,6 +1379,10 @@ function supervisionSelfScript() {
   }
 }
 
+function serverBuildIdentity() {
+  return `sha256:${crypto.createHash("sha256").update(fs.readFileSync(supervisionSelfScript())).digest("hex")}`;
+}
+
 function supervisionStateDir() {
   const state = path.join(controllerRoot(), "state");
   let stat;
@@ -2132,15 +2136,17 @@ async function install() {
   atomicWriteJson(hooksPath, hooks);
   let reload = "not attempted";
   let schemaVersion = null;
+  let reloadSucceeded = false;
   try {
     const servers = await playbotInvoke("codex:mcpServers:reload", undefined);
     reload = Array.isArray(servers) ? `reloaded ${servers.length} MCP server record(s)` : "reload requested";
     schemaVersion = MCP_SCHEMA_VERSION;
+    reloadSucceeded = true;
   } catch (error) {
     reload = `reload deferred: ${error instanceof Error ? error.message : String(error)}`;
   }
-  atomicWriteJson(path.join(stateDir(), "installation.json"), {
-    version: 1,
+  const installation = {
+    version: 2,
     installedAt: nowIso(),
     script,
     node,
@@ -2148,8 +2154,11 @@ async function install() {
     configPath,
     hooksPath,
     schemaVersion,
-  });
-  return { installed: true, configPath, hooksPath, stateDir: stateDir(), reload };
+    buildIdentity: serverBuildIdentity(),
+    reloadSucceeded,
+  };
+  atomicWriteJson(path.join(stateDir(), "installation.json"), installation);
+  return { installed: true, configPath, hooksPath, stateDir: stateDir(), reload, reloadSucceeded, buildIdentity: installation.buildIdentity };
 }
 
 function installedHookStatus() {
@@ -2276,7 +2285,7 @@ function toolDefinitions() {
     {
       name: "dispatch",
       description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: string("Firstmate task id the armed watcher poll is keyed on; the worker's workspace id is used when omitted, which arms the poll but leaves task teardown unable to retire it"), force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -2353,7 +2362,7 @@ async function handleTool(name, args = {}) {
     // which the next unset dispatch would then silently retarget off this
     // worker. An absent taskId takes the documented workspace-id fallback so a
     // poll still exists.
-    const requestedTaskId = typeof args.taskId === "string" ? args.taskId.trim() : null;
+    const requestedTaskId = typeof args.taskId === "string" ? args.taskId : null;
     if (requestedTaskId !== null && !supervisionTaskIdValid(requestedTaskId)) {
       throw new Error(`taskId '${requestedTaskId}' cannot key a watcher poll; use a firstmate task id of up to 64 characters from A-Z, a-z, 0-9, dot, dash, and underscore, not starting with a dot`);
     }
@@ -2626,7 +2635,6 @@ async function readStdinJson() {
 
 async function doctor() {
   const projects = topology();
-  const installation = readJson(path.join(stateDir(), "installation.json"));
   let renderer = false;
   let mcpServer = null;
   let chatCreation = null;
@@ -2646,6 +2654,8 @@ async function doctor() {
     }
     playbotApp = { version: await playbotVersion(), verifiedVersions: VERIFIED_PLAYBOT_VERSIONS };
   }
+  const buildIdentity = serverBuildIdentity();
+  const installation = readJson(path.join(stateDir(), "installation.json"));
   return {
     server: `${SERVER_NAME}@${SERVER_VERSION}`,
     node: process.version,
@@ -2655,9 +2665,10 @@ async function doctor() {
     codexDb: codexDbPath(),
     renderer,
     mcpServer,
+    buildIdentity,
+    installation,
     chatCreation,
     playbotApp,
-    installation,
     hooks: installedHookStatus(),
     projects: projects.map((project) => ({ id: project.id, name: project.name, paths: [...projectPaths(project)] })),
     routes: loadRoutes().length,
@@ -2669,13 +2680,16 @@ function readiness(diagnostics) {
   const expectedToolCount = toolDefinitions().length;
   const configuredSchemaVersion = diagnostics.mcpServer?.env?.PLAYBOT_LANES_SCHEMA_VERSION ?? null;
   const schemaVersion = diagnostics.installation?.schemaVersion ?? null;
+  const buildIdentityMatches = diagnostics.installation?.reloadSucceeded === true
+    && diagnostics.installation?.buildIdentity === diagnostics.buildIdentity;
   const ready = diagnostics.renderer
     && diagnostics.hooks.ready
     && diagnostics.mcpServer?.enabled === true
     && diagnostics.mcpServer?.error == null
     && diagnostics.mcpServer?.toolCount === expectedToolCount
     && configuredSchemaVersion === MCP_SCHEMA_VERSION
-    && schemaVersion === MCP_SCHEMA_VERSION;
+    && schemaVersion === MCP_SCHEMA_VERSION
+    && buildIdentityMatches;
   return {
     ready,
     checks: {
@@ -2689,6 +2703,9 @@ function readiness(diagnostics) {
       configuredSchemaVersion,
       schemaVersion,
       expectedSchemaVersion: MCP_SCHEMA_VERSION,
+      buildIdentity: diagnostics.buildIdentity,
+      installedBuildIdentity: diagnostics.installation?.buildIdentity ?? null,
+      buildIdentityMatches,
     },
   };
 }

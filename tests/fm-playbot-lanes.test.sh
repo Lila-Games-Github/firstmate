@@ -737,23 +737,38 @@ NODE
 
 node --no-warnings "$FIXTURE_ROOT/fake-cdp.mjs" &
 FAKE_CDP_PID=$!
-trap 'kill "$FAKE_CDP_PID" 2>/dev/null; fm_test_cleanup' EXIT
+PID_REUSE_PROCESS=
+trap 'kill "$FAKE_CDP_PID" 2>/dev/null; [ -z "$PID_REUSE_PROCESS" ] || kill "$PID_REUSE_PROCESS" 2>/dev/null; fm_test_cleanup' EXIT
 for _ in $(seq 1 50); do
   [ -f "$PLAYBOT_DESKTOP_DIR/DevToolsActivePort" ] && break
   sleep 0.1
 done
 [ -f "$PLAYBOT_DESKTOP_DIR/DevToolsActivePort" ] || fail "fake Playbot DevTools endpoint did not start"
 
+INSTALLATION="$PLAYBOT_LANES_STATE_DIR/installation.json" node --no-warnings <<'NODE' || fail "could not stage the stale loaded MCP identity"
+const fs = require('node:fs');
+const value = JSON.parse(fs.readFileSync(process.env.INSTALLATION, 'utf8'));
+value.buildIdentity = 'sha256:stale-loaded-source';
+value.reloadSucceeded = true;
+fs.writeFileSync(process.env.INSTALLATION, `${JSON.stringify(value, null, 2)}\n`);
+NODE
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
-OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup required the external terminal root to be a Playbot project"
+OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup accepted a stale loaded MCP identity with the current tool count"
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
 if (!value.checks.hooks.ready || value.checks.toolCount !== 18) process.exit(1);
 if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
 if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
+if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
 NODE
-pass "fm-playbot-lanes: setup readiness does not require a controller project"
+setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
+OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup reloaded an MCP whose build identity was already current"
+const value = JSON.parse(process.env.OUT);
+if (value.ready !== true || value.changed !== false) process.exit(1);
+if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 18) process.exit(1);
+NODE
+pass "fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project"
 
 printf '0.3.0\n' > "$FIXTURE_ROOT/mcp-schema-version"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
@@ -1980,6 +1995,22 @@ orphan_publication_lock() {  # <state> <task-id>
   rm -f "$fifo" "$ready"
 }
 
+stage_pid_reused_publication_lock() {  # <state> <task-id>
+  local state=$1 task_id=$2 lock owner
+  orphan_publication_lock "$state" "$task_id" || return 1
+  lock="$state/.$task_id.check-publish.lock"
+  if [ -L "$lock" ]; then
+    owner=$(readlink "$lock") || return 1
+    case "$owner" in /*) ;; *) owner="${lock%/*}/$owner" ;; esac
+  else
+    owner=$(cat "$lock/owner" 2>/dev/null || true)
+  fi
+  [ -n "$owner" ] && [ -s "$owner/pid-identity" ] || return 1
+  sleep 30 >/dev/null 2>&1 &
+  PID_REUSE_PROCESS=$!
+  printf '%s\n' "$PID_REUSE_PROCESS" > "$owner/pid"
+}
+
 set_thread_status() {  # <thread-id> <agent-status>
   FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$1" STATUS="$2" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -2454,6 +2485,13 @@ pass "fm-playbot-lanes: delivered unreadability retires while unconfirmed unread
 
 # Without a taskId the poll still has to exist, keyed on the workspace, and the
 # result has to say that task teardown will not retire it.
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch did not advertise fallback-compatible taskId input types"
+const tools = JSON.parse(process.env.OUT).result.tools;
+const taskId = tools.find(tool => tool.name === 'dispatch')?.inputSchema?.properties?.taskId;
+const expected = ['array', 'boolean', 'null', 'number', 'object', 'string'];
+if (!taskId || JSON.stringify([...taskId.type].sort()) !== JSON.stringify(expected)) process.exit(1);
+NODE
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-3\"},\"title\":\"Unkeyed task\",\"message\":\"Do the unkeyed work\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a dispatch without a taskId skipped arming instead of keying on the workspace"
@@ -2480,7 +2518,14 @@ if (value.supervision.taskId !== value.thread.workspaceId) process.exit(1);
 NODE
 [ ! -e "$FM_HOME_FIXTURE/state/null.check.sh" ] \
   || fail "a null taskId armed a poll keyed on the literal name null"
-pass "fm-playbot-lanes: a null taskId is absent, not the literal task id null"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-nonstring\"},\"title\":\"Non-string key\",\"message\":\"Do the non-string-keyed work\",\"taskId\":{\"unexpected\":true}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a non-string taskId did not take the workspace fallback"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== true || value.supervision.taskIdSource !== 'workspace-id') process.exit(1);
+if (value.supervision.taskId !== value.thread.workspaceId) process.exit(1);
+NODE
+pass "fm-playbot-lanes: null and non-string taskIds take the workspace fallback"
 
 # A taskId that could not key a check is refused BEFORE anything is created or
 # sent, because discovering it afterwards is exactly the unwatched worker.
@@ -2492,6 +2537,14 @@ if (!value.error || !value.error.message.includes('cannot key a watcher poll')) 
 NODE
 [ ! -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] \
   || fail "a dispatch refused for its taskId still created or sent something: $(cat "$FIXTURE_ROOT/ipc-calls.jsonl")"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-padded\"},\"title\":\"Padded key\",\"message\":\"x\",\"taskId\":\" fm-autoarm-padded \"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a whitespace-padded explicit taskId was normalized instead of refused"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('cannot key a watcher poll')) process.exit(1);
+NODE
+[ ! -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] \
+  || fail "a whitespace-padded taskId created or sent something before refusal: $(cat "$FIXTURE_ROOT/ipc-calls.jsonl")"
 pass "fm-playbot-lanes: an unusable taskId is refused before any worker is created or sent to"
 
 # Arming that fails must be loud in the result. A dispatch that silently created
@@ -2675,14 +2728,17 @@ NODE
 check_is_registered "$lane_first_id" || fail "the waiting PR owner overwrote the lane poll or its binding"
 
 dead_lane_id=fm-autoarm-dead-lock-lane
-orphan_publication_lock "$FM_HOME_FIXTURE/state" "$dead_lane_id" \
-  || fail "could not leave a dead lane-owner publication lock"
+stage_pid_reused_publication_lock "$FM_HOME_FIXTURE/state" "$dead_lane_id" \
+  || fail "could not stage a publication lock whose dead owner PID was reused"
 out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$dead_lane_id\"},\"title\":\"Dead lock lane\",\"message\":\"Recover the dead lane lock\",\"taskId\":\"$dead_lane_id\"}")
-OUT="$out" node --no-warnings <<'NODE' || fail "lane arming did not recover a verifiably dead publication lock"
+kill "$PID_REUSE_PROCESS" 2>/dev/null || true
+wait "$PID_REUSE_PROCESS" 2>/dev/null || true
+PID_REUSE_PROCESS=
+OUT="$out" node --no-warnings <<'NODE' || fail "lane arming did not recover a publication lock after PID reuse"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== true) process.exit(1);
 NODE
-check_is_registered "$dead_lane_id" || fail "dead-lock recovery did not leave the lane poll registered"
+check_is_registered "$dead_lane_id" || fail "PID-reuse recovery did not leave the lane poll registered"
 
 dead_pr_id=fm-autoarm-dead-lock-pr
 fm_write_meta "$FM_HOME_FIXTURE/state/$dead_pr_id.meta" \
@@ -2694,7 +2750,7 @@ FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-pr-check.sh" "$dead_pr_id" \
   https://github.com/o/r/pull/53 > "$FIXTURE_ROOT/dead-pr.out" 2>&1 \
   || fail "PR publication did not recover a verifiably dead lock: $(cat "$FIXTURE_ROOT/dead-pr.out")"
 pr_poll_is_valid "$dead_pr_id" || fail "dead-lock recovery did not publish a valid PR poll"
-pass "fm-playbot-lanes: concurrent check owners cannot overwrite across inspect, publish, or bind"
+pass "fm-playbot-lanes: concurrent owners serialize and dead or PID-reused publication locks recover"
 
 # A Playbot-chat caller has routed wakes already, so it must get none of this -
 # and the result must say which path it took rather than leaving the caller to

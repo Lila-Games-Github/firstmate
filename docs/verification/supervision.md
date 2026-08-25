@@ -603,12 +603,12 @@ ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then ret
 ok - fm-playbot-lanes: the poll keeps itself armed while the dispatched task is still queued or unreadable
 ok - fm-playbot-lanes: delivered unreadability retires while unconfirmed unreadability stays armed
 ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace
-ok - fm-playbot-lanes: a null taskId is absent, not the literal task id null
+ok - fm-playbot-lanes: null and non-string taskIds take the workspace fallback
 ok - fm-playbot-lanes: an unusable taskId is refused before any worker is created or sent to
 ok - fm-playbot-lanes: a dispatch whose arming failed says so instead of looking supervised
 ok - fm-playbot-lanes: arming never replaces a check this server did not generate
 ok - fm-playbot-lanes: arming a merged-PR poll over a lane poll refuses by name and leaves it intact
-ok - fm-playbot-lanes: concurrent check owners cannot overwrite across inspect, publish, or bind
+ok - fm-playbot-lanes: concurrent owners serialize and dead or PID-reused publication locks recover
 ok - fm-playbot-lanes: a Playbot-chat dispatch keeps its routed wake and arms no poll
 ok - fm-playbot-lanes: create_chat arms nothing, because it starts no worker
 ```
@@ -697,7 +697,7 @@ ok - fm-playbot-lanes: identity stays readable for chats outside the controller 
 ok - fm-playbot-lanes: normal-terminal callers can poll thread status
 ok - fm-playbot-lanes: normal-terminal callers can read worker conversations
 ok - fm-playbot-lanes: normal-terminal register_lane fails closed toward polling supervision
-ok - fm-playbot-lanes: setup readiness does not require a controller project
+ok - fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project
 ok - fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision
 ```
 

@@ -760,22 +760,29 @@ validate_pr_poll_cleanup() {
 }
 
 remove_pr_poll_artifacts() {
-  local state_dir=$1 id=$2 quarantine artifact
-  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
-  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
-  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust" "$state_dir/$id.lane-poll" || return 1
-  if fm_task_id_path_safe "$id"; then
+  local state_dir=$1 id=$2 quarantine artifact status=0
+  fm_pr_poll_lock_acquire "$state_dir" "$id" || return 1
+  validate_pr_poll_cleanup "$state_dir" "$id" || status=1
+  if [ "$status" -eq 0 ]; then
+    fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+      "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+      "$state_dir/$id.check-trust" "$state_dir/$id.lane-poll" || status=1
+  fi
+  if [ "$status" -eq 0 ] && fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
       for artifact in "$quarantine/$id."*; do
         [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-        rm -f -- "$artifact" || return 1
+        rm -f -- "$artifact" || status=1
       done
       rmdir "$quarantine" 2>/dev/null || true
     fi
   fi
+  fm_pr_poll_lock_release || status=1
+  return "$status"
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a

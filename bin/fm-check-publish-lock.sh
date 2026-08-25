@@ -31,6 +31,7 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 attempts=50
+FM_LOCK_REQUIRE_IDENTITY=1
 while ! fm_lock_try_acquire "$LOCK"; do
   attempts=$((attempts - 1))
   [ "$attempts" -gt 0 ] || exit 1

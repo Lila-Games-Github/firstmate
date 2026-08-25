@@ -2617,7 +2617,7 @@ SH
 }
 
 test_teardown_removes_poll_artifacts() {
-  local dir fakebin kind artifact counterpart rc
+  local dir fakebin kind artifact counterpart rc lock_ready poll_release poll_writer_pid teardown_pid teardown_waited i case_path
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
   fm_write_meta "$dir/home/state/task-a.meta" \
@@ -2647,15 +2647,42 @@ SH
   chmod +x "$fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
 
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
-    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "teardown cleanup fixture failed"
-  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
-  [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
-  [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
-  [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
-  [ ! -e "$dir/home/state/task-a.lane-poll" ] || fail "teardown left the lane poll's observed-state record"
-  ! find "$dir/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
+  case_path=$dir
+  lock_ready="$case_path/poll-lock-ready"
+  poll_release="$case_path/poll-lock-release"
+  (
+    set -eu
+    FM_STATE_OVERRIDE="$case_path/home/state"
+    export FM_STATE_OVERRIDE
+    . "$ROOT/bin/fm-wake-lib.sh"
+    FM_LOCK_REQUIRE_IDENTITY=1
+    fm_lock_acquire_wait "$case_path/home/state/.task-a.check-publish.lock"
+    : > "$lock_ready"
+    while [ ! -e "$poll_release" ]; do sleep 0.02; done
+    printf 'fm-playbot-lane-poll-v4\nworking\n2026-08-25T09:00:01.000Z\ndelivered\n0123456789abcdef0123456789abcdef\n' \
+      > "$case_path/home/state/task-a.lane-poll"
+    fm_lock_release "$case_path/home/state/.task-a.check-publish.lock"
+  ) &
+  poll_writer_pid=$!
+  i=0
+  while [ ! -e "$lock_ready" ] && [ "$i" -lt 100 ]; do sleep 0.02; i=$((i + 1)); done
+  [ -e "$lock_ready" ] || fail "poll writer did not acquire the teardown publication lock"
+  FM_HOME="$case_path/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$case_path/teardown.out" 2> "$case_path/teardown.err" &
+  teardown_pid=$!
+  sleep 0.5
+  teardown_waited=1
+  kill -0 "$teardown_pid" 2>/dev/null || teardown_waited=0
+  : > "$poll_release"
+  wait "$poll_writer_pid" || fail "poll writer failed during teardown serialization"
+  wait "$teardown_pid" || fail "teardown cleanup fixture failed"
+  [ "$teardown_waited" -eq 1 ] || fail "teardown crossed an in-flight poll's publication lock"
+  [ ! -e "$case_path/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
+  [ ! -e "$case_path/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
+  [ ! -e "$case_path/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
+  [ ! -e "$case_path/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$case_path/home/state/task-a.lane-poll" ] || fail "teardown left the lane poll's observed-state record"
+  ! find "$case_path/home/state/.pr-check-quarantine" -name 'task-a.*' -print 2>/dev/null | grep . >/dev/null \
     || fail "teardown left task quarantine artifacts"
 
   dir=$(make_case teardown-retirement-receipt)
@@ -2797,7 +2824,7 @@ SH
         || fail "teardown changed an external quarantine artifact mode"
     fi
   done
-  pass "teardown removes safe poll artifacts and refuses quarantine-directory symlinks without traversal"
+  pass "teardown serializes and removes safe poll artifacts while refusing unsafe quarantine paths"
 }
 
 # The GitLab watch must follow a merge request exactly as the GitHub watch
