@@ -584,6 +584,46 @@ ok - fm-playbot-lanes: a worker in a project Playbot no longer marks active stil
 
 Those checks run against the hermetic fake DevTools endpoint described below, extended to serve the card channels, to reject a named channel as unregistered, and to omit a snapshot field, so the loud-refusal paths are enforced without waiting for a real Playbot upgrade.
 
+On 2026-08-25, forced steering was live-verified against Playbot 0.95.0 on Linux with `playbot_lanes@0.4.0` and Node v26.7.0.
+`node --no-warnings bin/fm-playbot-lanes.mjs doctor` reported `renderer: true`, `chatCreation: "launch"`, and `playbotApp: {version: "0.95.0", verifiedVersions: "0.95.x"}`.
+The installed 0.95.0 `resources/app.asar` registered `threads:steerMessage` with strict `{threadId, messageId}` input.
+Its handler requires the named thread to remain in a prompting phase with an active turn id and the named local message to remain queued, marks that exact message as `steering`, calls Codex `turn/steer` with the expected current turn id, and returns the resulting thread snapshot.
+It does not call Codex `turn/interrupt`, which is the evidence that forced steering continues rather than stops the active turn.
+
+A scratch chat in the non-selected `ws_dcea82fc1107` workspace first received a no-file-write instruction that ran `sleep 30`.
+While that exact chat was working, the live force call was:
+
+```sh
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_message","arguments":{"project":"project_df995db1b164","workspace":"ws_dcea82fc1107","thread":"chat-a4b01c18-a9f4-42b2-93f3-fa8e84827534","message":"FORCE STEER: after the sleep, reply exactly FORCED-ACK and do nothing else.","force":true}}}' \
+  | node --no-warnings bin/fm-playbot-lanes.mjs serve
+```
+
+The exact force and delivery fields returned by Playbot's own response snapshot were:
+
+```json
+{
+  "delivery": {
+    "state": "steering",
+    "messageId": "0eed118f-bd86-4216-a8d5-09fa3fa92ba5",
+    "queuedTotal": 1,
+    "queuedAhead": 0
+  },
+  "force": {
+    "requested": true,
+    "state": "applied",
+    "mechanism": "threads:steerMessage",
+    "activeTurn": "continues",
+    "evidence": "Playbot's response snapshot marked the exact queued message steering=true"
+  }
+}
+```
+
+The same turn's persisted rollout then recorded the forced text as a user message and completed with final answer `FORCED-ACK`, rather than the initial prompt's `INITIAL-COMPLETE`.
+The exact scratch chat was archived after the readback, its queue was empty, its workspace remained non-selected, and no other chat or workspace was selected, stopped, created, or archived by the force call.
+
+The focused behavioral command `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 59 executed checks on 2026-08-25.
+The three force-specific checks exercised the executable MCP against its fake DevTools endpoint and verified the public schemas, exact thread and message ids sent to `threads:steerMessage`, the `steering=true` evidence gate, matching `dispatch` behavior for an existing thread, absence of selection and interrupt calls, unchanged default queue behavior, local-refresh independence, and an `unknown` result when Playbot did not confirm the force action.
+
 This suite previously printed `ok - fm-playbot-lanes: skipped (node unavailable)` and exited 0 whenever `node` was absent from `PATH`, which made a green run prove nothing: the same inherited-`PATH` gap that hides `shellcheck` and `actionlint` from a hook or validation-pipeline subprocess also hid the Node runtime, and one review round on this branch reported "there is no Node runtime anywhere on this machine" while `/home/linuxbrew/.linuxbrew/bin/node` was installed and in use.
 `fm_test_require_node` in `tests/lib.sh` now resolves a runtime from `FM_TEST_NODE`, then `PATH`, then the known fixed and version-managed install roots, version-sorting each globbed directory so no version is pinned, and it fails the suite when none is usable rather than skipping.
 It was verified on 2026-08-24 by running the suite under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 56 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.

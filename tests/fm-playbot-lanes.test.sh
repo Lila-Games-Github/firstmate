@@ -342,6 +342,9 @@ const reconcileFile = path.join(process.env.FIXTURE_ROOT, 'send-reconciles');
 const metadataFlakyFile = path.join(process.env.FIXTURE_ROOT, 'metadata-flaky');
 const metadataVersionlessFile = path.join(process.env.FIXTURE_ROOT, 'metadata-versionless');
 const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
+const steerResponseFile = path.join(process.env.FIXTURE_ROOT, 'steer-response');
+const refreshFailureFile = path.join(process.env.FIXTURE_ROOT, 'refresh-failure');
+const mcpSchemaVersionFile = path.join(process.env.FIXTURE_ROOT, 'mcp-schema-version');
 // The same drop mechanism aimed at the snapshot Playbot returns WITH a completed
 // write, so the post-action reads can be driven without touching the pre-action
 // read in the same tool call.
@@ -543,7 +546,14 @@ async function electronInvoke(channel, payload) {
       };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      return [{ name: 'playbot_lanes', enabled: true, error: null, toolCount: 18 }];
+      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.4.0\n');
+      return [{
+        name: 'playbot_lanes',
+        enabled: true,
+        error: null,
+        toolCount: 18,
+        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.4.0') },
+      }];
     }
     if (channel === 'threads:launch') {
       if (mode !== 'modern') throw new Error("No handler registered for 'threads:launch'");
@@ -568,6 +578,39 @@ async function electronInvoke(channel, payload) {
       if (Number(changed.changes) !== 1) throw new Error(`Thread not found: ${payload.threadId}`);
       return null;
     }
+    if (channel === 'threads:steerMessage') {
+      const store = loadSnapshots();
+      const snapshot = store[payload.threadId] ?? emptySnapshot(payload.threadId);
+      const message = (snapshot.pendingMessages ?? []).find((candidate) => candidate.id === payload.messageId);
+      if (snapshot.phase?.kind === 'prompting' && snapshot.phase.turnId && message && message.steering !== true) {
+        message.steering = true;
+      }
+      store[payload.threadId] = snapshot;
+      saveSnapshots(store);
+      if (readFileOr(refreshFailureFile, '') === 'steer') {
+        db.prepare('UPDATE workspace_threads SET archived = 1 WHERE id = ?').run(payload.threadId);
+      }
+      const responseMode = readFileOr(steerResponseFile, '');
+      if (responseMode === 'omit') {
+        return {
+          ...snapshot,
+          pendingMessages: snapshot.pendingMessages.filter((candidate) => candidate.id !== payload.messageId),
+          outboundMessages: snapshot.outboundMessages.filter((candidate) => candidate.id !== payload.messageId),
+        };
+      }
+      if (responseMode === 'substitute') {
+        return {
+          ...snapshot,
+          pendingMessages: snapshot.pendingMessages.map((candidate) => candidate.id === payload.messageId
+            ? { ...candidate, id: `substitute-${payload.messageId}` }
+            : candidate),
+          outboundMessages: snapshot.outboundMessages.map((candidate) => candidate.id === payload.messageId
+            ? { ...candidate, id: `substitute-${payload.messageId}` }
+            : candidate),
+        };
+      }
+      return snapshot;
+    }
     if (channel === 'threads:send') {
       // A legacy Playbot returns nothing here, which is what leaves delivery
       // unconfirmed; a modern one returns the thread snapshot and holds the
@@ -582,11 +625,16 @@ async function electronInvoke(channel, payload) {
         // Playbot's queued projection carries no createdAtMs; its outbound one does.
         if (readFileOr(sendFailsFile, '')) {
           snapshot.outboundMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text, status: 'failed', reason: 'Message not sent', createdAtMs: 1000 + sendCounter });
-        } else if (held) snapshot.pendingMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text });
+        } else if (held) snapshot.pendingMessages.push(payload.text === 'Idless force'
+          ? { text: payload.text }
+          : { id: `msg-sent-${sendCounter}`, text: payload.text });
         else snapshot.outboundMessages.push({ id: `msg-sent-${sendCounter}`, text: payload.text, status: 'sending', createdAtMs: 1000 + sendCounter });
       }
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
+      if (readFileOr(refreshFailureFile, '') === 'send') {
+        db.prepare('UPDATE workspace_threads SET archived = 1 WHERE id = ?').run(payload.threadId);
+      }
       const sendDrop = readFileOr(sendDropFile, '');
       if (sendDrop) return applyDropSpec(snapshot, sendDrop);
       return snapshot;
@@ -699,11 +747,39 @@ done
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
 OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup required the external terminal root to be a Playbot project"
 const value = JSON.parse(process.env.OUT);
-if (value.ready !== true || value.changed !== false) process.exit(1);
+if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
 if (!value.checks.hooks.ready || value.checks.toolCount !== 18) process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup readiness does not require a controller project"
+
+printf '0.3.0\n' > "$FIXTURE_ROOT/mcp-schema-version"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
+OUT="$setup_out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "setup accepted a stale MCP schema without using Playbot's supported reload"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const mcpCalls = calls.filter(call => call.channel.startsWith('codex:mcpServers:'));
+if (value.ready !== true || value.changed !== true) process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
+if (!value.installation.reload.startsWith('reloaded ')) process.exit(1);
+if (mcpCalls.filter(call => call.channel === 'codex:mcpServers:reload').length !== 1) process.exit(1);
+if (mcpCalls.some(call => !['codex:mcpServers:list', 'codex:mcpServers:reload'].includes(call.channel))) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
+OUT="$setup_out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "setup reloaded an already-current MCP schema"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (value.ready !== true || value.changed !== false) process.exit(1);
+if (calls.some(call => call.channel === 'codex:mcpServers:reload')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: setup reloads stale MCP schemas exactly once"
 
 worker_json=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path")
 
@@ -1138,14 +1214,18 @@ pass "fm-playbot-lanes: a version read that failed or carried no version recover
 # Delivery verdicts: a message Playbot only holds must never read as delivered.
 # ---------------------------------------------------------------------------
 
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Held steer\"}}}")
-OUT="$out" node --no-warnings <<'NODE' || fail "a send onto an existing queue was not reported as held"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "a send onto an existing queue was not reported as held"
+const fs = require('node:fs');
 const value = JSON.parse(process.env.OUT).result.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 if (value.thread.id !== 'chat-worker-alt') process.exit(1);
 if (value.delivery.state !== 'queued') process.exit(1);
 if (!value.delivery.messageId || value.delivery.queuedTotal !== 2 || value.delivery.queuedAhead !== 1) process.exit(1);
 if (!value.delivery.note.includes('has not seen it')) process.exit(1);
 if (!value.delivery.note.includes('Do not resend')) process.exit(1);
+if (calls.map(call => call.channel).join(',') !== 'threads:send') process.exit(1);
 NODE
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\",\"message\":\"Live steer\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a dispatched send was not reported as in flight"
@@ -1161,6 +1241,118 @@ if (value.delivery.state !== 'delivered') process.exit(1);
 NODE
 rm -f "$FIXTURE_ROOT/send-reconciles"
 pass "fm-playbot-lanes: send_message reports held, in-flight, and delivered separately"
+
+# force=true uses Playbot's own exact-message steering action only after the
+# ordinary send response proves that specific message is held. The response
+# snapshot must then mark that same id as steering before the MCP reports it as
+# such. No selected chat or workspace participates in either lookup or action.
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "the steering surfaces did not advertise the explicit force flag"
+const tools = JSON.parse(process.env.OUT).result.tools;
+for (const name of ['send_message', 'dispatch']) {
+  const tool = tools.find(candidate => candidate.name === name);
+  if (!tool || tool.inputSchema.properties.force?.type !== 'boolean') process.exit(1);
+  if (tool.inputSchema.properties.force.default !== false) process.exit(1);
+}
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Immediate steer\",\"force\":true}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "force=true did not promote the exact held message into the active turn"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:send,threads:steerMessage') process.exit(1);
+if (calls[0].payload.threadId !== 'chat-worker-alt' || calls[1].payload.threadId !== 'chat-worker-alt') process.exit(1);
+if (calls[0].payload.text !== 'Immediate steer' || calls[1].payload.messageId !== value.delivery.messageId) process.exit(1);
+if (value.thread.id !== 'chat-worker-alt' || value.thread.workspaceId !== 'ws-worker-alt') process.exit(1);
+if (value.delivery.state !== 'steering' || value.force.state !== 'applied') process.exit(1);
+if (value.force.mechanism !== 'threads:steerMessage' || value.force.activeTurn !== 'continues') process.exit(1);
+if (!value.force.evidence.includes('steering=true')) process.exit(1);
+if (calls.some(call => ['threads:setActiveThread', 'workspace:select', 'threads:stop', 'threads:archiveThread'].includes(call.channel))) process.exit(1);
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Immediate dispatch steer\",\"force\":true}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "dispatch did not expose the same force semantics for an existing busy thread"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:send,threads:steerMessage') process.exit(1);
+if (calls.some(call => call.channel === 'threads:launch')) process.exit(1);
+if (calls[1].payload.messageId !== value.delivery.messageId) process.exit(1);
+if (value.thread.id !== 'chat-worker-alt' || value.delivery.state !== 'steering') process.exit(1);
+if (value.force.state !== 'applied' || value.supervision.mode !== 'poll') process.exit(1);
+NODE
+pass "fm-playbot-lanes: force steers the exact queued message without interrupting or retargeting another chat"
+
+for failure_phase in send steer; do
+  printf '%s\n' "$failure_phase" > "$FIXTURE_ROOT/refresh-failure"
+  rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+  out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"$failure_phase refresh failure\",\"force\":true}}}")
+  rm -f "$FIXTURE_ROOT/refresh-failure"
+  FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET archived = 0 WHERE id = ?').run('chat-worker-alt');
+db.close();
+NODE
+  OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "a $failure_phase-time local refresh prevented or hid exact-message steering"
+const fs = require('node:fs');
+const response = JSON.parse(process.env.OUT);
+const value = response.result?.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (!value || response.error) process.exit(1);
+if (calls.map(call => call.channel).join(',') !== 'threads:send,threads:steerMessage') process.exit(1);
+if (calls[1].payload.messageId !== value.delivery.messageId) process.exit(1);
+if (value.thread.id !== 'chat-worker-alt' || value.thread.workspaceId !== 'ws-worker-alt') process.exit(1);
+if (value.delivery.state !== 'steering' || value.force.state !== 'applied') process.exit(1);
+NODE
+done
+pass "fm-playbot-lanes: local refresh failures cannot prevent or hide exact-message steering"
+
+# A force action happens after Playbot has accepted the ordinary send. If the
+# steering response cannot be observed, the result must remain unknown rather
+# than claiming either immediate steering or ordinary delivery.
+printf 'threads:steerMessage\n' > "$FIXTURE_ROOT/ipc-missing"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Unconfirmed force\",\"force\":true}}}")
+rm -f "$FIXTURE_ROOT/ipc-missing"
+OUT="$out" node --no-warnings <<'NODE' || fail "an unconfirmed force response was reported as delivered"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'unknown' || value.force.state !== 'unknown') process.exit(1);
+if (!value.force.reason.includes("No handler registered for 'threads:steerMessage'")) process.exit(1);
+if (!value.delivery.note.includes('Immediate steering is unconfirmed')) process.exit(1);
+NODE
+
+for response_mode in omit substitute; do
+  printf '%s\n' "$response_mode" > "$FIXTURE_ROOT/steer-response"
+  rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+  out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"$response_mode force evidence\",\"force\":true}}}")
+  OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "force with a $response_mode exact message id was reported as delivered"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:send,threads:steerMessage') process.exit(1);
+if (!value.delivery.messageId || calls[1].payload.messageId !== value.delivery.messageId) process.exit(1);
+if (value.delivery.state !== 'unknown' || value.force.state !== 'not-applied') process.exit(1);
+if (!value.delivery.note.includes('exact queued message id')) process.exit(1);
+if (!value.force.evidence.includes('did not contain the exact queued message id')) process.exit(1);
+NODE
+done
+rm -f "$FIXTURE_ROOT/steer-response"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Idless force\",\"force\":true}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "force guessed at a held message Playbot returned without an exact id"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (value.delivery.state !== 'queued' || value.delivery.messageId !== null) process.exit(1);
+if (value.force.state !== 'not-applied' || !value.force.reason.includes('no exact queued message id')) process.exit(1);
+if (calls.map(call => call.channel).join(',') !== 'threads:send') process.exit(1);
+NODE
+pass "fm-playbot-lanes: force never claims delivery without Playbot confirmation"
 
 # A send snapshot that IS returned but has lost the queue projection is a
 # renamed shape, not a legacy Playbot, so it must refuse by name instead of
@@ -1240,6 +1432,16 @@ OUT="$out" node --no-warnings <<'NODE' || fail "a send with no snapshot back was
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.delivery.state !== 'unknown' || value.delivery.messageId !== null) process.exit(1);
 if (!value.delivery.note.includes('delivery is unconfirmed')) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"thread\":\"Greeting\",\"message\":\"Unconfirmed legacy force\",\"force\":true}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "force on a Playbot with no send snapshot guessed that a queued message existed"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (value.delivery.state !== 'unknown' || value.force.state !== 'unknown') process.exit(1);
+if (!value.force.evidence.includes('no exact queued message was available')) process.exit(1);
+if (calls.map(call => call.channel).join(',') !== 'threads:send') process.exit(1);
 NODE
 printf 'modern\n' > "$FIXTURE_ROOT/ipc-mode"
 pass "fm-playbot-lanes: a Playbot that returns no send snapshot leaves delivery explicitly unconfirmed"
