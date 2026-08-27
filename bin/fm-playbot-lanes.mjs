@@ -1951,6 +1951,60 @@ function supervisionMessageAccepted(message, row) {
   return typeof turnId === "string" && turnId.length > 0;
 }
 
+function supervisionRolloutAccepted(row, messageKey, acceptanceMs) {
+  if (typeof row?.session_id !== "string" || !row.session_id || !messageKey || !Number.isFinite(acceptanceMs)) return false;
+  let session;
+  try {
+    session = codexSession(row.session_id);
+  } catch {
+    return false;
+  }
+  if (!session?.rollout_path || !fs.existsSync(session.rollout_path)) return false;
+  const inspect = (bytes) => {
+    if (bytes.length === 0) return "continue";
+    let record;
+    try {
+      record = JSON.parse(bytes.toString("utf8").replace(/\r$/, ""));
+    } catch {
+      return "continue";
+    }
+    const timestampMs = supervisionTimestampMs(record.timestamp);
+    if (timestampMs !== null && timestampMs < acceptanceMs) return "before";
+    const payload = record.type === "event_msg" ? record.payload : null;
+    if (payload?.type !== "user_message") return "continue";
+    return supervisionMessageKey(payload.client_id) === messageKey ? "accepted" : "continue";
+  };
+  let fd;
+  try {
+    fd = fs.openSync(session.rollout_path, "r");
+    let position = fs.fstatSync(fd).size;
+    let carry = Buffer.alloc(0);
+    const chunk = Buffer.alloc(64 * 1024);
+    while (position > 0) {
+      const length = Math.min(chunk.length, position);
+      position -= length;
+      fs.readSync(fd, chunk, 0, length, position);
+      const data = carry.length > 0
+        ? Buffer.concat([chunk.subarray(0, length), carry])
+        : chunk.subarray(0, length);
+      let lineEnd = data.length;
+      let newline;
+      while ((newline = data.lastIndexOf(0x0a, lineEnd - 1)) >= 0) {
+        const result = inspect(data.subarray(newline + 1, lineEnd));
+        if (result === "accepted") return true;
+        if (result === "before") return false;
+        lineEnd = newline;
+      }
+      carry = Buffer.from(data.subarray(0, lineEnd));
+    }
+    return inspect(carry) === "accepted";
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 // A finished worker is news exactly once, so a stop is reported on the CHANGE
 // into it and the poll then retires itself. A worker that is still parked is a
 // standing condition rather than a transition and keeps firing every interval,
@@ -1988,11 +2042,14 @@ function supervisionPollDecision(taskId, threadId, previous) {
   const afterAcceptance = previous?.acceptanceMs !== null
     && previous?.acceptanceMs !== undefined
     && supervisionTimestampMs(updatedAt) > previous.acceptanceMs;
-  const taskAccepted = Array.isArray(ledgerMessages)
-    && previous?.messageKey
-    && previous?.threadKey === supervisionThreadKey(row?.thread_id)
-    && ledgerMessages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey
-      && supervisionMessageAccepted(message, row));
+  const taskBoundToThread = previous?.messageKey
+    && previous?.threadKey === supervisionThreadKey(row?.thread_id);
+  const taskAccepted = Boolean(taskBoundToThread)
+    && (Array.isArray(ledgerMessages)
+      && ledgerMessages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey
+        && supervisionMessageAccepted(message, row))
+      || ["queued", "sending"].includes(priorDelivery)
+        && supervisionRolloutAccepted(row, previous.messageKey, previous.acceptanceMs));
   const deliveryState = ["queued", "sending"].includes(priorDelivery) && taskAccepted
     ? "delivered"
     : priorDelivery;

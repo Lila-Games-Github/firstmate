@@ -600,7 +600,7 @@ ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while
 ok - fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker
 ok - fm-playbot-lanes: failed restoration re-registration is loud even for identical check bytes
 ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself
-ok - fm-playbot-lanes: naturally drained exact-message delivery retires exactly once
+ok - fm-playbot-lanes: naturally drained completion before first poll retires exactly once
 ok - fm-playbot-lanes: exact-thread delivery and recall evidence stay ownership-safe
 ok - fm-playbot-lanes: delivered unreadability retires while restored unknown delivery stays armed
 ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace

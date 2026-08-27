@@ -2648,6 +2648,28 @@ db.close();
 if (changed.changes !== 1) process.exit(1);
 NODE
 }
+
+record_fixture_acceptance() {  # <session-id> <message-id> <timestamp>
+  FIXTURE_ROOT="$FIXTURE_ROOT" SESSION_ID="$1" MESSAGE_ID="$2" TIMESTAMP="$3" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const rollout = path.join(process.env.FIXTURE_ROOT, 'harness', `${process.env.SESSION_ID}.jsonl`);
+fs.writeFileSync(rollout, `${JSON.stringify({
+  timestamp: process.env.TIMESTAMP,
+  type: 'event_msg',
+  payload: {
+    type: 'user_message',
+    client_id: process.env.MESSAGE_ID,
+    message: 'Run after the current turn',
+  },
+})}\n`);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'harness', 'state_5.sqlite'));
+db.prepare('INSERT OR REPLACE INTO threads VALUES (?, ?, ?, ?, ?, ?)')
+  .run(process.env.SESSION_ID, rollout, path.join(process.env.FIXTURE_ROOT, 'worker'), 'Natural queue drain', Date.parse(process.env.TIMESTAMP), 0);
+db.close();
+NODE
+}
 set_thread_queue "$queued_thread" "{\"messages\":[{\"id\":\"$queued_message\",\"text\":\"Do the queued work\"}]}" \
   || fail "could not hold the dispatched task in the worker's queue"
 set_thread_turn "$queued_thread" ready 2026-08-25T10:00:00.000Z || fail "could not idle the queued-task worker"
@@ -2728,6 +2750,8 @@ NODE
 [ -n "$natural_message" ] || fail "the natural-drain task was not queued with an exact message id"
 accept_fixture_message "$natural_thread" "$natural_message" natural-session other-session turn-natural-other 2026-08-25T10:33:00.000Z \
   || fail "could not stage a cross-session message binding"
+record_fixture_acceptance other-session "$natural_message" 2026-08-25T10:33:00.000Z \
+  || fail "could not persist the cross-session acceptance fixture"
 set_thread_turn "$natural_thread" ready 2026-08-25T10:34:00.000Z \
   || fail "could not settle the cross-session fixture"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-natural-drain.check.sh")
@@ -2739,8 +2763,8 @@ check_is_registered fm-autoarm-natural-drain \
   || fail "a cross-session turn binding retired the natural-drain task"
 accept_fixture_message "$natural_thread" "$natural_message" natural-session natural-session turn-natural-accepted 2026-08-25T10:35:00.000Z \
   || fail "could not bind the naturally drained message to its worker turn"
-poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-natural-drain.check.sh")
-[ -z "$poll_line" ] || fail "the naturally accepted task emitted a wake while working: $poll_line"
+record_fixture_acceptance natural-session "$natural_message" 2026-08-25T10:35:00.000Z \
+  || fail "could not persist the naturally accepted message"
 remove_fixture_message "$natural_thread" "$natural_message" \
   || fail "could not reconcile the naturally accepted message"
 set_thread_turn "$natural_thread" ready 2026-08-25T10:36:00.000Z \
@@ -2756,7 +2780,7 @@ for leftover in fm-autoarm-natural-drain.check.sh fm-autoarm-natural-drain.check
 done
 ! check_is_registered fm-autoarm-natural-drain \
   || fail "the naturally accepted task remained registered after retirement"
-pass "fm-playbot-lanes: naturally drained exact-message delivery retires exactly once"
+pass "fm-playbot-lanes: naturally drained completion before first poll retires exactly once"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-recalled\"},\"title\":\"Recall queued task\"}}}")
