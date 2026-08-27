@@ -901,6 +901,59 @@ test_default_is_bounded_and_local_only() {
   pass "default output is bounded, local-only, and marks omitted surfaces"
 }
 
+test_oversized_parsed_backlog_survives_all_public_snapshot_routes() {
+  local home fakebin parsed_bytes canonical bearings summary i marker
+  home=$(make_home oversized-parsed-backlog)
+  fakebin=$(make_fakebin "$home")
+  marker="retain-large-body-$(printf '%0180d' 0)"
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] active-large - Active oversized inventory task (repo: firstmate) (kind: ship)\n\n'
+    printf '## Queued\n'
+    printf -- '- [ ] large-marker - %s (repo: firstmate) (kind: ship)\n' "$marker"
+    i=0
+    while [ "$i" -lt 900 ]; do
+      printf -- '- [ ] queued-%04d - Queue payload %04d %0180d (repo: firstmate) (kind: ship)\n' "$i" "$i" 0
+      i=$((i + 1))
+    done
+    printf '\n## Done\n'
+  } > "$home/data/backlog.md"
+  mkdir -p "$home/projects/active-large"
+  fm_write_meta "$home/state/active-large.meta" \
+    "window=firstmate:fm-active-large" "worktree=$home/projects/active-large" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$home/state" active-large busy
+
+  summary=$(FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary)
+  printf '%s' "$summary" | jq -e --arg marker "$marker" '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .valid == true
+      and (.active_children | any(.id == "active-large"))
+      and (.queued | any(.id == "large-marker" and (.title | startswith($marker[:120]))))
+      and .counts.queued == 901
+  ' >/dev/null || fail "secondmate summary lost oversized inventory content or classification"
+
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  parsed_bytes=$(printf '%s' "$canonical" | jq -c '.backlog' | LC_ALL=C wc -c | tr -d ' ')
+  [ "$parsed_bytes" -gt 131072 ] \
+    || fail "oversized regression did not execute: parsed backlog JSON was only $parsed_bytes bytes"
+  printf '%s' "$canonical" | jq -e --arg marker "$marker" '
+    .schema == "fm-fleet-snapshot.v1"
+      and .main_inventory.valid == true
+      and (.tasks | any(.id == "active-large" and .backlog.id == "active-large"))
+      and (.backlog.records | any(.id == "large-marker" and .title == $marker))
+      and (.backlog.records | length) == 902
+  ' >/dev/null || fail "fleet snapshot lost oversized backlog content, schema, or task association"
+
+  bearings=$(run "$home" "$fakebin" --json)
+  printf '%s' "$bearings" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.in_flight | any(.id == "active-large" and .kind == "ship"))
+      and (.omitted | all(.surface | contains("main in-flight backlog item(s) have no child metadata") | not))
+  ' >/dev/null || fail "Bearings could not enumerate the oversized live fleet"
+  pass "parsed backlogs above MAX_ARG_STRLEN survive fleet, Bearings, and secondmate summary routes"
+}
+
 test_toon_json_parity() {
   local home fakebin toon json keys k
   home=$(make_home parity); write_fixture "$home"
@@ -1908,6 +1961,7 @@ test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
+test_oversized_parsed_backlog_survives_all_public_snapshot_routes
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_default_balances_dominant_and_sparse_homes
