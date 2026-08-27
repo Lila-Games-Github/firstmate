@@ -2609,6 +2609,45 @@ db.close();
 if (changed.changes !== 1) process.exit(1);
 NODE
 }
+
+accept_fixture_message() {  # <thread-id> <message-id> <row-session-id> <message-session-id> <turn-id> <updated-at>
+  FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$1" MESSAGE_ID="$2" ROW_SESSION_ID="$3" MESSAGE_SESSION_ID="$4" TURN_ID="$5" UPDATED="$6" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const snapshotsPath = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const snapshots = JSON.parse(fs.readFileSync(snapshotsPath, 'utf8'));
+const snapshot = snapshots[process.env.THREAD];
+if (!snapshot || !Array.isArray(snapshot.pendingMessages) || !Array.isArray(snapshot.outboundMessages)) process.exit(1);
+const index = snapshot.pendingMessages.findIndex(message => message.id === process.env.MESSAGE_ID);
+const message = index < 0
+  ? snapshot.outboundMessages.find(candidate => candidate.id === process.env.MESSAGE_ID)
+  : snapshot.pendingMessages.splice(index, 1)[0];
+if (!message) process.exit(1);
+snapshot.outboundMessages = snapshot.outboundMessages.filter(candidate => candidate.id !== process.env.MESSAGE_ID);
+snapshot.outboundMessages.push({ ...message, status: 'sending', turnId: process.env.TURN_ID });
+snapshot.agentStatus = 'working';
+fs.writeFileSync(snapshotsPath, `${JSON.stringify(snapshots, null, 2)}\n`);
+const ledger = {
+  version: 1,
+  messages: [{
+    id: process.env.MESSAGE_ID,
+    input: { text: message.text },
+    createdAtMs: 1,
+    state: {
+      type: 'submitting',
+      sessionId: process.env.MESSAGE_SESSION_ID,
+      turnId: process.env.TURN_ID,
+    },
+  }],
+};
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const changed = db.prepare('UPDATE workspace_threads SET session_id = ?, pending_queue_json = ?, agent_status = ?, updated_at = ? WHERE id = ?')
+  .run(process.env.ROW_SESSION_ID, JSON.stringify(ledger), 'working', process.env.UPDATED, process.env.THREAD);
+db.close();
+if (changed.changes !== 1) process.exit(1);
+NODE
+}
 set_thread_queue "$queued_thread" "{\"messages\":[{\"id\":\"$queued_message\",\"text\":\"Do the queued work\"}]}" \
   || fail "could not hold the dispatched task in the worker's queue"
 set_thread_turn "$queued_thread" ready 2026-08-25T10:00:00.000Z || fail "could not idle the queued-task worker"
@@ -2669,6 +2708,55 @@ for leftover in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-auto
   [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
     || fail "the delivered queued task left $leftover armed"
 done
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-natural-drain\"},\"title\":\"Natural queue drain\"}}}")
+natural_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+natural_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+set_thread_turn "$natural_thread" working 2026-08-25T10:31:00.000Z \
+  || fail "could not stage the natural-drain worker as busy"
+printf 'yes\n' > "$FIXTURE_ROOT/send-holds-working"
+printf '2026-08-25T10:32:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(home_dispatch "{\"project\":$worker_json,\"workspace\":\"$natural_workspace\",\"thread\":\"$natural_thread\",\"message\":\"Run after the current turn\",\"taskId\":\"fm-autoarm-natural-drain\"}")
+rm -f "$FIXTURE_ROOT/send-holds-working" "$FIXTURE_ROOT/send-accepted-at"
+natural_message=$(OUT="$out" node --no-warnings <<'NODE'
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'queued' || !value.delivery.messageId || value.supervision.armed !== true) process.exit(1);
+process.stdout.write(value.delivery.messageId);
+NODE
+)
+[ -n "$natural_message" ] || fail "the natural-drain task was not queued with an exact message id"
+accept_fixture_message "$natural_thread" "$natural_message" natural-session other-session turn-natural-other 2026-08-25T10:33:00.000Z \
+  || fail "could not stage a cross-session message binding"
+set_thread_turn "$natural_thread" ready 2026-08-25T10:34:00.000Z \
+  || fail "could not settle the cross-session fixture"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-natural-drain.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-natural-drain"*"delivery remains queued"*"poll stays armed"*) ;;
+  *) fail "a cross-session turn binding fabricated delivery: $poll_line" ;;
+esac
+check_is_registered fm-autoarm-natural-drain \
+  || fail "a cross-session turn binding retired the natural-drain task"
+accept_fixture_message "$natural_thread" "$natural_message" natural-session natural-session turn-natural-accepted 2026-08-25T10:35:00.000Z \
+  || fail "could not bind the naturally drained message to its worker turn"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-natural-drain.check.sh")
+[ -z "$poll_line" ] || fail "the naturally accepted task emitted a wake while working: $poll_line"
+remove_fixture_message "$natural_thread" "$natural_message" \
+  || fail "could not reconcile the naturally accepted message"
+set_thread_turn "$natural_thread" ready 2026-08-25T10:36:00.000Z \
+  || fail "could not finish the naturally accepted task"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-natural-drain.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-natural-drain"*"stopped without a card"*"retired itself"*) ;;
+  *) fail "the naturally accepted task did not retire at terminal state: $poll_line" ;;
+esac
+for leftover in fm-autoarm-natural-drain.check.sh fm-autoarm-natural-drain.check-trust fm-autoarm-natural-drain.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the naturally accepted task left $leftover after retirement"
+done
+! check_is_registered fm-autoarm-natural-drain \
+  || fail "the naturally accepted task remained registered after retirement"
+pass "fm-playbot-lanes: naturally drained exact-message delivery retires exactly once"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-recalled\"},\"title\":\"Recall queued task\"}}}")

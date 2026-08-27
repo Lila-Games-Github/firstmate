@@ -1022,10 +1022,19 @@ function recallOutcomeClause(outcome) {
 
 // null means the ledger is present but unreadable, never that nothing is held;
 // 0 is reserved for an absent or empty queue.
-function queuedMessages(pendingQueueJson) {
+function persistedMessages(pendingQueueJson) {
   if (typeof pendingQueueJson !== "string" || !pendingQueueJson.trim()) return [];
   const ledger = readJsonText(pendingQueueJson);
   return Array.isArray(ledger?.messages) ? ledger.messages : null;
+}
+
+function queuedMessages(pendingQueueJson) {
+  const messages = persistedMessages(pendingQueueJson);
+  if (messages === null) return null;
+  return messages.filter((message) => {
+    const state = message?.state?.type;
+    return state === undefined || state === "queued" || state === "steering";
+  });
 }
 
 function queuedMessageCount(pendingQueueJson) {
@@ -1932,6 +1941,16 @@ function supervisionHeldClause(queued) {
   return "";
 }
 
+function supervisionMessageAccepted(message, row) {
+  const state = message?.state;
+  if (!state || typeof state !== "object" || typeof row?.session_id !== "string" || !row.session_id) return false;
+  if (state.sessionId !== row.session_id) return false;
+  const turnId = state.type === "steering"
+    ? state.expectedTurnId
+    : ["submitting", "reconciling"].includes(state.type) ? state.turnId : null;
+  return typeof turnId === "string" && turnId.length > 0;
+}
+
 // A finished worker is news exactly once, so a stop is reported on the CHANGE
 // into it and the poll then retires itself. A worker that is still parked is a
 // standing condition rather than a transition and keeps firing every interval,
@@ -1957,6 +1976,7 @@ function supervisionHeldClause(queued) {
 // where a queue firstmate has already seen is not.
 function supervisionPollDecision(taskId, threadId, previous) {
   const row = threadRowById(threadId);
+  const ledgerMessages = row ? persistedMessages(row.pending_queue_json) : [];
   const messages = row ? queuedMessages(row.pending_queue_json) : [];
   const queued = messages === null ? null : messages.length;
   const taskQueued = Array.isArray(messages)
@@ -1968,7 +1988,14 @@ function supervisionPollDecision(taskId, threadId, previous) {
   const afterAcceptance = previous?.acceptanceMs !== null
     && previous?.acceptanceMs !== undefined
     && supervisionTimestampMs(updatedAt) > previous.acceptanceMs;
-  const deliveryState = priorDelivery;
+  const taskAccepted = Array.isArray(ledgerMessages)
+    && previous?.messageKey
+    && previous?.threadKey === supervisionThreadKey(row?.thread_id)
+    && ledgerMessages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey
+      && supervisionMessageAccepted(message, row));
+  const deliveryState = ["queued", "sending"].includes(priorDelivery) && taskAccepted
+    ? "delivered"
+    : priorDelivery;
   const delivered = deliveryState === "delivered";
   const observed = {
     status,

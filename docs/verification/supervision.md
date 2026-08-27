@@ -600,6 +600,7 @@ ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while
 ok - fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker
 ok - fm-playbot-lanes: failed restoration re-registration is loud even for identical check bytes
 ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself
+ok - fm-playbot-lanes: naturally drained exact-message delivery retires exactly once
 ok - fm-playbot-lanes: exact-thread delivery and recall evidence stay ownership-safe
 ok - fm-playbot-lanes: delivered unreadability retires while restored unknown delivery stays armed
 ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace
@@ -627,7 +628,7 @@ Not verified against a live Playbot: creating a real throwaway workspace and dri
 Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
 
 A parked worker is a standing condition and a finished one is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
-A queued or sending task advances only when `drop_queued_message` gets `not-recallable` for the exact message on the worker that owns it, while UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.
+A queued or sending task advances only when Playbot's persisted local-message ledger binds the exact message to a turn on that worker session, or when `drop_queued_message` gets `not-recallable` for the exact message on the worker that owns it, while UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.
 It is reported when it appears and then stays quiet, because every branch that can print fires on a difference from the last observation rather than on a condition still being true, and `pending_input` is the one deliberate exception since answering the card is what resolves it.
 That change is decided on `agent_status` and `updated_at` after the task-specific `last_user_activity_at` acceptance boundary, because a send does not wait for the turn to start.
 The fixture drives both an accepted turn that finishes before the first poll and a preceding turn that reaches `ready` immediately before the new send, proving the former retires and the latter stays armed until the new task itself completes.
@@ -677,7 +678,7 @@ The exact force and delivery fields returned by Playbot's own response snapshot 
 The same turn's persisted rollout then recorded the forced text as a user message and completed with final answer `FORCED-ACK`, rather than the initial prompt's `INITIAL-COMPLETE`.
 The exact scratch chat was archived after the readback, its queue was empty, its workspace remained non-selected, and no other chat or workspace was selected, stopped, created, or archived by the force call.
 
-The focused behavioral command `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 59 executed checks on 2026-08-25.
+The focused behavioral command `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 83 executed checks on 2026-08-27.
 The three force-specific checks exercised the executable MCP against its fake DevTools endpoint and verified the public schemas, exact thread and message ids sent to `threads:steerMessage`, the `steering=true` evidence gate, matching `dispatch` behavior for an existing thread, absence of selection and interrupt calls, unchanged default queue behavior, local-refresh independence, and an `unknown` result when Playbot did not confirm the force action.
 
 This suite previously printed `ok - fm-playbot-lanes: skipped (node unavailable)` and exited 0 whenever `node` was absent from `PATH`, which made a green run prove nothing: the same inherited-`PATH` gap that hides `shellcheck` and `actionlint` from a hook or validation-pipeline subprocess also hid the Node runtime, and one review round on this branch reported "there is no Node runtime anywhere on this machine" while `/home/linuxbrew/.linuxbrew/bin/node` was installed and in use.
