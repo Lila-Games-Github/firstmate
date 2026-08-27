@@ -468,7 +468,7 @@ fm_pr_poll_destination_unclaimed() {
   FM_PR_POLL_REFUSAL=
   fm_pr_poll_check_is_lane_poll "$path" || return 0
   # shellcheck disable=SC2034
-  FM_PR_POLL_REFUSAL="pr= was recorded for task $id, but merge detection was not armed: $path already holds the Playbot lane supervision poll armed by bin/fm-playbot-lanes.mjs, and both owners key their watcher check on state/$id.check.sh; this collision is transient because it self-retires when its worker reaches a terminal state after proven delivery, or matching task teardown removes it, while failed, recalled, or unconfirmed delivery stays armed"
+  FM_PR_POLL_REFUSAL="pr= was recorded for task $id, but merge detection was not armed: $path already holds the Playbot lane supervision poll armed by bin/fm-playbot-lanes.mjs, and both owners key their watcher check on state/$id.check.sh; this collision lasts until proven delivery lets the lane poll self-retire on a terminal state or matching task teardown removes it, while failed, recalled, or unconfirmed delivery stays armed"
   return 1
 }
 

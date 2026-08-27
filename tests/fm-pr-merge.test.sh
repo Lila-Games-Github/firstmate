@@ -347,8 +347,8 @@ test_lane_poll_collision_does_not_block_merge() {
     "lane-poll-collision: pr= was not recorded, so teardown could not verify landed work"
   assert_grep 'pr= was recorded for task-x1, but merge detection was NOT armed' "$case_dir/stderr" \
     "lane-poll-collision: the arming failure was swallowed instead of surfaced"
-  assert_grep 'collision is transient because it self-retires when its worker reaches a terminal state' "$case_dir/stderr" \
-    "lane-poll-collision: the warning did not explain the lane poll's automatic retirement"
+  assert_grep 'collision lasts until proven delivery lets the lane poll self-retire on a terminal state or matching task teardown removes it, while failed, recalled, or unconfirmed delivery stays armed' "$case_dir/stderr" \
+    "lane-poll-collision: the warning did not explain the lane poll's conditional retirement"
   grep -q 'retire whatever owns\|watch this PR by hand' "$case_dir/stderr" \
     && fail "lane-poll-collision: the warning still advised manual retirement: $(cat "$case_dir/stderr")"
   assert_grep 'fm-playbot-lanes.mjs' "$case_dir/stderr" \

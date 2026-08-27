@@ -3211,8 +3211,8 @@ case "$collide" in
   *) fail "the refusal did not name both owners and the task id: $collide" ;;
 esac
 case "$collide" in
-  *"pr= was recorded for task fm-autoarm-pr"*"merge detection was not armed"*"self-retires"*) ;;
-  *) fail "the refusal did not say what was recorded, what was lost, and why the collision is transient: $collide" ;;
+  *"pr= was recorded for task fm-autoarm-pr"*"merge detection was not armed"*"collision lasts until proven delivery lets the lane poll self-retire"*"failed, recalled, or unconfirmed delivery stays armed"*) ;;
+  *) fail "the refusal did not say what was recorded, what was lost, and when the collision can persist: $collide" ;;
 esac
 case "$collide" in
   *"different task id"*|*"retire that lane poll"*) fail "the refusal advised an unsupported or identity-breaking workaround: $collide" ;;
