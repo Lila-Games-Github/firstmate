@@ -92,7 +92,7 @@ grep -qxF "pr=$URL" "$META" || {
   exit 1
 }
 if [ "$PR_CHECK_STATUS" -ne 0 ]; then
-  echo "warning: pr= was recorded for $ID, but merge detection was NOT armed (fm-pr-check.sh exited $PR_CHECK_STATUS); the existing Playbot lane poll is preserved, and this collision is transient because it self-retires when its worker reaches a terminal state" >&2
+  echo "warning: pr= was recorded for $ID, but merge detection was NOT armed (fm-pr-check.sh exited $PR_CHECK_STATUS); the existing Playbot lane poll is preserved, and this collision lasts until proven delivery lets the poll self-retire on a terminal state or matching task teardown removes it, while failed, recalled, or unconfirmed delivery stays armed" >&2
 fi
 
 merge_args=()

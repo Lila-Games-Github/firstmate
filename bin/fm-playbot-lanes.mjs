@@ -1930,7 +1930,7 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
     report.registration = bound.detail;
     report.firesOn = "the worker parking on a card, and the change into stopping without one or becoming unreadable";
     report.silentWhile = "working, and after it has reported a worker that finished";
-    report.retiresOn = "reporting a worker that stopped or became unreadable, which removes the check, its trust binding, and its observed-state record";
+    report.retiresOn = "after proven delivery, reporting a worker that stopped or became unreadable, which removes the check, its trust binding, and its observed-state record; failed, recalled, or unconfirmed delivery stays armed";
     report.note = taskIdSource === "workspace-id"
       ? "No taskId was given, so the poll is keyed on the workspace id and firstmate's task teardown will not retire it; retire it by hand when the work lands."
       : "Firstmate's task teardown retires this poll with the task.";
