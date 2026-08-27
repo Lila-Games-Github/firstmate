@@ -2649,8 +2649,8 @@ if (changed.changes !== 1) process.exit(1);
 NODE
 }
 
-record_fixture_acceptance() {  # <session-id> <message-id> <timestamp>
-  FIXTURE_ROOT="$FIXTURE_ROOT" SESSION_ID="$1" MESSAGE_ID="$2" TIMESTAMP="$3" node --no-warnings <<'NODE'
+record_fixture_acceptance() {  # <session-id> <message-id> <timestamp> [thread-id]
+  FIXTURE_ROOT="$FIXTURE_ROOT" SESSION_ID="$1" MESSAGE_ID="$2" TIMESTAMP="$3" THREAD="${4-}" node --no-warnings <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
@@ -2668,6 +2668,13 @@ const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'harness', 'stat
 db.prepare('INSERT OR REPLACE INTO threads VALUES (?, ?, ?, ?, ?, ?)')
   .run(process.env.SESSION_ID, rollout, path.join(process.env.FIXTURE_ROOT, 'worker'), 'Natural queue drain', Date.parse(process.env.TIMESTAMP), 0);
 db.close();
+if (process.env.THREAD) {
+  const app = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+  const changed = app.prepare('UPDATE workspace_threads SET session_id = ? WHERE id = ?')
+    .run(process.env.SESSION_ID, process.env.THREAD);
+  app.close();
+  if (changed.changes !== 1) process.exit(1);
+}
 NODE
 }
 set_thread_queue "$queued_thread" "{\"messages\":[{\"id\":\"$queued_message\",\"text\":\"Do the queued work\"}]}" \
@@ -2723,12 +2730,27 @@ NODE
 set_thread_turn "$queued_thread" ready 2026-08-25T10:30:00.000Z || fail "could not settle the queued-task worker"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
 case "$poll_line" in
+  *"playbot lane fm-autoarm-queued"*"delivery remains queued"*"poll stays armed"* | \
+    *"playbot lane fm-autoarm-queued"*"delivery remains sending"*"poll stays armed"*) ;;
+  *) fail "not-recallable fabricated delivery without an exact acceptance boundary: $poll_line" ;;
+esac
+for kept in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-queued.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "not-recallable retired $kept without exact rollout acceptance"
+done
+check_is_registered fm-autoarm-queued \
+  || fail "not-recallable disarmed without exact rollout acceptance"
+record_fixture_acceptance queued-session "$queued_message" 2026-08-25T10:31:00.000Z "$queued_thread" \
+  || fail "could not persist the queued task's exact acceptance"
+set_thread_turn "$queued_thread" ready 2026-08-25T10:32:00.000Z || fail "could not finish the accepted queued task"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-queued.check.sh")
+case "$poll_line" in
   *"playbot lane fm-autoarm-queued"*"stopped without a card"*"retired itself"*) ;;
-  *) fail "a task that crossed its exact queue and acceptance boundary did not retire: $poll_line" ;;
+  *) fail "exact acceptance did not retire the previously non-recallable task: $poll_line" ;;
 esac
 for leftover in fm-autoarm-queued.check.sh fm-autoarm-queued.check-trust fm-autoarm-queued.lane-poll; do
   [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
-    || fail "the delivered queued task left $leftover armed"
+    || fail "the exactly accepted queued task left $leftover armed"
 done
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
@@ -2788,6 +2810,38 @@ done
 ! check_is_registered fm-autoarm-natural-drain \
   || fail "the naturally accepted task remained registered after retirement"
 pass "fm-playbot-lanes: rollout acceptance advances the terminal boundary before retirement"
+
+set_thread_turn "$natural_thread" working 2026-08-25T10:40:00.000Z \
+  || fail "could not stage the exact-boundary worker as busy"
+printf 'yes\n' > "$FIXTURE_ROOT/send-holds-working"
+printf '2026-08-25T10:41:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(home_dispatch "{\"project\":$worker_json,\"workspace\":\"$natural_workspace\",\"thread\":\"$natural_thread\",\"message\":\"Run with delayed rollout evidence\",\"taskId\":\"fm-autoarm-ledger-boundary\"}")
+rm -f "$FIXTURE_ROOT/send-holds-working" "$FIXTURE_ROOT/send-accepted-at"
+ledger_message=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.delivery.messageId)')
+[ -n "$ledger_message" ] || fail "the delayed-rollout task had no exact message id"
+accept_fixture_message "$natural_thread" "$ledger_message" ledger-session ledger-session turn-ledger-boundary 2026-08-25T10:42:00.000Z \
+  || fail "could not stage exact ledger acceptance without a readable rollout"
+set_thread_turn "$natural_thread" ready 2026-08-25T10:43:00.000Z \
+  || fail "could not finish the delayed-rollout task"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-ledger-boundary.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-ledger-boundary"*"delivery remains queued"*"poll stays armed"*) ;;
+  *) fail "ledger acceptance without an exact timestamp fabricated delivery: $poll_line" ;;
+esac
+check_is_registered fm-autoarm-ledger-boundary \
+  || fail "ledger acceptance without an exact timestamp disarmed the task"
+remove_fixture_message "$natural_thread" "$ledger_message" \
+  || fail "could not reconcile the delayed-rollout message"
+record_fixture_acceptance ledger-session "$ledger_message" 2026-08-25T10:42:00.000Z \
+  || fail "could not restore the exact rollout acceptance timestamp"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-ledger-boundary.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-ledger-boundary"*"stopped without a card"*"retired itself"*) ;;
+  *) fail "the delayed exact acceptance timestamp did not retire completed work: $poll_line" ;;
+esac
+! check_is_registered fm-autoarm-ledger-boundary \
+  || fail "the delayed exact acceptance remained registered after retirement"
+pass "fm-playbot-lanes: delivered transitions require exact acceptance timestamps"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-recalled\"},\"title\":\"Recall queued task\"}}}")

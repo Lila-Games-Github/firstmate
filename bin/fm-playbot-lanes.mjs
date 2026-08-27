@@ -1799,17 +1799,36 @@ async function supervisionPrepareRecall(threadId, messageId) {
         || previous.threadKey !== threadKey
         || !["queued", "sending"].includes(previous.deliveryState)) return;
       supervisionWriteSidecar(state, taskId, { ...previous, deliveryState: "recall-pending" });
-      prepared.push({ state, taskId, generation: previous.generation, messageKey, threadKey, deliveryState: previous.deliveryState });
+      prepared.push({
+        state,
+        taskId,
+        generation: previous.generation,
+        messageKey,
+        threadKey,
+        deliveryState: previous.deliveryState,
+        acceptanceMs: previous.acceptanceMs,
+      });
     });
   }
   return prepared;
 }
 
-async function supervisionResolveRecall(prepared, outcome) {
+async function supervisionResolveRecall(prepared, outcome, threadId) {
   const problems = [];
-  const nextState = outcome === "recalled" ? "recalled" : outcome === "not-recallable" ? "delivered" : "recall-pending";
+  let row = null;
+  if (outcome === "not-recallable") {
+    try {
+      row = threadRowById(threadId);
+    } catch {
+      row = null;
+    }
+  }
   for (const item of prepared) {
     try {
+      const rolloutAcceptanceMs = outcome === "not-recallable"
+        && item.threadKey === supervisionThreadKey(row?.thread_id)
+        ? supervisionRolloutAcceptanceMs(row, item.messageKey, item.acceptanceMs)
+        : null;
       await supervisionWithCheckLock(item.state, item.taskId, () => {
         const current = supervisionReadSidecar(item.state, item.taskId);
         if (!current
@@ -1817,7 +1836,15 @@ async function supervisionResolveRecall(prepared, outcome) {
           || current.messageKey !== item.messageKey
           || current.threadKey !== item.threadKey
           || current.deliveryState !== "recall-pending") return;
-        supervisionWriteSidecar(item.state, item.taskId, { ...current, deliveryState: nextState });
+        const deliveryState = outcome === "recalled"
+          ? "recalled"
+          : outcome === "not-recallable" && rolloutAcceptanceMs !== null
+            ? "delivered"
+            : outcome === "not-recallable" ? item.deliveryState : "recall-pending";
+        const acceptanceMs = rolloutAcceptanceMs === null
+          ? current.acceptanceMs
+          : Math.max(current.acceptanceMs ?? rolloutAcceptanceMs, rolloutAcceptanceMs);
+        supervisionWriteSidecar(item.state, item.taskId, { ...current, deliveryState, acceptanceMs });
       });
     } catch (error) {
       problems.push(`state/${item.taskId}.lane-poll: ${supervisionErrorDetail(error)}`);
@@ -1941,16 +1968,6 @@ function supervisionHeldClause(queued) {
   return "";
 }
 
-function supervisionMessageAccepted(message, row) {
-  const state = message?.state;
-  if (!state || typeof state !== "object" || typeof row?.session_id !== "string" || !row.session_id) return false;
-  if (state.sessionId !== row.session_id) return false;
-  const turnId = state.type === "steering"
-    ? state.expectedTurnId
-    : ["submitting", "reconciling"].includes(state.type) ? state.turnId : null;
-  return typeof turnId === "string" && turnId.length > 0;
-}
-
 function supervisionRolloutAcceptanceMs(row, messageKey, acceptanceMs) {
   if (typeof row?.session_id !== "string" || !row.session_id || !messageKey || !Number.isFinite(acceptanceMs)) return null;
   let session;
@@ -2031,7 +2048,6 @@ function supervisionRolloutAcceptanceMs(row, messageKey, acceptanceMs) {
 // where a queue firstmate has already seen is not.
 function supervisionPollDecision(taskId, threadId, previous) {
   const row = threadRowById(threadId);
-  const ledgerMessages = row ? persistedMessages(row.pending_queue_json) : [];
   const messages = row ? queuedMessages(row.pending_queue_json) : [];
   const queued = messages === null ? null : messages.length;
   const taskQueued = Array.isArray(messages)
@@ -2045,18 +2061,13 @@ function supervisionPollDecision(taskId, threadId, previous) {
   const taskBoundToThread = previous?.messageKey
     && previous?.threadKey === supervisionThreadKey(row?.thread_id);
   const deliveryCanAdvance = ["queued", "sending"].includes(priorDelivery) && Boolean(taskBoundToThread);
-  const ledgerAccepted = deliveryCanAdvance
-    && Array.isArray(ledgerMessages)
-    && ledgerMessages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey
-      && supervisionMessageAccepted(message, row));
   const rolloutAcceptanceMs = deliveryCanAdvance
     ? supervisionRolloutAcceptanceMs(row, previous.messageKey, previousAcceptanceMs)
     : null;
-  const taskAccepted = ledgerAccepted || rolloutAcceptanceMs !== null;
-  const recoveredAcceptanceMs = rolloutAcceptanceMs ?? (ledgerAccepted ? updatedAtMs : null);
-  const acceptanceMs = recoveredAcceptanceMs === null
+  const taskAccepted = rolloutAcceptanceMs !== null;
+  const acceptanceMs = rolloutAcceptanceMs === null
     ? previousAcceptanceMs
-    : Math.max(previousAcceptanceMs ?? recoveredAcceptanceMs, recoveredAcceptanceMs);
+    : Math.max(previousAcceptanceMs ?? rolloutAcceptanceMs, rolloutAcceptanceMs);
   const afterAcceptance = acceptanceMs !== null && updatedAtMs > acceptanceMs;
   const deliveryState = ["queued", "sending"].includes(priorDelivery) && taskAccepted
     ? "delivered"
@@ -2829,7 +2840,7 @@ async function handleTool(name, args = {}) {
     const version = await playbotVersion();
     const preparedRecalls = await supervisionPrepareRecall(thread.thread_id, messageId);
     const result = await cardInvoke("threads:recallMessage", { threadId: thread.thread_id, messageId });
-    const supervisionProblems = await supervisionResolveRecall(preparedRecalls, result?.outcome);
+    const supervisionProblems = await supervisionResolveRecall(preparedRecalls, result?.outcome, thread.thread_id);
     // The recall already happened, so an unreadable queue projection is reported
     // as null and warned about rather than thrown, and never as an empty queue: a
     // supervisor reads an empty queueAfter as "the pile is gone" and acts on it.
