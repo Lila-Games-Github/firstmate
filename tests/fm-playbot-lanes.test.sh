@@ -2843,6 +2843,42 @@ esac
   || fail "the delayed exact acceptance remained registered after retirement"
 pass "fm-playbot-lanes: delivered transitions require exact acceptance timestamps"
 
+set_thread_turn "$natural_thread" working 2026-08-25T10:45:00.000Z \
+  || fail "could not stage the failed-recall worker as busy"
+printf 'yes\n' > "$FIXTURE_ROOT/send-holds-working"
+printf '2026-08-25T10:46:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(home_dispatch "{\"project\":$worker_json,\"workspace\":\"$natural_workspace\",\"thread\":\"$natural_thread\",\"message\":\"Run after the failed recall\",\"taskId\":\"fm-autoarm-recall-failure\"}")
+rm -f "$FIXTURE_ROOT/send-holds-working" "$FIXTURE_ROOT/send-accepted-at"
+recall_failure_message=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.delivery.messageId)')
+[ -n "$recall_failure_message" ] || fail "the failed-recall task had no exact message id"
+printf 'threads:recallMessage\n' > "$FIXTURE_ROOT/ipc-missing"
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"$natural_workspace\",\"thread\":\"$natural_thread\",\"messageId\":\"$recall_failure_message\"}}}")
+rm -f "$FIXTURE_ROOT/ipc-missing"
+OUT="$out" node --no-warnings <<'NODE' || fail "the failed recall did not surface its IPC error"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes("does not register the 'threads:recallMessage' channel")) process.exit(1);
+NODE
+accept_fixture_message "$natural_thread" "$recall_failure_message" recall-failure-session recall-failure-session turn-recall-failure 2026-08-25T10:47:00.000Z \
+  || fail "could not accept the task after its recall failed"
+record_fixture_acceptance recall-failure-session "$recall_failure_message" 2026-08-25T10:47:00.000Z \
+  || fail "could not persist exact acceptance after the failed recall"
+remove_fixture_message "$natural_thread" "$recall_failure_message" \
+  || fail "could not reconcile the task after its recall failed"
+set_thread_turn "$natural_thread" ready 2026-08-25T10:48:00.000Z \
+  || fail "could not finish the task after its recall failed"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-recall-failure.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-recall-failure"*"stopped without a card"*"retired itself"*) ;;
+  *) fail "exact acceptance could not recover recall-pending supervision: $poll_line" ;;
+esac
+for leftover in fm-autoarm-recall-failure.check.sh fm-autoarm-recall-failure.check-trust fm-autoarm-recall-failure.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the recovered failed-recall task left $leftover armed"
+done
+! check_is_registered fm-autoarm-recall-failure \
+  || fail "the recovered failed-recall task remained registered"
+pass "fm-playbot-lanes: exact acceptance recovers supervision after recall failure"
+
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-recalled\"},\"title\":\"Recall queued task\"}}}")
 recalled_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')

@@ -2060,7 +2060,7 @@ function supervisionPollDecision(taskId, threadId, previous) {
   const previousAcceptanceMs = Number.isFinite(previous?.acceptanceMs) ? previous.acceptanceMs : null;
   const taskBoundToThread = previous?.messageKey
     && previous?.threadKey === supervisionThreadKey(row?.thread_id);
-  const deliveryCanAdvance = ["queued", "sending"].includes(priorDelivery) && Boolean(taskBoundToThread);
+  const deliveryCanAdvance = ["queued", "sending", "recall-pending"].includes(priorDelivery) && Boolean(taskBoundToThread);
   const rolloutAcceptanceMs = deliveryCanAdvance
     ? supervisionRolloutAcceptanceMs(row, previous.messageKey, previousAcceptanceMs)
     : null;
@@ -2069,7 +2069,7 @@ function supervisionPollDecision(taskId, threadId, previous) {
     ? previousAcceptanceMs
     : Math.max(previousAcceptanceMs ?? rolloutAcceptanceMs, rolloutAcceptanceMs);
   const afterAcceptance = acceptanceMs !== null && updatedAtMs > acceptanceMs;
-  const deliveryState = ["queued", "sending"].includes(priorDelivery) && taskAccepted
+  const deliveryState = deliveryCanAdvance && taskAccepted
     ? "delivered"
     : priorDelivery;
   const delivered = deliveryState === "delivered";

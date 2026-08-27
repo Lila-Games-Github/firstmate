@@ -562,7 +562,7 @@ Live evidence against the running Playbot 0.95.0 on the same date, taken with a 
 - All six snapshot projections came back as real arrays on both Frogpile chats: `userInputRequests`, `pendingMessages`, `outboundMessages`, `approvalRequests`, `mcpElicitationRequests`, and `respondingRequestIds`, each `array(0)` on `chat-7975fcb9` and `chat-3bbd9805`. This is why the shape guard requires a list rather than mere presence and refuses a non-array by name. It is one version observed at one moment, not a contract.
 - `threadRows()` selects `t.pending_queue_json` unconditionally, and that one query backs every tool and both hooks, so the column's presence across the supported range was settled by evidence rather than by a defensive probe. Parsing `resources/app.asar` and reading every `/migrations/*/migration.sql` shows `workspace_threads` is created already carrying `pending_queue_json` by migration `20260414225126_medical_lilandra`, dated 2026-04-14, and that this is the only migration among the 33 in the 0.95.0 bundle that creates that table. Playbot 0.93.1, the oldest version this adapter's detected fallback targets, shipped around 2026-08-18, four months later, and Playbot runs its migrations forward on app start. No Playbot in the supported 0.93.1-to-0.95.0 range can therefore present a `workspace_threads` without that column. This says nothing about versions outside that range.
 
-The dispatch-armed poll's own checks were still being written after that live run, so the suite is dated separately: on 2026-08-25, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 76 checks, including twenty-eight added for the thread-resolution scope, the card and queue surfaces, the delivery verdict, and the lane-wake delivery rules, and twenty for the dispatch-armed supervision poll recorded below:
+The dispatch-armed poll's own checks were still being written after that live run, so the suite is dated separately: on 2026-08-25, `bash tests/fm-playbot-lanes.test.sh` with node v26.7.0 passed all 76 checks, including twenty-eight added for the thread-resolution scope, the card and queue surfaces, the delivery verdict, and the lane-wake delivery rules, and twenty for the then-current dispatch-armed supervision poll:
 
 ```text
 ok - fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it
@@ -588,7 +588,8 @@ Those checks run against the hermetic fake DevTools endpoint described below, ex
 
 On 2026-08-24, `dispatch` from an external-terminal caller was verified to arm that worker's firstmate watcher poll itself, because Playbot offers such a caller no push path at all: `identify_current_thread` returns `{"controller":"external-terminal","thread":null}`, and `register_lane` refuses with `register_lane requires a Playbot controller chat`.
 
-The firstmate-side half is enforced end to end in `tests/fm-playbot-lanes.test.sh` against the hermetic endpoint, using the real `bin/fm-check-register.sh` and the real `bin/fm-watch.sh` through `bin/fm-watch-checkpoint.sh`, so the proof is a watcher wake rather than the existence of a file:
+The firstmate-side half is enforced end to end in `tests/fm-playbot-lanes.test.sh` against the hermetic endpoint, using the real `bin/fm-check-register.sh` and the real `bin/fm-watch.sh` through `bin/fm-watch-checkpoint.sh`, so the proof is a watcher wake rather than the existence of a file.
+On 2026-08-27, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 85 checks, and the current supervision subset below comes from that later run rather than the historical 76-check evidence above:
 
 ```text
 ok - fm-playbot-lanes: an external-terminal dispatch arms and registers that worker's watcher poll
@@ -602,6 +603,7 @@ ok - fm-playbot-lanes: failed restoration re-registration is loud even for ident
 ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself
 ok - fm-playbot-lanes: rollout acceptance advances the terminal boundary before retirement
 ok - fm-playbot-lanes: delivered transitions require exact acceptance timestamps
+ok - fm-playbot-lanes: exact acceptance recovers supervision after recall failure
 ok - fm-playbot-lanes: exact-thread delivery and recall evidence stay ownership-safe
 ok - fm-playbot-lanes: delivered unreadability retires while restored unknown delivery stays armed
 ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace
@@ -629,7 +631,7 @@ Not verified against a live Playbot: creating a real throwaway workspace and dri
 Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
 
 A parked worker is a standing condition and a finished one is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
-A queued or sending task advances only when that worker session's persisted rollout records the exact client message id after the current acceptance boundary, while a ledger turn binding or `not-recallable` outcome without that timestamp stays armed and promotable, and UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.
+A queued, sending, or recall-pending task advances only when that worker session's persisted rollout records the exact client message id after the current acceptance boundary, while a ledger turn binding, `not-recallable` outcome, or failed recall without that timestamp stays armed and promotable, and UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.
 It is reported when it appears and then stays quiet, because every branch that can print fires on a difference from the last observation rather than on a condition still being true, and `pending_input` is the one deliberate exception since answering the card is what resolves it.
 That change is decided on `agent_status` and `updated_at` after the task-specific acceptance boundary, which starts from `last_user_activity_at` and advances with exact-message acceptance because a send does not wait for the turn to start.
 The fixture drives both an accepted turn that finishes before the first poll and a preceding turn that reaches `ready` immediately before the new send, proving the former retires and the latter stays armed until the new task itself completes.
