@@ -2228,6 +2228,54 @@ for leftover in fm-autoarm-turn.check.sh fm-autoarm-turn.check-trust fm-autoarm-
 done
 pass "fm-playbot-lanes: task acceptance boundaries preserve fast completion without crossing turns"
 
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-forced-turn\"},\"title\":\"Forced completed turn\"}}}")
+forced_turn_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+forced_turn_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+set_thread_turn "$forced_turn_thread" working 2099-08-25T10:00:00.000Z \
+  || fail "could not stage the forced-dispatch worker as active"
+FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$forced_turn_thread" node --no-warnings <<'NODE' || fail "could not stage the forced-dispatch snapshot"
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const store = JSON.parse(fs.readFileSync(file, 'utf8'));
+store[process.env.THREAD] = {
+  threadId: process.env.THREAD,
+  phase: { kind: 'prompting', threadId: `session-${process.env.THREAD}`, turnId: 'turn-forced-active' },
+  agentStatus: 'working',
+  userInputRequests: [],
+  approvalRequests: [],
+  mcpElicitationRequests: [],
+  respondingRequestIds: [],
+  pendingMessages: [],
+  outboundMessages: [],
+};
+fs.writeFileSync(file, `${JSON.stringify(store, null, 2)}\n`);
+NODE
+printf 'yes\n' > "$FIXTURE_ROOT/send-holds-working"
+printf '2099-08-25T10:01:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(home_dispatch "{\"project\":$worker_json,\"workspace\":\"$forced_turn_workspace\",\"thread\":\"$forced_turn_thread\",\"message\":\"Steer this exact task\",\"force\":true,\"taskId\":\"fm-autoarm-forced-turn\"}")
+rm -f "$FIXTURE_ROOT/send-holds-working" "$FIXTURE_ROOT/send-accepted-at"
+OUT="$out" node --no-warnings <<'NODE' || fail "the forced dispatch was not armed from exact-message steering evidence"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'steering' || value.force.state !== 'applied') process.exit(1);
+if (value.supervision.armed !== true) process.exit(1);
+NODE
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-forced-turn.check.sh")
+[ -z "$poll_line" ] || fail "the forced-dispatch poll fired while its worker was active: $poll_line"
+set_thread_turn "$forced_turn_thread" ready 2099-08-25T10:02:00.000Z \
+  || fail "could not finish the forced-dispatch worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-forced-turn.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-forced-turn"*"stopped without a card"*"retired itself"*) ;;
+  *) fail "the forced dispatch did not retire after terminal completion: $poll_line" ;;
+esac
+for leftover in fm-autoarm-forced-turn.check.sh fm-autoarm-forced-turn.check-trust fm-autoarm-forced-turn.lane-poll; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "the completed forced dispatch left $leftover armed"
+done
+pass "fm-playbot-lanes: forced exact-message delivery retires after terminal completion"
+
 # A retirement that cannot remove the executable check must leave the complete
 # registered poll intact. Removing its trust file after the check removal fails
 # turns the still-executable check into a rejected unauthenticated check, which
@@ -2334,6 +2382,47 @@ case "$drained" in
   *) fail "the parked wake was not queued durably: $drained" ;;
 esac
 pass "fm-playbot-lanes: the armed poll wakes the real watcher when the worker parks, naming the task"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
+printf 'send\n' > "$FIXTURE_ROOT/refresh-failure"
+printf '2099-08-25T11:00:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-refresh-failure\"},\"title\":\"Refresh failure\",\"message\":\"Accept without a readable boundary\",\"taskId\":\"fm-autoarm-refresh-failure\"}")
+rm -f "$FIXTURE_ROOT/send-reconciles" "$FIXTURE_ROOT/refresh-failure" "$FIXTURE_ROOT/send-accepted-at"
+refresh_failure_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+OUT="$out" node --no-warnings <<'NODE' || fail "the transient-refresh dispatch did not preserve its accepted delivery verdict"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.delivery.state !== 'delivered' || value.supervision.armed !== true) process.exit(1);
+NODE
+FIXTURE_ROOT="$FIXTURE_ROOT" THREAD="$refresh_failure_thread" node --no-warnings <<'NODE' || fail "could not restore the transiently unreadable worker"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const changed = db.prepare('UPDATE workspace_threads SET archived = 0 WHERE id = ?').run(process.env.THREAD);
+db.close();
+if (changed.changes !== 1) process.exit(1);
+NODE
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-refresh-failure.check.sh")
+case "$poll_line" in
+  *"playbot lane fm-autoarm-refresh-failure"*"delivery remains unconfirmed"*"poll stays armed"*) ;;
+  *) fail "the missing post-send boundary did not remain unconfirmed and armed: $poll_line" ;;
+esac
+check_is_registered fm-autoarm-refresh-failure \
+  || fail "the missing post-send boundary retired its poll"
+set_thread_turn "$refresh_failure_thread" working 2099-08-25T11:01:00.000Z \
+  || fail "could not start the transient-refresh worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-refresh-failure.check.sh")
+[ -z "$poll_line" ] || fail "the transient-refresh worker emitted a wake while working: $poll_line"
+set_thread_turn "$refresh_failure_thread" ready 2099-08-25T11:02:00.000Z \
+  || fail "could not finish the transient-refresh worker"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-refresh-failure.check.sh")
+case "$poll_line" in
+  *"delivery remains unconfirmed"*"poll stays armed"*) ;;
+  *) fail "terminal activity without an acceptance boundary retired the task: $poll_line" ;;
+esac
+check_is_registered fm-autoarm-refresh-failure \
+  || fail "terminal activity without an acceptance boundary disarmed the task"
+pass "fm-playbot-lanes: missing post-send acceptance stays unconfirmed and armed"
 
 # Held messages are the PL-017 defect, so a fired poll carries the pile rather
 # than making firstmate go looking for it.

@@ -1752,7 +1752,7 @@ function supervisionArmingBaseline(worker) {
 function supervisionArmingObservation(baseline, delivery, generation) {
   return {
     ...baseline,
-    deliveryState: supervisionDeliveryState(delivery?.state),
+    deliveryState: delivery?.state === "steering" ? "delivered" : supervisionDeliveryState(delivery?.state),
     messageKey: supervisionMessageKey(delivery?.messageId),
     acceptanceMs: baseline.acceptanceMs ?? null,
     generation,
@@ -2593,7 +2593,16 @@ async function handleTool(name, args = {}) {
           },
         };
       }
-      const supervision = await armSupervisionPoll({ requestedTaskId, worker, baseline: supervisionAcceptance ?? armingBaseline, delivery: sent.delivery });
+      const acceptedBaseline = supervisionAcceptance?.acceptanceMs === null
+        || supervisionAcceptance?.acceptanceMs === undefined
+        ? null
+        : supervisionAcceptance;
+      const supervision = await armSupervisionPoll({
+        requestedTaskId,
+        worker,
+        baseline: acceptedBaseline ?? { ...armingBaseline, acceptanceMs: null },
+        delivery: acceptedBaseline ? sent.delivery : null,
+      });
       const result = { lane: null, ...sent, supervision };
       if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
       return result;
