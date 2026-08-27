@@ -902,20 +902,16 @@ test_default_is_bounded_and_local_only() {
 }
 
 test_oversized_parsed_backlog_survives_all_public_snapshot_routes() {
-  local home fakebin parsed_bytes canonical bearings summary i marker status_tail valid_mate invalid_mate
+  local home fakebin parsed_bytes canonical bearings summary marker large_body status_tail valid_mate invalid_mate
   home=$(make_home oversized-parsed-backlog)
   fakebin=$(make_fakebin "$home")
   marker="retain-large-body-$(printf '%0180d' 0)"
+  large_body=$(awk 'BEGIN { for (i = 0; i < 70000; i++) printf "x" }')
   {
     printf '## In flight\n'
     printf -- '- [ ] active-large - Active oversized inventory task (repo: firstmate) (kind: ship)\n\n'
     printf '## Queued\n'
-    printf -- '- [ ] large-marker - %s (repo: firstmate) (kind: ship)\n' "$marker"
-    i=0
-    while [ "$i" -lt 900 ]; do
-      printf -- '- [ ] queued-%04d - Queue payload %04d %0180d (repo: firstmate) (kind: ship)\n' "$i" "$i" 0
-      i=$((i + 1))
-    done
+    printf -- '- [ ] large-marker - %s%s (repo: firstmate) (kind: ship)\n' "$marker" "$large_body"
     printf '\n## Done\n'
   } > "$home/data/backlog.md"
   mkdir -p "$home/projects/active-large"
@@ -926,11 +922,7 @@ test_oversized_parsed_backlog_survives_all_public_snapshot_routes() {
   status_tail="status-tail-$marker"
   {
     printf 'working: status-prefix-%s ' "$marker"
-    i=0
-    while [ "$i" -lt 900 ]; do
-      printf '%0180d' 0
-      i=$((i + 1))
-    done
+    awk 'BEGIN { for (i = 0; i < 132000; i++) printf "s" }'
     printf ' %s\n' "$status_tail"
   } > "$home/state/active-large.status"
 
@@ -940,7 +932,7 @@ test_oversized_parsed_backlog_survives_all_public_snapshot_routes() {
       and .valid == true
       and (.active_children | any(.id == "active-large" and (.doing | startswith("status-prefix-retain-large-body-"))))
       and (.queued | any(.id == "large-marker" and (.title | startswith($marker[:120]))))
-      and .counts.queued == 901
+      and .counts.queued == 1
   ' >/dev/null || fail "secondmate summary lost oversized inventory content or classification"
 
   valid_mate="$TMP_ROOT/oversized-status-valid-home"
@@ -966,8 +958,9 @@ test_oversized_parsed_backlog_survives_all_public_snapshot_routes() {
         and (.paths.status_log.last_event.raw | endswith($status_tail))
         and (.current_state.detail | endswith($status_tail))
         and (.hints.last_event_text | endswith($status_tail))))
-      and (.backlog.records | any(.id == "large-marker" and .title == $marker))
-      and (.backlog.records | length) == 902
+      and (.backlog.records | any(.id == "large-marker"
+        and (.title | startswith($marker)) and (.title | endswith("x"))))
+      and (.backlog.records | length) == 2
       and (.secondmate_current.records | any(.id == "oversized-status-valid"
         and .provenance.selected == "structured-home"
         and (.parent_event.raw | endswith($status_tail))))
