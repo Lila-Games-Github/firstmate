@@ -2761,12 +2761,19 @@ case "$poll_line" in
 esac
 check_is_registered fm-autoarm-natural-drain \
   || fail "a cross-session turn binding retired the natural-drain task"
-accept_fixture_message "$natural_thread" "$natural_message" natural-session natural-session turn-natural-accepted 2026-08-25T10:35:00.000Z \
-  || fail "could not bind the naturally drained message to its worker turn"
 record_fixture_acceptance natural-session "$natural_message" 2026-08-25T10:35:00.000Z \
   || fail "could not persist the naturally accepted message"
 remove_fixture_message "$natural_thread" "$natural_message" \
   || fail "could not reconcile the naturally accepted message"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-natural-drain.check.sh")
+[ -z "$poll_line" ] \
+  || fail "rollout acceptance retired against the prior turn's terminal row: $poll_line"
+for kept in fm-autoarm-natural-drain.check.sh fm-autoarm-natural-drain.check-trust fm-autoarm-natural-drain.lane-poll; do
+  [ -e "$FM_HOME_FIXTURE/state/$kept" ] \
+    || fail "rollout acceptance retired $kept before its row advanced"
+done
+check_is_registered fm-autoarm-natural-drain \
+  || fail "rollout acceptance disarmed before its row advanced"
 set_thread_turn "$natural_thread" ready 2026-08-25T10:36:00.000Z \
   || fail "could not finish the naturally accepted task"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-natural-drain.check.sh")
@@ -2780,7 +2787,7 @@ for leftover in fm-autoarm-natural-drain.check.sh fm-autoarm-natural-drain.check
 done
 ! check_is_registered fm-autoarm-natural-drain \
   || fail "the naturally accepted task remained registered after retirement"
-pass "fm-playbot-lanes: naturally drained completion before first poll retires exactly once"
+pass "fm-playbot-lanes: rollout acceptance advances the terminal boundary before retirement"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-recalled\"},\"title\":\"Recall queued task\"}}}")

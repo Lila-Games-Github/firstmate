@@ -1951,28 +1951,30 @@ function supervisionMessageAccepted(message, row) {
   return typeof turnId === "string" && turnId.length > 0;
 }
 
-function supervisionRolloutAccepted(row, messageKey, acceptanceMs) {
-  if (typeof row?.session_id !== "string" || !row.session_id || !messageKey || !Number.isFinite(acceptanceMs)) return false;
+function supervisionRolloutAcceptanceMs(row, messageKey, acceptanceMs) {
+  if (typeof row?.session_id !== "string" || !row.session_id || !messageKey || !Number.isFinite(acceptanceMs)) return null;
   let session;
   try {
     session = codexSession(row.session_id);
   } catch {
-    return false;
+    return null;
   }
-  if (!session?.rollout_path || !fs.existsSync(session.rollout_path)) return false;
+  if (!session?.rollout_path || !fs.existsSync(session.rollout_path)) return null;
   const inspect = (bytes) => {
-    if (bytes.length === 0) return "continue";
+    if (bytes.length === 0) return null;
     let record;
     try {
       record = JSON.parse(bytes.toString("utf8").replace(/\r$/, ""));
     } catch {
-      return "continue";
+      return null;
     }
     const timestampMs = supervisionTimestampMs(record.timestamp);
-    if (timestampMs !== null && timestampMs < acceptanceMs) return "before";
+    if (timestampMs !== null && timestampMs < acceptanceMs) return { stop: true, acceptanceMs: null };
     const payload = record.type === "event_msg" ? record.payload : null;
-    if (payload?.type !== "user_message") return "continue";
-    return supervisionMessageKey(payload.client_id) === messageKey ? "accepted" : "continue";
+    if (payload?.type !== "user_message" || timestampMs === null) return null;
+    return supervisionMessageKey(payload.client_id) === messageKey
+      ? { stop: true, acceptanceMs: timestampMs }
+      : null;
   };
   let fd;
   try {
@@ -1991,15 +1993,14 @@ function supervisionRolloutAccepted(row, messageKey, acceptanceMs) {
       let newline;
       while ((newline = data.lastIndexOf(0x0a, lineEnd - 1)) >= 0) {
         const result = inspect(data.subarray(newline + 1, lineEnd));
-        if (result === "accepted") return true;
-        if (result === "before") return false;
+        if (result?.stop) return result.acceptanceMs;
         lineEnd = newline;
       }
       carry = Buffer.from(data.subarray(0, lineEnd));
     }
-    return inspect(carry) === "accepted";
+    return inspect(carry)?.acceptanceMs ?? null;
   } catch {
-    return false;
+    return null;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -2038,18 +2039,25 @@ function supervisionPollDecision(taskId, threadId, previous) {
     && messages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey);
   const status = row ? supervisionField(row.agent_status ?? "unknown") : SUPERVISION_ABSENT;
   const updatedAt = row ? supervisionField(row.updated_at) : "";
+  const updatedAtMs = supervisionTimestampMs(updatedAt);
   const priorDelivery = supervisionDeliveryState(previous?.deliveryState);
-  const afterAcceptance = previous?.acceptanceMs !== null
-    && previous?.acceptanceMs !== undefined
-    && supervisionTimestampMs(updatedAt) > previous.acceptanceMs;
+  const previousAcceptanceMs = Number.isFinite(previous?.acceptanceMs) ? previous.acceptanceMs : null;
   const taskBoundToThread = previous?.messageKey
     && previous?.threadKey === supervisionThreadKey(row?.thread_id);
-  const taskAccepted = Boolean(taskBoundToThread)
-    && (Array.isArray(ledgerMessages)
-      && ledgerMessages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey
-        && supervisionMessageAccepted(message, row))
-      || ["queued", "sending"].includes(priorDelivery)
-        && supervisionRolloutAccepted(row, previous.messageKey, previous.acceptanceMs));
+  const deliveryCanAdvance = ["queued", "sending"].includes(priorDelivery) && Boolean(taskBoundToThread);
+  const ledgerAccepted = deliveryCanAdvance
+    && Array.isArray(ledgerMessages)
+    && ledgerMessages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey
+      && supervisionMessageAccepted(message, row));
+  const rolloutAcceptanceMs = deliveryCanAdvance
+    ? supervisionRolloutAcceptanceMs(row, previous.messageKey, previousAcceptanceMs)
+    : null;
+  const taskAccepted = ledgerAccepted || rolloutAcceptanceMs !== null;
+  const recoveredAcceptanceMs = rolloutAcceptanceMs ?? (ledgerAccepted ? updatedAtMs : null);
+  const acceptanceMs = recoveredAcceptanceMs === null
+    ? previousAcceptanceMs
+    : Math.max(previousAcceptanceMs ?? recoveredAcceptanceMs, recoveredAcceptanceMs);
+  const afterAcceptance = acceptanceMs !== null && updatedAtMs > acceptanceMs;
   const deliveryState = ["queued", "sending"].includes(priorDelivery) && taskAccepted
     ? "delivered"
     : priorDelivery;
@@ -2059,7 +2067,7 @@ function supervisionPollDecision(taskId, threadId, previous) {
     updatedAt,
     deliveryState,
     messageKey: previous?.messageKey ?? null,
-    acceptanceMs: previous?.acceptanceMs ?? null,
+    acceptanceMs,
     threadKey: previous?.threadKey ?? null,
     generation: previous?.generation ?? null,
   };
@@ -2107,7 +2115,7 @@ function supervisionPollDecision(taskId, threadId, previous) {
       remember: true,
     };
   }
-  if (row && previous?.acceptanceMs !== null && previous?.acceptanceMs !== undefined && !afterAcceptance) {
+  if (row && acceptanceMs !== null && !afterAcceptance) {
     return { ...observed, line: null, retire: false, remember: true };
   }
   const stopped = row

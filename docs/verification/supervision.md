@@ -600,7 +600,7 @@ ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while
 ok - fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker
 ok - fm-playbot-lanes: failed restoration re-registration is loud even for identical check bytes
 ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself
-ok - fm-playbot-lanes: naturally drained completion before first poll retires exactly once
+ok - fm-playbot-lanes: rollout acceptance advances the terminal boundary before retirement
 ok - fm-playbot-lanes: exact-thread delivery and recall evidence stay ownership-safe
 ok - fm-playbot-lanes: delivered unreadability retires while restored unknown delivery stays armed
 ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace
@@ -628,9 +628,9 @@ Not verified against a live Playbot: creating a real throwaway workspace and dri
 Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
 
 A parked worker is a standing condition and a finished one is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
-A queued or sending task advances only when Playbot's persisted local-message ledger binds the exact message to a turn on that worker session, or when `drop_queued_message` gets `not-recallable` for the exact message on the worker that owns it, while UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.
+A queued or sending task advances only when Playbot's persisted local-message ledger binds the exact message to a turn on that worker session, that session's persisted rollout records the exact client message id after the current acceptance boundary, or `drop_queued_message` gets `not-recallable` for the exact message on the worker that owns it, while UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.
 It is reported when it appears and then stays quiet, because every branch that can print fires on a difference from the last observation rather than on a condition still being true, and `pending_input` is the one deliberate exception since answering the card is what resolves it.
-That change is decided on `agent_status` and `updated_at` after the task-specific `last_user_activity_at` acceptance boundary, because a send does not wait for the turn to start.
+That change is decided on `agent_status` and `updated_at` after the task-specific acceptance boundary, which starts from `last_user_activity_at` and advances with exact-message acceptance because a send does not wait for the turn to start.
 The fixture drives both an accepted turn that finishes before the first poll and a preceding turn that reaches `ready` immediately before the new send, proving the former retires and the latter stays armed until the new task itself completes.
 That transition rule, the queued-task rule above it, and the reserved refusal status below were all added on 2026-08-25, after the 2026-08-24 live run, and the transition rule gave the generated check a third argument, `--state`, so the live lines recorded here were produced by the earlier two-argument invocation and every rule added that day is proved against the hermetic fixture rather than live.
 The check's bytes are hash-bound by `bin/fm-check-register.sh`, so that record is a separate private file rather than a rewrite of the check, and `bin/fm-teardown.sh` removes it with the rest of a task's state.
