@@ -594,9 +594,11 @@ On 2026-08-27, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed al
 ```text
 ok - fm-playbot-lanes: an external-terminal dispatch arms and registers that worker's watcher poll
 ok - fm-playbot-lanes: task acceptance boundaries preserve fast completion without crossing turns
+ok - fm-playbot-lanes: forced exact-message delivery retires after terminal completion
 ok - fm-playbot-lanes: retirement distinguishes an armed check from orphaned cleanup
 ok - fm-playbot-lanes: the armed poll keeps the real watcher silent while the worker is working
 ok - fm-playbot-lanes: the armed poll wakes the real watcher when the worker parks, naming the task
+ok - fm-playbot-lanes: missing post-send acceptance stays unconfirmed and armed
 ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while the worker stays parked
 ok - fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker
 ok - fm-playbot-lanes: failed restoration re-registration is loud even for identical check bytes
@@ -630,10 +632,11 @@ The generated check was then registered into a scratch home with the real `bin/f
 Not verified against a live Playbot: creating a real throwaway workspace and driving a real worker through it.
 Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
 
-A parked worker is a standing condition and a finished one is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
+A parked worker is a standing condition and a delivered worker finishing is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
 A queued, sending, or recall-pending task advances only when that worker session's persisted rollout records the exact client message id after the current acceptance boundary, while a ledger turn binding, `not-recallable` outcome, or failed recall without that timestamp stays armed and promotable, and UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.
 It is reported when it appears and then stays quiet, because every branch that can print fires on a difference from the last observation rather than on a condition still being true, and `pending_input` is the one deliberate exception since answering the card is what resolves it.
-That change is decided on `agent_status` and `updated_at` after the task-specific acceptance boundary, which starts from `last_user_activity_at` and advances with exact-message acceptance because a send does not wait for the turn to start.
+That change is decided on `agent_status` and `updated_at` after the task-specific acceptance boundary, which starts from a fresh post-send `last_user_activity_at` and advances with exact-message acceptance because a send does not wait for the turn to start.
+When that post-send refresh cannot establish the boundary, the poll keeps delivery unconfirmed and remains armed rather than falling back to a pre-send timestamp.
 The fixture drives both an accepted turn that finishes before the first poll and a preceding turn that reaches `ready` immediately before the new send, proving the former retires and the latter stays armed until the new task itself completes.
 That transition rule, the queued-task rule above it, and the reserved refusal status below were all added on 2026-08-25, after the 2026-08-24 live run, and the transition rule gave the generated check a third argument, `--state`, so the live lines recorded here were produced by the earlier two-argument invocation and every rule added that day is proved against the hermetic fixture rather than live.
 The check's bytes are hash-bound by `bin/fm-check-register.sh`, so that record is a separate private file rather than a rewrite of the check, and `bin/fm-teardown.sh` removes it with the rest of a task's state.
@@ -642,6 +645,7 @@ The check's bytes are hash-bound by `bin/fm-check-register.sh`, so that record i
 The lane arming leaves a foreign check byte-identical, and `bin/fm-pr-check.sh` refuses by name and exits non-zero when it would publish over a lane poll.
 The suite proves that second direction by arming a real generated lane poll and then running the real `bin/fm-pr-check.sh` for the same task id, which leaves the lane poll intact and its trust binding valid.
 That refusal costs merge detection only, never the merge: it exits with the status `bin/fm-pr-lib.sh` reserves for it, and `bin/fm-pr-merge.sh` continues past that one status while every other failure still aborts the merge.
+The collision persists until proven delivery lets the lane poll retire on a terminal state or a matching task teardown removes it; failed, recalled, or unconfirmed delivery remains armed.
 `bash tests/fm-pr-merge.test.sh` proves both halves with a recording fake forge on PATH, one case binding a marker-bearing lane-poll fixture through the real `bin/fm-check-register.sh` and merging anyway, and one case failing a state-integrity prepass on a re-run whose `pr=` is already recorded and never reaching the forge at all, and passed all 12 checks on 2026-08-25.
 
 On 2026-08-25, forced steering was live-verified against Playbot 0.95.0 on Linux with `playbot_lanes@0.4.0` and Node v26.7.0.

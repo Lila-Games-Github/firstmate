@@ -1380,9 +1380,10 @@ ${SUPERVISION_CHECK_MARKER}
 # bin/fm-playbot-lanes.mjs when an external-terminal caller dispatched that
 # worker. Generated from a fixed template: the only interpolated values are this
 # server's own resolved paths and the validated task and thread ids.
-# Prints one line when the worker parks on a card, and one line on the change
-# into a stopped or unreadable state, after which it retires itself. Silent
-# while the worker is working and silent once it has reported a finished one.
+# Prints one line when the worker parks on a card. After proven delivery, it
+# prints one line on the change into a stopped or unreadable state and retires
+# itself; without that proof it reports the uncertainty and remains armed.
+# Silent while the worker is working and after it has reported a finished one.
 # Re-arm through dispatch rather than editing this file: the watcher runs only
 # the exact bytes bin/fm-check-register.sh bound, so an edit disarms the poll.
 set -u
