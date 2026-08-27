@@ -6,13 +6,15 @@
 // caller without one is an external terminal that dispatches without a lane
 // and supervises by polling.
 //
-// This executable has six entry points:
-//   serve          Run the stdio MCP server.
-//   install        Register the MCP server and inert global Playbot hooks.
-//   hook-pretool   Capture the exact Codex session invoking one MCP tool.
-//   hook-stop      Wake a routed controller after a worker turn completes.
-//   setup          Install, reload, and verify the complete integration.
-//   doctor         Print bounded local integration diagnostics.
+// This executable has seven entry points:
+//   serve             Run the stdio MCP server.
+//   install           Register the MCP server and inert global Playbot hooks.
+//   hook-pretool      Capture the exact Codex session invoking one MCP tool.
+//   hook-stop         Wake a routed controller after a worker turn completes.
+//   supervision-poll  Report one dispatched worker's persisted state as the
+//                     firstmate watcher check that dispatch armed for it.
+//   setup             Install, reload, and verify the complete integration.
+//   doctor            Print bounded local integration diagnostics.
 //
 // The server talks to Playbot through its local Electron DevTools socket and
 // invokes Playbot's own IPC handlers: threads:launch for chat and workspace
@@ -43,6 +45,7 @@
 //
 // Requires Node.js 22.5 or newer for node:sqlite.
 
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -161,6 +164,7 @@ function threadRows() {
         t.archived,
         t.approval_mode,
         t.plan_mode,
+        t.last_user_activity_at,
         t.created_at,
         t.updated_at,
         w.project_id,
@@ -766,15 +770,25 @@ async function sendMessage(row, text, force = false) {
     }
   };
   const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
+  let fresh = null;
   try {
+    try {
+      fresh = refreshThread(row);
+    } catch {
+      fresh = null;
+    }
+    const sendResult = () => ({
+      thread: resultThread(),
+      supervisionAcceptance: fresh ? supervisionArmingBaseline(fresh) : null,
+    });
     const delivery = await deliveryVerdict(response, value, row.thread_id);
-    if (!force) return { thread: resultThread(), delivery };
+    if (!force) return { ...sendResult(), delivery };
     if (delivery.state !== "queued") {
       const forceState = delivery.state === "delivered" || delivery.state === "sending"
         ? "not-needed"
         : delivery.state === "failed" ? "not-applied" : "unknown";
       return {
-        thread: resultThread(),
+        ...sendResult(),
         delivery,
         force: {
           requested: true,
@@ -787,7 +801,7 @@ async function sendMessage(row, text, force = false) {
     }
     if (!delivery.messageId) {
       return {
-        thread: resultThread(),
+        ...sendResult(),
         delivery: {
           ...delivery,
           note: "Playbot confirmed the message is queued but returned no message id, so force was not attempted because the exact held message cannot be addressed safely.",
@@ -809,7 +823,7 @@ async function sendMessage(row, text, force = false) {
       });
     } catch (error) {
       return {
-        thread: resultThread(),
+        ...sendResult(),
         delivery: {
           state: "unknown",
           messageId: delivery.messageId,
@@ -826,12 +840,13 @@ async function sendMessage(row, text, force = false) {
       };
     }
     return {
-      thread: resultThread(),
+      ...sendResult(),
       ...forcedDeliveryVerdict(forcedResponse, delivery),
     };
   } catch (error) {
     const accepted = error instanceof Error ? error : new Error(String(error));
     accepted.sendReachedPlaybot = true;
+    if (fresh) accepted.supervisionAcceptance = supervisionArmingBaseline(fresh);
     throw accepted;
   }
 }
@@ -1007,10 +1022,24 @@ function recallOutcomeClause(outcome) {
 
 // null means the ledger is present but unreadable, never that nothing is held;
 // 0 is reserved for an absent or empty queue.
-function queuedMessageCount(pendingQueueJson) {
-  if (typeof pendingQueueJson !== "string" || !pendingQueueJson.trim()) return 0;
+function persistedMessages(pendingQueueJson) {
+  if (typeof pendingQueueJson !== "string" || !pendingQueueJson.trim()) return [];
   const ledger = readJsonText(pendingQueueJson);
-  return Array.isArray(ledger?.messages) ? ledger.messages.length : null;
+  return Array.isArray(ledger?.messages) ? ledger.messages : null;
+}
+
+function queuedMessages(pendingQueueJson) {
+  const messages = persistedMessages(pendingQueueJson);
+  if (messages === null) return null;
+  return messages.filter((message) => {
+    const state = message?.state?.type;
+    return state === undefined || state === "queued" || state === "steering";
+  });
+}
+
+function queuedMessageCount(pendingQueueJson) {
+  const messages = queuedMessages(pendingQueueJson);
+  return messages === null ? null : messages.length;
 }
 
 function readJsonText(text) {
@@ -1268,6 +1297,935 @@ function registerLane(supervisor, worker) {
   return saveRoute(supervisor, worker, prior);
 }
 
+// --- Watcher supervision poll for external-terminal lanes ---------------------
+//
+// A Playbot-chat caller gets registerLane above and its routed Stop-hook wakes.
+// An external-terminal caller gets no push path at all: identify_current_thread
+// reports external-terminal, register_lane refuses it, and a Stop hook only ever
+// wakes a chat. Polling is therefore the only supervision that exists for it, and
+// leaving the caller to write that poll by hand is what produced three dispatched
+// workers with nothing watching them on 2026-08-24. A dispatch result that names
+// polling tools while arming no poll instructs the caller instead of serving it,
+// so arming is this server's job and happens inside the dispatch call.
+//
+// This is a stdio server with no life between calls, so it cannot poll itself.
+// It registers the poll with the supervision that already exists - firstmate's
+// watcher - by writing state/<task-id>.check.sh under the controller root and
+// binding it through bin/fm-check-register.sh, which is the one owner of the
+// watcher's trust binding. The watcher executes only the exact bytes that
+// registration bound, so the check is generated from the fixed template below
+// with nothing interpolated but this server's own resolved paths and the
+// validated task and thread ids; no caller-supplied text ever reaches it, and
+// the trust store is never written here.
+//
+// create_chat deliberately arms nothing. It creates an empty chat and starts no
+// agent turn, so there is no worker to supervise yet and an armed poll would
+// immediately report a chat that stopped without a card. The dispatch that sends
+// that chat its task is what arms the poll.
+
+const SUPERVISION_CHECK_MARKER = "# fm-playbot-lane-supervision-poll v1";
+const SUPERVISION_TOOLS = ["get_thread_status", "read_thread", "get_thread_card"];
+const SUPERVISION_CHECK_SHEBANG = "#!/usr/bin/env bash";
+const SUPERVISION_SIDECAR_VERSION = "fm-playbot-lane-poll-v8";
+const SUPERVISION_SIDECAR_VERSION_V7 = "fm-playbot-lane-poll-v7";
+const SUPERVISION_SIDECAR_VERSION_V6 = "fm-playbot-lane-poll-v6";
+const SUPERVISION_SIDECAR_VERSION_V5 = "fm-playbot-lane-poll-v5";
+const SUPERVISION_SIDECAR_VERSION_V4 = "fm-playbot-lane-poll-v4";
+const SUPERVISION_SIDECAR_VERSION_V3 = "fm-playbot-lane-poll-v3";
+const SUPERVISION_SIDECAR_VERSION_V2 = "fm-playbot-lane-poll-v2";
+const SUPERVISION_DELIVERY_STATES = new Set(["delivered", "queued", "sending", "recall-pending", "recalled", "failed", "unknown", "unconfirmed"]);
+// The status a chat that Playbot no longer holds is recorded under. It is not
+// one of Playbot's own agent_status values, so it can never collide with one.
+const SUPERVISION_ABSENT = "chat-absent";
+
+// The shape bin/fm-pr-lib.sh's fm_task_id_path_safe accepts, plus the 64-character
+// bound fm_task_id_creation_valid applies, because this id names a file in the
+// controller's state directory and fm-check-register.sh revalidates it before
+// binding anything.
+function supervisionTaskIdValid(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 64
+    && !value.startsWith(".")
+    && /^[A-Za-z0-9._-]+$/.test(value);
+}
+
+function supervisionRefuse(message) {
+  throw new Error(message);
+}
+
+function supervisionErrorDetail(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+// Quoting alone would survive a newline, but a template whose every line is one
+// command is far easier to audit than one that might not be, so a path carrying
+// a newline or NUL refuses instead of being escaped into the file.
+function supervisionPath(value, label) {
+  const text = String(value ?? "");
+  if (!text || !path.isAbsolute(text) || /[\0\n\r]/.test(text)) {
+    supervisionRefuse(`${label} is not a usable absolute path for a generated check: ${JSON.stringify(text)}`);
+  }
+  return text;
+}
+
+function supervisionCheckScript({ taskId, threadId, generation, nodeBin, scriptPath, desktop, state }) {
+  return `${SUPERVISION_CHECK_SHEBANG}
+${SUPERVISION_CHECK_MARKER}
+# Firstmate watcher poll for one Playbot lane worker, armed by
+# bin/fm-playbot-lanes.mjs when an external-terminal caller dispatched that
+# worker. Generated from a fixed template: the only interpolated values are this
+# server's own resolved paths and the validated task and thread ids.
+# Prints one line when the worker parks on a card. After proven delivery, it
+# prints one line on the change into a stopped or unreadable state and retires
+# itself; without that proof it reports the uncertainty and remains armed.
+# Silent while the worker is working and after it has reported a finished one.
+# Re-arm through dispatch rather than editing this file: the watcher runs only
+# the exact bytes bin/fm-check-register.sh bound, so an edit disarms the poll.
+set -u
+export PLAYBOT_DESKTOP_DIR=${shellQuote(desktop)}
+exec ${shellQuote(nodeBin)} ${shellQuote(scriptPath)} supervision-poll --task ${shellQuote(taskId)} --thread ${shellQuote(threadId)} --state ${shellQuote(state)} --generation ${shellQuote(generation)}
+`;
+}
+
+function supervisionCheckIsOurs(text) {
+  return text.startsWith(`${SUPERVISION_CHECK_SHEBANG}\n${SUPERVISION_CHECK_MARKER}\n`);
+}
+
+// This server's own absolute path, which is also where fm-check-register.sh
+// lives: both are in the tracked bin/ directory, while the controller root is
+// the firstmate HOME that owns state/. Resolving the helper from the code root
+// rather than from the home is what lets a secondmate home, whose state/ and
+// bin/ are different directories, arm a poll at all.
+function supervisionSelfScript() {
+  const raw = process.argv[1];
+  if (!raw) supervisionRefuse("this server's own script path is unknown, so no check can name it");
+  try {
+    return fs.realpathSync.native(path.resolve(raw));
+  } catch {
+    return path.resolve(raw);
+  }
+}
+
+function serverBuildIdentity() {
+  return `sha256:${crypto.createHash("sha256").update(fs.readFileSync(supervisionSelfScript())).digest("hex")}`;
+}
+
+function supervisionStateDir() {
+  const state = path.join(controllerRoot(), "state");
+  let stat;
+  try {
+    stat = fs.lstatSync(state);
+  } catch {
+    supervisionRefuse(`${state} does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll`);
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    supervisionRefuse(`${state} is not a real directory, so no watcher poll can be written there`);
+  }
+  return state;
+}
+
+// fm-check-register.sh resolves its state directory as
+// ${FM_STATE_OVERRIDE:-$FM_HOME/state}, so an inherited override would bind a
+// directory other than the one this arming just wrote into - and if a check of
+// the same name happened to live there, it would report success for bytes this
+// server never wrote. The arming deliberately resolves state from the
+// controller root, so the redirecting variables are cleared for this child and
+// FM_HOME alone decides.
+function supervisionRegister(taskId, register) {
+  const env = { ...process.env, FM_HOME: controllerRoot() };
+  delete env.FM_STATE_OVERRIDE;
+  delete env.FM_ROOT_OVERRIDE;
+  const result = spawnSync(register, [taskId], {
+    env,
+    encoding: "utf8",
+    timeout: 20_000,
+  });
+  if (result.error) return { ok: false, detail: result.error.message };
+  if (result.status !== 0) {
+    const detail = `${result.stderr ?? ""} ${result.stdout ?? ""}`.trim() || `exit ${result.status}`;
+    return { ok: false, detail };
+  }
+  return { ok: true, detail: String(result.stdout ?? "").trim() };
+}
+
+function supervisionWriteCheck(state, taskId, script) {
+  return supervisionPublish(state, `${taskId}.check.sh`, script, 0o700);
+}
+
+// The armed poll must not rewrite its own check to remember anything: the
+// watcher executes only the exact bytes fm-check-register.sh bound, so a check
+// that edited itself would disarm itself. The last observed status therefore
+// lives in this private sidecar beside the check, written with the same atomic
+// temp-then-rename discipline, and is removed with the check when the poll
+// retires or the task is torn down.
+function supervisionSidecarPath(state, taskId) {
+  return path.join(state, `${taskId}.lane-poll`);
+}
+
+// One observation is a status AND the row's updated_at, because a bare status
+// cannot tell a worker that ran and finished from one that never started: both
+// read back as 'ready'. threadRows() already selects t.updated_at, so the pair
+// costs no extra read and no extra file.
+function supervisionField(value) {
+  return String(value ?? "").replace(/[\r\n]+/g, " ");
+}
+
+function supervisionDeliveryState(value) {
+  return SUPERVISION_DELIVERY_STATES.has(value) ? value : "unconfirmed";
+}
+
+function supervisionMessageKey(value) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return `sha256:${crypto.createHash("sha256").update(value).digest("hex")}`;
+}
+
+function supervisionThreadKey(value) {
+  return supervisionMessageKey(value);
+}
+
+function supervisionTimestampMs(value) {
+  const parsed = Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function supervisionWriteSidecar(state, taskId, observation) {
+  const delivery = supervisionDeliveryState(observation.deliveryState);
+  const messageKey = observation.messageKey ?? "none";
+  const acceptanceMs = observation.acceptanceMs ?? "none";
+  const threadKey = observation.threadKey ?? "none";
+  const body = `${SUPERVISION_SIDECAR_VERSION}\n${supervisionField(observation.status)}\n${supervisionField(observation.updatedAt)}\n${delivery}\n${supervisionField(observation.generation)}\n${messageKey}\n${acceptanceMs}\n${threadKey}\n`;
+  return supervisionPublish(state, `${taskId}.lane-poll`, body, 0o600);
+}
+
+function supervisionSameObservation(left, right) {
+  return Boolean(left) && Boolean(right)
+    && left.status === supervisionField(right.status)
+    && left.updatedAt === supervisionField(right.updatedAt)
+    && supervisionDeliveryState(left.deliveryState) === supervisionDeliveryState(right.deliveryState)
+    && (left.messageKey ?? null) === (right.messageKey ?? null)
+    && (left.acceptanceMs ?? null) === (right.acceptanceMs ?? null)
+    && (left.threadKey ?? null) === (right.threadKey ?? null)
+    && (left.generation ?? null) === (right.generation ?? null);
+}
+
+function supervisionPublish(state, name, contents, mode) {
+  const target = path.join(state, name);
+  const tmp = path.join(state, `.fm-playbot-check.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`);
+  try {
+    fs.writeFileSync(tmp, contents, { encoding: "utf8", mode });
+    // writeFileSync's mode is masked by the umask this server inherited, and
+    // fm-check-register.sh requires the check to be exactly 0700, so the mode
+    // is set explicitly rather than requested.
+    fs.chmodSync(tmp, mode);
+    fs.renameSync(tmp, target);
+  } catch (error) {
+    fs.rmSync(tmp, { force: true });
+    supervisionRefuse(`could not write ${target}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return target;
+}
+
+function supervisionReadSidecarText(state, taskId) {
+  try {
+    return fs.readFileSync(supervisionSidecarPath(state, taskId), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function supervisionReadSidecar(state, taskId) {
+  const text = supervisionReadSidecarText(state, taskId);
+  if (text === null) return null;
+  const lines = text.split("\n");
+  if (!lines[1]) return null;
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V2) {
+    return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: "unconfirmed", generation: null };
+  }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V3 && ["delivered", "unconfirmed"].includes(lines[3])) {
+    return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: null };
+  }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V4
+    && ["delivered", "unconfirmed"].includes(lines[3])
+    && /^[a-f0-9]{32}$/.test(lines[4] ?? "")) {
+    return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: lines[4] };
+  }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V5) {
+    if (!SUPERVISION_DELIVERY_STATES.has(lines[3])
+      || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")) return null;
+    return { status: lines[1], updatedAt: lines[2] ?? "", deliveryState: lines[3], generation: lines[4], messageKey: null };
+  }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V6) {
+    if (!SUPERVISION_DELIVERY_STATES.has(lines[3])
+      || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")
+      || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")) return null;
+    return {
+      status: lines[1],
+      updatedAt: lines[2] ?? "",
+      deliveryState: lines[3],
+      generation: lines[4],
+      messageKey: lines[5] === "none" ? null : lines[5],
+      acceptanceMs: null,
+    };
+  }
+  if (lines[0] === SUPERVISION_SIDECAR_VERSION_V7) {
+    if (!SUPERVISION_DELIVERY_STATES.has(lines[3])
+      || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")
+      || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")
+      || !/^(?:none|[0-9]+)$/.test(lines[6] ?? "")) return null;
+    return {
+      status: lines[1],
+      updatedAt: lines[2] ?? "",
+      deliveryState: lines[3],
+      generation: lines[4],
+      messageKey: lines[5] === "none" ? null : lines[5],
+      acceptanceMs: lines[6] === "none" ? null : Number(lines[6]),
+      threadKey: null,
+    };
+  }
+  if (lines[0] !== SUPERVISION_SIDECAR_VERSION
+    || !SUPERVISION_DELIVERY_STATES.has(lines[3])
+    || !/^[a-f0-9]{32}$/.test(lines[4] ?? "")
+    || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[5] ?? "")
+    || !/^(?:none|[0-9]+)$/.test(lines[6] ?? "")
+    || !/^(?:none|sha256:[a-f0-9]{64})$/.test(lines[7] ?? "")) return null;
+  return {
+    status: lines[1],
+    updatedAt: lines[2] ?? "",
+    deliveryState: lines[3],
+    generation: lines[4],
+    messageKey: lines[5] === "none" ? null : lines[5],
+    acceptanceMs: lines[6] === "none" ? null : Number(lines[6]),
+    threadKey: lines[7] === "none" ? null : lines[7],
+  };
+}
+
+function supervisionCheckLockAcquire(state, taskId) {
+  const helper = path.join(path.dirname(supervisionSelfScript()), "fm-check-publish-lock.sh");
+  return new Promise((resolve, reject) => {
+    const child = spawn(helper, [state, taskId], { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve({ child });
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(new Error(`timed out acquiring the shared publication lock for state/${taskId}.check.sh`));
+    }, 6_500);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (stdout === "locked\n") finish();
+      else if (stdout.includes("\n")) {
+        child.kill("SIGTERM");
+        finish(new Error(`could not verify the shared publication lock for state/${taskId}.check.sh`));
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.once("error", (error) => finish(new Error(`could not acquire the shared publication lock for state/${taskId}.check.sh: ${supervisionErrorDetail(error)}`)));
+    child.once("exit", (status) => {
+      if (!settled) finish(new Error(`could not acquire the shared publication lock for state/${taskId}.check.sh: ${stderr.trim() || `exit ${status}`}`));
+    });
+  });
+}
+
+function supervisionCheckLockRelease(held, taskId) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (problem) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(problem);
+    };
+    const timer = setTimeout(() => {
+      held.child.kill("SIGKILL");
+      finish(`timed out releasing the shared publication lock for state/${taskId}.check.sh`);
+    }, 2_000);
+    held.child.once("exit", (status) => finish(status === 0 ? null : `could not release the shared publication lock for state/${taskId}.check.sh: exit ${status}`));
+    held.child.once("error", (error) => finish(`could not release the shared publication lock for state/${taskId}.check.sh: ${supervisionErrorDetail(error)}`));
+    held.child.stdin.end("release\n");
+  });
+}
+
+async function supervisionWithCheckLock(state, taskId, callback) {
+  const held = await supervisionCheckLockAcquire(state, taskId);
+  let result;
+  let problem = null;
+  try {
+    result = await callback();
+  } catch (error) {
+    problem = error;
+  }
+  const releaseProblem = await supervisionCheckLockRelease(held, taskId);
+  if (problem) {
+    const detail = supervisionErrorDetail(problem);
+    supervisionRefuse(releaseProblem ? `${detail}; ${releaseProblem}` : detail);
+  }
+  if (releaseProblem) supervisionRefuse(releaseProblem);
+  return result;
+}
+
+// Retire exactly what arming created. The merged-PR poll retires itself the same
+// way through fm_pr_poll_retirement_publish, and for the same reason: a check
+// nothing will act on again must stop being armed rather than re-waking
+// firstmate every check interval for news it has already handled.
+function supervisionRetire(state, taskId) {
+  const checkName = `${taskId}.check.sh`;
+  const checkPath = path.join(state, checkName);
+  try {
+    fs.rmSync(checkPath, { force: true });
+    try {
+      fs.lstatSync(checkPath);
+      return { checkRemoved: false, problems: [`${checkName}: removal reported success but the check still exists`] };
+    } catch (error) {
+      if (!(error instanceof Error) || error.code !== "ENOENT") {
+        return { checkRemoved: false, problems: [`${checkName}: could not confirm removal: ${error instanceof Error ? error.message : String(error)}`] };
+      }
+    }
+  } catch (error) {
+    return { checkRemoved: false, problems: [`${checkName}: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+
+  const problems = [];
+  // The executable check is what fires, so its trust binding and observed-state
+  // record are removed only after the check is confirmed gone. If check removal
+  // fails, leaving all three artifacts intact keeps the poll armed and registered
+  // instead of turning it into a rejected unauthenticated check on every sweep.
+  for (const name of [`${taskId}.check-trust`, `${taskId}.lane-poll`]) {
+    try {
+      fs.rmSync(path.join(state, name), { force: true });
+    } catch (error) {
+      problems.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { checkRemoved: true, problems };
+}
+
+// Write the sidecar and bind the check, in that order, so a poll can never run
+// against a state directory that has no record of what it last saw.
+function supervisionBind({ state, taskId, register, observation }) {
+  try {
+    supervisionWriteSidecar(state, taskId, observation);
+  } catch (error) {
+    return { ok: false, detail: `the poll's observed-state record could not be written: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const registration = supervisionRegister(taskId, register);
+  if (!registration.ok) {
+    return { ok: false, detail: `fm-check-register.sh refused to bind state/${taskId}.check.sh: ${registration.detail}` };
+  }
+  return { ok: true, detail: registration.detail };
+}
+
+// A failed arming must never leave the task with LESS supervision than it had.
+// fm-check-register.sh removes the trust file when its own final verify fails,
+// so even an identical-bytes re-arm has to be restored and rebound; only an
+// arming that created the check from nothing removes it outright.
+function supervisionRestore({ state, taskId, register, existed, previousCheck, previousSidecar }) {
+  try {
+    if (existed) {
+      supervisionWriteCheck(state, taskId, previousCheck);
+      if (previousSidecar === null) fs.rmSync(supervisionSidecarPath(state, taskId), { force: true });
+      else supervisionPublish(state, `${taskId}.lane-poll`, previousSidecar, 0o600);
+      const registration = supervisionRegister(taskId, register);
+      if (!registration.ok) return { ok: false, detail: `restoration re-registration failed: ${registration.detail}` };
+      return { ok: true, detail: registration.detail };
+    }
+    fs.rmSync(path.join(state, `${taskId}.check.sh`), { force: true });
+    fs.rmSync(supervisionSidecarPath(state, taskId), { force: true });
+    return { ok: true, detail: "removed the unbound replacement" };
+  } catch (error) {
+    return { ok: false, detail: `restoration failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+// The accepted row is recorded before the poll ever runs so its task-specific
+// activity boundary separates this turn from any turn that finished before it.
+function supervisionArmingBaseline(worker) {
+  return {
+    status: String(worker.agent_status ?? "unknown"),
+    updatedAt: String(worker.updated_at ?? ""),
+    acceptanceMs: supervisionTimestampMs(worker.last_user_activity_at),
+    threadKey: supervisionThreadKey(worker.thread_id),
+  };
+}
+
+function supervisionArmingObservation(baseline, delivery, generation) {
+  return {
+    ...baseline,
+    deliveryState: delivery?.state === "steering" ? "delivered" : supervisionDeliveryState(delivery?.state),
+    messageKey: supervisionMessageKey(delivery?.messageId),
+    acceptanceMs: baseline.acceptanceMs ?? null,
+    generation,
+  };
+}
+
+async function supervisionPrepareRecall(threadId, messageId) {
+  const messageKey = supervisionMessageKey(messageId);
+  const threadKey = supervisionThreadKey(threadId);
+  if (!messageKey || !threadKey) return [];
+  const state = path.join(controllerRoot(), "state");
+  let stat;
+  try {
+    stat = fs.lstatSync(state);
+  } catch {
+    return [];
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return [];
+  const tasks = fs.readdirSync(state)
+    .filter((name) => name.endsWith(".lane-poll"))
+    .map((name) => name.slice(0, -".lane-poll".length))
+    .filter(supervisionTaskIdValid)
+    .filter((taskId) => {
+      const previous = supervisionReadSidecar(state, taskId);
+      return previous?.threadKey === threadKey
+        && previous.messageKey === messageKey
+        && ["queued", "sending"].includes(previous.deliveryState);
+    });
+  const prepared = [];
+  for (const taskId of tasks) {
+    await supervisionWithCheckLock(state, taskId, () => {
+      const previous = supervisionReadSidecar(state, taskId);
+      if (!previous
+        || previous.messageKey !== messageKey
+        || previous.threadKey !== threadKey
+        || !["queued", "sending"].includes(previous.deliveryState)) return;
+      supervisionWriteSidecar(state, taskId, { ...previous, deliveryState: "recall-pending" });
+      prepared.push({
+        state,
+        taskId,
+        generation: previous.generation,
+        messageKey,
+        threadKey,
+        deliveryState: previous.deliveryState,
+        acceptanceMs: previous.acceptanceMs,
+      });
+    });
+  }
+  return prepared;
+}
+
+async function supervisionResolveRecall(prepared, outcome, threadId) {
+  const problems = [];
+  let row = null;
+  if (outcome === "not-recallable") {
+    try {
+      row = threadRowById(threadId);
+    } catch {
+      row = null;
+    }
+  }
+  for (const item of prepared) {
+    try {
+      const rolloutAcceptanceMs = outcome === "not-recallable"
+        && item.threadKey === supervisionThreadKey(row?.thread_id)
+        ? supervisionRolloutAcceptanceMs(row, item.messageKey, item.acceptanceMs)
+        : null;
+      await supervisionWithCheckLock(item.state, item.taskId, () => {
+        const current = supervisionReadSidecar(item.state, item.taskId);
+        if (!current
+          || current.generation !== item.generation
+          || current.messageKey !== item.messageKey
+          || current.threadKey !== item.threadKey
+          || current.deliveryState !== "recall-pending") return;
+        const deliveryState = outcome === "recalled"
+          ? "recalled"
+          : outcome === "not-recallable" && rolloutAcceptanceMs !== null
+            ? "delivered"
+            : outcome === "not-recallable" ? item.deliveryState : "recall-pending";
+        const acceptanceMs = rolloutAcceptanceMs === null
+          ? current.acceptanceMs
+          : Math.max(current.acceptanceMs ?? rolloutAcceptanceMs, rolloutAcceptanceMs);
+        supervisionWriteSidecar(item.state, item.taskId, { ...current, deliveryState, acceptanceMs });
+      });
+    } catch (error) {
+      problems.push(`state/${item.taskId}.lane-poll: ${supervisionErrorDetail(error)}`);
+    }
+  }
+  return problems;
+}
+
+// Arm one worker's watcher poll and report exactly what happened. Never throws
+// into the caller's dispatch: the send has already reached Playbot by the time
+// this runs, so a failure here is reported loudly in the result rather than
+// turning a completed dispatch into an error.
+async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, delivery = null }) {
+  const taskId = requestedTaskId ?? worker.workspace_id;
+  const taskIdSource = requestedTaskId ? "argument" : "workspace-id";
+  const report = {
+    mode: "poll",
+    tools: SUPERVISION_TOOLS,
+    taskId,
+    taskIdSource,
+    thread: worker.thread_id,
+    check: supervisionTaskIdValid(taskId) ? `state/${taskId}.check.sh` : null,
+    armed: false,
+  };
+  try {
+    if (!supervisionTaskIdValid(taskId)) {
+      supervisionRefuse(`'${taskId}' cannot key a watcher poll; pass taskId as a firstmate task id of up to 64 characters from A-Z, a-z, 0-9, dot, dash, and underscore, not starting with a dot`);
+    }
+    if (!/^[A-Za-z0-9._-]{1,200}$/.test(String(worker.thread_id))) {
+      supervisionRefuse(`Playbot thread id '${worker.thread_id}' is not a shape this generated check can carry`);
+    }
+    const state = supervisionStateDir();
+    const script = supervisionSelfScript();
+    const register = path.join(path.dirname(script), "fm-check-register.sh");
+    const lockHelper = path.join(path.dirname(script), "fm-check-publish-lock.sh");
+    if (!fs.existsSync(register) || !fs.existsSync(lockHelper)) {
+      supervisionRefuse(`the watcher's registration or publication-lock helper is missing beside ${script}, so no poll was armed`);
+    }
+    const generation = crypto.randomBytes(16).toString("hex");
+    const desired = supervisionCheckScript({
+      taskId,
+      threadId: worker.thread_id,
+      generation,
+      nodeBin: supervisionPath(process.execPath, "the Node runtime"),
+      scriptPath: supervisionPath(script, "this server's script"),
+      desktop: supervisionPath(desktopDir(), "the Playbot desktop directory"),
+      state: supervisionPath(state, "the controller's state directory"),
+    });
+    const bound = await supervisionWithCheckLock(state, taskId, () => {
+      const target = path.join(state, `${taskId}.check.sh`);
+      let previous = null;
+      let existed = false;
+      let stat = null;
+      try {
+        stat = fs.lstatSync(target);
+      } catch {
+        stat = null;
+      }
+      if (stat) {
+        if (!stat.isFile() || stat.isSymbolicLink()) {
+          supervisionRefuse(`state/${taskId}.check.sh exists and is not a regular file, so it was left untouched`);
+        }
+        const text = fs.readFileSync(target, "utf8");
+        if (!supervisionCheckIsOurs(text)) {
+          supervisionRefuse(`state/${taskId}.check.sh already holds a check this server did not generate, so it was left untouched; dispatch with a different taskId or retire that check first`);
+        }
+        existed = true;
+        previous = text;
+        report.rearmed = true;
+      }
+      const previousSidecar = existed ? supervisionReadSidecarText(state, taskId) : null;
+      if (previous !== desired) supervisionWriteCheck(state, taskId, desired);
+      const observation = supervisionArmingObservation(baseline ?? supervisionArmingBaseline(worker), delivery, generation);
+      const registration = supervisionBind({ state, taskId, register, observation });
+      if (!registration.ok) {
+        const restored = supervisionRestore({ state, taskId, register, existed, previousCheck: previous, previousSidecar });
+        supervisionRefuse(restored.ok ? registration.detail : `${registration.detail}; ${restored.detail}`);
+      }
+      return registration;
+    });
+    report.armed = true;
+    report.registration = bound.detail;
+    report.firesOn = "the worker parking on a card, and the change into stopping without one or becoming unreadable";
+    report.silentWhile = "working, and after it has reported a worker that finished";
+    report.retiresOn = "after proven delivery, reporting a worker that stopped or became unreadable, which removes the check, its trust binding, and its observed-state record; failed, recalled, or unconfirmed delivery stays armed";
+    report.note = taskIdSource === "workspace-id"
+      ? "No taskId was given, so the poll is keyed on the workspace id and firstmate's task teardown will not retire it; retire it by hand when the work lands."
+      : "Firstmate's task teardown retires this poll with the task.";
+    return report;
+  } catch (error) {
+    report.armed = false;
+    report.problem = error instanceof Error ? error.message : String(error);
+    return report;
+  }
+}
+
+function supervisionArmWarning(report) {
+  return `SUPERVISION NOT ARMED: this worker was dispatched and nothing is polling it. ${report.problem} Arm a poll before relying on a wake, or supervise it by hand with ${SUPERVISION_TOOLS.join(", ")}.`;
+}
+
+// --- The armed poll itself ---------------------------------------------------
+//
+// Runs as the watcher's per-task check, once per check interval, from the
+// generated script above. It reads persisted Playbot state only: it contacts
+// Playbot not at all, resumes nothing, and starts no turn, which is what keeps a
+// per-task poll cheap enough for the watcher to run unattended.
+//
+// A persisted pending_input is a CANDIDATE, never proof: Playbot's own
+// restorePersistedAgentStatus collapses working into pending_input for a merely
+// database-hydrated chat, so the wake line says so and names get_thread_card as
+// the confirming read, exactly as list_parked_threads does.
+
+function supervisionOneLine(text, max = 400) {
+  const value = String(text ?? "").replace(/\s+/g, " ").trim();
+  return value.length <= max ? value : `${value.slice(0, max - 12)} [truncated]`;
+}
+
+function supervisionHeldClause(queued) {
+  if (queued === null) return ", held messages unreadable";
+  if (queued > 0) return `, ${queued} held message${queued === 1 ? "" : "s"}`;
+  return "";
+}
+
+function supervisionRolloutAcceptanceMs(row, messageKey, acceptanceMs) {
+  if (typeof row?.session_id !== "string" || !row.session_id || !messageKey || !Number.isFinite(acceptanceMs)) return null;
+  let session;
+  try {
+    session = codexSession(row.session_id);
+  } catch {
+    return null;
+  }
+  if (!session?.rollout_path || !fs.existsSync(session.rollout_path)) return null;
+  const inspect = (bytes) => {
+    if (bytes.length === 0) return null;
+    let record;
+    try {
+      record = JSON.parse(bytes.toString("utf8").replace(/\r$/, ""));
+    } catch {
+      return null;
+    }
+    const timestampMs = supervisionTimestampMs(record.timestamp);
+    if (timestampMs !== null && timestampMs < acceptanceMs) return { stop: true, acceptanceMs: null };
+    const payload = record.type === "event_msg" ? record.payload : null;
+    if (payload?.type !== "user_message" || timestampMs === null) return null;
+    return supervisionMessageKey(payload.client_id) === messageKey
+      ? { stop: true, acceptanceMs: timestampMs }
+      : null;
+  };
+  let fd;
+  try {
+    fd = fs.openSync(session.rollout_path, "r");
+    let position = fs.fstatSync(fd).size;
+    let carry = Buffer.alloc(0);
+    const chunk = Buffer.alloc(64 * 1024);
+    while (position > 0) {
+      const length = Math.min(chunk.length, position);
+      position -= length;
+      fs.readSync(fd, chunk, 0, length, position);
+      const data = carry.length > 0
+        ? Buffer.concat([chunk.subarray(0, length), carry])
+        : chunk.subarray(0, length);
+      let lineEnd = data.length;
+      let newline;
+      while ((newline = data.lastIndexOf(0x0a, lineEnd - 1)) >= 0) {
+        const result = inspect(data.subarray(newline + 1, lineEnd));
+        if (result?.stop) return result.acceptanceMs;
+        lineEnd = newline;
+      }
+      carry = Buffer.from(data.subarray(0, lineEnd));
+    }
+    return inspect(carry)?.acceptanceMs ?? null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+// A finished worker is news exactly once, so a stop is reported on the CHANGE
+// into it and the poll then retires itself. A worker that is still parked is a
+// standing condition rather than a transition and keeps firing every interval,
+// because it genuinely still needs its supervisor.
+//
+// The change is decided against status and updated_at beyond the task-specific
+// activity boundary. That keeps a prior turn's completion out of this task while
+// retaining a ready-to-working-to-ready completion the poll never sampled.
+//
+// Retirement is irreversible - there is no re-arm tool - so it may only ever
+// happen once the worker has actually RECEIVED its task. A dispatch onto a busy
+// chat is held in Playbot's queue, and that worker's earlier turn can end before
+// the queue drains, so an idle worker with a held message has not stopped: its
+// task has not started, and the poll stays armed. A queue that cannot be read
+// counts the same way, because unreadable is not proof of delivery, and keeping
+// a poll armed costs one wake while dropping one costs the supervision entirely.
+//
+// Every branch that can print fires on a DIFFERENCE from the last observation
+// and never on a condition merely still being true, so an undrained queue is
+// reported when it appears and then stays quiet. The single exception is
+// pending_input, which keeps firing every interval on purpose: a parked card is
+// resolved by the supervisor answering it, so that repeated wake is actionable
+// where a queue firstmate has already seen is not.
+function supervisionPollDecision(taskId, threadId, previous) {
+  const row = threadRowById(threadId);
+  const messages = row ? queuedMessages(row.pending_queue_json) : [];
+  const queued = messages === null ? null : messages.length;
+  const taskQueued = Array.isArray(messages)
+    && previous?.messageKey
+    && messages.some((message) => supervisionMessageKey(message?.id) === previous.messageKey);
+  const status = row ? supervisionField(row.agent_status ?? "unknown") : SUPERVISION_ABSENT;
+  const updatedAt = row ? supervisionField(row.updated_at) : "";
+  const updatedAtMs = supervisionTimestampMs(updatedAt);
+  const priorDelivery = supervisionDeliveryState(previous?.deliveryState);
+  const previousAcceptanceMs = Number.isFinite(previous?.acceptanceMs) ? previous.acceptanceMs : null;
+  const taskBoundToThread = previous?.messageKey
+    && previous?.threadKey === supervisionThreadKey(row?.thread_id);
+  const deliveryCanAdvance = ["queued", "sending", "recall-pending"].includes(priorDelivery) && Boolean(taskBoundToThread);
+  const rolloutAcceptanceMs = deliveryCanAdvance
+    ? supervisionRolloutAcceptanceMs(row, previous.messageKey, previousAcceptanceMs)
+    : null;
+  const taskAccepted = rolloutAcceptanceMs !== null;
+  const acceptanceMs = rolloutAcceptanceMs === null
+    ? previousAcceptanceMs
+    : Math.max(previousAcceptanceMs ?? rolloutAcceptanceMs, rolloutAcceptanceMs);
+  const afterAcceptance = acceptanceMs !== null && updatedAtMs > acceptanceMs;
+  const deliveryState = deliveryCanAdvance && taskAccepted
+    ? "delivered"
+    : priorDelivery;
+  const delivered = deliveryState === "delivered";
+  const observed = {
+    status,
+    updatedAt,
+    deliveryState,
+    messageKey: previous?.messageKey ?? null,
+    acceptanceMs,
+    threadKey: previous?.threadKey ?? null,
+    generation: previous?.generation ?? null,
+  };
+  if (status === "working") return { ...observed, line: null, retire: false, remember: true };
+  const held = supervisionHeldClause(queued);
+  if (status === "pending_input") {
+    return {
+      ...observed,
+      line: `playbot lane ${taskId}: worker ${threadId} may be parked on a card${held}; confirm with get_thread_card before answering anything`,
+      retire: false,
+      remember: true,
+    };
+  }
+  const changed = !supervisionSameObservation(previous, observed);
+  if (!changed && !(delivered && row && afterAcceptance)) {
+    return { ...observed, line: null, retire: false, remember: false };
+  }
+  if (!delivered) {
+    let unreadable;
+    let delivery;
+    if (!row) {
+      unreadable = `worker chat ${threadId} is no longer readable in Playbot state while task delivery is ${priorDelivery}`;
+      delivery = "the worker may not have seen the task";
+    } else if (queued === null) {
+      unreadable = `worker ${threadId} is idle (status ${status}) with its task queue unreadable${held}`;
+      delivery = "the worker may not have seen the task";
+    } else if (taskQueued) {
+      unreadable = `worker ${threadId} is idle (status ${status}) with its dispatched task still queued${held}`;
+      delivery = "the worker has not seen it and has not started";
+    } else if (queued > 0) {
+      unreadable = `worker ${threadId} is idle (status ${status}) with other messages still queued${held} while task delivery remains ${priorDelivery}`;
+      delivery = "the worker may not have seen the task";
+    } else {
+      unreadable = `worker ${threadId} is idle (status ${status}) while task delivery remains ${priorDelivery}`;
+      delivery = priorDelivery === "failed"
+        ? "Playbot reported that the task was not sent"
+        : ["recall-pending", "recalled"].includes(priorDelivery)
+          ? "the task was recalled or its recall is still being resolved"
+          : "the worker may not have seen the task";
+    }
+    return {
+      ...observed,
+      line: `playbot lane ${taskId}: ${unreadable}, so ${delivery}; this poll stays armed, and list_queued_messages reads the queue`,
+      retire: false,
+      remember: true,
+    };
+  }
+  if (row && acceptanceMs !== null && !afterAcceptance) {
+    return { ...observed, line: null, retire: false, remember: true };
+  }
+  const stopped = row
+    ? `playbot lane ${taskId}: worker ${threadId} stopped without a card (status ${status})${held}`
+    : `playbot lane ${taskId}: worker chat ${threadId} is no longer readable in Playbot state (archived or removed)`;
+  return { ...observed, line: stopped, retire: true, remember: false };
+}
+
+function supervisionPollArgs(argv) {
+  const values = { task: null, thread: null, state: null, generation: null };
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index];
+    if (flag !== "--task" && flag !== "--thread" && flag !== "--state" && flag !== "--generation") throw new Error(`unrecognized argument: ${flag}`);
+    const value = argv[index + 1];
+    if (value === undefined) throw new Error(`${flag} requires a value`);
+    values[flag.slice(2)] = value;
+    index += 1;
+  }
+  if (!values.task || !values.thread || !values.state) {
+    throw new Error("--task, --thread and --state are all required; re-arm this poll through dispatch");
+  }
+  if (!supervisionTaskIdValid(values.task)) throw new Error(`'${values.task}' cannot key a watcher poll`);
+  if (values.generation !== null && !/^[a-f0-9]{32}$/.test(values.generation)) throw new Error("--generation is not a valid poll generation");
+  return values;
+}
+
+// The watcher discards this poll's stderr and exit code and wakes on stdout
+// alone, so every failure is reported as the single stdout line too. A poll that
+// crashed silently would read as "nothing to report", which is the exact silence
+// this whole surface exists to remove.
+async function supervisionPoll(argv) {
+  let taskId = null;
+  try {
+    const { task, thread, state, generation } = supervisionPollArgs(argv);
+    taskId = task;
+    const result = await supervisionWithCheckLock(state, task, () => {
+      const previous = supervisionReadSidecar(state, task);
+      if (!previous) {
+        return { line: `playbot lane ${task}: supervision poll failed: its observed-state record is unreadable, so this check remains armed` };
+      }
+      if ((previous.generation ?? null) !== generation) return { line: null };
+      try {
+        const decision = supervisionPollDecision(task, thread, previous);
+        let line = decision.line;
+        if (decision.retire) {
+          const retirement = supervisionRetire(state, task);
+          if (!retirement.checkRemoved) {
+            line = `${line}; retirement failed and this check is still armed: ${retirement.problems.join("; ")}`;
+          } else {
+            line = `${line}; this poll has retired itself`;
+            if (retirement.problems.length > 0) {
+              line = `${line}; the executable check was removed, but cleanup left orphaned artifacts: ${retirement.problems.join("; ")}`;
+            }
+          }
+        } else if (decision.remember && !supervisionSameObservation(previous, decision)) {
+          try {
+            supervisionWriteSidecar(state, task, decision);
+          } catch (error) {
+            const detail = supervisionErrorDetail(error);
+            line = line
+              ? `${line}; the poll could not record this observation: ${detail}`
+              : `playbot lane ${task}: worker ${thread} is working, but the poll could not record that observation, so it cannot tell a finished worker from a still-running one: ${detail}`;
+          }
+        }
+        return { line };
+      } catch (error) {
+        const detail = supervisionErrorDetail(error);
+        let line = `playbot lane ${task}: worker ${thread} is unreadable because the supervision poll failed: ${detail}`;
+        if (previous.deliveryState === "delivered") {
+          const retirement = supervisionRetire(state, task);
+          if (!retirement.checkRemoved) {
+            line = `${line}; the task was delivered, but retirement failed and this check is still armed: ${retirement.problems.join("; ")}`;
+          } else {
+            line = `${line}; the task was delivered, so this poll has retired itself`;
+            if (retirement.problems.length > 0) {
+              line = `${line}; the executable check was removed, but cleanup left orphaned artifacts: ${retirement.problems.join("; ")}`;
+            }
+          }
+        } else {
+          const observed = { status: "poll-unreadable", updatedAt: "", deliveryState: previous.deliveryState, messageKey: previous.messageKey ?? null, acceptanceMs: previous.acceptanceMs ?? null, threadKey: previous.threadKey ?? null, generation };
+          if (supervisionSameObservation(previous, observed)) return { line: null };
+          line = `${line}; task delivery or its queue is unconfirmed, so this poll stays armed`;
+          try {
+            supervisionWriteSidecar(state, task, observed);
+          } catch (writeError) {
+            line = `${line}; the poll could not record this observation: ${supervisionErrorDetail(writeError)}`;
+          }
+        }
+        return { line };
+      }
+    });
+    if (result.line) console.log(supervisionOneLine(result.line));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.log(supervisionOneLine(`playbot lane ${taskId ?? "unknown"}: supervision poll failed: ${detail}`));
+  }
+}
+
 function bounded(text, max = 4_000) {
   const value = String(text ?? "").trim();
   return value.length <= max ? value : `${value.slice(0, max)}\n[truncated]`;
@@ -1479,15 +2437,17 @@ async function install() {
   atomicWriteJson(hooksPath, hooks);
   let reload = "not attempted";
   let schemaVersion = null;
+  let reloadSucceeded = false;
   try {
     const servers = await playbotInvoke("codex:mcpServers:reload", undefined);
     reload = Array.isArray(servers) ? `reloaded ${servers.length} MCP server record(s)` : "reload requested";
     schemaVersion = MCP_SCHEMA_VERSION;
+    reloadSucceeded = true;
   } catch (error) {
     reload = `reload deferred: ${error instanceof Error ? error.message : String(error)}`;
   }
-  atomicWriteJson(path.join(stateDir(), "installation.json"), {
-    version: 1,
+  const installation = {
+    version: 2,
     installedAt: nowIso(),
     script,
     node,
@@ -1495,8 +2455,11 @@ async function install() {
     configPath,
     hooksPath,
     schemaVersion,
-  });
-  return { installed: true, configPath, hooksPath, stateDir: stateDir(), reload };
+    buildIdentity: serverBuildIdentity(),
+    reloadSucceeded,
+  };
+  atomicWriteJson(path.join(stateDir(), "installation.json"), installation);
+  return { installed: true, configPath, hooksPath, stateDir: stateDir(), reload, reloadSucceeded, buildIdentity: installation.buildIdentity };
 }
 
 function installedHookStatus() {
@@ -1622,8 +2585,8 @@ function toolDefinitions() {
     },
     {
       name: "dispatch",
-      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake; an external-terminal caller supervises with get_thread_status, read_thread, and get_thread_card.`,
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -1691,6 +2654,19 @@ async function handleTool(name, args = {}) {
 
   if (name === "dispatch") {
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
+    // Validated before anything is created or sent: a taskId that cannot key a
+    // check would otherwise be discovered only after the worker was already
+    // working, which is the unwatched-worker case this arming exists to remove.
+    // Only a string is a taskId. A JSON null is what a client sends for an
+    // optional field it did not set, and coercing it would arm the literal
+    // state/null.check.sh - a poll keyed on nothing teardown will ever retire,
+    // which the next unset dispatch would then silently retarget off this
+    // worker. An absent taskId takes the documented workspace-id fallback so a
+    // poll still exists.
+    const requestedTaskId = typeof args.taskId === "string" ? args.taskId : null;
+    if (requestedTaskId !== null && !supervisionTaskIdValid(requestedTaskId)) {
+      throw new Error(`taskId '${requestedTaskId}' cannot key a watcher poll; use a firstmate task id of up to 64 characters from A-Z, a-z, 0-9, dot, dash, and underscore, not starting with a dot`);
+    }
     let worker = null;
     if (!wantsNewWorkspace) {
       if (args.thread) {
@@ -1707,18 +2683,33 @@ async function handleTool(name, args = {}) {
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
     const lane = caller ? registerLane(caller, worker) : null;
+    const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
-      const sent = await sendMessage(worker, args.message, args.force === true);
-      return caller
-        ? { lane, ...sent }
-        : {
-            lane: null,
-            ...sent,
-            supervision: {
-              mode: "poll",
-              tools: ["get_thread_status", "read_thread", "get_thread_card"],
-            },
-          };
+      const { supervisionAcceptance, ...sent } = await sendMessage(worker, args.message, args.force === true);
+      if (caller) {
+        return {
+          lane,
+          ...sent,
+          supervision: {
+            mode: "routed-wake",
+            laneId: lane.id,
+            note: "This caller is a Playbot chat, so the worker's completed turns wake it through the registered lane and no watcher poll was armed.",
+          },
+        };
+      }
+      const acceptedBaseline = supervisionAcceptance?.acceptanceMs === null
+        || supervisionAcceptance?.acceptanceMs === undefined
+        ? null
+        : supervisionAcceptance;
+      const supervision = await armSupervisionPoll({
+        requestedTaskId,
+        worker,
+        baseline: acceptedBaseline ?? { ...armingBaseline, acceptanceMs: null },
+        delivery: acceptedBaseline ? sent.delivery : null,
+      });
+      const result = { lane: null, ...sent, supervision };
+      if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
+      return result;
     } catch (error) {
       // Only a send that never reached Playbot may tear the lane down. When the
       // send was accepted the message may already be with the worker, so the
@@ -1730,6 +2721,18 @@ async function handleTool(name, args = {}) {
         lane.error = error instanceof Error ? error.message : String(error);
         atomicWriteJson(routePath(lane.id), lane);
       }
+      // The mirror of that rule for an external-terminal caller: a send Playbot
+      // ACCEPTED whose verdict could not be read still leaves a worker that may
+      // be working, so it gets its poll even though the refusal reaches the
+      // caller. The thrown message carries the arming outcome, because a refusal
+      // has no result body to report it in.
+      if (!lane && sendReachedPlaybot(error)) {
+        const supervision = await armSupervisionPoll({ requestedTaskId, worker, baseline: error.supervisionAcceptance ?? armingBaseline });
+        const suffix = supervision.armed
+          ? `Playbot accepted the task, so its watcher poll was armed as ${supervision.check}.`
+          : supervisionArmWarning(supervision);
+        throw new Error(`${error instanceof Error ? error.message : String(error)} ${suffix}`);
+      }
       throw error;
     }
   }
@@ -1739,7 +2742,10 @@ async function handleTool(name, args = {}) {
     return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
   }
   const thread = resolveThreadInProject(project, args.workspace, args.thread, name === "archive_chat");
-  if (name === "send_message") return sendMessage(thread, args.message, args.force === true);
+  if (name === "send_message") {
+    const { supervisionAcceptance: _supervisionAcceptance, ...sent } = await sendMessage(thread, args.message, args.force === true);
+    return sent;
+  }
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
   if (name === "get_thread_status") {
     const publicValue = publicThread(thread);
@@ -1833,7 +2839,9 @@ async function handleTool(name, args = {}) {
     const messageId = String(args.messageId ?? "").trim();
     if (!messageId) throw new Error("messageId must not be empty; use list_queued_messages to choose one");
     const version = await playbotVersion();
+    const preparedRecalls = await supervisionPrepareRecall(thread.thread_id, messageId);
     const result = await cardInvoke("threads:recallMessage", { threadId: thread.thread_id, messageId });
+    const supervisionProblems = await supervisionResolveRecall(preparedRecalls, result?.outcome, thread.thread_id);
     // The recall already happened, so an unreadable queue projection is reported
     // as null and warned about rather than thrown, and never as an empty queue: a
     // supervisor reads an empty queueAfter as "the pile is gone" and acts on it.
@@ -1846,9 +2854,14 @@ async function handleTool(name, args = {}) {
       outcome: result?.outcome ?? null,
       recalled: result?.outcome === "recalled" ? result.message ?? null : null,
       queueAfter,
-      warnings: unreadableAfter.length > 0
-        ? [`${recallOutcomeClause(result?.outcome)}, and Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so that part of queueAfter is null rather than empty: what remains held is unknown, and list_queued_messages is the way to find out.`]
-        : [],
+      warnings: [
+        ...unreadableAfter.length > 0
+          ? [`${recallOutcomeClause(result?.outcome)}, and Playbot's response snapshot carried no readable ${unreadableAfter.join(", ")}, so that part of queueAfter is null rather than empty: what remains held is unknown, and list_queued_messages is the way to find out.`]
+          : [],
+        ...supervisionProblems.length > 0
+          ? [`${recallOutcomeClause(result?.outcome)}, but its watcher delivery record could not be finalized and remains fail-safe: ${supervisionProblems.join("; ")}`]
+          : [],
+      ],
     };
   }
   if (name === "register_lane") {
@@ -1943,7 +2956,6 @@ async function readStdinJson() {
 
 async function doctor() {
   const projects = topology();
-  const installation = readJson(path.join(stateDir(), "installation.json"));
   let renderer = false;
   let mcpServer = null;
   let chatCreation = null;
@@ -1963,6 +2975,8 @@ async function doctor() {
     }
     playbotApp = { version: await playbotVersion(), verifiedVersions: VERIFIED_PLAYBOT_VERSIONS };
   }
+  const buildIdentity = serverBuildIdentity();
+  const installation = readJson(path.join(stateDir(), "installation.json"));
   return {
     server: `${SERVER_NAME}@${SERVER_VERSION}`,
     node: process.version,
@@ -1972,9 +2986,10 @@ async function doctor() {
     codexDb: codexDbPath(),
     renderer,
     mcpServer,
+    buildIdentity,
+    installation,
     chatCreation,
     playbotApp,
-    installation,
     hooks: installedHookStatus(),
     projects: projects.map((project) => ({ id: project.id, name: project.name, paths: [...projectPaths(project)] })),
     routes: loadRoutes().length,
@@ -1986,13 +3001,16 @@ function readiness(diagnostics) {
   const expectedToolCount = toolDefinitions().length;
   const configuredSchemaVersion = diagnostics.mcpServer?.env?.PLAYBOT_LANES_SCHEMA_VERSION ?? null;
   const schemaVersion = diagnostics.installation?.schemaVersion ?? null;
+  const buildIdentityMatches = diagnostics.installation?.reloadSucceeded === true
+    && diagnostics.installation?.buildIdentity === diagnostics.buildIdentity;
   const ready = diagnostics.renderer
     && diagnostics.hooks.ready
     && diagnostics.mcpServer?.enabled === true
     && diagnostics.mcpServer?.error == null
     && diagnostics.mcpServer?.toolCount === expectedToolCount
     && configuredSchemaVersion === MCP_SCHEMA_VERSION
-    && schemaVersion === MCP_SCHEMA_VERSION;
+    && schemaVersion === MCP_SCHEMA_VERSION
+    && buildIdentityMatches;
   return {
     ready,
     checks: {
@@ -2006,6 +3024,9 @@ function readiness(diagnostics) {
       configuredSchemaVersion,
       schemaVersion,
       expectedSchemaVersion: MCP_SCHEMA_VERSION,
+      buildIdentity: diagnostics.buildIdentity,
+      installedBuildIdentity: diagnostics.installation?.buildIdentity ?? null,
+      buildIdentityMatches,
     },
   };
 }
@@ -2042,6 +3063,7 @@ async function main() {
     return;
   }
   if (command === "doctor") return console.log(JSON.stringify(await doctor(), null, 2));
+  if (command === "supervision-poll") return await supervisionPoll(process.argv.slice(3));
   if (command === "hook-pretool") {
     try {
       recordCaller(await readStdinJson());

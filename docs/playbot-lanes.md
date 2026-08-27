@@ -2,7 +2,7 @@
 
 Playbot lanes let a normal terminal or one Playbot chat control chats in Playbot projects without selecting those chats in the UI.
 A Playbot-chat controller can register durable worker routes and receive background completion notifications.
-A normal-terminal controller supervises dispatched workers through bounded status and conversation reads because it has no Playbot chat to wake.
+A normal-terminal controller has no Playbot chat to wake, so `dispatch` arms that worker's firstmate watcher poll for it and it supervises through bounded status and conversation reads.
 
 `bin/fm-playbot-lanes.mjs` is the single owner of the tool schemas, private state format, install command, hook behavior, and exact failure rules.
 Run its `doctor` command for bounded local diagnostics and its `install` command to register the server and hooks in Playbot's managed Codex home.
@@ -64,7 +64,38 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 With `newWorkspace`, it creates the isolated workspace and creates the worker chat inside it.
 The message can enter a non-selected project and does not require changing UI focus.
 For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.
-For a normal-terminal caller, it returns `lane: null` plus the `get_thread_status`, `read_thread`, and `get_thread_card` supervision tools instead of inventing a chat route that cannot deliver a wake.
+
+A normal-terminal caller has no chat to wake, so polling is the only supervision available to it, and `dispatch` arms that poll itself rather than naming tools and leaving the caller to remember.
+It writes `state/<taskId>.check.sh` under the configured controller root, binds it through `bin/fm-check-register.sh`, and reports the outcome in the result's `supervision` block: `mode`, the `taskId` and whether it came from the argument or the workspace, the `check` path, and `armed`.
+The armed poll reads persisted Playbot state only, so it contacts Playbot not at all and resumes nothing.
+It stays silent while the worker is `working` and prints one line when the worker parks on a card, stops without one, becomes unreadable, or cannot be read at all, which is why a poll that failed reports the failure instead of passing as silence.
+A persisted `pending_input` is a candidate on exactly the terms `list_parked_threads` describes, so the wake line says so and names `get_thread_card` as the confirming read.
+Every branch that can print fires on a difference from the last observation and never on a condition merely still being true, with one deliberate exception: a parked worker keeps firing each check interval, because answering the card is what resolves it and a worker that is still parked still needs its supervisor.
+A delivered worker that stopped or became unreadable is news exactly once, so that is reported on the change into it and the poll then retires itself, removing the check, its trust binding, and its private `state/<taskId>.lane-poll` record of what it last saw.
+If executable-check removal succeeds but trust or sidecar cleanup fails, the wake reports those files as orphaned artifacts instead of claiming the removed check remains armed.
+An idle worker whose dispatched task Playbot is still holding has not stopped, it has not started, so it is reported as that once and the poll stays armed and then quiet until the persisted observation changes.
+A queue that cannot be read counts the same way, because unreadable is not proof of delivery, and retirement is irreversible while an extra wake is not.
+That record holds the observed status and `updated_at`, Playbot's task-specific delivery verdict, worker and message identities, and a task acceptance boundary initialized from a fresh post-send `last_user_activity_at` and advanced by exact-message acceptance evidence.
+If that post-send refresh is unreadable, no earlier timestamp is trusted as the new task's boundary, so delivery remains unconfirmed and the poll stays armed.
+A terminal observation must fall after that acceptance boundary, so an earlier turn reaching `ready` cannot retire the new task while a fast accepted turn that finishes before the first poll remains visible.
+A queued, sending, or recall-pending verdict advances only when that worker session's persisted rollout records the exact client message id after the task acceptance boundary.
+A ledger turn binding, same-worker `not-recallable` outcome, or failed recall without that exact timestamp leaves supervision armed and promotable by a later poll, while bare queue disappearance remains armed because Playbot's UI may have recalled the message.
+A worker that genuinely never began leaves its row untouched, so the pair holds the poll silent and armed for it while still reporting the one that finished.
+If that record is missing the poll reports the observation state as unreadable and remains armed, because it cannot prove that the executing snapshot still owns the live check generation or that the task was delivered.
+Firstmate's task teardown removes the record with the rest of the task's state, so a task torn down while its worker was still working leaves nothing behind.
+
+`taskId` is optional and the workspace id is used when it is absent, so `dispatch` still attempts to arm the poll; a workspace-keyed poll is not retired by firstmate's task teardown and the result says so.
+A `taskId` that is not a string is treated as absent and takes that same fallback, because coercing one would key the poll on a name no teardown matches.
+`state/<taskId>.check.sh` is a name firstmate's merged-PR poll owns too, so neither owner may overwrite the other and both refuse by name instead.
+Arming only ever replaces a check this server generated, so a merged-PR poll or any other check already armed for that task id is left untouched and the arming is refused instead.
+In the other direction `bin/fm-pr-check.sh` refuses to arm over a lane supervision poll, naming both owners and the task id and exiting with the status it reserves for that one refusal, rather than silently destroying the only supervision a dispatched worker has.
+That collision remains until proven delivery lets the lane poll retire on a terminal state or a matching task teardown removes it; failed, recalled, or unconfirmed delivery deliberately remains armed.
+That refusal costs merge detection and nothing else, because `bin/fm-pr-merge.sh` continues past that reserved status alone and every other `bin/fm-pr-check.sh` failure still aborts the merge exactly as before.
+Keying on the status rather than on the recorded `pr=` is what keeps that true on a re-run, where an earlier successful run has already left `pr=` in the task metadata and it proves nothing about this one.
+A supervision poll never blocks a merge, because losing detection is a degradation firstmate recovers from by hand while a blocked merge stops real work.
+A failed arming never turns a delivered task into an error: the result carries the delivery verdict beside `armed: false`, the reason, and a warning that nothing is polling the worker.
+A Playbot-chat caller is reported as `mode: "routed-wake"` and arms nothing, because its lane already delivers.
+`create_chat` arms nothing either: it starts no agent turn, so there is no worker to supervise until a `dispatch` sends one a task.
 
 Playbot accepts a message it cannot deliver yet and holds it in a queue the sender is never told about, so `send_message` and `dispatch` report a `delivery` verdict taken from the thread snapshot Playbot returns.
 `delivered` means the agent's turn accepted the message, `sending` means it is in flight, `queued` means Playbot is holding it and the worker has not seen it, `steering` means Playbot marked that exact message for the active turn, `failed` carries Playbot's own reason, and `unknown` means Playbot returned no usable confirmation.

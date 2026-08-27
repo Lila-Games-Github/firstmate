@@ -20,7 +20,8 @@ Ensure the existing Playbot lane control plane is ready without starting a worke
    Do not call a `playbot_lanes` chat tool merely to prove the MCP is ready.
 5. If setup is ready, tell the captain whether setup was already healthy or repaired and confirm that no chat was started.
    From a normal terminal, lane tools may list projects, create workspaces, dispatch, send, read, and manage chats directly.
-   A terminal dispatch has no Playbot controller chat to wake, so supervise it with `get_thread_status`, `read_thread`, and `get_thread_card`; routed Stop-hook wakes remain available when the caller is a configured Playbot controller chat.
+   A terminal dispatch has no Playbot controller chat to wake, so it arms that worker's watcher poll itself: pass `taskId` so the poll is keyed on the task and retired with it, read the result's `supervision` block, and treat `armed: false` as a worker nobody is watching rather than a detail.
+   Confirm every wake from that poll with `get_thread_card` before answering anything, and never hand-write a check for a dispatched lane; routed Stop-hook wakes remain available when the caller is a configured Playbot controller chat.
    Never treat a `send_message` or `dispatch` result as delivered without reading its `delivery.state`, and never resend on a `queued` or `unknown` verdict; [docs/playbot-lanes.md](../../../docs/playbot-lanes.md) owns what each verdict means and how a held message is cleared.
 6. If setup is not ready, report the failed checks and precise local blocker.
    Do not compensate by creating a startup chat, focusing another chat, or starting an agent session.

@@ -70,11 +70,30 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   exit 1
 fi
 
-"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
+# Recording pr= is what this path exists for and stays mandatory, but ARMING the
+# merge poll is supervision, and losing supervision must never block real work.
+# Exactly one failure is treated that way: the poll collision fm-pr-check.sh
+# reports with FM_PR_POLL_COLLISION_STATUS, raised when a Playbot lane
+# supervision poll already owns state/<id>.check.sh. Its own refusal has already
+# reached stderr; this names what was lost and what to do.
+#
+# The decision keys on that status and never on whether pr= is present, because
+# fm-pr-check.sh rewrites the pr= line on every successful run and a re-run after
+# an earlier success would find it already there. Every other non-zero exit stays
+# fatal exactly as it was, including the state-integrity prepasses that run
+# before the metadata is committed and have nothing to do with supervision.
+PR_CHECK_STATUS=0
+"$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" || PR_CHECK_STATUS=$?
+if [ "$PR_CHECK_STATUS" -ne 0 ] && [ "$PR_CHECK_STATUS" -ne "$FM_PR_POLL_COLLISION_STATUS" ]; then
+  exit "$PR_CHECK_STATUS"
+fi
 grep -qxF "pr=$URL" "$META" || {
   echo "error: PR metadata recording failed" >&2
   exit 1
 }
+if [ "$PR_CHECK_STATUS" -ne 0 ]; then
+  echo "warning: pr= was recorded for $ID, but merge detection was NOT armed (fm-pr-check.sh exited $PR_CHECK_STATUS); the existing Playbot lane poll is preserved, and this collision lasts until proven delivery lets the poll self-retire on a terminal state or matching task teardown removes it, while failed, recalled, or unconfirmed delivery stays armed" >&2
+fi
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then

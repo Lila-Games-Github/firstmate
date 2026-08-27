@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
-# exact pr_head=<sha> when available, then atomically arm a static merge poll.
+# exact pr_head=<sha> when available, then atomically try to arm a static merge
+# poll; a lane-poll collision preserves the recorded metadata and exits with the
+# reserved collision status without replacing that worker's supervision.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -130,7 +132,14 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
+# A poll collision is the one failure here that costs merge detection and
+# nothing else, so it exits with its own reserved status and every other failure
+# keeps exiting 1. bin/fm-pr-merge.sh continues past that status alone.
 fm_pr_poll_publish_prepared || {
+  if [ -n "$FM_PR_POLL_REFUSAL" ]; then
+    echo "error: $FM_PR_POLL_REFUSAL" >&2
+    exit "$FM_PR_POLL_COLLISION_STATUS"
+  fi
   echo "error: could not publish PR poll" >&2
   exit 1
 }

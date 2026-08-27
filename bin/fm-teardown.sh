@@ -40,8 +40,9 @@
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
-# it removes the task's check, trust record, PR sidecar, publication record, and
-# quarantine entries with the rest of the volatile state.
+# it removes the task's check, trust record, PR or lane sidecar, publication
+# record, and quarantine entries with the rest of the volatile state while
+# holding the shared per-task check-publication lock.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -711,7 +712,7 @@ validate_pr_poll_cleanup() {
   fi
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.check-trust" "$state_dir/$id.lane-poll"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -723,7 +724,7 @@ validate_pr_poll_cleanup() {
   state_device=$(fm_pr_file_device "$state_dir") || return 1
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust"; do
+    "$state_dir/$id.check-trust" "$state_dir/$id.lane-poll"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
@@ -760,22 +761,29 @@ validate_pr_poll_cleanup() {
 }
 
 remove_pr_poll_artifacts() {
-  local state_dir=$1 id=$2 quarantine artifact
-  validate_pr_poll_cleanup "$state_dir" "$id" || return 1
-  fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
-  rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
-    "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
-    "$state_dir/$id.check-trust" || return 1
-  if fm_task_id_path_safe "$id"; then
+  local state_dir=$1 id=$2 quarantine artifact status=0
+  fm_pr_poll_lock_acquire "$state_dir" "$id" || return 1
+  validate_pr_poll_cleanup "$state_dir" "$id" || status=1
+  if [ "$status" -eq 0 ]; then
+    fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
+      "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
+      "$state_dir/$id.check-trust" "$state_dir/$id.lane-poll" || status=1
+  fi
+  if [ "$status" -eq 0 ] && fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
       for artifact in "$quarantine/$id."*; do
         [ -e "$artifact" ] || [ -L "$artifact" ] || continue
-        rm -f -- "$artifact" || return 1
+        rm -f -- "$artifact" || status=1
       done
       rmdir "$quarantine" 2>/dev/null || true
     fi
   fi
+  fm_pr_poll_lock_release || status=1
+  return "$status"
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a

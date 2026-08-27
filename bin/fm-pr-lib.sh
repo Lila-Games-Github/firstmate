@@ -62,6 +62,14 @@ FM_PR_POLL_EXPECT_DATA_IDENTITY=
 FM_PR_POLL_EXPECT_CHECK_IDENTITY=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
+FM_PR_POLL_REFUSAL=
+FM_PR_POLL_LOCK_DIR=
+# The exit status bin/fm-pr-check.sh reserves for the poll-collision refusal
+# alone, and the only status bin/fm-pr-merge.sh is allowed to continue past.
+# Both read it from here so neither can drift from the other, and no other
+# failure may ever be given this status: everything else stays fatal to a merge.
+# shellcheck disable=SC2034
+FM_PR_POLL_COLLISION_STATUS=3
 FM_PR_POLL_SNAPSHOT_ID=
 FM_PR_POLL_SNAPSHOT_PROVIDER=
 FM_PR_POLL_SNAPSHOT_URL=
@@ -421,13 +429,98 @@ fm_pr_poll_registration_parse() {
   FM_PR_REG_CHECK_IDENTITY=$check_identity
 }
 
+# bin/fm-playbot-lanes.mjs arms a Playbot lane supervision poll on the same
+# state/<id>.check.sh name this poll owns, so the two are one shared boundary and
+# neither owner may overwrite the other. The lane arming already refuses a check
+# it did not generate; this is the mirror, and it is what stops an ordinary
+# fm-pr-check.sh run from silently destroying the only supervision a dispatched
+# external-terminal worker has. The lane check carries this marker as its second
+# line, which is the shape both sides recognise each other by.
+FM_PR_POLL_LANE_MARKER='# fm-playbot-lane-supervision-poll v1'
+
+fm_pr_poll_check_is_lane_poll() {
+  local path=$1 line index=0
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    index=$((index + 1))
+    [ "$index" -eq 2 ] || continue
+    [ "$line" = "$FM_PR_POLL_LANE_MARKER" ]
+    return
+  done < "$path"
+  return 1
+}
+
+# Refuses at the point of collision and names both owners and the task id, so
+# the caller reports which two things wanted the same file rather than picking a
+# winner. Leaves FM_PR_POLL_REFUSAL empty on every other failure so the caller's
+# own generic wording still applies there.
+#
+# This belongs to the publish half and must not be hoisted into preparation or
+# any earlier preflight. bin/fm-pr-check.sh commits pr= to the task metadata
+# between preparing and publishing, and bin/fm-pr-merge.sh merges on that
+# recorded pr= while reporting the unarmed detection. Refusing before the
+# metadata was committed would leave pr= unwritten and block the merge instead
+# of only the merge poll, which is the failure this guard must never cause.
+fm_pr_poll_destination_unclaimed() {
+  local path=$1 id=$2
+  # Consumed by bin/fm-pr-check.sh, which reports the refusal it names.
+  # shellcheck disable=SC2034
+  FM_PR_POLL_REFUSAL=
+  fm_pr_poll_check_is_lane_poll "$path" || return 0
+  # shellcheck disable=SC2034
+  FM_PR_POLL_REFUSAL="pr= was recorded for task $id, but merge detection was not armed: $path already holds the Playbot lane supervision poll armed by bin/fm-playbot-lanes.mjs, and both owners key their watcher check on state/$id.check.sh; this collision lasts until proven delivery lets the lane poll self-retire on a terminal state or matching task teardown removes it, while failed, recalled, or unconfirmed delivery stays armed"
+  return 1
+}
+
 fm_pr_poll_cleanup() {
   [ -z "$FM_PR_POLL_DATA_TMP" ] || rm -f -- "$FM_PR_POLL_DATA_TMP"
   [ -z "$FM_PR_POLL_CHECK_TMP" ] || rm -f -- "$FM_PR_POLL_CHECK_TMP"
   [ -z "$FM_PR_POLL_REG_TMP" ] || rm -f -- "$FM_PR_POLL_REG_TMP"
+  fm_pr_poll_lock_release || true
   FM_PR_POLL_DATA_TMP=
   FM_PR_POLL_CHECK_TMP=
   FM_PR_POLL_REG_TMP=
+}
+
+fm_pr_poll_lock_acquire() {
+  local state=$1 id=$2 attempts=50 lib_dir had_override=0 saved_override='' had_identity=0 saved_identity=''
+  if ! declare -F fm_lock_try_acquire >/dev/null 2>&1; then
+    lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
+    if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
+      had_override=1
+      saved_override=$FM_STATE_OVERRIDE
+    fi
+    FM_STATE_OVERRIDE=$state
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$lib_dir/fm-wake-lib.sh"
+    if [ "$had_override" = 1 ]; then
+      FM_STATE_OVERRIDE=$saved_override
+    else
+      unset FM_STATE_OVERRIDE
+    fi
+  fi
+  FM_PR_POLL_LOCK_DIR="$state/.$id.check-publish.lock"
+  if [ "${FM_LOCK_REQUIRE_IDENTITY+x}" = x ]; then
+    had_identity=1
+    saved_identity=$FM_LOCK_REQUIRE_IDENTITY
+  fi
+  FM_LOCK_REQUIRE_IDENTITY=1
+  while ! fm_lock_try_acquire "$FM_PR_POLL_LOCK_DIR"; do
+    attempts=$((attempts - 1))
+    if [ "$attempts" -le 0 ]; then
+      FM_PR_POLL_LOCK_DIR=
+      if [ "$had_identity" = 1 ]; then FM_LOCK_REQUIRE_IDENTITY=$saved_identity; else unset FM_LOCK_REQUIRE_IDENTITY; fi
+      return 1
+    fi
+    sleep 0.1
+  done
+  if [ "$had_identity" = 1 ]; then FM_LOCK_REQUIRE_IDENTITY=$saved_identity; else unset FM_LOCK_REQUIRE_IDENTITY; fi
+}
+
+fm_pr_poll_lock_release() {
+  [ -n "$FM_PR_POLL_LOCK_DIR" ] || return 0
+  fm_lock_release "$FM_PR_POLL_LOCK_DIR"
+  FM_PR_POLL_LOCK_DIR=
 }
 
 fm_pr_poll_revoke_final() {
@@ -444,6 +537,23 @@ fm_pr_poll_revoke_final() {
     rm -f -- "$FM_PR_POLL_DATA_DEST" || failed=1
   fi
   [ ! -e "$FM_PR_POLL_CHECK_DEST" ] && [ ! -L "$FM_PR_POLL_CHECK_DEST" ] || failed=1
+  [ ! -e "$FM_PR_POLL_REG_DEST" ] && [ ! -L "$FM_PR_POLL_REG_DEST" ] || failed=1
+  [ ! -e "$FM_PR_POLL_DATA_DEST" ] && [ ! -L "$FM_PR_POLL_DATA_DEST" ] || failed=1
+  return "$failed"
+}
+
+# The revoke to use when the runnable name belongs to another owner: it undoes
+# only this poll's own sidecars and never touches the check, because removing a
+# check this poll did not publish is the destruction the guard above exists to
+# prevent.
+fm_pr_poll_revoke_sidecars() {
+  local failed=0
+  if [ -e "$FM_PR_POLL_REG_DEST" ] || [ -L "$FM_PR_POLL_REG_DEST" ]; then
+    rm -f -- "$FM_PR_POLL_REG_DEST" || failed=1
+  fi
+  if [ -e "$FM_PR_POLL_DATA_DEST" ] || [ -L "$FM_PR_POLL_DATA_DEST" ]; then
+    rm -f -- "$FM_PR_POLL_DATA_DEST" || failed=1
+  fi
   [ ! -e "$FM_PR_POLL_REG_DEST" ] && [ ! -L "$FM_PR_POLL_REG_DEST" ] || failed=1
   [ ! -e "$FM_PR_POLL_DATA_DEST" ] && [ ! -L "$FM_PR_POLL_DATA_DEST" ] || failed=1
   return "$failed"
@@ -521,9 +631,10 @@ fm_pr_poll_prepare() {
   fi
 }
 
-fm_pr_poll_publish_prepared() {
+fm_pr_poll_publish_prepared_locked() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
+  fm_pr_poll_destination_unclaimed "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_EXPECT_ID" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_REG_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
@@ -567,6 +678,13 @@ fm_pr_poll_publish_prepared() {
     return 1
   fi
 
+  # Re-checked immediately before the rename: a lane poll armed since the
+  # preflight above must still stop this publish, and its revoke may only take
+  # back this poll's own sidecars.
+  if ! fm_pr_poll_destination_unclaimed "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_EXPECT_ID"; then
+    fm_pr_poll_revoke_sidecars || true
+    return 1
+  fi
   if ! fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" \
     || ! mv -f -- "$FM_PR_POLL_CHECK_TMP" "$FM_PR_POLL_CHECK_DEST"; then
     fm_pr_poll_revoke_final || true
@@ -577,6 +695,15 @@ fm_pr_poll_publish_prepared() {
     fm_pr_poll_revoke_final || true
     return 1
   fi
+}
+
+fm_pr_poll_publish_prepared() {
+  local status=0
+  [ -n "$FM_PR_POLL_CHECK_DEST" ] && [ -n "$FM_PR_POLL_EXPECT_ID" ] || return 1
+  fm_pr_poll_lock_acquire "${FM_PR_POLL_CHECK_DEST%/*}" "$FM_PR_POLL_EXPECT_ID" || return 1
+  fm_pr_poll_publish_prepared_locked || status=$?
+  fm_pr_poll_lock_release || status=1
+  return "$status"
 }
 
 fm_pr_poll_artifacts_valid() {
