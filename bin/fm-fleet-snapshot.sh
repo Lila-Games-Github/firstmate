@@ -55,6 +55,11 @@
 #
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
+# Size safety: stream unbounded backlog, task, secondmate, and status-derived
+# JSON or text into jq through stdin because Linux caps each argv element at
+# MAX_ARG_STRLEN.
+# Keep jq arguments to bounded controls and paths; the oversized public-route
+# regression lives in tests/fm-bearings-snapshot.test.sh.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
