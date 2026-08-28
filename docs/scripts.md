@@ -43,7 +43,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-turnend-guard.sh`    | Shared primary turn-end guard predicate so no turn ends blind (docs/turnend-guard.md) |
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-kimi-turnend-hook.sh` | Surgically install or remove Kimi's guarded global crew turn-end hook                |
-| `fm-playbot-lanes.mjs`   | Ensure, verify, and serve Playbot chat lanes from a terminal or a Playbot controller chat, with routed Stop-hook wakes for chat callers |
+| `fm-playbot-lanes.mjs`   | Ensure, verify, and serve Playbot chat lanes, routed Stop-hook wakes, and guarded workspace retirement from a terminal or Playbot controller chat |
 | `fm-arm-pretool-check.sh` | Stable PreToolUse transport for the watcher-arm command policy (docs/arm-pretool-check.md) |
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |
 | `fm-subagent-pretool-check.sh` | Primary-home delegation-shape PreToolUse guard (docs/subagent-guard.md) |

@@ -103,6 +103,38 @@ codex.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)').run('controller-s
 codex.close();
 NODE
 
+# Workspace-retirement evidence is Git behavior, so the fixture uses a real
+# repository, current local bare remote, and registered worktree rather than a
+# source-level mock of Git output.
+git -C "$FIXTURE_ROOT/worker" init --initial-branch=main >/dev/null \
+  || fail "could not initialize the retirement fixture repository"
+git -C "$FIXTURE_ROOT/worker" config user.name "Firstmate tests"
+git -C "$FIXTURE_ROOT/worker" config user.email "firstmate-tests@example.invalid"
+mkdir -p "$FIXTURE_ROOT/worker/prototype-game/addons/playbot"
+for churn_path in \
+  playbot_common.gd.uid \
+  playbot_export_plugin.gd \
+  playbot_export_plugin.gd.uid \
+  playbot_log_capture.gd.source \
+  playbot_runtime_bridge.gd.uid \
+  playbot_runtime_debugger.gd.uid \
+  plugin.gd.uid
+do
+  printf 'baseline %s\n' "$churn_path" > "$FIXTURE_ROOT/worker/prototype-game/addons/playbot/$churn_path"
+done
+printf 'baseline project\n' > "$FIXTURE_ROOT/worker/prototype-game/project.godot"
+printf 'tracked work\n' > "$FIXTURE_ROOT/worker/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker" add .
+git -C "$FIXTURE_ROOT/worker" commit -m "fixture baseline" >/dev/null \
+  || fail "could not commit the retirement fixture baseline"
+git init --bare --initial-branch=main "$FIXTURE_ROOT/worker-remote.git" >/dev/null \
+  || fail "could not initialize the retirement fixture remote"
+git -C "$FIXTURE_ROOT/worker" remote add origin "$FIXTURE_ROOT/worker-remote.git"
+git -C "$FIXTURE_ROOT/worker" push -u origin main >/dev/null \
+  || fail "could not publish the retirement fixture landing branch"
+git -C "$FIXTURE_ROOT/worker" worktree add -b alt "$FIXTURE_ROOT/worker/.worktrees/alt" main >/dev/null \
+  || fail "could not create the retirement fixture worktree"
+
 node --check "$SCRIPT" || fail "fm-playbot-lanes script failed node syntax validation"
 pass "fm-playbot-lanes: node syntax is valid"
 
@@ -296,7 +328,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup did not fail closed 
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== false || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== false || value.checks.controllerPresent !== true) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 18) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 20) process.exit(1);
 NODE
 threads_after=$(FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -326,6 +358,7 @@ pass "fm-playbot-lanes: workspace root branches are visible in the global topolo
 # ipc-mode file contains "legacy", so both adapter paths are enforced.
 cat > "$FIXTURE_ROOT/fake-cdp.mjs" <<'NODE'
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -552,13 +585,13 @@ async function electronInvoke(channel, payload) {
       };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.4.0\n');
+      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.5.0\n');
       return [{
         name: 'playbot_lanes',
         enabled: true,
         error: null,
-        toolCount: 18,
-        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.4.0') },
+        toolCount: 20,
+        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.5.0') },
       }];
     }
     if (channel === 'threads:launch') {
@@ -571,6 +604,29 @@ async function electronInvoke(channel, payload) {
     if (channel === 'workspace:create') {
       if (mode !== 'legacy') throw new Error("No handler registered for 'workspace:create'");
       return createWorkspaceRows(db, payload);
+    }
+    if (channel === 'workspace:delete') {
+      if (!payload || Object.keys(payload).sort().join(',') !== 'preserveWorktrees,workspaceId') {
+        throw new Error('workspace:delete payload keys are not exact');
+      }
+      if (payload.preserveWorktrees !== false) throw new Error('fixture requires preserveWorktrees=false');
+      const workspace = db.prepare('SELECT id, kind FROM workspaces WHERE id = ?').get(payload.workspaceId);
+      if (!workspace) throw new Error(`Workspace not found: ${payload.workspaceId}`);
+      if (workspace.kind === 'local') throw new Error('Cannot delete the Local workspace');
+      const roots = db.prepare(`
+        SELECT wr.path, r.path AS repository_path FROM workspace_roots wr
+        JOIN project_roots pr ON pr.id = wr.project_root_id
+        JOIN repositories r ON r.id = pr.repository_id
+        WHERE wr.workspace_id = ?
+      `).all(payload.workspaceId);
+      for (const root of roots) {
+        const removed = spawnSync('git', ['-C', root.repository_path, 'worktree', 'remove', '--force', root.path], { encoding: 'utf8' });
+        if (removed.status !== 0) throw new Error((removed.stderr || removed.stdout || 'git worktree remove failed').trim());
+      }
+      db.prepare('DELETE FROM workspace_threads WHERE workspace_id = ?').run(payload.workspaceId);
+      db.prepare('DELETE FROM workspace_roots WHERE workspace_id = ?').run(payload.workspaceId);
+      db.prepare('DELETE FROM workspaces WHERE id = ?').run(payload.workspaceId);
+      return null;
     }
     if (channel === 'threads:openThread') {
       if (mode !== 'legacy') throw new Error("No handler registered for 'threads:openThread'");
@@ -779,16 +835,16 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup accepted a stale loa
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.toolCount !== 18) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
+if (!value.checks.hooks.ready || value.checks.toolCount !== 20) process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.5.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.5.0' || value.checks.expectedSchemaVersion !== '0.5.0') process.exit(1);
 if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
 NODE
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
 OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup reloaded an MCP whose build identity was already current"
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== false) process.exit(1);
-if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 18) process.exit(1);
+if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 20) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project"
 
@@ -801,8 +857,8 @@ const value = JSON.parse(process.env.OUT);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 const mcpCalls = calls.filter(call => call.channel.startsWith('codex:mcpServers:'));
 if (value.ready !== true || value.changed !== true) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.5.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.5.0' || value.checks.expectedSchemaVersion !== '0.5.0') process.exit(1);
 if (!value.installation.reload.startsWith('reloaded ')) process.exit(1);
 if (mcpCalls.filter(call => call.channel === 'codex:mcpServers:reload').length !== 1) process.exit(1);
 if (mcpCalls.some(call => !['codex:mcpServers:list', 'codex:mcpServers:reload'].includes(call.channel))) process.exit(1);
@@ -3384,6 +3440,279 @@ NODE
 [ "$(find "$FM_HOME_FIXTURE/state" -name '*.check.sh' | sort)" = "$before" ] \
   || fail "create_chat armed a poll for a chat that has no work to supervise"
 pass "fm-playbot-lanes: create_chat arms nothing, because it starts no worker"
+
+# ---------------------------------------------------------------------------
+# Guarded workspace retirement.
+# ---------------------------------------------------------------------------
+
+retirement_list() {
+  rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_retirable_workspaces\",\"arguments\":{\"project\":$worker_json,\"landingBranch\":\"$1\"}}}"
+}
+
+retirement_call() {
+  rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"retire_workspace\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"$1\",\"landingBranch\":\"main\"$2}}}"
+}
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "workspace retirement tools were not exposed with one-at-a-time schemas"
+const tools = JSON.parse(process.env.OUT).result.tools;
+if (tools.length !== 20) process.exit(1);
+const list = tools.find(tool => tool.name === 'list_retirable_workspaces');
+const retire = tools.find(tool => tool.name === 'retire_workspace');
+if (!list || !retire) process.exit(1);
+if (list.inputSchema.required.join(',') !== 'project,landingBranch') process.exit(1);
+if (retire.inputSchema.required.join(',') !== 'project,workspace,landingBranch,confirm') process.exit(1);
+if (retire.inputSchema.properties.confirm.const !== true) process.exit(1);
+if (retire.inputSchema.properties.workspaces || retire.inputSchema.properties.all) process.exit(1);
+NODE
+pass "fm-playbot-lanes: retirement exposes inspection plus one confirmed exact-workspace call"
+
+# Add two explicit corrupt inventory rows after every earlier resolver test has
+# run: one has no roots and one names an existing directory which is not Git.
+mkdir -p "$FIXTURE_ROOT/not-a-git-worktree"
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = new Date().toISOString();
+db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-retire-no-roots', 'project-worker', 'No roots', 'worktree', 0, 'active', now, now);
+db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-retire-unreadable', 'project-worker', 'Unreadable Git', 'worktree', 0, 'active', now, now);
+db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-retire-unreadable', 'root-worker', path.join(process.env.FIXTURE_ROOT, 'not-a-git-worktree'), 'broken');
+db.close();
+NODE
+
+db_before=$(cksum "$PLAYBOT_DESKTOP_DIR/playbot.db")
+retirement_inventory="$FIXTURE_ROOT/retirement-inventory.json"
+retirement_list main > "$retirement_inventory"
+db_after=$(cksum "$PLAYBOT_DESKTOP_DIR/playbot.db")
+[ "$db_before" = "$db_after" ] || fail "retirement inventory changed Playbot's database"
+[ -d "$FIXTURE_ROOT/worker/.worktrees/alt" ] || fail "retirement inventory removed a worktree"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "retirement inventory did not report every active workspace with refusal evidence"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const byId = Object.fromEntries(value.workspaces.map(workspace => [workspace.workspace.id, workspace]));
+if (value.trackedChurnAllowlist.length !== 8) process.exit(1);
+if (!value.untrackedBoundary.includes('block retirement')) process.exit(1);
+if (byId['ws-worker'].blockers[0]?.code !== 'local-workspace') process.exit(1);
+if (!byId['ws-worker-alt'].blockers.some(blocker => blocker.code === 'active-threads')) process.exit(1);
+const active = byId['ws-worker-alt'].threads.blocking;
+if (active.length !== 1 || active[0].id !== 'chat-worker-alt' || active[0].status !== 'pending_input') process.exit(1);
+if (!byId['ws-retire-no-roots'].blockers.some(blocker => blocker.code === 'missing-root')) process.exit(1);
+if (!byId['ws-retire-unreadable'].blockers.some(blocker => blocker.code === 'git-unreadable')) process.exit(1);
+if (!byId['ws-worker-alt'].roots[0].landing.commit || byId['ws-worker-alt'].roots[0].landing.remote !== 'origin') process.exit(1);
+NODE
+pass "fm-playbot-lanes: inventory is non-destructive and reports Local, thread, root, and Git refusals with evidence"
+
+retirement_list branch-that-does-not-exist > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an unresolvable landing branch was not reported as a blocker"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+if (!workspace.blockers.some(blocker => blocker.code === 'landing-branch-unresolvable')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: landing branches require current resolvable remote evidence"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_retirable_workspaces\",\"arguments\":{\"project\":$worker_json}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement inventory accepted an omitted landing branch"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('requires an explicit landingBranch')) process.exit(1);
+NODE
+out=$(retirement_call ws-worker-alt '')
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement without confirmation was not refused"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('requires confirm=true')) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"retire_workspace\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"\",\"landingBranch\":\"main\",\"confirm\":true}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement accepted an implicit workspace selector"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('requires one exact workspace selector')) process.exit(1);
+NODE
+if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
+  fail "retirement without confirmation reached workspace:delete"
+fi
+out=$(retirement_call ws-worker ',"confirm":true')
+OUT="$out" node --no-warnings <<'NODE' || fail "Local workspace retirement was not refused before IPC"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('local-workspace')) process.exit(1);
+NODE
+out=$(retirement_call ws-retire-no-roots ',"confirm":true')
+OUT="$out" node --no-warnings <<'NODE' || fail "a workspace with no roots was not refused before IPC"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('missing-root')) process.exit(1);
+NODE
+out=$(retirement_call ws-retire-unreadable ',"confirm":true')
+OUT="$out" node --no-warnings <<'NODE' || fail "a workspace with unreadable Git was not refused before IPC"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('git-unreadable')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: explicit inputs, confirmation, Local, missing-root, and unreadable-Git refusals never reach IPC"
+
+# Settle the fixture's parked thread, then dirty every exact Playbot churn path.
+# All eight are evidence but none is generalized from a prefix or extension.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET agent_status = ? WHERE id = ?').run('ready', 'chat-worker-alt');
+db.close();
+NODE
+for churn_path in \
+  prototype-game/addons/playbot/playbot_common.gd.uid \
+  prototype-game/addons/playbot/playbot_export_plugin.gd \
+  prototype-game/addons/playbot/playbot_export_plugin.gd.uid \
+  prototype-game/addons/playbot/playbot_log_capture.gd.source \
+  prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid \
+  prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid \
+  prototype-game/addons/playbot/plugin.gd.uid \
+  prototype-game/project.godot
+do
+  printf 'playbot rewrite\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/$churn_path"
+done
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "the exact tracked Playbot churn set did not remain retirable"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const root = workspace.roots[0];
+if (!workspace.retirable || workspace.verdict !== 'retirable') process.exit(1);
+if (root.tracked.paths.length !== 8 || root.tracked.allowedChurnPaths.length !== 8) process.exit(1);
+if (root.tracked.blockingPaths.length !== 0 || root.untrackedPaths.length !== 0) process.exit(1);
+if (new Set(root.tracked.allowlist).size !== 8) process.exit(1);
+NODE
+pass "fm-playbot-lanes: all and only eight exact tracked Playbot churn paths are allowed"
+
+printf 'real tracked edit\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "a tracked path outside the churn allowlist did not expose its exact path"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'tracked-modifications');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/real-work.txt') process.exit(1);
+NODE
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore prototype-game/real-work.txt
+printf 'untracked work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an untracked file was not visible and blocking"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/untracked-work.txt') process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
+pass "fm-playbot-lanes: tracked work outside the allowlist and every untracked file fail closed by exact path"
+
+# Commit subjects are returned, and pushing the same head to the explicitly
+# named landing branch must become visible from ls-remote even though the local
+# origin/main tracking ref is deliberately left stale.
+printf 'landed behavior\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" add prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit -m "landed workspace behavior" >/dev/null \
+  || fail "could not create the ahead-commit retirement fixture"
+retirement_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" HEAD_COMMIT="$retirement_head" node --no-warnings <<'NODE' || fail "ahead commits were not returned with their subjects"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const commits = workspace.roots[0].commitsAhead;
+if (commits.length !== 1 || commits[0].commit !== process.env.HEAD_COMMIT || commits[0].subject !== 'landed workspace behavior') process.exit(1);
+if (!workspace.blockers.some(blocker => blocker.code === 'unlanded-commits')) process.exit(1);
+NODE
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:main >/dev/null \
+  || fail "could not advance the current remote landing branch"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" HEAD_COMMIT="$retirement_head" node --no-warnings <<'NODE' || fail "current remote landing evidence did not supersede a stale tracking ref"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const landing = workspace.roots[0].landing;
+if (!workspace.retirable || workspace.roots[0].commitsAhead.length !== 0) process.exit(1);
+if (landing.commit !== process.env.HEAD_COMMIT || landing.remoteRef !== 'refs/heads/main' || !landing.observedAt) process.exit(1);
+NODE
+pass "fm-playbot-lanes: commit subjects block retirement until current remote evidence proves them landed"
+
+# A safe inventory is never authorization: change a persisted safety condition
+# after the read and prove retire_workspace catches it before workspace:delete.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET agent_status = ? WHERE id = ?').run('working', 'chat-worker-alt');
+db.close();
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(retirement_call ws-worker-alt ',"confirm":true')
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement did not recheck a thread that started working after inventory"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('active-threads') || !value.error.message.includes('working or pending input')) process.exit(1);
+NODE
+if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
+  fail "failed immediate safety recheck still invoked workspace:delete"
+fi
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET agent_status = ? WHERE id = ?').run('ready', 'chat-worker-alt');
+db.close();
+NODE
+pass "fm-playbot-lanes: retirement reruns the complete safety inspection immediately before IPC"
+
+# Register a real durable route naming the retiring workspace so deletion has
+# to clean it up as part of the public behavior.
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker-alt\",\"thread\":\"chat-worker-alt\"}}}")
+retirement_lane=$(OUT="$out" node -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.lane.id)')
+[ -n "$retirement_lane" ] || fail "could not create the route cleanup fixture"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(retirement_call ws-worker-alt ',"confirm":true')
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" HEAD_COMMIT="$retirement_head" LANE_ID="$retirement_lane" node --no-warnings <<'NODE' \
+  || fail "confirmed safe workspace retirement did not report complete verified deletion"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const deletes = calls.filter(call => call.channel === 'workspace:delete');
+if (deletes.length !== 1) process.exit(1);
+if (JSON.stringify(deletes[0].payload) !== JSON.stringify({ workspaceId: 'ws-worker-alt', preserveWorktrees: false })) process.exit(1);
+if (!value.deleted || !value.postActionComplete || !value.verification.complete) process.exit(1);
+if (!value.verification.checks.workspaceRowGone || !value.verification.checks.workspaceRootRowsGone) process.exit(1);
+if (!value.verification.checks.worktreeDirectoriesGone.every(check => check.gone)) process.exit(1);
+if (!value.verification.checks.gitRegistrationsGone.every(check => check.gone)) process.exit(1);
+if (!value.routes.affected.some(route => route.id === process.env.LANE_ID && route.deactivated)) process.exit(1);
+if (!value.audit.appended || value.problems.length !== 0) process.exit(1);
+NODE
+
+[ ! -e "$FIXTURE_ROOT/worker/.worktrees/alt" ] || fail "Playbot IPC left the retired worktree directory"
+git -C "$FIXTURE_ROOT/worker" worktree list --porcelain | grep -F "$FIXTURE_ROOT/worker/.worktrees/alt" >/dev/null \
+  && fail "Playbot IPC left the retired Git worktree registration"
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "Playbot IPC left workspace database rows"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'), { readOnly: true });
+if (db.prepare('SELECT COUNT(*) AS count FROM workspaces WHERE id = ?').get('ws-worker-alt').count !== 0) process.exit(1);
+if (db.prepare('SELECT COUNT(*) AS count FROM workspace_roots WHERE workspace_id = ?').get('ws-worker-alt').count !== 0) process.exit(1);
+db.close();
+NODE
+LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$retirement_lane.json" node --no-warnings <<'NODE' \
+  || fail "retirement did not deactivate the durable lane route"
+const route = JSON.parse(require('node:fs').readFileSync(process.env.LANE_FILE, 'utf8'));
+if (route.active !== false || route.retiredWorkspace !== 'ws-worker-alt' || !route.retiredWorkspaceAt) process.exit(1);
+NODE
+AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" HEAD_COMMIT="$retirement_head" LANE_ID="$retirement_lane" node --no-warnings <<'NODE' \
+  || fail "retirement audit did not preserve exact Git, landing, path, and route evidence"
+const fs = require('node:fs');
+const rows = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse);
+const audit = rows.at(-1);
+if (audit.workspace.id !== 'ws-worker-alt' || audit.project.id !== 'project-worker') process.exit(1);
+if (audit.landingBranch !== 'main' || audit.heads[0].commit !== process.env.HEAD_COMMIT) process.exit(1);
+if (audit.verifiedLandingCommits[0].commit !== process.env.HEAD_COMMIT) process.exit(1);
+if (audit.deletedPaths.length !== 1 || audit.remainingPaths.length !== 0) process.exit(1);
+if (!audit.affectedLaneRoutes.some(route => route.id === process.env.LANE_ID && route.deactivated)) process.exit(1);
+if (!audit.verification.complete || !audit.ipc.succeeded) process.exit(1);
+if ((fs.statSync(process.env.AUDIT_FILE).mode & 0o777) !== 0o600) process.exit(1);
+NODE
+pass "fm-playbot-lanes: confirmed retirement uses exact IPC and verifies audit, routes, database, directory, and Git removal"
 
 # ---------------------------------------------------------------------------
 # The shared node resolver must name what it rejected.

@@ -58,6 +58,22 @@ When present, the workspace and the chat are created together in one launch on 0
 `newWorkspace` is mutually exclusive with `workspace`, and `dispatch` additionally rejects combining it with `thread`, because a just-created workspace has no existing chats.
 When `newWorkspace` is absent, existing workspace selection behavior is unchanged.
 
+### Workspace retirement
+
+`list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
+It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default, and reports the verified landing commit, each workspace root's exact head, every ahead commit and subject, every unarchived thread state, and all tracked and untracked paths.
+Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, an ahead commit, and a tracked modification outside Playbot's exact churn allowlist are blocking evidence rather than a bare false verdict.
+Untracked files also block retirement and are returned by exact path, because the tracked-churn allowlist never classifies them.
+The allowlist is eight literal repository-relative paths returned as `trackedChurnAllowlist`: seven files under `prototype-game/addons/playbot/` plus `prototype-game/project.godot` that Playbot's editor integration rewrites across unrelated worktrees.
+No directory, extension, basename, or broader pattern is treated as churn.
+
+`retire_workspace` accepts one exact workspace selector, the same explicit `landingBranch`, and `confirm: true`.
+There is no bulk destructive form.
+It repeats the complete inspection immediately before action and calls Playbot's own `workspace:delete` IPC with `preserveWorktrees: false`; it never deletes a folder or changes Playbot's database itself.
+After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, deactivates every durable lane route naming the workspace, and appends a mode-0600 private audit record under the lane state directory.
+That record names the time, project, workspace, workspace paths, exact root heads, explicit landing branch and remotely verified landing commits, affected lane routes, IPC outcome, and removal verification.
+Once the IPC succeeds, later verification, route, or audit failures return `deleted: true` with `postActionComplete: false` and exact problems instead of throwing an ordinary refusal that could make a caller retry a deletion that already happened.
+
 ## Lane lifecycle
 
 `dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x through 0.95.x.
@@ -153,7 +169,7 @@ A message that has already been delivered reports `not-recallable`, which is an 
 
 Private route and hook state defaults to `~/.playbot/mcp/project-chat`.
 The integration reads Playbot's application and Codex SQLite databases but never writes them directly.
-Chat creation, message delivery, and archive operations go through Playbot's Electron IPC handlers over the local DevTools socket.
+Chat creation, message delivery, archive, and guarded workspace retirement operations go through Playbot's Electron IPC handlers over the local DevTools socket.
 
 The current adapter targets Playbot 0.94.0 and Node.js 22.5 or newer, with a detected fallback to the pre-0.94 channels that were verified against Playbot 0.93.1 on Linux.
 The card, snapshot, queue, and forced-steering channels are verified against Playbot 0.95.x, and every version-sensitive result names the verified range or the exact internal mechanism, so a mismatch is visible rather than inferred.

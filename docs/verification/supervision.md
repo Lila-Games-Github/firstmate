@@ -539,6 +539,28 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
+On 2026-08-28, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 94 checks after adding guarded workspace retirement to `playbot_lanes@0.5.0` and increasing the expected MCP tool count from 18 to 20.
+The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
+The current remote test deliberately leaves `origin/main` stale, advances the bare remote's `main`, and proves the inventory uses the `ls-remote` commit as its landing evidence.
+The exact retirement-specific output was:
+
+```text
+ok - fm-playbot-lanes: retirement exposes inspection plus one confirmed exact-workspace call
+ok - fm-playbot-lanes: inventory is non-destructive and reports Local, thread, root, and Git refusals with evidence
+ok - fm-playbot-lanes: landing branches require current resolvable remote evidence
+ok - fm-playbot-lanes: explicit inputs, confirmation, Local, missing-root, and unreadable-Git refusals never reach IPC
+ok - fm-playbot-lanes: all and only eight exact tracked Playbot churn paths are allowed
+ok - fm-playbot-lanes: tracked work outside the allowlist and every untracked file fail closed by exact path
+ok - fm-playbot-lanes: commit subjects block retirement until current remote evidence proves them landed
+ok - fm-playbot-lanes: retirement reruns the complete safety inspection immediately before IPC
+ok - fm-playbot-lanes: confirmed retirement uses exact IPC and verifies audit, routes, database, directory, and Git removal
+```
+
+The final check confirms the exact `{workspaceId, preserveWorktrees: false}` payload, then independently reads the Playbot database, filesystem, Git worktree inventory, durable route file, and mode-0600 JSONL audit record.
+The broader `bin/fm-test-run.sh --changed --base origin/main` run passed 36 of 37 selected scripts, with only `tests/fm-teardown.test.sh` failing because `lsof-absent-process-group-reap` returned exit 139 instead of 0.
+The isolated fixture was then run from this workspace-retirement tree and a detached worktree at exact base `d4d6398c92da7ac82f800e5ddc3c9b8923a5152d` under the same constrained environment; both returned exit 139 with byte-identical output whose SHA-256 was `10f6ac65180a19b3c37dce19ff7e6ae123cd0fe69e3a9737e88a88fec707afbf`.
+There is no branch/base diff in `bin/fm-teardown.sh`, `tests/fm-teardown.test.sh`, or `tests/lib.sh`, so that pre-existing failure is disconfirming evidence rather than a workspace-retirement regression.
+
 On 2026-08-24, Playbot 0.95.0 on Linux was verified to expose the question-card, snapshot, and pending-queue channels the card tools use, and to have kept the composer mounted while a card is displayed.
 `app:metadata` returned `{name: "Playbot", version: "0.95.0"}`, matching the extracted `resources/app.asar` `/package.json` and the crashpad `--annotation=_version=0.95.0`.
 The channel names and payload shapes were confirmed from the running app's extracted `.vite/build/main.js`, where `threads:respondToUserInput` takes `{threadId, requestId, response, composerContext?}` and resolves the pending Codex `item/tool/requestUserInput` request, `threads:getSnapshot` takes `{threadId}` and returns `userInputRequests`, `pendingMessages`, and `outboundMessages` among its fields, `threads:recallMessage` takes `{threadId, messageId}` and returns `{outcome, message?, snapshot}`, and `threads:send` returns that same thread snapshot.
@@ -629,8 +651,8 @@ playbot lane fm-live-probe: worker chat-7975fcb9-7add-4c6f-8add-1ddd6428a39d sto
 A poll for a thread id the database does not hold, and a poll given incomplete arguments, each printed their one loud line and exited 0 rather than failing silently, which matters because `bin/fm-watch.sh` discards a check's stderr and exit code and wakes on stdout alone.
 The generated check was then registered into a scratch home with the real `bin/fm-check-register.sh`, retargeted at that live application database, and executed through the watcher's own `fm_custom_check_snapshot_prepare` path: the trust binding validated, the working chat produced no output, and the idle chat produced the single line above.
 
-Not verified against a live Playbot: creating a real throwaway workspace and driving a real worker through it.
-Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
+That 2026-08-24 live run did not create a throwaway workspace because the lane MCP did not yet expose guarded retirement.
+The current one-at-a-time retirement surface is covered by the 2026-08-28 hermetic executable evidence above, while the live `workspace:delete` channel evidence remains the 0.93.1 run recorded on 2026-08-18.
 
 A parked worker is a standing condition and a delivered worker finishing is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
 A queued, sending, or recall-pending task advances only when that worker session's persisted rollout records the exact client message id after the current acceptance boundary, while a ledger turn binding, `not-recallable` outcome, or failed recall without that timestamp stays armed and promotable, and UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.

@@ -24,7 +24,10 @@
 // is the thread snapshot that says whether Playbot delivered the message or is
 // only holding it. On Playbot 0.95.x an explicit forced send promotes that exact
 // held message through threads:steerMessage into the active turn without
-// interrupting it. It reads
+// interrupting it. Guarded workspace retirement uses Playbot's own
+// workspace:delete channel only after a fresh remote, Git, and thread-state
+// inspection, then verifies every Playbot, filesystem, and Git-worktree removal.
+// It reads
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
 // directly.
@@ -54,10 +57,26 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.4.0";
+const SERVER_VERSION = "0.5.0";
 const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
+
+// This exact list is the one allowance shared by retirement inventory and
+// retirement itself. Playbot's Godot editor integration rewrites these eight
+// tracked paths across unrelated worktrees. No directory prefix, extension,
+// basename, or untracked file is inferred to be churn.
+const PLAYBOT_TRACKED_CHURN_PATHS = Object.freeze([
+  "prototype-game/addons/playbot/playbot_common.gd.uid",
+  "prototype-game/addons/playbot/playbot_export_plugin.gd",
+  "prototype-game/addons/playbot/playbot_export_plugin.gd.uid",
+  "prototype-game/addons/playbot/playbot_log_capture.gd.source",
+  "prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid",
+  "prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid",
+  "prototype-game/addons/playbot/plugin.gd.uid",
+  "prototype-game/project.godot",
+]);
+const PLAYBOT_TRACKED_CHURN_SET = new Set(PLAYBOT_TRACKED_CHURN_PATHS);
 
 function desktopDir() {
   if (process.env.PLAYBOT_DESKTOP_DIR) return path.resolve(process.env.PLAYBOT_DESKTOP_DIR);
@@ -283,6 +302,401 @@ function resolveWorkspace(project, selector) {
   const selected = active.filter((workspace) => workspace.selected);
   if (selected.length === 1) return selected[0];
   throw new Error(`Project ${project.id} has multiple active workspaces; provide workspace id or path`);
+}
+
+function git(root, args, options = {}) {
+  const encoding = options.encoding ?? "utf8";
+  const result = spawnSync("git", ["-C", root, ...args], {
+    encoding,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.error) throw new Error(result.error.message);
+  if (result.status !== 0) {
+    const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : String(result.stderr ?? "");
+    const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf8") : String(result.stdout ?? "");
+    throw new Error((stderr || stdout || `git exited ${result.status}`).trim());
+  }
+  return result.stdout;
+}
+
+function splitNul(value) {
+  return String(value).split("\0").filter((item) => item !== "");
+}
+
+function workspaceGitStatus(root) {
+  const raw = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { encoding: "buffer" });
+  const records = raw.toString("utf8").split("\0");
+  const tracked = new Set();
+  const untracked = new Set();
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record) continue;
+    const status = record.slice(0, 2);
+    const file = record.slice(3).replaceAll("\\", "/");
+    if (status === "??") {
+      untracked.add(file);
+      continue;
+    }
+    tracked.add(file);
+    if (status.includes("R") || status.includes("C")) {
+      const prior = records[index + 1];
+      if (prior) tracked.add(prior.replaceAll("\\", "/"));
+      index += 1;
+    }
+  }
+  const trackedPaths = [...tracked].sort();
+  return {
+    trackedPaths,
+    allowedTrackedChurnPaths: trackedPaths.filter((file) => PLAYBOT_TRACKED_CHURN_SET.has(file)),
+    blockingTrackedPaths: trackedPaths.filter((file) => !PLAYBOT_TRACKED_CHURN_SET.has(file)),
+    untrackedPaths: [...untracked].sort(),
+  };
+}
+
+function landingRemote(root, landingBranch) {
+  const requested = String(landingBranch ?? "").trim();
+  if (!requested) throw new Error("landingBranch is required and must name the branch this workspace lands on");
+  const remotes = String(git(root, ["remote"])).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  let remote = null;
+  let branch = requested.replace(/^refs\/heads\//, "");
+  const remoteRefMatch = requested.match(/^refs\/remotes\/([^/]+)\/(.+)$/);
+  if (remoteRefMatch && remotes.includes(remoteRefMatch[1])) {
+    [, remote, branch] = remoteRefMatch;
+  } else {
+    const slash = requested.indexOf("/");
+    const prefix = slash > 0 ? requested.slice(0, slash) : "";
+    if (prefix && remotes.includes(prefix)) {
+      remote = prefix;
+      branch = requested.slice(slash + 1);
+    }
+  }
+  git(root, ["check-ref-format", "--branch", branch]);
+  if (!remote) {
+    const upstream = String(git(root, [
+      "for-each-ref",
+      "--format=%(upstream:remotename)%09%(upstream:remoteref)",
+      `refs/heads/${branch}`,
+    ])).trim();
+    if (upstream) {
+      const [upstreamRemote, upstreamRef] = upstream.split("\t");
+      if (!upstreamRemote || !upstreamRef?.startsWith("refs/heads/")) {
+        throw new Error(`landing branch ${requested} has an unreadable upstream binding`);
+      }
+      remote = upstreamRemote;
+      branch = upstreamRef.slice("refs/heads/".length);
+    } else if (remotes.length === 1) {
+      [remote] = remotes;
+    } else if (remotes.length === 0) {
+      throw new Error(`landing branch ${requested} has no remote from which to obtain current evidence`);
+    } else {
+      throw new Error(`landing branch ${requested} has no upstream and this repository has multiple remotes; name it as <remote>/${requested}`);
+    }
+  }
+  const remoteRef = `refs/heads/${branch}`;
+  const observedAt = nowIso();
+  const rows = String(git(root, ["ls-remote", "--exit-code", remote, remoteRef])).trim().split(/\r?\n/).filter(Boolean);
+  if (rows.length !== 1) throw new Error(`remote ${remote} did not resolve exactly one ${remoteRef}`);
+  const [commit, resolvedRef] = rows[0].split(/\s+/);
+  if (!/^[0-9a-f]{40,64}$/i.test(commit) || resolvedRef !== remoteRef) {
+    throw new Error(`remote ${remote} returned unreadable evidence for ${remoteRef}`);
+  }
+  try {
+    git(root, ["cat-file", "-e", `${commit}^{commit}`]);
+  } catch {
+    git(root, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, remoteRef]);
+    git(root, ["cat-file", "-e", `${commit}^{commit}`]);
+  }
+  return {
+    requested,
+    remote,
+    remoteUrl: String(git(root, ["remote", "get-url", remote])).trim(),
+    branch,
+    remoteRef,
+    commit,
+    observedAt,
+  };
+}
+
+function aheadCommits(root, landingCommit) {
+  const raw = git(root, ["log", "-z", "--format=%H%x00%s", `${landingCommit}..HEAD`], { encoding: "buffer" });
+  const fields = splitNul(raw.toString("utf8"));
+  const commits = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    commits.push({ commit: fields[index], subject: fields[index + 1] ?? "" });
+  }
+  return commits;
+}
+
+function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache) {
+  const rootPath = canonicalPath(workspaceRoot.path);
+  const result = {
+    projectRootId: workspaceRoot.projectRootId,
+    path: rootPath,
+    branch: workspaceRoot.branch,
+    head: null,
+    landing: null,
+    commitsAhead: [],
+    tracked: {
+      paths: [],
+      allowedChurnPaths: [],
+      blockingPaths: [],
+      allowlist: PLAYBOT_TRACKED_CHURN_PATHS,
+    },
+    untrackedPaths: [],
+    blockers: [],
+  };
+  if (!rootPath || !fs.existsSync(rootPath)) {
+    result.blockers.push({ code: "missing-root", message: `Workspace root is missing: ${workspaceRoot.path || "<empty>"}` });
+    return result;
+  }
+  let commonDir;
+  try {
+    const top = canonicalPath(String(git(rootPath, ["rev-parse", "--show-toplevel"])).trim());
+    if (top !== rootPath) throw new Error(`root resolves inside Git worktree ${top} instead of naming it exactly`);
+    commonDir = String(git(rootPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+    result.head = {
+      commit: String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim(),
+      subject: String(git(rootPath, ["show", "-s", "--format=%s", "HEAD"])).trim(),
+    };
+    const status = workspaceGitStatus(rootPath);
+    result.tracked.paths = status.trackedPaths;
+    result.tracked.allowedChurnPaths = status.allowedTrackedChurnPaths;
+    result.tracked.blockingPaths = status.blockingTrackedPaths;
+    result.untrackedPaths = status.untrackedPaths;
+  } catch (error) {
+    result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
+    return result;
+  }
+  try {
+    const cacheKey = `${canonicalPath(commonDir)}\n${landingBranch}`;
+    result.landing = remoteCache.get(cacheKey) ?? landingRemote(rootPath, landingBranch);
+    remoteCache.set(cacheKey, result.landing);
+    result.commitsAhead = aheadCommits(rootPath, result.landing.commit);
+  } catch (error) {
+    result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
+  }
+  if (result.commitsAhead.length > 0) {
+    result.blockers.push({
+      code: "unlanded-commits",
+      message: `${result.commitsAhead.length} commit(s) are ahead of ${landingBranch}`,
+      commits: result.commitsAhead,
+    });
+  }
+  if (result.tracked.blockingPaths.length > 0) {
+    result.blockers.push({
+      code: "tracked-modifications",
+      message: `${result.tracked.blockingPaths.length} tracked path(s) fall outside Playbot's exact churn allowlist`,
+      paths: result.tracked.blockingPaths,
+    });
+  }
+  if (result.untrackedPaths.length > 0) {
+    result.blockers.push({
+      code: "untracked-files",
+      message: `${result.untrackedPaths.length} untracked path(s) would be deleted and are never classified as Playbot churn`,
+      paths: result.untrackedPaths,
+    });
+  }
+  return result;
+}
+
+function inspectWorkspace(project, workspace, landingBranch, remoteCache = new Map()) {
+  const unarchivedThreads = threadRows()
+    .filter((row) => row.workspace_id === workspace.id && !row.archived)
+    .map((row) => ({ id: row.thread_id, title: row.title, status: row.agent_status, updatedAt: row.updated_at }));
+  const blockingThreads = unarchivedThreads.filter((thread) => thread.status === "working" || thread.status === "pending_input");
+  const evidence = {
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      kind: workspace.kind,
+      selected: workspace.selected,
+      projectId: project.id,
+      project: project.name,
+    },
+    landingBranch: String(landingBranch ?? ""),
+    threads: { unarchived: unarchivedThreads, blocking: blockingThreads },
+    roots: [],
+    blockers: [],
+  };
+  if (workspace.kind === "local") {
+    evidence.blockers.push({ code: "local-workspace", message: "Local workspaces are never retirable" });
+  }
+  if (blockingThreads.length > 0) {
+    evidence.blockers.push({
+      code: "active-threads",
+      message: `${blockingThreads.length} unarchived chat(s) are working or pending input`,
+      threads: blockingThreads,
+    });
+  }
+  if (workspace.roots.length === 0) {
+    evidence.blockers.push({ code: "missing-root", message: "Workspace has no persisted workspace roots" });
+  } else if (workspace.kind !== "local") {
+    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch, remoteCache));
+    evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
+  } else {
+    evidence.roots = workspace.roots.map((root) => ({
+      projectRootId: root.projectRootId,
+      path: canonicalPath(root.path),
+      branch: root.branch,
+      inspection: "skipped because Local workspaces are never retirable",
+    }));
+  }
+  evidence.retirable = evidence.blockers.length === 0;
+  evidence.verdict = evidence.retirable ? "retirable" : "blocked";
+  return evidence;
+}
+
+function retirementAuditPath() {
+  return path.join(stateDir(), "workspace-retirements.jsonl");
+}
+
+function appendRetirementAudit(record) {
+  ensurePrivateDirs();
+  const file = retirementAuditPath();
+  const descriptor = fs.openSync(file, "a", 0o600);
+  try {
+    fs.writeSync(descriptor, `${JSON.stringify(record)}\n`, null, "utf8");
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  fs.chmodSync(file, 0o600);
+  return file;
+}
+
+function deactivateWorkspaceRoutes(workspaceId) {
+  const affected = [];
+  const problems = [];
+  let routes;
+  try {
+    routes = loadRoutes();
+  } catch (error) {
+    return { affected, problems: [`Lane routes could not be read: ${error instanceof Error ? error.message : String(error)}`] };
+  }
+  for (const route of routes.filter((item) => item.supervisor?.workspaceId === workspaceId || item.worker?.workspaceId === workspaceId)) {
+    const wasActive = route.active === true;
+    route.active = false;
+    route.updatedAt = nowIso();
+    route.retiredWorkspace = workspaceId;
+    route.retiredWorkspaceAt = route.updatedAt;
+    try {
+      atomicWriteJson(routePath(route.id), route);
+      affected.push({ id: route.id, wasActive, deactivated: true });
+    } catch (error) {
+      affected.push({ id: route.id, wasActive, deactivated: false });
+      problems.push(`Lane ${route.id} could not be deactivated: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { affected, problems };
+}
+
+function verifyWorkspaceRetirement(project, inspection) {
+  const workspaceId = inspection.workspace.id;
+  const checks = {
+    workspaceRowGone: false,
+    workspaceRootRowsGone: false,
+    worktreeDirectoriesGone: [],
+    gitRegistrationsGone: [],
+  };
+  const problems = [];
+  try {
+    const db = openDb(appDbPath());
+    try {
+      checks.workspaceRowGone = Number(queryOne(db, "SELECT COUNT(*) AS count FROM workspaces WHERE id = ?", [workspaceId])?.count ?? -1) === 0;
+      checks.workspaceRootRowsGone = Number(queryOne(db, "SELECT COUNT(*) AS count FROM workspace_roots WHERE workspace_id = ?", [workspaceId])?.count ?? -1) === 0;
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    problems.push(`Playbot database verification failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!checks.workspaceRowGone) problems.push(`Playbot workspaces row still exists for ${workspaceId}`);
+  if (!checks.workspaceRootRowsGone) problems.push(`Playbot workspace_roots rows still exist for ${workspaceId}`);
+  for (const root of inspection.roots) {
+    const directoryGone = !fs.existsSync(root.path);
+    checks.worktreeDirectoriesGone.push({ path: root.path, gone: directoryGone });
+    if (!directoryGone) problems.push(`Worktree directory still exists: ${root.path}`);
+    const projectRoot = project.roots.find((candidate) => candidate.id === root.projectRootId);
+    if (!projectRoot?.path) {
+      checks.gitRegistrationsGone.push({ path: root.path, gone: false, error: "project root path missing" });
+      problems.push(`Git registration for ${root.path} cannot be checked because project root ${root.projectRootId} is missing`);
+      continue;
+    }
+    try {
+      const registered = String(git(projectRoot.path, ["worktree", "list", "--porcelain"]))
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("worktree "))
+        .map((line) => canonicalPath(line.slice("worktree ".length)));
+      const gone = !registered.includes(canonicalPath(root.path));
+      checks.gitRegistrationsGone.push({ path: root.path, gone });
+      if (!gone) problems.push(`Git worktree registration still exists: ${root.path}`);
+    } catch (error) {
+      checks.gitRegistrationsGone.push({ path: root.path, gone: false, error: error instanceof Error ? error.message : String(error) });
+      problems.push(`Git worktree registration verification failed for ${root.path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { complete: problems.length === 0, checks, problems };
+}
+
+async function retireWorkspace(project, workspace, landingBranch) {
+  const inspection = inspectWorkspace(project, workspace, landingBranch, new Map());
+  if (!inspection.retirable) {
+    const summary = inspection.blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
+    throw new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck: ${summary}`);
+  }
+  const ipcPayload = { workspaceId: workspace.id, preserveWorktrees: false };
+  await playbotInvoke("workspace:delete", ipcPayload);
+
+  // Everything below is post-action accounting. Once Playbot's awaited delete
+  // resolves, failures are data in a result whose deleted=true, never a thrown
+  // pre-action-looking refusal that could invite an unsafe retry.
+  const routes = deactivateWorkspaceRoutes(workspace.id);
+  const verification = verifyWorkspaceRetirement(project, inspection);
+  const deletedPaths = inspection.roots.filter((root) => !fs.existsSync(root.path)).map((root) => root.path);
+  const audit = {
+    at: nowIso(),
+    project: { id: project.id, name: project.name },
+    workspace: inspection.workspace,
+    workspacePaths: inspection.roots.map((root) => root.path),
+    deletedPaths,
+    remainingPaths: inspection.roots.filter((root) => fs.existsSync(root.path)).map((root) => root.path),
+    heads: inspection.roots.map((root) => ({ projectRootId: root.projectRootId, path: root.path, ...root.head })),
+    landingBranch: inspection.landingBranch,
+    verifiedLandingCommits: inspection.roots.map((root) => ({
+      projectRootId: root.projectRootId,
+      remote: root.landing.remote,
+      remoteRef: root.landing.remoteRef,
+      commit: root.landing.commit,
+      observedAt: root.landing.observedAt,
+    })),
+    affectedLaneRoutes: routes.affected,
+    ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: true },
+    verification,
+    routeProblems: routes.problems,
+  };
+  let auditResult;
+  try {
+    auditResult = { appended: true, path: appendRetirementAudit(audit) };
+  } catch (error) {
+    auditResult = { appended: false, path: retirementAuditPath(), error: error instanceof Error ? error.message : String(error) };
+  }
+  const problems = [
+    ...verification.problems,
+    ...routes.problems,
+    ...(auditResult.appended ? [] : [`Audit record could not be appended: ${auditResult.error}`]),
+  ];
+  return {
+    deleted: true,
+    workspace: inspection.workspace,
+    landingBranch: inspection.landingBranch,
+    ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: true },
+    verification,
+    routes,
+    audit: auditResult,
+    postActionComplete: problems.length === 0,
+    problems,
+  };
 }
 
 // An explicit workspace selector is resolved against the project's ACTIVE
@@ -2516,6 +2930,26 @@ function toolDefinitions() {
       inputSchema: object({ project: string("Project id, root path, or unique project name"), name: string("Optional workspace name; Playbot shows a generated name when omitted"), baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"), branch: string("Optional name for the new working branch; generated when omitted") }, ["project"]),
     },
     {
+      name: "list_retirable_workspaces",
+      description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence, unarchived thread states, commits and subjects ahead, and exact tracked and untracked paths. Local workspaces and any workspace with uncertain evidence are reported blocked.",
+      inputSchema: object({
+        project: string("Project id, root path, or unique project name"),
+        landingBranch: string("Explicit branch these workspaces must already be landed on; name <remote>/<branch> when a local branch has no unambiguous upstream"),
+      }, ["project", "landingBranch"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: "retire_workspace",
+      description: "Delete one exact non-Local Playbot workspace only after immediately re-running the complete landing, thread, and Git safety inspection. Requires confirm=true, invokes workspace:delete with preserveWorktrees=false, verifies every database, directory, and Git-worktree removal, deactivates matching lane routes, and appends a private audit record.",
+      inputSchema: object({
+        project: string("Project id, root path, or unique project name"),
+        workspace: string("Exact workspace id, root path, or unique exact name from list_retirable_workspaces"),
+        landingBranch: string("Explicit branch this workspace must already be landed on; use the same value just inspected"),
+        confirm: { type: "boolean", const: true },
+      }, ["project", "workspace", "landingBranch", "confirm"]),
+      annotations: { destructiveHint: true },
+    },
+    {
       name: "create_chat",
       description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace.",
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), newWorkspace: newWorkspace(), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false) }, ["project", "title"]),
@@ -2644,6 +3078,30 @@ async function handleTool(name, args = {}) {
   }
 
   const project = resolveProject(args.project, projects);
+  if (name === "list_retirable_workspaces") {
+    const landingBranch = String(args.landingBranch ?? "").trim();
+    if (!landingBranch) throw new Error("list_retirable_workspaces requires an explicit landingBranch");
+    const remoteCache = new Map();
+    const workspaces = project.workspaces
+      .filter((workspace) => workspace.archiveState === "active")
+      .map((workspace) => inspectWorkspace(project, workspace, landingBranch, remoteCache));
+    return {
+      project: { id: project.id, name: project.name },
+      landingBranch,
+      trackedChurnAllowlist: PLAYBOT_TRACKED_CHURN_PATHS,
+      untrackedBoundary: "Untracked files are reported and block retirement; the tracked-churn allowlist never applies to them.",
+      workspaces,
+    };
+  }
+  if (name === "retire_workspace") {
+    if (args.confirm !== true) throw new Error("retire_workspace requires confirm=true after a fresh list_retirable_workspaces inspection");
+    const selector = String(args.workspace ?? "").trim();
+    if (!selector) throw new Error("retire_workspace requires one exact workspace selector from list_retirable_workspaces");
+    const landingBranch = String(args.landingBranch ?? "").trim();
+    if (!landingBranch) throw new Error("retire_workspace requires an explicit landingBranch");
+    const workspace = resolveWorkspace(project, selector);
+    return retireWorkspace(project, workspace, landingBranch);
+  }
   if (name === "create_workspace") {
     return { workspace: await createWorkspace(project, args) };
   }

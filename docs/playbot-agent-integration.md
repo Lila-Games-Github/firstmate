@@ -425,7 +425,8 @@ The renderer's `window.electronAPI.invoke(channel, payload)` bridge (the transpo
 - **`workspace:delete`** — `{ workspaceId, preserveWorktrees? }` (default `false`). Refuses to delete the Local workspace, and refuses to delete the selected workspace unless a replacement exists.
 - Related channels confirmed present in the same module: `workspace:update`, `workspace:archive`, `workspace:select`, `workspace:renameBranch`, and `workspaceRoots:list`. Avoid `workspace:select` from automation — it changes what the user is looking at.
 
-Firstmate's `playbot_lanes` MCP exposes this as the `create_workspace` tool plus a `newWorkspace` option on `create_chat`/`dispatch` (see `docs/playbot-lanes.md`); prefer those over raw CDP calls.
+Firstmate's `playbot_lanes` MCP exposes creation as `create_workspace` plus the `newWorkspace` option on `create_chat` and `dispatch`, and exposes deletion only through the guarded `list_retirable_workspaces` then one-at-a-time `retire_workspace` path documented in [playbot-lanes.md](playbot-lanes.md#workspace-retirement).
+Use those tools instead of raw CDP or IPC code, manual folder deletion, direct database edits, or direct Git worktree removal.
 
 ---
 
@@ -476,4 +477,3 @@ node bin/fm-playbot-lanes.mjs serve          # thread-addressed lane MCP, §8.1
 MCP endpoint: `POST http://127.0.0.1:<port>/mcp?roots=<json>&primaryRootId=<id>`
 Headers: `Content-Type: application/json`, `Accept: application/json, text/event-stream`, `mcp-session-id: <from initialize>`
 Methods: `initialize` → `notifications/initialized` → `tools/list` / `tools/call`. No auth.
-
