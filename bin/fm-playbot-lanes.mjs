@@ -320,6 +320,10 @@ function git(root, args, options = {}) {
   return result.stdout;
 }
 
+function gitPathIdentity(value) {
+  return process.platform === "win32" ? String(value).replaceAll("\\", "/") : String(value);
+}
+
 function workspaceGitStatus(root) {
   const raw = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"], { encoding: "buffer" });
   const records = raw.toString("utf8").split("\0");
@@ -329,7 +333,7 @@ function workspaceGitStatus(root) {
     const record = records[index];
     if (!record) continue;
     const status = record.slice(0, 2);
-    const file = record.slice(3).replaceAll("\\", "/");
+    const file = gitPathIdentity(record.slice(3));
     if (status === "??" || status === "!!") {
       untracked.add(file);
       continue;
@@ -337,7 +341,7 @@ function workspaceGitStatus(root) {
     tracked.add(file);
     if (status.includes("R") || status.includes("C")) {
       const prior = records[index + 1];
-      if (prior) tracked.add(prior.replaceAll("\\", "/"));
+      if (prior) tracked.add(gitPathIdentity(prior));
       index += 1;
     }
   }

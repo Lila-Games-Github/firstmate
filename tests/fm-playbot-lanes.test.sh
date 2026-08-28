@@ -124,6 +124,7 @@ do
 done
 printf 'baseline project\n' > "$FIXTURE_ROOT/worker/prototype-game/project.godot"
 printf 'tracked work\n' > "$FIXTURE_ROOT/worker/prototype-game/real-work.txt"
+printf 'tracked backslash work\n' > "$FIXTURE_ROOT/worker/prototype-game/addons/playbot\\plugin.gd.uid"
 printf 'prototype-game/ignored-retirement.txt\n' > "$FIXTURE_ROOT/worker/.gitignore"
 git -C "$FIXTURE_ROOT/worker" add .
 git -C "$FIXTURE_ROOT/worker" commit -m "fixture baseline" >/dev/null \
@@ -3614,6 +3615,17 @@ if (root.tracked.blockingPaths.length !== 0 || root.untrackedPaths.length !== 0)
 if (new Set(root.tracked.allowlist).size !== 8) process.exit(1);
 NODE
 pass "fm-playbot-lanes: all and only eight exact tracked Playbot churn paths are allowed"
+
+printf 'backslash edit\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/addons/playbot\\plugin.gd.uid"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "a POSIX backslash pathname aliased an allowlisted path"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'tracked-modifications');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/addons/playbot\\plugin.gd.uid') process.exit(1);
+NODE
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore 'prototype-game/addons/playbot\plugin.gd.uid'
+pass "fm-playbot-lanes: POSIX backslashes remain literal blocking path characters"
 
 printf 'real tracked edit\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
 retirement_list main > "$retirement_inventory"
