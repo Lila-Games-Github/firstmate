@@ -23,6 +23,8 @@ Linux
 
 ## Behavioral evidence
 
+The review-fixed pipeline under test was commit `974dcb2741aeb24a7deb50f9765ab7daed71c7de`.
+
 The focused public-interface and startup integration run used:
 
 ```sh
@@ -32,13 +34,15 @@ bin/fm-test-run.sh tests/fm-learning-candidate.test.sh tests/fm-brief.test.sh te
 The result was:
 
 ```text
-FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=144794
-FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=2 duration_ms=7609 failed=0
-FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=137066 failed=0
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=157561
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=2 duration_ms=17351 failed=0
+FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=140119 failed=0
 ```
 
-That run covers required-field and stored-record validation, deterministic repeat capture, every routing class, incompatible route rejection, separate curator identity, complete no-one-off-skill evidence, idempotent retries, every requested disposition, explicit deduplication, bounded list and summary output, session-start visibility, and survival through ordinary non-forced task cleanup.
-It also confirms the conditional reminder appears in ship and scout briefs, routine success still requires no audit or state creation, and the originating lane is not assigned asynchronous curation.
+That run covers required-field and stored-record validation, deterministic repeat capture, every routing class, incompatible route rejection, separate curator identity, complete no-one-off-skill evidence, every requested disposition, and explicit deduplication with interruption recovery, authoritative duplicate state, exact retry repair, and conflicting-retry refusal.
+It also covers store-independent summary reads, bounded list and summary output, interrupted and concurrent summary-transaction recovery, bounded session-start visibility, and generated ship and scout capture commands that bind the originating home and tracked executable.
+The conditional reminder remains limited to ship and scout briefs, routine success still requires no audit or state creation, and the originating lane is not assigned asynchronous curation.
+The ordinary non-forced task-cleanup survival case reported `skip` because `tasks-axi` was unavailable in this environment; the other focused assertions and all three scripts passed.
 
 The relevant broader contract family and portable-lane coverage check used:
 
