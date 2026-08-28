@@ -100,6 +100,6 @@ rg -n "learning-candidate|fm-learning-candidate" bin/fm-harness.sh bin/fm-backen
 
 The command produced no matches.
 The lifecycle reads and atomically writes only the selected home's private state, so tmux, Herdr, Zellij, Orca, and cmux endpoint creation, transport, liveness, and cleanup mechanics are not applicable.
-The cleanup regression exercises the shared task-cleanup entrypoint and proves its task-scoped removal leaves the home-level candidate directory intact; backend-specific teardown branches do not own that directory.
+The cleanup regression targets the shared task-cleanup entrypoint, but its teardown assertions remain pending CI coverage because `tasks-axi` was unavailable in the recorded run; backend-specific teardown branches do not own the home-level candidate directory.
 
 No live harness or real backend smoke was required because no verdict depends on vendor output, process shape, rendered UI, endpoint transport, or backend lifecycle behavior.

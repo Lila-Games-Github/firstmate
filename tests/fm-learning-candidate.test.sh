@@ -520,6 +520,28 @@ test_bounded_summary_and_batch() {
   pass "summary and batch output remain bounded as the unresolved inbox grows"
 }
 
+test_summary_strips_terminal_controls() {
+  local home impact id summary stored batched control
+  home=$(make_home summary-controls)
+  impact=$'impact\001\007\033[2J\037\177\302\205\302\233\302\237visible'
+  id=$(capture_candidate "$home" summary-controls FrogPile review-rejection "$impact") \
+    || fail "could not capture a candidate containing control characters"
+
+  summary=$(run_learning "$home" summary) || fail "summary failed for control-character evidence"
+  assert_contains "$summary" "impact[2Jvisible" \
+    "summary did not retain the printable incident text"
+  for control in $'\001' $'\007' $'\033' $'\037' $'\177' $'\302\205' $'\302\233' $'\302\237'; do
+    assert_not_contains "$summary" "$control" \
+      "summary emitted a captured terminal control character"
+  done
+
+  stored=$(run_learning "$home" get "$id" | jq -r '.incident.user_visible_impact')
+  [ "$stored" = "$impact" ] || fail "get did not preserve complete control-character evidence"
+  batched=$(run_learning "$home" batch --limit 1 | jq -r '.[0].incident.user_visible_impact')
+  [ "$batched" = "$impact" ] || fail "batch did not preserve complete control-character evidence"
+  pass "summary strips terminal controls while get and batch preserve evidence"
+}
+
 test_candidate_survives_nonblocking_task_cleanup() {
   local home fakebin id candidate rc
   command -v tasks-axi >/dev/null 2>&1 || { pass "task cleanup survival skipped because tasks-axi is unavailable"; return; }
@@ -578,6 +600,7 @@ test_dedupe_recovers_interrupted_backlink
 test_summary_index_recovers_interrupted_update
 test_summary_read_work_is_store_independent
 test_bounded_summary_and_batch
+test_summary_strips_terminal_controls
 test_candidate_survives_nonblocking_task_cleanup
 
 echo "# fm-learning-candidate.test.sh: all assertions passed"

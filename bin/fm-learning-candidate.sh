@@ -695,7 +695,7 @@ summary_command() {
   store_available_read_only || return 0
   index=$(effective_summary_index)
   printf '%s\n' "$index" | jq -r --argjson limit "$limit" '
-    def compact: gsub("[\\r\\n\\t]+"; " ") | if length > 120 then .[:117] + "..." else . end;
+    def compact: gsub("[\\r\\n\\t]+"; " ") | gsub("[[:cntrl:]]+"; "") | if length > 120 then .[:117] + "..." else . end;
     .unresolved_count as $count |
     if $count == 0 then empty else
       "LEARNING CANDIDATES: \($count) unresolved",
