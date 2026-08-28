@@ -658,6 +658,13 @@ dedupe_command() {
   duplicate_path=$RECORD_PATH
   [ "$(printf '%s\n' "$duplicate_json" | jq -r '.incident.origin_task')" != "$curator" ] \
     || die "curator must differ from the originating task"
+
+  load_record "$canonical"
+  canonical_json=$RECORD_JSON
+  canonical_path=$RECORD_PATH
+  [ "$(printf '%s\n' "$canonical_json" | jq -r '.incident.origin_task')" != "$curator" ] \
+    || die "curator must differ from the originating task"
+
   existing=$(printf '%s\n' "$duplicate_json" | jq -cS '.disposition // null')
   if [ "$existing" != null ]; then
     if printf '%s\n' "$existing" | jq -e --arg curator "$curator" --arg canonical "$canonical" --arg reason "$reason" \
@@ -669,10 +676,6 @@ dedupe_command() {
   fi
   [ "$(printf '%s\n' "$duplicate_json" | jq -r '.lifecycle_state')" = unresolved ] \
     || die "only an unresolved candidate can be deduplicated"
-
-  load_record "$canonical"
-  canonical_json=$RECORD_JSON
-  canonical_path=$RECORD_PATH
   [ "$(printf '%s\n' "$canonical_json" | jq -r '.lifecycle_state')" = unresolved ] \
     || die "canonical candidate must remain unresolved"
   timestamp=$(now_rfc3339)

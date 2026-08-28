@@ -274,6 +274,24 @@ test_lifecycle_dispositions_and_deduplication() {
     "the same visual review gap appeared")
   duplicate=$(capture_candidate "$home" duplicate-b FrogPile review-rejection \
     "the same visual review gap appeared" "second incident with the same cause")
+  set +e
+  run_learning "$home" dedupe "$duplicate" --into "$canonical" \
+    --curator duplicate-a --reason "same escaped contract and prevention" \
+    >"$home/canonical-origin.out" 2>"$home/canonical-origin.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "canonical originating task was accepted as dedupe curator"
+  assert_grep "curator must differ from the originating task" "$home/canonical-origin.err" \
+    "canonical-origin dedupe refusal was not explicit"
+  json=$(run_learning "$home" get "$duplicate")
+  printf '%s\n' "$json" | jq -e '
+    .lifecycle_state == "unresolved" and .disposition == null
+  ' >/dev/null || fail "rejected dedupe mutated the duplicate candidate: $json"
+  json=$(run_learning "$home" get "$canonical")
+  printf '%s\n' "$json" | jq -e '
+    .lifecycle_state == "unresolved" and .duplicates == []
+  ' >/dev/null || fail "rejected dedupe mutated the canonical candidate: $json"
+
   run_learning "$home" dedupe "$duplicate" --into "$canonical" \
     --curator curator-dedupe --reason "same escaped contract and prevention" >/dev/null \
     || fail "dedupe failed"
