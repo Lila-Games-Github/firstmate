@@ -112,7 +112,7 @@ test_repeat_capture_is_idempotent() {
   second=$(capture_candidate "$home" repeated-review FrogPile review-rejection \
     "review rejected the completed HUD") || fail "repeat capture failed"
   [ "$first" = "$second" ] || fail "exact repeat capture produced a different identity"
-  count=$(find "$home/state/learning-candidates" -type f -name '*.json' | wc -l | tr -d ' ')
+  count=$(find "$home/state/learning-candidates" -type f -name 'lc-*.json' | wc -l | tr -d ' ')
   [ "$count" -eq 1 ] || fail "exact repeat capture created $count records"
   pass "exact repeat capture converges on one durable candidate"
 }
@@ -327,13 +327,8 @@ test_dedupe_recovers_interrupted_backlink() {
   real_mv=$(command -v mv) || fail "could not locate mv for interrupted dedupe fixture"
   cat >"$fakebin/mv" <<'SH'
 #!/usr/bin/env bash
-count=0
-if [ -f "$FM_TEST_MV_COUNT" ]; then
-  IFS= read -r count <"$FM_TEST_MV_COUNT"
-fi
-count=$((count + 1))
-printf '%s\n' "$count" >"$FM_TEST_MV_COUNT"
-if [ "$count" -eq 2 ]; then
+last=${!#}
+if [ "$last" = "$FM_TEST_FAIL_PATH" ]; then
   exit 1
 fi
 exec "$FM_TEST_REAL_MV" "$@"
@@ -342,7 +337,7 @@ SH
 
   set +e
   PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" \
-    FM_TEST_MV_COUNT="$home/mv-count" \
+    FM_TEST_FAIL_PATH="$home/state/learning-candidates/$canonical.json" \
     run_learning "$home" dedupe "$duplicate" --into "$canonical" \
       --curator curator-interrupted --reason "same durable prevention" \
       >"$home/interrupted.out" 2>"$home/interrupted.err"
@@ -386,6 +381,94 @@ SH
     .lifecycle_state == "duplicate" and .disposition.reference == $canonical
   ' >/dev/null || fail "conflicting dedupe changed the authoritative duplicate state: $json"
   pass "dedupe interruption preserves one authority and exact retry repairs its backlink"
+}
+
+test_summary_index_recovers_interrupted_update() {
+  local home fakebin real_mv summary rc
+  home=$(make_home interrupted-summary)
+  capture_candidate "$home" summary-base FrogPile escaped-defect \
+    "base summary candidate" >/dev/null
+  fakebin=$(fm_fakebin "$home")
+  real_mv=$(command -v mv) || fail "could not locate mv for interrupted summary fixture"
+  cat >"$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_TEST_FAIL_PATH" ]; then
+  exit 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" \
+    FM_TEST_FAIL_PATH="$home/state/learning-candidates/.summary.json" \
+    capture_candidate "$home" summary-interrupted FrogPile review-rejection \
+      "candidate committed before its summary index" \
+      >"$home/interrupted-summary.out" 2>"$home/interrupted-summary.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "capture succeeded after its summary index commit failed"
+  rm -f "$fakebin/mv"
+
+  summary=$(run_learning "$home" summary) \
+    || fail "summary could not reconcile its committed pending record"
+  assert_contains "$summary" "LEARNING CANDIDATES: 2 unresolved" \
+    "pending summary transaction did not expose the committed candidate"
+  capture_candidate "$home" summary-recovery FrogPile workflow-gap-blocker \
+    "later mutation recovers the pending summary transaction" >/dev/null \
+    || fail "later mutation did not recover the pending summary transaction"
+  summary=$(run_learning "$home" summary) || fail "summary failed after transaction recovery"
+  assert_contains "$summary" "LEARNING CANDIDATES: 3 unresolved" \
+    "recovered summary index lost a committed candidate"
+  pass "summary index remains exact across an interrupted index commit"
+}
+
+test_summary_read_work_is_store_independent() {
+  local home fakebin real_cat id summary rc i details
+  home=$(make_home summary-scale)
+  i=1
+  while [ "$i" -le 24 ]; do
+    id=$(capture_candidate "$home" "scale-$i" FrogPile escaped-defect \
+      "scale candidate impact $i") || fail "could not capture scale candidate $i"
+    if [ "$i" -le 19 ]; then
+      run_learning "$home" disposition "$id" --curator scale-curator \
+        --status dismissed --note "resolved scale candidate $i" >/dev/null \
+        || fail "could not resolve scale candidate $i"
+    fi
+    i=$((i + 1))
+  done
+
+  fakebin=$(fm_fakebin "$home")
+  real_cat=$(command -v cat) || fail "could not locate cat for bounded summary fixture"
+  cat >"$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+case "$last" in
+  "$FM_TEST_CANDIDATE_DIR"/lc-*.json)
+    printf 'candidate record read\n' >"$FM_TEST_CAT_MARKER"
+    exit 97
+    ;;
+esac
+exec "$FM_TEST_REAL_CAT" "$@"
+SH
+  chmod +x "$fakebin/cat"
+
+  set +e
+  summary=$(PATH="$fakebin:$PATH" FM_TEST_REAL_CAT="$real_cat" \
+    FM_TEST_CANDIDATE_DIR="$home/state/learning-candidates" \
+    FM_TEST_CAT_MARKER="$home/candidate-read" \
+    run_learning "$home" summary 2>"$home/scale-summary.err")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "bounded summary failed with many resolved records: $(cat "$home/scale-summary.err")"
+  assert_contains "$summary" "LEARNING CANDIDATES: 5 unresolved" \
+    "bounded summary index lost the exact unresolved count"
+  details=$(printf '%s\n' "$summary" | grep -c '^- lc-')
+  [ "$details" -eq 3 ] || fail "bounded summary emitted $details details instead of three"
+  assert_absent "$home/candidate-read" \
+    "summary read a full candidate record instead of its fixed-size index"
+  pass "summary read work stays fixed as resolved candidate history grows"
 }
 
 test_bounded_summary_and_batch() {
@@ -472,6 +555,8 @@ test_repeat_capture_is_idempotent
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_recovers_interrupted_backlink
+test_summary_index_recovers_interrupted_update
+test_summary_read_work_is_store_independent
 test_bounded_summary_and_batch
 test_candidate_survives_nonblocking_task_cleanup
 

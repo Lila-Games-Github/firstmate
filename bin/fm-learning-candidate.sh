@@ -76,9 +76,13 @@
 #
 # `list` and `batch` default to unresolved candidates, oldest first. `list` is a
 # concise tab-separated surface; `batch` emits a JSON array with complete records
-# for independent curation. `summary` is silent when no candidate is unresolved
-# and otherwise emits at most five capped detail lines plus one remainder line,
-# regardless of inbox size. `get` emits one complete JSON record.
+# for independent curation. `summary` reads only the fixed-size `.summary.json`
+# index and an optional `.summary-pending.json` commit probe, so its memory and
+# read work do not grow with the store. Mutations maintain that index under the
+# lifecycle lock; a missing legacy index is rebuilt only by a mutating command.
+# `summary` is silent when no candidate is unresolved and otherwise emits at most
+# five capped detail lines plus one remainder line. `get` emits one complete JSON
+# record.
 #
 # Lifecycle states are unresolved, dismissed, documented, promoted, follow-up,
 # and duplicate. Dismissal may precede classification. Documented, promoted, and
@@ -100,6 +104,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CANDIDATE_DIR="$STATE/learning-candidates"
 MUTATION_LOCK="$STATE/.learning-candidates.lock"
+SUMMARY_INDEX="$CANDIDATE_DIR/.summary.json"
+SUMMARY_PENDING="$CANDIDATE_DIR/.summary-pending.json"
 MAX_TEXT_BYTES=8192
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -318,6 +324,181 @@ write_record() { # <path> <json>
   TEMP_FILE=
 }
 
+validate_summary_index_json() {
+  local json=$1
+  printf '%s\n' "$json" | jq -e '
+    .schema == 1
+    and (.unresolved_count | type == "number" and . >= 0 and floor == .)
+    and (.sample | type == "array" and length <= 5)
+    and (.sample | all(
+      type == "object"
+      and ([.id, .captured_at, .project, .signal_type, .user_visible_impact] |
+        all(type == "string" and length > 0))
+      and (.id | test("^lc-[0-9a-f]{24}$"))))
+    and .unresolved_count >= (.sample | length)
+    and (.sample == (.sample | sort_by(.captured_at, .id)))
+    and (([.sample[].id] | unique | length) == (.sample | length))
+  ' >/dev/null || die "invalid learning-candidate summary index"
+}
+
+validate_summary_pending_json() {
+  local json=$1 after
+  printf '%s\n' "$json" | jq -e '
+    .schema == 1
+    and (.operation | IN("capture", "disposition", "dedupe"))
+    and (.probe | type == "object")
+    and (.probe.id | type == "string" and test("^lc-[0-9a-f]{24}$"))
+    and (.probe.lifecycle_state |
+      IN("unresolved", "dismissed", "documented", "promoted", "follow-up", "duplicate"))
+    and (.probe.capture_digest == null or
+      (.probe.capture_digest | type == "string" and test("^[0-9a-f]{64}$")))
+    and (.probe.reference == null or
+      (.probe.reference | type == "string" and test("^lc-[0-9a-f]{24}$")))
+    and (.after | type == "object")
+  ' >/dev/null || die "invalid learning-candidate summary transaction"
+  after=$(printf '%s\n' "$json" | jq -cS '.after')
+  validate_summary_index_json "$after"
+}
+
+write_summary_json() {
+  local path=$1 prefix=$2 json=$3
+  TEMP_FILE=$(mktemp "$CANDIDATE_DIR/.$prefix.XXXXXX") \
+    || die "could not create learning-candidate summary temporary file"
+  printf '%s\n' "$json" > "$TEMP_FILE"
+  chmod 600 "$TEMP_FILE"
+  mv -f -- "$TEMP_FILE" "$path"
+  TEMP_FILE=
+}
+
+write_summary_index() {
+  validate_summary_index_json "$1"
+  write_summary_json "$SUMMARY_INDEX" summary "$1"
+}
+
+write_summary_pending() {
+  validate_summary_pending_json "$1"
+  write_summary_json "$SUMMARY_PENDING" summary-pending "$1"
+}
+
+summary_projection() {
+  printf '%s\n' "$1" | jq -cS '
+    {id, captured_at, project:.incident.project,
+     signal_type:.incident.signal_type,
+     user_visible_impact:.incident.user_visible_impact}'
+}
+
+build_summary_index() {
+  records_stream | jq -csS '
+    [.[] | select(.lifecycle_state == "unresolved")]
+    | sort_by(.captured_at, .id)
+    | {schema:1, unresolved_count:length,
+       sample:(.[:5] | map(
+         {id, captured_at, project:.incident.project,
+          signal_type:.incident.signal_type,
+          user_visible_impact:.incident.user_visible_impact}))}'
+}
+
+summary_probe_committed() {
+  local pending=$1 id path record
+  id=$(printf '%s\n' "$pending" | jq -r '.probe.id')
+  path=$(record_path "$id")
+  if [ ! -e "$path" ]; then
+    return 1
+  fi
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    || die "candidate not found during summary recovery: $id"
+  record=$(cat "$path")
+  validate_record_json "$record" "$id"
+  printf '%s\n' "$record" | jq -e --argjson pending "$pending" '
+    .lifecycle_state == $pending.probe.lifecycle_state
+    and ($pending.probe.capture_digest == null
+      or .capture_digest == $pending.probe.capture_digest)
+    and ($pending.probe.reference == null
+      or .disposition.reference == $pending.probe.reference)
+  ' >/dev/null
+}
+
+effective_summary_index() {
+  local index pending
+  [ -f "$SUMMARY_INDEX" ] && [ ! -L "$SUMMARY_INDEX" ] \
+    || die "learning-candidate summary index is missing; run a mutating lifecycle command to rebuild it"
+  index=$(cat "$SUMMARY_INDEX")
+  validate_summary_index_json "$index"
+  if [ -e "$SUMMARY_PENDING" ]; then
+    [ -f "$SUMMARY_PENDING" ] && [ ! -L "$SUMMARY_PENDING" ] \
+      || die "learning-candidate summary transaction must be a regular file"
+    pending=$(cat "$SUMMARY_PENDING")
+    validate_summary_pending_json "$pending"
+    if summary_probe_committed "$pending"; then
+      index=$(printf '%s\n' "$pending" | jq -cS '.after')
+    fi
+  fi
+  printf '%s\n' "$index"
+}
+
+load_summary_index_for_mutation() {
+  if [ -e "$SUMMARY_PENDING" ]; then
+    SUMMARY_INDEX_JSON=$(effective_summary_index)
+    write_summary_index "$SUMMARY_INDEX_JSON"
+    rm -f -- "$SUMMARY_PENDING"
+  elif [ -e "$SUMMARY_INDEX" ]; then
+    [ -f "$SUMMARY_INDEX" ] && [ ! -L "$SUMMARY_INDEX" ] \
+      || die "learning-candidate summary index must be a regular file"
+    SUMMARY_INDEX_JSON=$(cat "$SUMMARY_INDEX")
+    validate_summary_index_json "$SUMMARY_INDEX_JSON"
+  else
+    SUMMARY_INDEX_JSON=$(build_summary_index)
+    validate_summary_index_json "$SUMMARY_INDEX_JSON"
+    write_summary_index "$SUMMARY_INDEX_JSON"
+  fi
+}
+
+summary_index_add() {
+  local entry
+  entry=$(summary_projection "$2")
+  jq -cnS --argjson index "$1" --argjson entry "$entry" '
+    $index
+    | .unresolved_count += 1
+    | .sample = ((.sample + [$entry]) | sort_by(.captured_at, .id) | .[:5])
+  '
+}
+
+summary_index_remove() {
+  local index=$1 id=$2 count sample
+  count=$(printf '%s\n' "$index" | jq '.unresolved_count')
+  [ "$count" -gt 0 ] || die "learning-candidate summary index underflow"
+  sample=$(records_stream | jq -csS --arg id "$id" '
+    [.[] | select(.lifecycle_state == "unresolved" and .id != $id)]
+    | sort_by(.captured_at, .id)
+    | .[:5]
+    | map({id, captured_at, project:.incident.project,
+           signal_type:.incident.signal_type,
+           user_visible_impact:.incident.user_visible_impact})
+  ')
+  jq -cnS --argjson index "$index" --argjson count "$((count - 1))" \
+    --argjson sample "$sample" \
+    '$index | .unresolved_count=$count | .sample=$sample'
+}
+
+begin_summary_transaction() {
+  local operation=$1 id=$2 lifecycle_state=$3 digest=$4 reference=$5 after=$6 pending
+  pending=$(jq -cnS --arg operation "$operation" --arg id "$id" \
+    --arg lifecycle_state "$lifecycle_state" --arg digest "$digest" \
+    --arg reference "$reference" --argjson after "$after" \
+    '{schema:1, operation:$operation,
+      probe:{id:$id, lifecycle_state:$lifecycle_state,
+        capture_digest:(if $digest == "" then null else $digest end),
+        reference:(if $reference == "" then null else $reference end)},
+      after:$after}')
+  write_summary_pending "$pending"
+}
+
+finish_summary_transaction() {
+  write_summary_index "$1"
+  rm -f -- "$SUMMARY_PENDING"
+  SUMMARY_INDEX_JSON=$1
+}
+
 records_stream() {
   local path json id
   store_available_read_only || return 0
@@ -338,7 +519,7 @@ records_array() {
 
 capture_command() {
   local task='' project='' signal='' impact='' root_cause='' escaped_contract='' missing_check=''
-  local consumer='' prevention='' evidence='' proposed_owner='' counterfactual='' payload digest id path timestamp record existing
+  local consumer='' prevention='' evidence='' proposed_owner='' counterfactual='' payload digest id path timestamp record existing summary_after
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -394,6 +575,7 @@ capture_command() {
       disposition:null, duplicates:[], history:[{at:$at,event:"captured",actor:$incident.origin_task}]}')
 
   acquire_mutation_lock
+  load_summary_index_for_mutation
   path=$(record_path "$id")
   if [ -e "$path" ]; then
     [ -f "$path" ] && [ ! -L "$path" ] || die "candidate id collision with non-regular path: $id"
@@ -404,7 +586,10 @@ capture_command() {
     printf '%s\n' "$id"
     return 0
   fi
+  summary_after=$(summary_index_add "$SUMMARY_INDEX_JSON" "$record")
+  begin_summary_transaction capture "$id" unresolved "$digest" '' "$summary_after"
   write_record "$path" "$record"
+  finish_summary_transaction "$summary_after"
   printf '%s\n' "$id"
 }
 
@@ -451,7 +636,7 @@ batch_command() {
 }
 
 summary_command() {
-  local limit=3 array
+  local limit=3 index
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -460,14 +645,14 @@ summary_command() {
     esac
   done
   validate_summary_limit "$limit"
-  array=$(records_array)
-  printf '%s\n' "$array" | jq -r --argjson limit "$limit" '
+  store_available_read_only || return 0
+  index=$(effective_summary_index)
+  printf '%s\n' "$index" | jq -r --argjson limit "$limit" '
     def compact: gsub("[\\r\\n\\t]+"; " ") | if length > 120 then .[:117] + "..." else . end;
-    [.[] | select(.lifecycle_state == "unresolved")] as $open |
-    ($open | length) as $count |
+    .unresolved_count as $count |
     if $count == 0 then empty else
       "LEARNING CANDIDATES: \($count) unresolved",
-      ($open[:$limit][] | "- \(.id) [\(.incident.project)/\(.incident.signal_type)] \(.incident.user_visible_impact | compact)"),
+      (.sample[:$limit][] | "- \(.id) [\(.project)/\(.signal_type)] \(.user_visible_impact | compact)"),
       (if $count > $limit then "- ... \($count - $limit) more; run bin/fm-learning-candidate.sh batch" else empty end)
     end
   '
@@ -551,6 +736,7 @@ classify_command() {
   fi
 
   acquire_mutation_lock
+  load_summary_index_for_mutation
   load_record "$id"
   [ "$(printf '%s\n' "$RECORD_JSON" | jq -r '.incident.origin_task')" != "$curator" ] \
     || die "curator must differ from the originating task"
@@ -580,7 +766,7 @@ classify_command() {
 }
 
 disposition_command() {
-  local id=${2:-} curator='' outcome='' note='' reference='' timestamp disposition existing comparable updated
+  local id=${2:-} curator='' outcome='' note='' reference='' timestamp disposition existing comparable updated summary_after
   [ -n "$id" ] || die "disposition requires a candidate id"
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -603,6 +789,7 @@ disposition_command() {
   fi
 
   acquire_mutation_lock
+  load_summary_index_for_mutation
   load_record "$id"
   [ "$(printf '%s\n' "$RECORD_JSON" | jq -r '.incident.origin_task')" != "$curator" ] \
     || die "curator must differ from the originating task"
@@ -630,7 +817,10 @@ disposition_command() {
     --arg at "$timestamp" --arg curator "$curator" --arg outcome "$outcome" \
     '.lifecycle_state=$outcome | .disposition=$disposition |
      .history += [{at:$at,event:"disposed",actor:$curator,detail:$outcome}]')
+  summary_after=$(summary_index_remove "$SUMMARY_INDEX_JSON" "$id")
+  begin_summary_transaction disposition "$id" "$outcome" '' '' "$summary_after"
   write_record "$RECORD_PATH" "$updated"
+  finish_summary_transaction "$summary_after"
   printf '%s\n' "$id"
 }
 
@@ -646,7 +836,7 @@ derive_canonical_link() {
 
 dedupe_command() {
   local duplicate=${2:-} canonical='' curator='' reason='' timestamp duplicate_json duplicate_path
-  local canonical_json canonical_path disposition updated_canonical updated_duplicate existing
+  local canonical_json canonical_path disposition updated_canonical updated_duplicate existing summary_after
   [ -n "$duplicate" ] || die "dedupe requires a duplicate candidate id"
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -664,6 +854,7 @@ dedupe_command() {
   validate_text reason "$reason"
 
   acquire_mutation_lock
+  load_summary_index_for_mutation
   load_record "$duplicate"
   duplicate_json=$RECORD_JSON
   duplicate_path=$RECORD_PATH
@@ -705,10 +896,13 @@ dedupe_command() {
     --arg at "$timestamp" --arg curator "$curator" --arg canonical "$canonical" \
     '.lifecycle_state="duplicate" | .disposition=$disposition |
      .history += [{at:$at,event:"deduplicated",actor:$curator,detail:$canonical}]')
+  summary_after=$(summary_index_remove "$SUMMARY_INDEX_JSON" "$duplicate")
+  begin_summary_transaction dedupe "$duplicate" duplicate '' "$canonical" "$summary_after"
   write_record "$duplicate_path" "$updated_duplicate"
   if [ "$updated_canonical" != "$canonical_json" ]; then
     write_record "$canonical_path" "$updated_canonical"
   fi
+  finish_summary_transaction "$summary_after"
   printf '%s\n' "$canonical"
 }
 
