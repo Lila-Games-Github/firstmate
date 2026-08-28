@@ -83,8 +83,9 @@
 # Lifecycle states are unresolved, dismissed, documented, promoted, follow-up,
 # and duplicate. Dismissal may precede classification. Documented, promoted, and
 # follow-up dispositions require a classification and a reference. Dedupe leaves
-# the canonical candidate unresolved and marks only the duplicate. Exact retries
-# of classification, disposition, and dedupe are idempotent; conflicting retries
+# the canonical candidate unresolved and marks only the duplicate. The duplicate
+# disposition is authoritative and its canonical backlink is derived. Exact
+# retries repair a missing backlink and remain idempotent; conflicting retries
 # are refused.
 #
 # FM_HOME selects the private operational home. FM_STATE_OVERRIDE overrides its
@@ -633,6 +634,16 @@ disposition_command() {
   printf '%s\n' "$id"
 }
 
+derive_canonical_link() {
+  local canonical_json=$1 duplicate=$2 timestamp=$3 curator=$4 reason=$5
+  printf '%s\n' "$canonical_json" | jq -cS --arg duplicate "$duplicate" \
+    --arg at "$timestamp" --arg curator "$curator" --arg reason "$reason" \
+    'if (.duplicates | index($duplicate)) == null then
+       .duplicates = ((.duplicates + [$duplicate]) | unique) |
+       .history += [{at:$at,event:"dedupe-canonical",actor:$curator,detail:$reason}]
+     else . end'
+}
+
 dedupe_command() {
   local duplicate=${2:-} canonical='' curator='' reason='' timestamp duplicate_json duplicate_path
   local canonical_json canonical_path disposition updated_canonical updated_duplicate existing
@@ -669,6 +680,12 @@ dedupe_command() {
   if [ "$existing" != null ]; then
     if printf '%s\n' "$existing" | jq -e --arg curator "$curator" --arg canonical "$canonical" --arg reason "$reason" \
       '.outcome == "duplicate" and .curator == $curator and .reference == $canonical and .note == $reason' >/dev/null; then
+      timestamp=$(printf '%s\n' "$existing" | jq -r '.at')
+      updated_canonical=$(derive_canonical_link "$canonical_json" "$duplicate" \
+        "$timestamp" "$curator" "$reason")
+      if [ "$updated_canonical" != "$canonical_json" ]; then
+        write_record "$canonical_path" "$updated_canonical"
+      fi
       printf '%s\n' "$canonical"
       return 0
     fi
@@ -679,12 +696,8 @@ dedupe_command() {
   [ "$(printf '%s\n' "$canonical_json" | jq -r '.lifecycle_state')" = unresolved ] \
     || die "canonical candidate must remain unresolved"
   timestamp=$(now_rfc3339)
-  updated_canonical=$(printf '%s\n' "$canonical_json" | jq -cS --arg duplicate "$duplicate" \
-    --arg at "$timestamp" --arg curator "$curator" --arg reason "$reason" \
-    'if (.duplicates | index($duplicate)) == null then
-       .duplicates = ((.duplicates + [$duplicate]) | unique) |
-       .history += [{at:$at,event:"dedupe-canonical",actor:$curator,detail:$reason}]
-     else . end')
+  updated_canonical=$(derive_canonical_link "$canonical_json" "$duplicate" \
+    "$timestamp" "$curator" "$reason")
   disposition=$(jq -cnS --arg at "$timestamp" --arg curator "$curator" \
     --arg note "$reason" --arg reference "$canonical" \
     '{at:$at,curator:$curator,outcome:"duplicate",note:$note,reference:$reference}')
@@ -692,8 +705,10 @@ dedupe_command() {
     --arg at "$timestamp" --arg curator "$curator" --arg canonical "$canonical" \
     '.lifecycle_state="duplicate" | .disposition=$disposition |
      .history += [{at:$at,event:"deduplicated",actor:$curator,detail:$canonical}]')
-  write_record "$canonical_path" "$updated_canonical"
   write_record "$duplicate_path" "$updated_duplicate"
+  if [ "$updated_canonical" != "$canonical_json" ]; then
+    write_record "$canonical_path" "$updated_canonical"
+  fi
   printf '%s\n' "$canonical"
 }
 

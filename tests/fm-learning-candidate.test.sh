@@ -314,6 +314,80 @@ test_lifecycle_dispositions_and_deduplication() {
   pass "candidates can be dismissed, documented, promoted, linked to follow-up, or deduplicated"
 }
 
+test_dedupe_recovers_interrupted_backlink() {
+  local home fakebin real_mv canonical duplicate alternative rc json
+  home=$(make_home interrupted-dedupe)
+  canonical=$(capture_candidate "$home" interrupted-canonical FrogPile review-rejection \
+    "the canonical visual review gap")
+  duplicate=$(capture_candidate "$home" interrupted-duplicate FrogPile review-rejection \
+    "the repeated visual review gap")
+  alternative=$(capture_candidate "$home" alternative-canonical FrogPile review-rejection \
+    "an unrelated canonical candidate")
+  fakebin=$(fm_fakebin "$home")
+  real_mv=$(command -v mv) || fail "could not locate mv for interrupted dedupe fixture"
+  cat >"$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+count=0
+if [ -f "$FM_TEST_MV_COUNT" ]; then
+  IFS= read -r count <"$FM_TEST_MV_COUNT"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$FM_TEST_MV_COUNT"
+if [ "$count" -eq 2 ]; then
+  exit 1
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" \
+    FM_TEST_MV_COUNT="$home/mv-count" \
+    run_learning "$home" dedupe "$duplicate" --into "$canonical" \
+      --curator curator-interrupted --reason "same durable prevention" \
+      >"$home/interrupted.out" 2>"$home/interrupted.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dedupe succeeded after its second record commit failed"
+  rm -f "$fakebin/mv"
+
+  json=$(run_learning "$home" get "$duplicate")
+  printf '%s\n' "$json" | jq -e --arg canonical "$canonical" '
+    .lifecycle_state == "duplicate" and .disposition.reference == $canonical
+  ' >/dev/null || fail "interrupted dedupe did not persist its authoritative duplicate state: $json"
+  json=$(run_learning "$home" get "$canonical")
+  printf '%s\n' "$json" | jq -e --arg duplicate "$duplicate" '
+    (.duplicates | index($duplicate)) == null
+  ' >/dev/null || fail "interrupted dedupe persisted its derived canonical backlink: $json"
+
+  run_learning "$home" dedupe "$duplicate" --into "$canonical" \
+    --curator curator-interrupted --reason "same durable prevention" >/dev/null \
+    || fail "exact dedupe retry did not reconcile the missing canonical backlink"
+  json=$(run_learning "$home" get "$canonical")
+  printf '%s\n' "$json" | jq -e --arg duplicate "$duplicate" '
+    ([.duplicates[] | select(. == $duplicate)] | length) == 1
+    and ([.history[] | select(.event == "dedupe-canonical")] | length) == 1
+  ' >/dev/null || fail "exact dedupe retry did not reconcile one canonical backlink: $json"
+
+  set +e
+  run_learning "$home" dedupe "$duplicate" --into "$alternative" \
+    --curator curator-interrupted --reason "same durable prevention" \
+    >"$home/conflicting.out" 2>"$home/conflicting.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "authoritative duplicate state allowed a conflicting canonical"
+  assert_grep "candidate already has a different disposition" "$home/conflicting.err" \
+    "conflicting dedupe refusal did not identify the authoritative disposition"
+  json=$(run_learning "$home" get "$alternative")
+  printf '%s\n' "$json" | jq -e '.duplicates == []' >/dev/null \
+    || fail "conflicting dedupe mutated the alternative canonical: $json"
+  json=$(run_learning "$home" get "$duplicate")
+  printf '%s\n' "$json" | jq -e --arg canonical "$canonical" '
+    .lifecycle_state == "duplicate" and .disposition.reference == $canonical
+  ' >/dev/null || fail "conflicting dedupe changed the authoritative duplicate state: $json"
+  pass "dedupe interruption preserves one authority and exact retry repairs its backlink"
+}
+
 test_bounded_summary_and_batch() {
   local home empty_home i summary lines batch rc
   empty_home=$(make_home empty-summary)
@@ -397,6 +471,7 @@ test_capture_validation_and_complete_record
 test_repeat_capture_is_idempotent
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
+test_dedupe_recovers_interrupted_backlink
 test_bounded_summary_and_batch
 test_candidate_survives_nonblocking_task_cleanup
 
