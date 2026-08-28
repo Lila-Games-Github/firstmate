@@ -688,6 +688,18 @@ The exact scratch chat was archived after the readback, its queue was empty, its
 The focused behavioral command `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 83 executed checks on 2026-08-27.
 The three force-specific checks exercised the executable MCP against its fake DevTools endpoint and verified the public schemas, exact thread and message ids sent to `threads:steerMessage`, the `steering=true` evidence gate, matching `dispatch` behavior for an existing thread, absence of selection and interrupt calls, unchanged default queue behavior, local-refresh independence, and an `unknown` result when Playbot did not confirm the force action.
 
+On 2026-08-28, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed after the project fixture gained selected, unselected, archived, and empty active-worktree workspace cases.
+The added public-interface outcomes were:
+
+```text
+ok - fm-playbot-lanes: list_threads groups every active workspace deterministically without filtering on selected
+ok - fm-playbot-lanes: list_threads workspace filtering is explicit, archived-safe, and fail-closed
+ok - fm-playbot-lanes: terminal call returns the same result object as MCP
+ok - fm-playbot-lanes: terminal calls stay external without consuming Playbot caller identity
+```
+
+The same branch passed `bin/fm-test-run.sh --family pure-contract-unit`: 32 test scripts, zero failures, and two environment-gated skips for unavailable Pi dependencies.
+
 This suite previously printed `ok - fm-playbot-lanes: skipped (node unavailable)` and exited 0 whenever `node` was absent from `PATH`, which made a green run prove nothing: the same inherited-`PATH` gap that hides `shellcheck` and `actionlint` from a hook or validation-pipeline subprocess also hid the Node runtime, and one review round on this branch reported "there is no Node runtime anywhere on this machine" while `/home/linuxbrew/.linuxbrew/bin/node` was installed and in use.
 `fm_test_require_node` in `tests/lib.sh` now resolves a runtime from `FM_TEST_NODE`, then `PATH`, then the known fixed and version-managed install roots, version-sorting each globbed directory so no version is pinned, and it fails the suite when none is usable rather than skipping.
 It was verified on 2026-08-25, the date of the suite run recorded above, by running it under `env -i HOME=$HOME PATH=/usr/bin:/bin`, where `command -v node` finds nothing: the suite resolved `/home/linuxbrew/.linuxbrew/bin/node` (26.7.0) and executed all 76 checks, and its first line now names the runtime it used so an executed run is distinguishable from a skipped one at a glance.
