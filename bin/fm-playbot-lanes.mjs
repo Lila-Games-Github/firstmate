@@ -320,12 +320,8 @@ function git(root, args, options = {}) {
   return result.stdout;
 }
 
-function splitNul(value) {
-  return String(value).split("\0").filter((item) => item !== "");
-}
-
 function workspaceGitStatus(root) {
-  const raw = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { encoding: "buffer" });
+  const raw = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"], { encoding: "buffer" });
   const records = raw.toString("utf8").split("\0");
   const tracked = new Set();
   const untracked = new Set();
@@ -334,7 +330,7 @@ function workspaceGitStatus(root) {
     if (!record) continue;
     const status = record.slice(0, 2);
     const file = record.slice(3).replaceAll("\\", "/");
-    if (status === "??") {
+    if (status === "??" || status === "!!") {
       untracked.add(file);
       continue;
     }
@@ -383,8 +379,10 @@ function landingRemote(root, landingBranch) {
       if (!upstreamRemote || !upstreamRef?.startsWith("refs/heads/")) {
         throw new Error(`landing branch ${requested} has an unreadable upstream binding`);
       }
+      if (!remotes.includes(upstreamRemote)) {
+        throw new Error(`landing branch ${requested} has an upstream binding without a readable remote`);
+      }
       remote = upstreamRemote;
-      branch = upstreamRef.slice("refs/heads/".length);
     } else if (remotes.length === 1) {
       [remote] = remotes;
     } else if (remotes.length === 0) {
@@ -420,7 +418,9 @@ function landingRemote(root, landingBranch) {
 
 function aheadCommits(root, landingCommit) {
   const raw = git(root, ["log", "-z", "--format=%H%x00%s", `${landingCommit}..HEAD`], { encoding: "buffer" });
-  const fields = splitNul(raw.toString("utf8"));
+  const fields = raw.toString("utf8").split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  if (fields.length % 2 !== 0) throw new Error("Git returned unreadable ahead-commit evidence");
   const commits = [];
   for (let index = 0; index < fields.length; index += 2) {
     commits.push({ commit: fields[index], subject: fields[index + 1] ?? "" });
@@ -643,7 +643,9 @@ async function retireWorkspace(project, workspace, landingBranch) {
   const inspection = inspectWorkspace(project, workspace, landingBranch, new Map());
   if (!inspection.retirable) {
     const summary = inspection.blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
-    throw new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck: ${summary}`);
+    throw Object.assign(new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck: ${summary}`), {
+      data: { inspection },
+    });
   }
   const ipcPayload = { workspaceId: workspace.id, preserveWorktrees: false };
   await playbotInvoke("workspace:delete", ipcPayload);
@@ -3397,6 +3399,7 @@ async function serve() {
           error: {
             code: Number.isInteger(error?.code) ? error.code : -32603,
             message: error instanceof Error ? error.message : String(error),
+            ...(error?.data === undefined ? {} : { data: error.data }),
           },
         });
       }

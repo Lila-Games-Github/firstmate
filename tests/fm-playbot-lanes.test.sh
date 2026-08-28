@@ -124,6 +124,7 @@ do
 done
 printf 'baseline project\n' > "$FIXTURE_ROOT/worker/prototype-game/project.godot"
 printf 'tracked work\n' > "$FIXTURE_ROOT/worker/prototype-game/real-work.txt"
+printf 'prototype-game/ignored-retirement.txt\n' > "$FIXTURE_ROOT/worker/.gitignore"
 git -C "$FIXTURE_ROOT/worker" add .
 git -C "$FIXTURE_ROOT/worker" commit -m "fixture baseline" >/dev/null \
   || fail "could not commit the retirement fixture baseline"
@@ -3549,8 +3550,9 @@ if (!value.error || !value.error.message.includes('git-unreadable')) process.exi
 NODE
 pass "fm-playbot-lanes: explicit inputs, confirmation, Local, missing-root, and unreadable-Git refusals never reach IPC"
 
-# Settle the fixture's parked thread, then dirty every exact Playbot churn path.
-# All eight are evidence but none is generalized from a prefix or extension.
+# Settle the fixture's parked thread, then prove a differently named upstream
+# can choose the remote without replacing the caller's landing branch. The two
+# commits also put an empty subject before another record in Git's output.
 FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
@@ -3558,6 +3560,37 @@ const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'play
 db.prepare('UPDATE workspace_threads SET agent_status = ? WHERE id = ?').run('ready', 'chat-worker-alt');
 db.close();
 NODE
+printf 'release-only behavior\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" add prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit -m "release-only workspace behavior" >/dev/null \
+  || fail "could not create the mismatched-upstream fixture commit"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit --allow-empty --allow-empty-message -m "" >/dev/null \
+  || fail "could not create the empty-subject fixture commit"
+empty_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
+named_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^)
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:release >/dev/null \
+  || fail "could not publish the differently named upstream branch"
+git -C "$FIXTURE_ROOT/worker" branch --set-upstream-to=origin/release main >/dev/null \
+  || fail "could not configure the mismatched landing upstream"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" EMPTY_HEAD="$empty_subject_head" NAMED_HEAD="$named_subject_head" node --no-warnings <<'NODE' \
+  || fail "the explicit landing branch or empty commit subject was not preserved"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const root = workspace.roots[0];
+if (root.landing.remote !== 'origin' || root.landing.remoteRef !== 'refs/heads/main') process.exit(1);
+if (root.commitsAhead.length !== 2) process.exit(1);
+if (root.commitsAhead[0].commit !== process.env.EMPTY_HEAD || root.commitsAhead[0].subject !== '') process.exit(1);
+if (root.commitsAhead[1].commit !== process.env.NAMED_HEAD || root.commitsAhead[1].subject !== 'release-only workspace behavior') process.exit(1);
+NODE
+git -C "$FIXTURE_ROOT/worker" branch --set-upstream-to=origin/main main >/dev/null \
+  || fail "could not restore the fixture landing upstream"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:main >/dev/null \
+  || fail "could not land the upstream and empty-subject fixture commits"
+pass "fm-playbot-lanes: explicit landing names and empty commit subjects remain exact"
+
+# Dirty every exact Playbot churn path.
+# All eight are evidence but none is generalized from a prefix or extension.
 for churn_path in \
   prototype-game/addons/playbot/playbot_common.gd.uid \
   prototype-game/addons/playbot/playbot_export_plugin.gd \
@@ -3592,15 +3625,18 @@ if (!blocker || blocker.paths.join(',') !== 'prototype-game/real-work.txt') proc
 NODE
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore prototype-game/real-work.txt
 printf 'untracked work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
+printf 'ignored work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement.txt"
 retirement_list main > "$retirement_inventory"
-OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an untracked file was not visible and blocking"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "untracked and ignored files were not visible and blocking"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const blocker = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
-if (!blocker || blocker.paths.join(',') !== 'prototype-game/untracked-work.txt') process.exit(1);
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/ignored-retirement.txt,prototype-game/untracked-work.txt') process.exit(1);
 NODE
-rm -f "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
-pass "fm-playbot-lanes: tracked work outside the allowlist and every untracked file fail closed by exact path"
+rm -f \
+  "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement.txt" \
+  "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
+pass "fm-playbot-lanes: tracked, untracked, and ignored work block by exact path"
 
 # Commit subjects are returned, and pushing the same head to the explicitly
 # named landing branch must become visible from ls-remote even though the local
@@ -3639,11 +3675,21 @@ const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'play
 db.prepare('UPDATE workspace_threads SET agent_status = ? WHERE id = ?').run('working', 'chat-worker-alt');
 db.close();
 NODE
+printf 'recheck tracked edit\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+printf 'recheck untracked edit\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/recheck-untracked.txt"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(retirement_call ws-worker-alt ',"confirm":true')
 OUT="$out" node --no-warnings <<'NODE' || fail "retirement did not recheck a thread that started working after inventory"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('active-threads') || !value.error.message.includes('working or pending input')) process.exit(1);
+const inspection = value.error.data?.inspection;
+if (!inspection || inspection.workspace.id !== 'ws-worker-alt') process.exit(1);
+const threadBlocker = inspection.blockers.find(blocker => blocker.code === 'active-threads');
+if (threadBlocker?.threads[0]?.id !== 'chat-worker-alt' || threadBlocker.threads[0].status !== 'working') process.exit(1);
+const trackedBlocker = inspection.blockers.find(blocker => blocker.code === 'tracked-modifications');
+if (trackedBlocker?.paths.join(',') !== 'prototype-game/real-work.txt') process.exit(1);
+const untrackedBlocker = inspection.blockers.find(blocker => blocker.code === 'untracked-files');
+if (untrackedBlocker?.paths.join(',') !== 'prototype-game/recheck-untracked.txt') process.exit(1);
 NODE
 if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
   fail "failed immediate safety recheck still invoked workspace:delete"
@@ -3655,7 +3701,9 @@ const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'play
 db.prepare('UPDATE workspace_threads SET agent_status = ? WHERE id = ?').run('ready', 'chat-worker-alt');
 db.close();
 NODE
-pass "fm-playbot-lanes: retirement reruns the complete safety inspection immediately before IPC"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore prototype-game/real-work.txt
+rm -f "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/recheck-untracked.txt"
+pass "fm-playbot-lanes: immediate recheck returns exact thread and path blockers"
 
 # Register a real durable route naming the retiring workspace so deletion has
 # to clean it up as part of the public behavior.
