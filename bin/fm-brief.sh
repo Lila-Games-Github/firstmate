@@ -314,9 +314,9 @@ LEARNING_SECTION=$(printf '%s\n' \
 'If this task hits a meaningful-signal condition named in `'"$SCRIPT_DIR"'/../.agents/skills/learning-candidate-lifecycle/SKILL.md`, read that skill and perform its bounded originating-lane capture before terminal completion when practical.' \
 'When that skill requires capture, set the incident variables named below and run this generated command from any working directory.' \
 '```sh' \
-'FM_HOME='"$LEARNING_HOME"' FM_STATE_OVERRIDE='"$LEARNING_STATE"' '"$LEARNING_COMMAND"' capture \' \
-'  --task '"$LEARNING_TASK"' \' \
-'  --project '"$LEARNING_PROJECT"' \' \
+"FM_HOME=$LEARNING_HOME FM_STATE_OVERRIDE=$LEARNING_STATE $LEARNING_COMMAND capture \\" \
+"  --task $LEARNING_TASK \\" \
+"  --project $LEARNING_PROJECT \\" \
 "  --signal \"\${FM_LEARNING_SIGNAL:?set FM_LEARNING_SIGNAL}\" \\" \
 "  --impact \"\${FM_LEARNING_IMPACT:?set FM_LEARNING_IMPACT}\" \\" \
 "  --root-cause \"\${FM_LEARNING_ROOT_CAUSE:?set FM_LEARNING_ROOT_CAUSE}\" \\" \

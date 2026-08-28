@@ -12,6 +12,8 @@
 # state/learning-candidates/<candidate-id>.json in the active FM_HOME. That
 # directory is outside task-scoped state, so fm-teardown.sh never removes it.
 # Mutations use the home-local state/.learning-candidates.lock and atomic rename.
+# Capture makes one non-waiting lock attempt and reports temporary unavailability
+# without changing candidate records; curator mutations retain the waiting lock.
 # Exact repeat capture is idempotent: the candidate id is the first 24 hex digits
 # of the SHA-256 digest of the canonical incident object, excluding timestamps.
 # A digest collision with different content is refused.
@@ -79,7 +81,7 @@
 # for independent curation. `summary` reads only the fixed-size `.summary.json`
 # index and an optional `.summary-pending.json` commit probe, so its memory and
 # read work do not grow with the store. Mutations maintain that index under the
-# lifecycle lock; a missing legacy index is rebuilt only by a mutating command.
+# lifecycle lock; a missing legacy index is rebuilt only by a curator mutation.
 # `summary` is silent when no candidate is unresolved and otherwise emits at most
 # five capped detail lines plus one remainder line. `get` emits one complete JSON
 # record.
@@ -87,7 +89,8 @@
 # Lifecycle states are unresolved, dismissed, documented, promoted, follow-up,
 # and duplicate. Dismissal may precede classification. Documented, promoted, and
 # follow-up dispositions require a classification and a reference. Dedupe leaves
-# the canonical candidate unresolved and marks only the duplicate. The duplicate
+# the canonical candidate unresolved and marks only the duplicate; a canonical
+# that already owns duplicates cannot itself become a duplicate. The duplicate
 # disposition is authoritative and its canonical backlink is derived. Exact
 # retries repair a missing backlink and remain idempotent; conflicting retries
 # are refused.
@@ -150,6 +153,13 @@ validate_text() { # <label> <value> [max-bytes]
   [ -n "$value" ] || die "$label must not be empty"
   bytes=$(printf '%s' "$value" | LC_ALL=C wc -c | tr -d ' ')
   [ "$bytes" -le "$max" ] || die "$label exceeds $max bytes"
+}
+
+validate_nonblank_text() { # <label> <value> [max-bytes]
+  local label=$1 value=$2 max=${3:-$MAX_TEXT_BYTES} compact
+  validate_text "$label" "$value" "$max"
+  compact=$(printf '%s' "$value" | LC_ALL=C tr -d '[:space:]')
+  [ -n "$compact" ] || die "$label must contain non-whitespace text"
 }
 
 validate_one_line() { # <label> <value> [max-bytes]
@@ -234,6 +244,13 @@ acquire_mutation_lock() {
   LOCK_HELD=1
 }
 
+acquire_capture_lock() {
+  ensure_store
+  fm_lock_try_acquire "$MUTATION_LOCK" \
+    || die "capture is temporarily unavailable while learning-candidate curation is active"
+  LOCK_HELD=1
+}
+
 record_path() {
   printf '%s/%s.json\n' "$CANDIDATE_DIR" "$1"
 }
@@ -311,6 +328,31 @@ load_record() { # <candidate-id>; sets RECORD_JSON and RECORD_PATH
   [ -f "$RECORD_PATH" ] && [ ! -L "$RECORD_PATH" ] || die "candidate not found: $id"
   RECORD_JSON=$(cat "$RECORD_PATH")
   validate_record_json "$RECORD_JSON" "$id"
+}
+
+ensure_curator_separate_from_cluster() { # <canonical-json> <curator> [label]
+  local canonical_json=$1 curator=$2 label=${3:-curator} origin duplicate_id duplicate_json
+  origin=$(printf '%s\n' "$canonical_json" | jq -r '.incident.origin_task')
+  [ "$origin" != "$curator" ] \
+    || die "$label must differ from the originating task and every originating task in the candidate cluster"
+  while IFS= read -r duplicate_id; do
+    [ -n "$duplicate_id" ] || continue
+    duplicate_json=$(record_json_by_id "$duplicate_id")
+    origin=$(printf '%s\n' "$duplicate_json" | jq -r '.incident.origin_task')
+    [ "$origin" != "$curator" ] \
+      || die "$label must differ from the originating task and every originating task in the candidate cluster"
+  done < <(printf '%s\n' "$canonical_json" | jq -r '.duplicates[]')
+}
+
+record_json_by_id() { # <candidate-id>
+  local id=$1 path json
+  validate_candidate_id "$id"
+  store_available_read_only || die "candidate not found: $id"
+  path=$(record_path "$id")
+  [ -f "$path" ] && [ ! -L "$path" ] || die "candidate not found: $id"
+  json=$(cat "$path")
+  validate_record_json "$json" "$id"
+  printf '%s\n' "$json"
 }
 
 write_record() { # <path> <json>
@@ -500,6 +542,26 @@ load_summary_index_for_mutation() {
   fi
 }
 
+load_summary_index_for_capture() {
+  local first_record
+  if [ -e "$SUMMARY_PENDING" ]; then
+    SUMMARY_INDEX_JSON=$(effective_summary_index)
+    write_summary_index "$SUMMARY_INDEX_JSON"
+    rm -f -- "$SUMMARY_PENDING"
+  elif [ -e "$SUMMARY_INDEX" ]; then
+    [ -f "$SUMMARY_INDEX" ] && [ ! -L "$SUMMARY_INDEX" ] \
+      || die "learning-candidate summary index must be a regular file"
+    SUMMARY_INDEX_JSON=$(cat "$SUMMARY_INDEX")
+    validate_summary_index_json "$SUMMARY_INDEX_JSON"
+  else
+    first_record=$(find "$CANDIDATE_DIR" -maxdepth 1 -name 'lc-*.json' -print -quit)
+    [ -z "$first_record" ] \
+      || die "learning-candidate summary index is missing; run a curator mutation to rebuild it"
+    SUMMARY_INDEX_JSON='{"sample":[],"schema":1,"unresolved_count":0}'
+    write_summary_index "$SUMMARY_INDEX_JSON"
+  fi
+}
+
 summary_index_add() {
   local entry
   entry=$(summary_projection "$2")
@@ -621,8 +683,7 @@ capture_command() {
       lifecycle_state:"unresolved", incident:$incident, classification:null,
       disposition:null, duplicates:[], history:[{at:$at,event:"captured",actor:$incident.origin_task}]}')
 
-  acquire_mutation_lock
-  load_summary_index_for_mutation
+  acquire_capture_lock
   path=$(record_path "$id")
   if [ -e "$path" ]; then
     [ -f "$path" ] && [ ! -L "$path" ] || die "candidate id collision with non-regular path: $id"
@@ -635,6 +696,7 @@ capture_command() {
     printf '%s\n' "$id"
     return 0
   fi
+  load_summary_index_for_capture
   summary_after=$(summary_index_add "$SUMMARY_INDEX_JSON" "$record")
   begin_summary_transaction capture "$id" unresolved "$digest" '' "$summary_after"
   write_record "$path" "$record"
@@ -764,15 +826,15 @@ classify_command() {
   task_types_json=$(printf '%s\n' "$skill_task_types" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')
   count=$(printf '%s\n' "$task_types_json" | jq 'length')
   if [ "$surface" = skill ]; then
-    validate_text skill-statement "$skill_statement"
-    validate_text skill-feature-neutral-evidence "$skill_feature_neutral"
-    validate_text skill-procedure "$skill_procedure"
-    validate_text skill-load-trigger "$skill_load_trigger"
-    validate_text skill-counterfactual "$skill_counterfactual"
+    validate_nonblank_text skill-statement "$skill_statement"
+    validate_nonblank_text skill-feature-neutral-evidence "$skill_feature_neutral"
+    validate_nonblank_text skill-procedure "$skill_procedure"
+    validate_nonblank_text skill-load-trigger "$skill_load_trigger"
+    validate_nonblank_text skill-counterfactual "$skill_counterfactual"
     if [ "$count" -lt 2 ]; then
-      validate_text skill-feature-agnostic-evidence "$skill_feature_agnostic"
+      validate_nonblank_text skill-feature-agnostic-evidence "$skill_feature_agnostic"
     elif [ -n "$skill_feature_agnostic" ]; then
-      validate_text skill-feature-agnostic-evidence "$skill_feature_agnostic"
+      validate_nonblank_text skill-feature-agnostic-evidence "$skill_feature_agnostic"
     fi
     skill_gate=$(jq -cnS --arg statement "$skill_statement" \
       --arg feature_neutral "$skill_feature_neutral" \
@@ -793,8 +855,7 @@ classify_command() {
   acquire_mutation_lock
   load_summary_index_for_mutation
   load_record "$id"
-  [ "$(printf '%s\n' "$RECORD_JSON" | jq -r '.incident.origin_task')" != "$curator" ] \
-    || die "curator must differ from the originating task"
+  ensure_curator_separate_from_cluster "$RECORD_JSON" "$curator"
   comparable=$(jq -cnS --arg curator "$curator" --arg route "$route" --arg owner "$owner" \
     --arg surface "$surface" --arg recommendation "$recommendation" --arg rationale "$rationale" \
     --argjson skill_gate "$skill_gate" \
@@ -846,8 +907,7 @@ disposition_command() {
   acquire_mutation_lock
   load_summary_index_for_mutation
   load_record "$id"
-  [ "$(printf '%s\n' "$RECORD_JSON" | jq -r '.incident.origin_task')" != "$curator" ] \
-    || die "curator must differ from the originating task"
+  ensure_curator_separate_from_cluster "$RECORD_JSON" "$curator"
   comparable=$(jq -cnS --arg curator "$curator" --arg outcome "$outcome" \
     --arg note "$note" --arg reference "$reference" \
     '{curator:$curator, outcome:$outcome, note:$note,
@@ -892,6 +952,7 @@ derive_canonical_link() {
 dedupe_command() {
   local duplicate=${2:-} canonical='' curator='' reason='' timestamp duplicate_json duplicate_path
   local canonical_json canonical_path disposition updated_canonical updated_duplicate existing summary_after
+  local canonical_classifier duplicate_classifier duplicate_origin
   [ -n "$duplicate" ] || die "dedupe requires a duplicate candidate id"
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -913,14 +974,22 @@ dedupe_command() {
   load_record "$duplicate"
   duplicate_json=$RECORD_JSON
   duplicate_path=$RECORD_PATH
-  [ "$(printf '%s\n' "$duplicate_json" | jq -r '.incident.origin_task')" != "$curator" ] \
-    || die "curator must differ from the originating task"
+  [ "$(printf '%s\n' "$duplicate_json" | jq '.duplicates | length')" -eq 0 ] \
+    || die "a canonical candidate with duplicates cannot itself be deduplicated"
+  ensure_curator_separate_from_cluster "$duplicate_json" "$curator"
 
   load_record "$canonical"
   canonical_json=$RECORD_JSON
   canonical_path=$RECORD_PATH
-  [ "$(printf '%s\n' "$canonical_json" | jq -r '.incident.origin_task')" != "$curator" ] \
-    || die "curator must differ from the originating task"
+  ensure_curator_separate_from_cluster "$canonical_json" "$curator"
+  duplicate_origin=$(printf '%s\n' "$duplicate_json" | jq -r '.incident.origin_task')
+  canonical_classifier=$(printf '%s\n' "$canonical_json" | jq -r '.classification.curator // empty')
+  [ -z "$canonical_classifier" ] || ensure_curator_separate_from_cluster "$canonical_json" "$canonical_classifier" "classification curator"
+  [ -z "$canonical_classifier" ] || [ "$canonical_classifier" != "$duplicate_origin" ] \
+    || die "classification curator must differ from the originating task and every originating task in the candidate cluster"
+  duplicate_classifier=$(printf '%s\n' "$duplicate_json" | jq -r '.classification.curator // empty')
+  [ -z "$duplicate_classifier" ] || ensure_curator_separate_from_cluster "$duplicate_json" "$duplicate_classifier" "classification curator"
+  [ -z "$duplicate_classifier" ] || ensure_curator_separate_from_cluster "$canonical_json" "$duplicate_classifier" "classification curator"
 
   existing=$(printf '%s\n' "$duplicate_json" | jq -cS '.disposition // null')
   if [ "$existing" != null ]; then

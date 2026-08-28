@@ -203,6 +203,21 @@ test_routes_and_no_one_off_skill_gate() {
   assert_grep "skill-feature-agnostic-evidence must not be empty" "$home/skill-one-type.err" \
     "single-task skill refusal did not require alternate generality evidence"
 
+  set +e
+  run_learning "$home" classify "$pointer" --curator curator-input --route project \
+    --owner FrogPile --surface skill \
+    --recommendation "Add reusable physical-input validation" \
+    --rationale "The practice spans input interactions" \
+    --skill-statement " " --skill-feature-neutral-evidence $'\t' \
+    --skill-feature-agnostic-evidence " " --skill-procedure $'\n' \
+    --skill-load-trigger " " --skill-counterfactual $'\r' \
+    >"$home/skill-blank.out" 2>"$home/skill-blank.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "whitespace-only evidence bypassed the project skill gate"
+  assert_grep "must contain non-whitespace text" "$home/skill-blank.err" \
+    "blank skill-gate refusal did not require substantive evidence"
+
   run_learning "$home" classify "$pointer" --curator curator-input --route project \
     --owner FrogPile --surface skill \
     --recommendation "Add reusable physical-input validation" \
@@ -337,6 +352,145 @@ test_lifecycle_dispositions_and_deduplication() {
   [ "$(run_learning "$home" list | wc -l | tr -d ' ')" -eq 1 ] \
     || fail "unresolved list included disposed or duplicate records"
   pass "candidates can be dismissed, documented, promoted, linked to follow-up, or deduplicated"
+}
+
+test_dedupe_keeps_clusters_flat_and_curators_separate() {
+  local home canonical duplicate outer classified_canonical classified_duplicate rc json
+  home=$(make_home dedupe-separation)
+  canonical=$(capture_candidate "$home" canonical-origin FrogPile review-rejection \
+    "canonical visual review gap")
+  duplicate=$(capture_candidate "$home" duplicate-origin FrogPile review-rejection \
+    "duplicate visual review gap")
+  classify_feature "$home" "$canonical" duplicate-origin >/dev/null \
+    || fail "pre-dedupe canonical classification fixture failed"
+
+  set +e
+  run_learning "$home" dedupe "$duplicate" --into "$canonical" \
+    --curator cluster-curator --reason "same visual review prevention" \
+    >"$home/classifier-origin.out" 2>"$home/classifier-origin.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dedupe linked an origin whose lane classified the canonical"
+  assert_grep "classification curator must differ from the originating task" \
+    "$home/classifier-origin.err" \
+    "dedupe did not explain the cluster-wide classification separation rule"
+
+  classified_canonical=$(capture_candidate "$home" classified-canonical FrogPile review-rejection \
+    "classified canonical gap")
+  classified_duplicate=$(capture_candidate "$home" classified-duplicate FrogPile review-rejection \
+    "classified duplicate gap")
+  classify_feature "$home" "$classified_duplicate" classified-canonical >/dev/null \
+    || fail "pre-dedupe duplicate classification fixture failed"
+  set +e
+  run_learning "$home" dedupe "$classified_duplicate" --into "$classified_canonical" \
+    --curator other-cluster-curator --reason "same classified prevention" \
+    >"$home/duplicate-classifier.out" 2>"$home/duplicate-classifier.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dedupe retained a duplicate classification made by a cluster origin"
+
+  canonical=$(capture_candidate "$home" flat-canonical FrogPile review-rejection \
+    "flat canonical gap")
+  duplicate=$(capture_candidate "$home" flat-duplicate FrogPile review-rejection \
+    "flat duplicate gap")
+  outer=$(capture_candidate "$home" flat-outer FrogPile review-rejection \
+    "outer canonical gap")
+  run_learning "$home" dedupe "$duplicate" --into "$canonical" \
+    --curator flat-curator --reason "same flat prevention" >/dev/null \
+    || fail "flat-cluster fixture dedupe failed"
+
+  set +e
+  run_learning "$home" dedupe "$canonical" --into "$outer" \
+    --curator outer-curator --reason "attempted nested cluster" \
+    >"$home/nested.out" 2>"$home/nested.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a canonical candidate was accepted as a nested duplicate"
+  assert_grep "cannot itself be deduplicated" "$home/nested.err" \
+    "nested-cluster refusal did not explain the flat-cluster rule"
+
+  set +e
+  classify_feature "$home" "$canonical" flat-duplicate \
+    >"$home/cluster-origin.out" 2>"$home/cluster-origin.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a represented cluster origin was accepted as curator"
+  json=$(run_learning "$home" get "$outer")
+  printf '%s\n' "$json" | jq -e '.duplicates == []' >/dev/null \
+    || fail "rejected nested dedupe mutated the outer canonical: $json"
+  pass "dedupe keeps clusters flat and separates classification from every represented origin"
+}
+
+test_capture_lock_and_missing_index_stay_bounded() {
+  local home first second lock ready release holder capture_pid attempt rc count
+  home=$(make_home bounded-capture-lock)
+  lock="$home/state/.learning-candidates.lock"
+  ready="$home/lock-ready"
+  release="$home/lock-release"
+  (
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
+      . "$1"
+      fm_lock_acquire_wait "$2"
+      : > "$3"
+      while [ ! -e "$4" ]; do sleep 0.02; done
+      fm_lock_release "$2"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$ready" "$release"
+  ) &
+  holder=$!
+  attempt=0
+  while [ ! -e "$ready" ] && kill -0 "$holder" 2>/dev/null && [ "$attempt" -lt 100 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  [ -e "$ready" ] || fail "capture-lock fixture did not acquire the lifecycle lock"
+
+  (
+    set +e
+    capture_candidate "$home" contended-capture FrogPile review-rejection \
+      "contended bounded capture" >"$home/contended.out" 2>"$home/contended.err"
+    printf '%s\n' "$?" >"$home/contended.rc"
+  ) &
+  capture_pid=$!
+  attempt=0
+  while kill -0 "$capture_pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+    sleep 0.02
+    attempt=$((attempt + 1))
+  done
+  if kill -0 "$capture_pid" 2>/dev/null; then
+    : >"$release"
+    wait "$holder"
+    wait "$capture_pid" || true
+    fail "capture waited for the curator-held lifecycle lock"
+  fi
+  wait "$capture_pid" || true
+  rc=$(cat "$home/contended.rc")
+  : >"$release"
+  wait "$holder"
+  [ "$rc" -ne 0 ] || fail "contended capture succeeded instead of reporting temporary unavailability"
+  assert_grep "capture is temporarily unavailable" "$home/contended.err" \
+    "contended capture refusal was not explicit"
+  count=$(find "$home/state/learning-candidates" -type f -name 'lc-*.json' | wc -l | tr -d ' ')
+  [ "$count" -eq 0 ] || fail "contended capture mutated candidate records"
+
+  first=$(capture_candidate "$home" indexed-first FrogPile review-rejection \
+    "first indexed candidate") || fail "initial indexed capture failed"
+  rm -f "$home/state/learning-candidates/.summary.json"
+  set +e
+  second=$(capture_candidate "$home" indexed-second FrogPile review-rejection \
+    "second indexed candidate" 2>"$home/missing-index.err")
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "origin capture rebuilt a missing summary index"
+  [ -z "$second" ] || fail "failed missing-index capture returned an id"
+  assert_grep "run a curator mutation to rebuild it" "$home/missing-index.err" \
+    "missing-index capture refusal did not identify the curator boundary"
+  classify_feature "$home" "$first" index-curator >/dev/null \
+    || fail "curator mutation did not rebuild the missing summary index"
+  second=$(capture_candidate "$home" indexed-second FrogPile review-rejection \
+    "second indexed candidate") || fail "capture did not resume after curator-owned rebuild"
+  assert_present "$home/state/learning-candidates/$second.json" \
+    "post-rebuild capture did not persist its candidate"
+  pass "origin capture never waits for curation or rebuilds a missing index"
 }
 
 test_dedupe_recovers_interrupted_backlink() {
@@ -635,6 +789,8 @@ test_repeat_capture_is_idempotent
 test_repeat_capture_rejects_unbound_digest
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
+test_dedupe_keeps_clusters_flat_and_curators_separate
+test_capture_lock_and_missing_index_stay_bounded
 test_dedupe_recovers_interrupted_backlink
 test_summary_index_recovers_interrupted_update
 test_summary_read_work_is_store_independent
