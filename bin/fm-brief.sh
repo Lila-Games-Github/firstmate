@@ -54,6 +54,10 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs also carry one conditional terminal-lifecycle pointer to
+# the learning-candidate skill. It causes no completion audit: a routine success
+# does nothing, an originating lane performs bounded capture only after a named
+# qualifying signal, and curation never blocks task cleanup.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -298,6 +302,11 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+LEARNING_SECTION="# Learning-candidate reminder
+If this task hits a meaningful-signal condition named in \`$FM_ROOT/.agents/skills/learning-candidate-lifecycle/SKILL.md\`, read that skill and perform its bounded originating-lane capture before terminal completion when practical.
+Do not run a completion audit to search for candidates; routine success adds nothing.
+The originating lane captures only, and neither later classification nor curation may block this task's cleanup."
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -307,6 +316,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$LEARNING_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -315,7 +326,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report, the status file below, and a private learning candidate created through the conditional lifecycle above.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -418,6 +429,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$LEARNING_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -429,7 +442,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; modify nothing outside it except a private learning candidate created through the conditional lifecycle above.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

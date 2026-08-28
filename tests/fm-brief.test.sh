@@ -212,6 +212,12 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
+    assert_grep "learning-candidate-lifecycle/SKILL.md" "$brief" \
+      "$id: brief missing the conditional learning-candidate lifecycle pointer"
+    assert_grep "routine success adds nothing" "$brief" \
+      "$id: brief turned learning capture into a routine completion audit"
+    assert_grep "originating lane captures only" "$brief" \
+      "$id: brief assigned asynchronous curation to the implementation lane"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
@@ -701,6 +707,8 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
   assert_grep "you may host the Lavish review loop yourself" "$brief" \
     "scout brief must mention the option to host a Lavish review loop"
+  assert_grep "learning-candidate-lifecycle/SKILL.md" "$brief" \
+    "scout brief missing the conditional learning-candidate lifecycle pointer"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \

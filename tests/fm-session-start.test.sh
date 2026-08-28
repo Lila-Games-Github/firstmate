@@ -21,6 +21,7 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
+#   - bounded unresolved learning-candidate visibility without dumping records
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -2201,6 +2202,44 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
+test_learning_candidate_summary_is_bounded() {
+  local rec root home fakebin out i details
+  rec=$(new_world learning-candidate-summary)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+
+  i=1
+  while [ "$i" -le 7 ]; do
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_LEARNING_NOW="2026-08-28T12:00:0${i}Z" \
+      "$ROOT/bin/fm-learning-candidate.sh" capture \
+      --task "startup-candidate-$i" --project FrogPile --signal escaped-defect \
+      --impact "startup candidate impact $i" --root-cause "cause $i" \
+      --escaped-contract "contract $i" --missing-check "check $i" \
+      --consumer "consumer $i" --prevention "prevention $i" \
+      --evidence "evidence $i" --proposed-owner "owner $i" \
+      --counterfactual "counterfactual $i" >/dev/null \
+      || fail "could not seed learning candidate $i"
+    i=$((i + 1))
+  done
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Unresolved learning candidates" \
+    "session start omitted the learning-candidate subsection"
+  assert_contains "$out" "LEARNING CANDIDATES: 7 unresolved" \
+    "session start omitted the exact unresolved count"
+  assert_contains "$out" "... 4 more; run bin/fm-learning-candidate.sh batch" \
+    "session start did not disclose the bounded remainder"
+  details=$(printf '%s\n' "$out" | grep -c '^- lc-')
+  [ "$details" -eq 3 ] || fail "session start emitted $details candidate details instead of three"
+  assert_contains "$out" "Load learning-candidate-lifecycle before curating a bounded batch." \
+    "session start omitted the asynchronous curation trigger"
+  pass "session start exposes a bounded learning-candidate count and sample"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -2426,6 +2465,7 @@ test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_learning_candidate_summary_is_bounded
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic

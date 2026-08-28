@@ -11,7 +11,7 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, and scout reports.
-`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+`state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, away-mode state, generated Relay artifacts, private secondmate config-reread generations with their retry and quarantine state, parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`), and durable unresolved-development-incident records under `state/learning-candidates/`.
 `config/` holds local gitignored operating choices, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -24,6 +24,15 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `docs/sessionstart-nudge.md` owns the native session-open adapter tiers that run or nudge the digest command, and the source routing between them.
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Learning candidates (state/learning-candidates)
+
+Meaningful development incidents captured for later reusable-prevention review live as private JSON records under `state/learning-candidates/` in the home where the incident occurred.
+The records are not task-scoped, survive the originating task's cleanup, and are not inherited between primary and secondmate homes.
+The session-start fleet digest shows only a bounded unresolved count and concise sample, so a large inbox does not become startup prompt weight.
+Use `bin/fm-learning-candidate.sh list` or `batch` for asynchronous curation, and load the internal `learning-candidate-lifecycle` skill before applying semantic routing judgment.
+The command's executable header and `--help` own the exact record fields, signal vocabulary, lifecycle, route-to-surface compatibility, skill-gate evidence, limits, and environment overrides.
+Classification and disposition record recommendations and references only; they never mutate a destination repository or bypass its delivery authority.
 
 ## Pi Calm preference (config/calm)
 
