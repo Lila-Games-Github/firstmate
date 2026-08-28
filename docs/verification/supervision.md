@@ -539,9 +539,9 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
-On 2026-08-28, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 94 checks after adding guarded workspace retirement to `playbot_lanes@0.5.0` and increasing the expected MCP tool count from 18 to 20.
+On 2026-08-28, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 96 checks after adding guarded workspace retirement to `playbot_lanes@0.5.0` and increasing the expected MCP tool count from 18 to 20.
 The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
-The current remote test deliberately leaves `origin/main` stale, advances the bare remote's `main`, and proves the inventory uses the `ls-remote` commit as its landing evidence.
+The remote cases deliberately leave `origin/main` stale, advance the bare remote's `main`, and bind local `main` to `origin/release`, proving that inventory uses the `ls-remote` commit while preserving the explicitly named landing branch.
 The exact retirement-specific output was:
 
 ```text
@@ -549,10 +549,12 @@ ok - fm-playbot-lanes: retirement exposes inspection plus one confirmed exact-wo
 ok - fm-playbot-lanes: inventory is non-destructive and reports Local, thread, root, and Git refusals with evidence
 ok - fm-playbot-lanes: landing branches require current resolvable remote evidence
 ok - fm-playbot-lanes: explicit inputs, confirmation, Local, missing-root, and unreadable-Git refusals never reach IPC
+ok - fm-playbot-lanes: explicit landing names and empty commit subjects remain exact
 ok - fm-playbot-lanes: all and only eight exact tracked Playbot churn paths are allowed
-ok - fm-playbot-lanes: tracked work outside the allowlist and every untracked file fail closed by exact path
+ok - fm-playbot-lanes: POSIX backslashes remain literal blocking path characters
+ok - fm-playbot-lanes: tracked, untracked, and ignored work block by exact path
 ok - fm-playbot-lanes: commit subjects block retirement until current remote evidence proves them landed
-ok - fm-playbot-lanes: retirement reruns the complete safety inspection immediately before IPC
+ok - fm-playbot-lanes: immediate recheck returns exact thread and path blockers
 ok - fm-playbot-lanes: confirmed retirement uses exact IPC and verifies audit, routes, database, directory, and Git removal
 ```
 

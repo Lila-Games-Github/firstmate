@@ -61,15 +61,18 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 ### Workspace retirement
 
 `list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
-It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default, and reports the verified landing commit, each workspace root's exact head, every ahead commit and subject, every unarchived thread state, and all tracked and untracked paths.
+It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
+It reports the verified landing commit, each workspace root's exact head, every ahead commit and subject including an empty subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
 Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, an ahead commit, and a tracked modification outside Playbot's exact churn allowlist are blocking evidence rather than a bare false verdict.
-Untracked files also block retirement and are returned by exact path, because the tracked-churn allowlist never classifies them.
+Untracked and ignored files also block retirement and are returned by exact path, because the tracked-churn allowlist never classifies them.
 The allowlist is eight literal repository-relative paths returned as `trackedChurnAllowlist`: seven files under `prototype-game/addons/playbot/` plus `prototype-game/project.godot` that Playbot's editor integration rewrites across unrelated worktrees.
 No directory, extension, basename, or broader pattern is treated as churn.
+Path matching preserves Git pathname identity, so a literal backslash in a POSIX filename cannot alias a slash in an allowlisted path.
 
 `retire_workspace` accepts one exact workspace selector, the same explicit `landingBranch`, and `confirm: true`.
 There is no bulk destructive form.
 It repeats the complete inspection immediately before action and calls Playbot's own `workspace:delete` IPC with `preserveWorktrees: false`; it never deletes a folder or changes Playbot's database itself.
+A failed immediate recheck returns that complete structured inspection, including the blocking chat states and tracked, untracked, and ignored paths, without calling the destructive IPC.
 After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, deactivates every durable lane route naming the workspace, and appends a mode-0600 private audit record under the lane state directory.
 That record names the time, project, workspace, workspace paths, exact root heads, explicit landing branch and remotely verified landing commits, affected lane routes, IPC outcome, and removal verification.
 Once the IPC succeeds, later verification, route, or audit failures return `deleted: true` with `postActionComplete: false` and exact problems instead of throwing an ordinary refusal that could make a caller retry a deletion that already happened.
