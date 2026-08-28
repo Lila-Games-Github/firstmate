@@ -661,9 +661,11 @@ list_command() {
   validate_positive_limit "$limit" 500
   array=$(records_array)
   printf '%s\n' "$array" | jq -r --arg filter "$filter" --argjson limit "$limit" '
-    def compact: gsub("[\\r\\n\\t]+"; " ") | if length > 160 then .[:157] + "..." else . end;
+    def terminal_safe: gsub("[[:cntrl:]]+"; "");
+    def compact: gsub("[\\r\\n\\t]+"; " ") | terminal_safe | if length > 160 then .[:157] + "..." else . end;
     [.[] | select($filter == "all" or .lifecycle_state == $filter)][: $limit][] |
-    [.id, .lifecycle_state, .incident.project, .incident.signal_type,
+    [(.id | terminal_safe), (.lifecycle_state | terminal_safe),
+     (.incident.project | terminal_safe), (.incident.signal_type | terminal_safe),
      (.incident.user_visible_impact | compact)] | @tsv
   '
 }
@@ -695,11 +697,15 @@ summary_command() {
   store_available_read_only || return 0
   index=$(effective_summary_index)
   printf '%s\n' "$index" | jq -r --argjson limit "$limit" '
-    def compact: gsub("[\\r\\n\\t]+"; " ") | gsub("[[:cntrl:]]+"; "") | if length > 120 then .[:117] + "..." else . end;
+    def terminal_safe: gsub("[[:cntrl:]]+"; "");
+    def compact: gsub("[\\r\\n\\t]+"; " ") | terminal_safe | if length > 120 then .[:117] + "..." else . end;
     .unresolved_count as $count |
     if $count == 0 then empty else
       "LEARNING CANDIDATES: \($count) unresolved",
-      (.sample[:$limit][] | "- \(.id) [\(.project)/\(.signal_type)] \(.user_visible_impact | compact)"),
+      (.sample[:$limit][] |
+       {id:(.id | terminal_safe), project:(.project | terminal_safe),
+        signal_type:(.signal_type | terminal_safe), impact:(.user_visible_impact | compact)} |
+       "- \(.id) [\(.project)/\(.signal_type)] \(.impact)"),
       (if $count > $limit then "- ... \($count - $limit) more; run bin/fm-learning-candidate.sh batch" else empty end)
     end
   '

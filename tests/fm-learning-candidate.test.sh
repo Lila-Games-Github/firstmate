@@ -521,25 +521,38 @@ test_bounded_summary_and_batch() {
 }
 
 test_summary_strips_terminal_controls() {
-  local home impact id summary stored batched control
+  local home project impact id summary listed rendered stored batched control
   home=$(make_home summary-controls)
-  impact=$'impact\001\007\033[2J\037\177\302\205\302\233\302\237visible'
-  id=$(capture_candidate "$home" summary-controls FrogPile review-rejection "$impact") \
+  project=$'Frog\001\033[2J\177Pile'
+  impact=$'impact\007\033[3J\037\302\205\302\233\302\237visible'
+  id=$(capture_candidate "$home" summary-controls "$project" review-rejection "$impact") \
     || fail "could not capture a candidate containing control characters"
 
   summary=$(run_learning "$home" summary) || fail "summary failed for control-character evidence"
-  assert_contains "$summary" "impact[2Jvisible" \
+  listed=$(run_learning "$home" list) || fail "list failed for control-character evidence"
+  assert_contains "$summary" "Frog[2JPile" \
+    "summary did not retain the printable project text"
+  assert_contains "$summary" "impact[3Jvisible" \
     "summary did not retain the printable incident text"
+  assert_contains "$listed" "Frog[2JPile" \
+    "list did not retain the printable project text"
+  assert_contains "$listed" "impact[3Jvisible" \
+    "list did not retain the printable incident text"
+  rendered="$summary"$'\n'"$listed"
   for control in $'\001' $'\007' $'\033' $'\037' $'\177' $'\302\205' $'\302\233' $'\302\237'; do
-    assert_not_contains "$summary" "$control" \
-      "summary emitted a captured terminal control character"
+    assert_not_contains "$rendered" "$control" \
+      "concise output emitted a captured terminal control character"
   done
 
-  stored=$(run_learning "$home" get "$id" | jq -r '.incident.user_visible_impact')
-  [ "$stored" = "$impact" ] || fail "get did not preserve complete control-character evidence"
-  batched=$(run_learning "$home" batch --limit 1 | jq -r '.[0].incident.user_visible_impact')
-  [ "$batched" = "$impact" ] || fail "batch did not preserve complete control-character evidence"
-  pass "summary strips terminal controls while get and batch preserve evidence"
+  stored=$(run_learning "$home" get "$id")
+  printf '%s\n' "$stored" | jq -e --arg project "$project" --arg impact "$impact" '
+    .incident.project == $project and .incident.user_visible_impact == $impact
+  ' >/dev/null || fail "get did not preserve complete control-character evidence"
+  batched=$(run_learning "$home" batch --limit 1)
+  printf '%s\n' "$batched" | jq -e --arg project "$project" --arg impact "$impact" '
+    .[0].incident.project == $project and .[0].incident.user_visible_impact == $impact
+  ' >/dev/null || fail "batch did not preserve complete control-character evidence"
+  pass "concise output strips controls while get and batch preserve evidence"
 }
 
 test_candidate_survives_nonblocking_task_cleanup() {
