@@ -117,6 +117,31 @@ test_repeat_capture_is_idempotent() {
   pass "exact repeat capture converges on one durable candidate"
 }
 
+test_repeat_capture_rejects_unbound_digest() {
+  local home id path tampered after rc
+  home=$(make_home repeat-unbound)
+  id=$(capture_candidate "$home" repeated-review FrogPile review-rejection \
+    "review rejected the completed HUD") || fail "initial capture failed"
+  path="$home/state/learning-candidates/$id.json"
+  jq '.incident.evidence="altered persisted evidence"' "$path" >"$home/tampered.json"
+  mv "$home/tampered.json" "$path"
+  run_learning "$home" get "$id" >/dev/null \
+    || fail "tampered retry fixture was not schema-valid"
+  tampered=$(cat "$path")
+
+  set +e
+  capture_candidate "$home" repeated-review FrogPile review-rejection \
+    "review rejected the completed HUD" >"$home/retry.out" 2>"$home/retry.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "repeat capture trusted a digest detached from stored evidence"
+  assert_grep "candidate digest collision" "$home/retry.err" \
+    "detached capture digest refusal was not explicit"
+  after=$(cat "$path")
+  [ "$after" = "$tampered" ] || fail "failed retry overwrote the inconsistent stored record"
+  pass "repeat capture binds stored digest to stored incident evidence"
+}
+
 test_routes_and_no_one_off_skill_gate() {
   local home quest hud lost playbot pointer json rc
   home=$(make_home routes)
@@ -607,6 +632,7 @@ EOF
 
 test_capture_validation_and_complete_record
 test_repeat_capture_is_idempotent
+test_repeat_capture_rejects_unbound_digest
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_recovers_interrupted_backlink

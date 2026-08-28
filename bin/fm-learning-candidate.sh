@@ -628,7 +628,9 @@ capture_command() {
     [ -f "$path" ] && [ ! -L "$path" ] || die "candidate id collision with non-regular path: $id"
     existing=$(cat "$path")
     validate_record_json "$existing" "$id"
-    [ "$(printf '%s\n' "$existing" | jq -r '.capture_digest')" = "$digest" ] \
+    printf '%s\n' "$existing" | jq -e --arg digest "$digest" --argjson payload "$payload" '
+      .capture_digest == $digest and .incident == $payload
+    ' >/dev/null \
       || die "candidate digest collision: $id"
     printf '%s\n' "$id"
     return 0
