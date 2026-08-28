@@ -290,7 +290,7 @@ test_learning_capture_command_binds_origin_home() {
     "generated capture command wrote into the conflicting ambient home"
   assert_absent "$foreign/local-command-ran" \
     "generated capture command executed the foreign worktree's local namesake"
-  count=$(find "$intended/state/learning-candidates" -type f -name '*.json' | wc -l | tr -d ' ')
+  count=$(find "$intended/state/learning-candidates" -type f -name 'lc-*.json' | wc -l | tr -d ' ')
   [ "$count" -eq 2 ] || fail "generated ship/scout commands persisted $count candidates instead of two"
   pass "fm-brief.sh: ship and scout capture commands bind the originating home and tracked executable"
 }

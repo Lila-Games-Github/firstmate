@@ -384,7 +384,7 @@ SH
 }
 
 test_summary_index_recovers_interrupted_update() {
-  local home fakebin real_mv summary rc
+  local home fakebin real_cat real_mv summary rc
   home=$(make_home interrupted-summary)
   capture_candidate "$home" summary-base FrogPile escaped-defect \
     "base summary candidate" >/dev/null
@@ -411,10 +411,30 @@ SH
   [ "$rc" -ne 0 ] || fail "capture succeeded after its summary index commit failed"
   rm -f "$fakebin/mv"
 
-  summary=$(run_learning "$home" summary) \
-    || fail "summary could not reconcile its committed pending record"
+  jq -cS '.after' "$home/state/learning-candidates/.summary-pending.json" \
+    >"$home/after-summary-index.json"
+  real_cat=$(command -v cat) || fail "could not locate cat for summary race fixture"
+  cat >"$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_TEST_PENDING_PATH" ]; then
+  "$FM_TEST_REAL_MV" "$FM_TEST_AFTER_INDEX" "$FM_TEST_INDEX_PATH"
+  rm -f -- "$FM_TEST_PENDING_PATH"
+  exit 1
+fi
+exec "$FM_TEST_REAL_CAT" "$@"
+SH
+  chmod +x "$fakebin/cat"
+  summary=$(PATH="$fakebin:$PATH" FM_TEST_REAL_CAT="$real_cat" \
+    FM_TEST_REAL_MV="$real_mv" \
+    FM_TEST_PENDING_PATH="$home/state/learning-candidates/.summary-pending.json" \
+    FM_TEST_INDEX_PATH="$home/state/learning-candidates/.summary.json" \
+    FM_TEST_AFTER_INDEX="$home/after-summary-index.json" \
+    run_learning "$home" summary) \
+    || fail "summary could not retry a concurrently completed transaction"
+  rm -f "$fakebin/cat"
   assert_contains "$summary" "LEARNING CANDIDATES: 2 unresolved" \
-    "pending summary transaction did not expose the committed candidate"
+    "summary lost a transaction completed during its pending-file read"
   capture_candidate "$home" summary-recovery FrogPile workflow-gap-blocker \
     "later mutation recovers the pending summary transaction" >/dev/null \
     || fail "later mutation did not recover the pending summary transaction"

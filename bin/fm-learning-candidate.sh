@@ -418,21 +418,68 @@ summary_probe_committed() {
   ' >/dev/null
 }
 
-effective_summary_index() {
-  local index pending
+read_summary_index_file() {
+  local index
   [ -f "$SUMMARY_INDEX" ] && [ ! -L "$SUMMARY_INDEX" ] \
     || die "learning-candidate summary index is missing; run a mutating lifecycle command to rebuild it"
   index=$(cat "$SUMMARY_INDEX")
   validate_summary_index_json "$index"
-  if [ -e "$SUMMARY_PENDING" ]; then
-    [ -f "$SUMMARY_PENDING" ] && [ ! -L "$SUMMARY_PENDING" ] \
-      || die "learning-candidate summary transaction must be a regular file"
-    pending=$(cat "$SUMMARY_PENDING")
-    validate_summary_pending_json "$pending"
-    if summary_probe_committed "$pending"; then
-      index=$(printf '%s\n' "$pending" | jq -cS '.after')
-    fi
+  printf '%s\n' "$index"
+}
+
+read_summary_pending_file() {
+  local pending
+  [ -e "$SUMMARY_PENDING" ] || return 1
+  if [ -L "$SUMMARY_PENDING" ] || [ ! -f "$SUMMARY_PENDING" ]; then
+    [ -e "$SUMMARY_PENDING" ] || return 1
+    return 2
   fi
+  if ! pending=$(cat "$SUMMARY_PENDING"); then
+    [ -e "$SUMMARY_PENDING" ] || return 1
+    return 2
+  fi
+  printf '%s\n' "$pending"
+}
+
+effective_summary_index() {
+  local attempt index index_after pending pending_after pending_status committed
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    index=$(read_summary_index_file)
+    if pending=$(read_summary_pending_file); then
+      validate_summary_pending_json "$pending"
+      committed=0
+      if summary_probe_committed "$pending"; then
+        committed=1
+      fi
+      index_after=$(read_summary_index_file)
+      if pending_after=$(read_summary_pending_file); then
+        validate_summary_pending_json "$pending_after"
+        if [ "$index" = "$index_after" ] && [ "$pending" = "$pending_after" ]; then
+          if [ "$committed" -eq 1 ]; then
+            index=$(printf '%s\n' "$pending" | jq -cS '.after')
+          fi
+          printf '%s\n' "$index"
+          return 0
+        fi
+      else
+        pending_status=$?
+        [ "$pending_status" -eq 1 ] \
+          || die "learning-candidate summary transaction must be a readable regular file"
+      fi
+    else
+      pending_status=$?
+      [ "$pending_status" -eq 1 ] \
+        || die "learning-candidate summary transaction must be a readable regular file"
+      index_after=$(read_summary_index_file)
+      if [ "$index" = "$index_after" ] && [ ! -e "$SUMMARY_PENDING" ]; then
+        printf '%s\n' "$index"
+        return 0
+      fi
+    fi
+    attempt=$((attempt + 1))
+  done
+  index=$(read_summary_index_file)
   printf '%s\n' "$index"
 }
 
