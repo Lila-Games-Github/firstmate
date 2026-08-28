@@ -23,7 +23,7 @@ Do not audit the whole task at completion to search for a candidate.
 
 ## Originating lane: bounded capture only
 
-The lane where the signal occurred records one candidate with `bin/fm-learning-candidate.sh capture` before its terminal completion report when practical.
+The lane where the signal occurred records one candidate with the absolute, home-bound capture invocation in its generated brief before its terminal completion report when practical.
 Use the command's help for the exact signal names, required fields, schema, validation, and idempotent retry behavior.
 State concrete evidence, the escaped contract, and the counterfactual that explains how the proposed prevention would have caught the original failure.
 The proposed owner is a hypothesis for later review, not a routing decision.

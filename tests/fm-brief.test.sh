@@ -223,6 +223,78 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+learning_capture_command() {
+  awk '
+    $0 == "# Learning-candidate reminder" { section = 1; next }
+    section && $0 == "```sh" { command = 1; next }
+    command && $0 == "```" { exit }
+    command { print }
+  ' "$1"
+}
+
+test_learning_capture_command_binds_origin_home() {
+  local intended ambient foreign project kind id brief command candidate rc json count
+  intended="$TMP_ROOT/intended home's fleet"
+  ambient="$TMP_ROOT/conflicting ambient home"
+  foreign="$TMP_ROOT/foreign project worktree"
+  project="confusing project's repo"
+  mkdir -p "$intended/data" "$ambient/state" "$foreign/bin"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    "printf 'wrong command executed\\n' >\"\$FM_CONFUSING_MARKER\"" \
+    'exit 91' >"$foreign/bin/fm-learning-candidate.sh"
+  chmod +x "$foreign/bin/fm-learning-candidate.sh"
+
+  for kind in ship scout; do
+    id="capture-$kind"
+    if [ "$kind" = ship ]; then
+      FM_HOME="$intended" "$ROOT/bin/fm-brief.sh" "$id" "$project" \
+        --mode local-only >/dev/null 2>&1
+    else
+      FM_HOME="$intended" "$ROOT/bin/fm-brief.sh" "$id" "$project" \
+        --scout >/dev/null 2>&1
+    fi
+    brief="$intended/data/$id/brief.md"
+    command=$(learning_capture_command "$brief")
+    [ -n "$command" ] || fail "$kind brief omitted its executable learning capture command"
+
+    candidate=$(cd "$foreign" && \
+      FM_HOME="$ambient" \
+      FM_STATE_OVERRIDE="$ambient/state" \
+      FM_ROOT_OVERRIDE="$ambient/stale-root" \
+      FM_CONFUSING_MARKER="$foreign/local-command-ran" \
+      FM_LEARNING_SIGNAL=review-rejection \
+      FM_LEARNING_IMPACT="impact from $kind" \
+      FM_LEARNING_ROOT_CAUSE="root cause from $kind" \
+      FM_LEARNING_ESCAPED_CONTRACT="escaped contract from $kind" \
+      FM_LEARNING_MISSING_CHECK="missing check from $kind" \
+      FM_LEARNING_CONSUMER="consumer from $kind" \
+      FM_LEARNING_PREVENTION="prevention from $kind" \
+      FM_LEARNING_EVIDENCE="evidence from $kind" \
+      FM_LEARNING_PROPOSED_OWNER="owner from $kind" \
+      FM_LEARNING_COUNTERFACTUAL="counterfactual from $kind" \
+      bash -c "$command" 2>"$intended/$id.err")
+    rc=$?
+    expect_code 0 "$rc" "$kind generated capture command failed: $(cat "$intended/$id.err")"
+    case "$candidate" in lc-[0-9a-f][0-9a-f]*) ;; *) fail "$kind capture returned an invalid candidate id: $candidate" ;; esac
+    assert_present "$intended/state/learning-candidates/$candidate.json" \
+      "$kind capture did not persist in the originating Firstmate home"
+    json=$(FM_HOME="$intended" FM_STATE_OVERRIDE="$intended/state" \
+      "$ROOT/bin/fm-learning-candidate.sh" get "$candidate")
+    printf '%s\n' "$json" | jq -e --arg task "$id" --arg project "$project" '
+      .incident.origin_task == $task and .incident.project == $project
+    ' >/dev/null || fail "$kind generated capture lost its bound task or project: $json"
+  done
+
+  assert_absent "$ambient/state/learning-candidates" \
+    "generated capture command wrote into the conflicting ambient home"
+  assert_absent "$foreign/local-command-ran" \
+    "generated capture command executed the foreign worktree's local namesake"
+  count=$(find "$intended/state/learning-candidates" -type f -name '*.json' | wc -l | tr -d ' ')
+  [ "$count" -eq 2 ] || fail "generated ship/scout commands persisted $count candidates instead of two"
+  pass "fm-brief.sh: ship and scout capture commands bind the originating home and tracked executable"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -724,6 +796,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_learning_capture_command_binds_origin_home
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
