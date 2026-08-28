@@ -23,7 +23,7 @@ Linux
 
 ## Behavioral evidence
 
-The review-fixed pipeline under test was commit `4b44f1152b8f5c901b30c28489f737b7a0a20930` with the current rendering fix applied.
+The review-fixed pipeline under test was commit `aa82ac9126caf8c4b260838532fef62e874c7ee6`.
 
 The focused public-interface and startup integration run used:
 
@@ -34,12 +34,12 @@ bin/fm-test-run.sh tests/fm-learning-candidate.test.sh tests/fm-brief.test.sh te
 The result was:
 
 ```text
-FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=157161
-FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=2 duration_ms=17658 failed=0
-FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=139413 failed=0
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=156540
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=2 duration_ms=18314 failed=0
+FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=138128 failed=0
 ```
 
-That run covers required-field and stored-record validation, deterministic repeat capture, every routing class, incompatible route rejection, separate curator identity, complete no-one-off-skill evidence, every requested disposition, and explicit deduplication with interruption recovery, authoritative duplicate state, exact retry repair, and conflicting-retry refusal.
+That run covers required-field and stored-record validation, deterministic repeat capture with stored digest-to-incident integrity enforcement, every routing class, incompatible route rejection, separate curator identity, complete no-one-off-skill evidence, every requested disposition, and explicit deduplication with interruption recovery, authoritative duplicate state, exact retry repair, and conflicting-retry refusal.
 It also covers store-independent summary reads, control-safe bounded list and summary rendering with full get and batch evidence preservation, interrupted and concurrent summary-transaction recovery, bounded session-start visibility, and generated ship and scout capture commands that bind the originating home and tracked executable.
 The conditional reminder remains limited to ship and scout briefs, routine success still requires no audit or state creation, and the originating lane is not assigned asynchronous curation.
 The ordinary non-forced task-cleanup survival case reported `skip` because `tasks-axi` was unavailable in this environment; the other focused assertions and all three scripts passed.
