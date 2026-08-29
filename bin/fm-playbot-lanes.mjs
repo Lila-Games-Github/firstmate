@@ -498,6 +498,14 @@ function resolveWorkspace(project, selector) {
   throw new Error(`Project ${project.id} has multiple active workspaces; provide workspace id or path`);
 }
 
+function resolveRetirementWorkspace(project, workspaceId) {
+  const workspace = project.workspaces.find((candidate) => (
+    candidate.archiveState === "active" && candidate.id === workspaceId
+  ));
+  if (workspace) return workspace;
+  throw new Error(`retire_workspace requires an exact active workspace id returned by list_retirable_workspaces; no active workspace id matches '${workspaceId}'`);
+}
+
 function gitEnvironment() {
   const env = { ...process.env };
   const overrides = [
@@ -826,22 +834,29 @@ function remoteRefRows(root, remote) {
 function localDisposableRefRows(root) {
   const rows = String(git(root, [
     "for-each-ref",
-    "--format=%(refname)%09%(objectname)",
+    "--format=%(refname)%09%(objectname)%09%(symref)",
     "refs/",
   ])).split(/\r?\n/).filter(Boolean).map((row) => {
-    const separator = row.indexOf("\t");
-    const ref = separator < 0 ? "" : row.slice(0, separator);
-    const object = separator < 0 ? "" : row.slice(separator + 1);
-    if (!ref.startsWith("refs/") || !/^[0-9a-f]{40,64}$/i.test(object)) {
+    const [ref, object, symbolicTarget, ...extra] = row.split("\t");
+    if (!ref.startsWith("refs/")
+      || !/^[0-9a-f]{40,64}$/i.test(object)
+      || (symbolicTarget && !symbolicTarget.startsWith("refs/"))
+      || extra.length > 0) {
       throw new Error("Git returned unreadable local submodule ref evidence");
     }
-    return { ref, object };
+    return { ref, object, symbolicTarget: symbolicTarget || null };
   }).filter((entry) => !entry.ref.startsWith("refs/remotes/"));
-  return rows.sort((left, right) => left.ref.localeCompare(right.ref) || left.object.localeCompare(right.object));
+  return rows.sort((left, right) => (
+    left.ref.localeCompare(right.ref)
+      || left.object.localeCompare(right.object)
+      || String(left.symbolicTarget).localeCompare(String(right.symbolicTarget))
+  ));
 }
 
 function gitIndexHeadChanges(root) {
-  const raw = git(root, ["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD", "--"], { encoding: "buffer" });
+  const raw = git(root, [
+    "diff", "--cached", "--name-only", "--no-renames", "--ignore-submodules=none", "-z", "HEAD", "--",
+  ], { encoding: "buffer" });
   return [...new Set(raw.toString("utf8").split("\0").filter(Boolean).map(gitPathIdentity))].sort();
 }
 
@@ -925,7 +940,9 @@ function persistedSubmoduleState(root) {
       const localOnlyCommits = candidates.filter((entry) => !commitPublished(repository.gitDir, entry.commit, remoteTips));
       const localRefs = localDisposableRefRows(repository.gitDir);
       const publishedRefs = new Set(remoteEvidence.flatMap((entry) => entry.refs.map((item) => `${item.ref}\0${item.object}`)));
-      const localOnlyRefs = localRefs.filter((entry) => !publishedRefs.has(`${entry.ref}\0${entry.object}`));
+      const localOnlyRefs = localRefs.filter((entry) => (
+        entry.symbolicTarget !== null || !publishedRefs.has(`${entry.ref}\0${entry.object}`)
+      ));
       const stagedPaths = gitIndexHeadChanges(repository.gitDir);
       const indexFlags = gitIndexFlags(repository.gitDir);
       const operations = gitOperationState(repository.gitDir);
@@ -4027,7 +4044,7 @@ function toolDefinitions() {
       description: "Delete one exact non-Local Playbot workspace only after immediately re-running the complete landing, thread, and Git safety inspection. Requires confirm=true, invokes workspace:delete with preserveWorktrees=false, verifies every database, directory, and Git-worktree removal, deactivates matching lane routes, and appends a private audit record.",
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
-        workspace: string("Exact workspace id, root path, or unique exact name from list_retirable_workspaces"),
+        workspace: string("Exact active workspace id from list_retirable_workspaces"),
         landingBranch: string("Explicit branch this workspace must already be landed on; use the same value just inspected"),
         confirm: { type: "boolean", const: true },
       }, ["project", "workspace", "landingBranch", "confirm"]),
@@ -4178,11 +4195,11 @@ async function handleTool(name, args = {}) {
   }
   if (name === "retire_workspace") {
     if (args.confirm !== true) throw new Error("retire_workspace requires confirm=true after a fresh list_retirable_workspaces inspection");
-    const selector = String(args.workspace ?? "").trim();
+    const selector = typeof args.workspace === "string" ? args.workspace : "";
     if (!selector) throw new Error("retire_workspace requires one exact workspace selector from list_retirable_workspaces");
     const landingBranch = String(args.landingBranch ?? "").trim();
     if (!landingBranch) throw new Error("retire_workspace requires an explicit landingBranch");
-    const workspace = resolveWorkspace(project, selector);
+    const workspace = resolveRetirementWorkspace(project, selector);
     return retireWorkspace(project, workspace, landingBranch);
   }
   if (name === "create_workspace") {

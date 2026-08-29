@@ -550,9 +550,10 @@ A same-length edit with restored mtime stays blocking when `core.trustctime=fals
 The untracked and ignored inventory disables Git's untracked cache and filesystem monitor for its safety read, uses traditional ignored traversal with all untracked files, and returns the exact nested file beneath an explicitly ignored directory instead of collapsing it to the directory.
 An executable Git compatibility fixture models a stale cache result after warming the real untracked cache and restoring the directory mtime, proving the otherwise hidden file remains blocking by exact path.
 Initialized submodules are inspected recursively with ignored files visible.
-Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixtures prove an exact stash, a server-deleted commit hidden by a stale remote-tracking ref, a reset commit reachable only through a reflog, unpublished local branch, annotated-tag, and custom refs, plus staged index and merge-operation state remain visible and blocking after the submodule worktree is emptied.
+Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixtures prove an exact stash, a server-deleted commit hidden by a stale remote-tracking ref, a reset commit reachable only through a reflog, unpublished local branch, annotated-tag, custom, and symbolic refs, plus staged regular-file, nested-gitlink, and merge-operation state remain visible and blocking after the submodule worktree is emptied.
 Publication proof enumerates every ref- and reflog-reachable candidate, fetches the objects behind a fresh configured-remote ref snapshot without updating local refs, rejects a snapshot that changes during inspection, and compares candidates against those authoritative remote tips rather than local `refs/remotes/*`.
-It separately compares every disposable local ref name plus direct object identity against those snapshots, excluding only the reconstructible `refs/remotes/` cache, so an already-published target commit cannot conceal custom unpublished ref metadata.
+It separately compares every ordinary disposable local ref name plus direct object identity against those snapshots, excluding only the reconstructible `refs/remotes/` cache, and conservatively blocks symbolic refs whose target metadata is flattened by ordinary remote rows.
+Persisted index comparison forces submodule differences visible despite repository-level or per-submodule ignore configuration, with the executable fixture first proving the same nested gitlink is absent from an unoverridden cached diff.
 Every Git invocation contributing retirement evidence disables replacement objects, and a real `refs/replace` fixture proves the exact replacement ref blocks even after the workspace head is otherwise clean and landed.
 An executable `GIT_INDEX_FILE` fixture points the MCP process at a clean alternate index while the real linked-worktree index holds a staged-only change, proving inherited repository overrides are cleared before evidence collection.
 Repository and persisted-submodule `info/grafts` metadata blocks as unreadable evidence, with a real top-level graft fixture proving the exact metadata path is returned.
@@ -567,6 +568,7 @@ The post-delete audit also covered a real two-root workspace whose first worktre
 The MCP error, durable audit, later inventory, database counts, both directory checks, and both Git registration checks all agreed on the exact partial result, including the surviving registration whose real path contained a newline.
 The rejection result and durable audit also preserve the pre-action strict route baseline and reconcile the still-active route against the post-action inventory.
 Another executable fixture makes `workspace:delete` resolve successfully without removing its database rows, directory, or Git registration, and proves the MCP reports `deleted: false`, a partial action, full remaining evidence, the blind-retry warning, and an unchanged active route.
+Destructive selection accepts only the exact active workspace id returned by inventory, with executable name, case-folded name, and path refusals proving no alias reaches Playbot IPC.
 Another real rejection fixture uses a valid standalone Git directory that was never registered in the project repository and proves the pre-action baseline prevents its already-absent registration from being mislabeled as destructive change.
 A real worktree-specific landing-branch remote binding gives two roots sharing one common Git directory different landing commits and proves both roots retain their own remote evidence.
 A syntactically valid empty route object fixture survives successful workspace deletion while schema validation makes the result and durable audit explicitly incomplete.
@@ -606,7 +608,7 @@ ok - fm-playbot-lanes: initialized submodules expose nested ignored work before 
 ok - fm-playbot-lanes: persisted removed-submodule storage exposes stash and unpushed commits
 ok - fm-playbot-lanes: fresh submodule remote evidence rejects stale tracking refs
 ok - fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits
-ok - fm-playbot-lanes: persisted submodule unpublished refs block
+ok - fm-playbot-lanes: persisted submodule unpublished and symbolic refs block
 ok - fm-playbot-lanes: persisted submodule operations and index state block
 ok - fm-playbot-lanes: clean-looking merge, cherry-pick, and rebase states block retirement
 ok - fm-playbot-lanes: every root resolves its own worktree-specific remote evidence

@@ -3638,6 +3638,21 @@ OUT="$out" node --no-warnings <<'NODE' || fail "retirement accepted an implicit 
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('requires one exact workspace selector')) process.exit(1);
 NODE
+out=$(retirement_call alt ',"confirm":true')
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement accepted an exact workspace name instead of its id"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('exact active workspace id')) process.exit(1);
+NODE
+out=$(retirement_call ALT ',"confirm":true')
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement accepted a case-folded workspace name"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('exact active workspace id')) process.exit(1);
+NODE
+out=$(retirement_call "$FIXTURE_ROOT/worker/.worktrees/alt" ',"confirm":true')
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement accepted a workspace path instead of its id"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('exact active workspace id')) process.exit(1);
+NODE
 if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
   fail "retirement without confirmation reached workspace:delete"
 fi
@@ -4134,6 +4149,8 @@ submodule_published=$(git --git-dir="$submodule_git_dir" rev-parse refs/remotes/
 git --git-dir="$submodule_git_dir" update-ref refs/heads/retirement-local-branch "$submodule_published"
 git --git-dir="$submodule_git_dir" tag -a retirement-local-tag "$submodule_published" -m "local retirement tag"
 git --git-dir="$submodule_git_dir" update-ref refs/archive/safety "$submodule_published"
+git --git-dir="$submodule_git_dir" push origin refs/heads/main:refs/archive/symbolic >/dev/null
+git --git-dir="$submodule_git_dir" symbolic-ref refs/archive/symbolic refs/heads/main
 submodule_local_tag=$(git --git-dir="$submodule_git_dir" rev-parse refs/tags/retirement-local-tag)
 retirement_list main > "$retirement_inventory"
 OUT_FILE="$retirement_inventory" BRANCH_OBJECT="$submodule_published" TAG_OBJECT="$submodule_local_tag" node --no-warnings <<'NODE' \
@@ -4146,13 +4163,16 @@ if (!residue || residue.localOnlyCommits.length !== 0) process.exit(1);
 if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/heads/retirement-local-branch' && entry.object === process.env.BRANCH_OBJECT)) process.exit(1);
 if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/tags/retirement-local-tag' && entry.object === process.env.TAG_OBJECT)) process.exit(1);
 if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/archive/safety' && entry.object === process.env.BRANCH_OBJECT)) process.exit(1);
+if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/archive/symbolic' && entry.object === process.env.BRANCH_OBJECT && entry.symbolicTarget === 'refs/heads/main')) process.exit(1);
 if (!residue.publicationEvidence.localRefs.some(entry => entry.ref === 'refs/heads/main' && entry.object === process.env.BRANCH_OBJECT)) process.exit(1);
 if (residue.publicationEvidence.localRefs.some(entry => entry.ref.startsWith('refs/remotes/'))) process.exit(1);
 NODE
 git --git-dir="$submodule_git_dir" update-ref -d refs/heads/retirement-local-branch
 git --git-dir="$submodule_git_dir" tag -d retirement-local-tag >/dev/null
 git --git-dir="$submodule_git_dir" update-ref -d refs/archive/safety
-pass "fm-playbot-lanes: persisted submodule unpublished refs block"
+git --git-dir="$submodule_git_dir" symbolic-ref --delete refs/archive/symbolic
+git --git-dir="$submodule_git_dir" push --delete origin refs/archive/symbolic >/dev/null
+pass "fm-playbot-lanes: persisted submodule unpublished and symbolic refs block"
 
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" -c protocol.file.allow=always submodule update --init --force prototype-game/submodule >/dev/null \
   || fail "could not restore the persisted-operation submodule worktree"
@@ -4167,6 +4187,13 @@ git -C "$submodule_worktree" push -u origin retirement-persisted-operation >/dev
 git -C "$submodule_worktree" checkout main >/dev/null
 git -C "$submodule_worktree" merge --no-ff --no-commit retirement-persisted-operation >/dev/null \
   || fail "could not create the persisted merge and index state"
+git -C "$submodule_worktree" config diff.ignoreSubmodules all
+git -C "$submodule_worktree" config submodule.nested-link.ignore all
+git -C "$submodule_worktree" update-index --add --cacheinfo 160000,"$submodule_published",nested-link
+hidden_gitlinks=$(git -C "$submodule_worktree" diff --cached --name-only HEAD --)
+case "$hidden_gitlinks" in
+  *nested-link*) fail "the persisted gitlink fixture was not hidden by configured submodule ignoring" ;;
+esac
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" submodule deinit -f prototype-game/submodule >/dev/null \
   || fail "could not remove the submodule worktree with persisted operation state"
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rm --cached prototype-game/submodule >/dev/null \
@@ -4180,7 +4207,7 @@ const blocker = workspace.blockers.find(candidate => candidate.code === 'submodu
 const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
 if (!residue || residue.localOnlyCommits.length !== 0 || residue.localOnlyRefs.length !== 0) process.exit(1);
 if (!residue.operations.some(entry => entry.operation === 'merge' && entry.marker === 'MERGE_HEAD')) process.exit(1);
-if (residue.stagedPaths.join(',') !== 'operation-state.txt') process.exit(1);
+if (residue.stagedPaths.join(',') !== 'nested-link,operation-state.txt') process.exit(1);
 NODE
 rm -f "$submodule_git_dir/MERGE_HEAD" "$submodule_git_dir/MERGE_MODE" "$submodule_git_dir/MERGE_MSG" "$submodule_git_dir/AUTO_MERGE"
 git --git-dir="$submodule_git_dir" read-tree --reset HEAD
@@ -4188,6 +4215,8 @@ git --git-dir="$submodule_git_dir" update-ref -d refs/heads/retirement-persisted
 git --git-dir="$submodule_git_dir" push --delete origin retirement-persisted-operation >/dev/null
 git --git-dir="$submodule_git_dir" update-ref -d refs/remotes/origin/retirement-persisted-operation
 git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
+git --git-dir="$submodule_git_dir" config --unset diff.ignoreSubmodules
+git --git-dir="$submodule_git_dir" config --unset submodule.nested-link.ignore
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore --staged prototype-game/submodule
 pass "fm-playbot-lanes: persisted submodule operations and index state block"
 
