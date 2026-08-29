@@ -959,8 +959,13 @@ function repositoryPseudoObjectRecords(root) {
   for (const entry of fs.readdirSync(gitDir, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
     if (!entry.isFile() || entry.name === "HEAD" || entry.name === "FETCH_HEAD") continue;
     const raw = fs.readFileSync(path.join(gitDir, entry.name), "utf8");
-    const objects = raw.split(/\r?\n/).filter(Boolean);
-    if (objects.length === 0 || objects.some((object) => !/^[0-9a-f]{40,64}$/i.test(object))) continue;
+    const objects = raw.split(/\r?\n/);
+    if (objects.at(-1) === "") objects.pop();
+    const strictPseudoObject = entry.name === "AUTO_MERGE" || /(?:^|_)(?:HEAD|AUTOSTASH)$/.test(entry.name);
+    if (objects.length === 0 || objects.some((object) => !/^[0-9a-f]{40,64}$/i.test(object))) {
+      if (strictPseudoObject) throw new Error(`Git returned unreadable persisted submodule ${entry.name} object evidence`);
+      continue;
+    }
     for (const object of objects) {
       const type = stripTerminalLineEnding(git(root, ["cat-file", "-t", object]));
       if (!new Set(["blob", "commit", "tag", "tree"]).has(type)) {

@@ -4535,6 +4535,19 @@ NODE
 rm -f "$submodule_git_dir/ORIG_HEAD"
 pass "fm-playbot-lanes: persisted submodule pseudorefs expose reset unpushed commits"
 
+printf '%s\n%s\n' "$submodule_orig_head_only" 'corrupt' > "$submodule_git_dir/ORIG_HEAD"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' \
+  || fail "a mixed-validity persisted submodule pseudoref was allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'submodule-unreadable');
+const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
+if (!residue?.error.includes('unreadable persisted submodule ORIG_HEAD object evidence')) process.exit(1);
+NODE
+rm -f "$submodule_git_dir/ORIG_HEAD"
+pass "fm-playbot-lanes: malformed persisted pseudorefs fail closed"
+
 submodule_autostash=$(printf '%s\n' 'MERGE_AUTOSTASH-only submodule work' \
   | git --git-dir="$submodule_git_dir" commit-tree "$submodule_tree" -p "$submodule_base")
 submodule_auto_merge_blob=$(printf '%s\n' 'AUTO_MERGE-only submodule work' \
