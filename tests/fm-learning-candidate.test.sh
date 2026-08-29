@@ -273,6 +273,14 @@ test_atomic_lifecycle_publication_and_content_authority() {
     "interrupted lifecycle cutover published a second record"
   [ "$(jq -r '.lifecycle_state' "$(candidate_path "$home" "$id")")" = documented ] \
     || fail "interrupted lifecycle cutover did not publish updated content first"
+  summary=$(run_learning "$home" summary --read-only 2>"$home/read-only-summary.err") \
+    || fail "read-only summary rejected a readable stale lifecycle hint"
+  [ -z "$summary" ] || fail "read-only summary trusted a stale unresolved filename over terminal content"
+  [ ! -s "$home/read-only-summary.err" ] || fail "read-only summary reported a stale derived hint"
+  assert_present "$(candidate_path "$home" "$id")" \
+    "read-only summary renamed the stale lifecycle hint"
+  assert_absent "$(candidate_path "$home" "$id" documented)" \
+    "read-only summary published a corrected lifecycle hint"
   summary=$(run_learning "$home" summary 2>"$home/summary.err") \
     || fail "summary rejected a readable record with a stale lifecycle hint"
   [ -z "$summary" ] || fail "summary counted terminal content under a stale unresolved hint"
@@ -765,6 +773,24 @@ SH
   pass "summary propagates enumeration failures before rendering"
 }
 
+test_summary_rejects_unsafe_entries() {
+  local home id rc
+  home=$(make_home unsafe-summary-entry)
+  id=lc-000000000000000000000000
+  mkdir -p "$home/state/learning-candidates"
+  ln -s "$home/state" "$(candidate_path "$home" "$id")"
+
+  set +e
+  run_learning "$home" summary >"$home/unsafe.out" 2>"$home/unsafe.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "summary silently skipped an unsafe candidate entry"
+  assert_grep "candidate path must be a regular file" "$home/unsafe.err" \
+    "summary did not route an unsafe entry through record-path validation"
+  [ ! -s "$home/unsafe.out" ] || fail "summary rendered output after finding an unsafe entry"
+  pass "summary rejects unsafe matching candidate entries"
+}
+
 test_capture_does_not_wait_for_curation() {
   local home lock ready release holder capture_pid attempt rc count
   home=$(make_home bounded-capture)
@@ -883,6 +909,7 @@ test_dedupe_interruption_and_terminal_retry
 test_concise_outputs_strip_terminal_controls
 test_bounded_summary_and_batch
 test_summary_producer_failure_propagates
+test_summary_rejects_unsafe_entries
 test_capture_does_not_wait_for_curation
 test_candidate_survives_nonblocking_task_cleanup
 

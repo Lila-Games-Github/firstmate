@@ -843,8 +843,10 @@ fi
 # record schema and the hard output cap. An absent store is a zero-cost silent
 # case and is not created by this read-only path.
 if [ -e "$STATE/learning-candidates" ]; then
+  LEARNING_SUMMARY_ARGS=()
+  [ "$READ_ONLY" -eq 0 ] || LEARNING_SUMMARY_ARGS=(--read-only)
   if LEARNING_SUMMARY=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-learning-candidate.sh" summary 2>&1); then
+    "$SCRIPT_DIR/fm-learning-candidate.sh" summary "${LEARNING_SUMMARY_ARGS[@]}" 2>&1); then
     if [ -n "$LEARNING_SUMMARY" ]; then
       subsection "Unresolved learning candidates"
       printf '%s\n' "$LEARNING_SUMMARY"

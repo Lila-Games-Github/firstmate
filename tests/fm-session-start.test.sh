@@ -740,7 +740,7 @@ EOF
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
-  local rec root home fakebin holder_pid out status
+  local rec root home fakebin holder_pid out status candidate candidate_path
   rec=$(new_world lock-refusal)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -757,6 +757,26 @@ EOF
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
   git -C "$root" checkout -q -B fm/read-only-tangle
+
+  candidate=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_LEARNING_NOW=2026-08-28T12:00:00Z "$ROOT/bin/fm-learning-candidate.sh" capture \
+    --task read-only-summary --project FrogPile --signal escaped-defect \
+    --impact "terminal content must override a stale unresolved hint" \
+    --root-cause "summary lacked mutation authority" --escaped-contract "read-only startup" \
+    --missing-check "lock-refusal summary regression" --consumer captain \
+    --prevention "load candidate content without correcting hints" \
+    --evidence "a stale suffix was renamed during lock refusal" \
+    --proposed-owner Firstmate --counterfactual "non-mutating load would preserve shared state") \
+    || fail "could not seed the read-only summary candidate"
+  candidate_path="$home/state/learning-candidates/$candidate.unresolved.json"
+  jq '
+    .lifecycle_state="dismissed" |
+    .disposition={at:"2026-08-28T12:00:01Z",curator:"curator-read-only",
+      outcome:"dismissed",note:"terminal candidate",reference:null} |
+    .history += [{at:"2026-08-28T12:00:01Z",event:"disposed",
+      actor:"curator-read-only",detail:"dismissed"}]
+  ' "$candidate_path" >"$home/terminal-candidate.json"
+  mv "$home/terminal-candidate.json" "$candidate_path"
 
   sleep 300 &
   holder_pid=$!
@@ -781,6 +801,10 @@ EOF
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
   assert_not_contains "$out" "git -C $root checkout main" "read-only bootstrap printed a state-changing checkout remediation"
+  assert_not_contains "$out" "$candidate" "read-only summary trusted the stale unresolved hint over terminal content"
+  assert_present "$candidate_path" "lock-refused summary renamed a stale candidate hint"
+  assert_absent "$home/state/learning-candidates/$candidate.dismissed.json" \
+    "lock-refused summary mutated the candidate lifecycle hint"
 
   # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
   # tasks-axi, so bootstrap's own read-only tool-detection line fires
@@ -2272,6 +2296,27 @@ SH
   pass "session start terminal-sanitizes candidate summary diagnostics"
 }
 
+test_learning_candidate_summary_rejects_unsafe_entry() {
+  local rec root home fakebin out id
+  rec=$(new_world learning-candidate-unsafe-entry)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+  mkdir -p "$home/state/learning-candidates"
+  id=lc-000000000000000000000000
+  ln -s "$home/state" "$home/state/learning-candidates/$id.unresolved.json"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
+    "session start silently skipped an unsafe candidate entry"
+  assert_contains "$out" "candidate path must be a regular file" \
+    "session start did not surface shared candidate-path validation"
+  pass "session start reports unsafe candidate entries as unavailable"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -2499,6 +2544,7 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_learning_candidate_summary_is_bounded
 test_learning_candidate_summary_error_is_terminal_safe
+test_learning_candidate_summary_rejects_unsafe_entry
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic

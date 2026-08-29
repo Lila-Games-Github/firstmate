@@ -14,8 +14,9 @@
 # The directory is outside task-scoped state, so fm-teardown.sh never removes it.
 # Every record replacement publishes at the current path by atomic temp-plus-rename,
 # then renames that sole record when its lifecycle hint changes. A read that finds
-# a stale hint trusts readable content and corrects the name in passing. Capture
-# makes one non-waiting mutation-lock attempt; curator mutations may wait for the lock.
+# a stale hint trusts readable content and corrects the name in passing unless
+# summary --read-only disables that mutation. Capture makes one non-waiting
+# mutation-lock attempt; curator mutations may wait for the lock.
 # Exact repeat capture is idempotent: the candidate id is the first 24 hex digits
 # of the SHA-256 digest of the canonical incident object, excluding timestamps.
 # A digest collision with different content is refused.
@@ -33,7 +34,7 @@
 #   fm-learning-candidate.sh get <candidate-id>
 #   fm-learning-candidate.sh list [--status <state>|--all] [--limit <1..500>]
 #   fm-learning-candidate.sh batch [--limit <1..100>]
-#   fm-learning-candidate.sh summary [--limit <0..5>]
+#   fm-learning-candidate.sh summary [--limit <0..5>] [--read-only]
 #
 #   fm-learning-candidate.sh classify <candidate-id>
 #     --curator <curator-id> --route <feature|project|firstmate|tool>
@@ -361,8 +362,8 @@ resolve_record_path() { # <candidate-id>; sets RECORD_PATH
   die "candidate not found: $id"
 }
 
-load_record() { # <candidate-id>; sets RECORD_JSON and RECORD_PATH
-  local id=$1 content_state corrected_path attempt=0
+load_record() { # <candidate-id> [correct-hint]; sets RECORD_JSON and RECORD_PATH
+  local id=$1 correct_hint=${2:-1} content_state corrected_path attempt=0
   validate_candidate_id "$id"
   store_available_read_only || die "candidate not found: $id"
   while [ "$attempt" -lt 2 ]; do
@@ -375,6 +376,7 @@ load_record() { # <candidate-id>; sets RECORD_JSON and RECORD_PATH
     content_state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
     corrected_path=$(record_path "$id" "$content_state")
     [ "$corrected_path" != "$RECORD_PATH" ] || return 0
+    [ "$correct_hint" -eq 1 ] || return 0
     if [ -e "$corrected_path" ] || ! mv -- "$RECORD_PATH" "$corrected_path" 2>/dev/null; then
       attempt=$((attempt + 1))
       continue
@@ -566,12 +568,13 @@ batch_command() {
 
 summary_command() {
   local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
-  local producer_pid
+  local producer_pid correct_hint=1
   local -a samples=()
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --limit) [ "$#" -ge 2 ] || die "--limit requires a value"; limit=$2; shift 2 ;;
+      --read-only) correct_hint=0; shift ;;
       *) die "unknown summary argument: $1" ;;
     esac
   done
@@ -579,14 +582,14 @@ summary_command() {
   store_available_read_only || return 0
   exec 3< <(
     CDPATH='' cd -- "$CANDIDATE_DIR" && \
-      find . -maxdepth 1 -type f -name 'lc-*.json' -print | LC_ALL=C sort
+      find . -maxdepth 1 -name 'lc-*.json' -print | LC_ALL=C sort
   )
   producer_pid=$!
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     name=${name#./}
     id=${name%%.*}
-    load_record "$id"
+    load_record "$id" "$correct_hint"
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
     [ "$state" = unresolved ] || continue
     count=$((count + 1))
