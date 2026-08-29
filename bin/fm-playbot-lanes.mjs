@@ -309,6 +309,7 @@ function git(root, args, options = {}) {
   const result = spawnSync("git", ["-C", root, ...args], {
     encoding,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    input: options.input,
     maxBuffer: 16 * 1024 * 1024,
   });
   if (result.error) throw new Error(result.error.message);
@@ -483,6 +484,61 @@ function persistedSubmoduleGitDirs(root) {
   return { repositories, unreadable };
 }
 
+function remoteRefRows(root, remote) {
+  const rows = String(git(root, ["ls-remote", "--refs", remote])).split(/\r?\n/).filter(Boolean).map((row) => {
+    const separator = row.indexOf("\t");
+    const commit = separator < 0 ? "" : row.slice(0, separator);
+    const ref = separator < 0 ? "" : row.slice(separator + 1);
+    if (!/^[0-9a-f]{40,64}$/i.test(commit) || !ref.startsWith("refs/") || ref.includes("\t")) {
+      throw new Error(`remote ${remote} returned unreadable ref evidence`);
+    }
+    return { ref, commit };
+  });
+  return rows.sort((left, right) => left.ref.localeCompare(right.ref) || left.commit.localeCompare(right.commit));
+}
+
+function freshRemoteCommitTips(root, remote) {
+  const before = remoteRefRows(root, remote);
+  for (let index = 0; index < before.length; index += 64) {
+    git(root, [
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-write-fetch-head",
+      remote,
+      ...before.slice(index, index + 64).map((entry) => entry.ref),
+    ]);
+  }
+  const after = remoteRefRows(root, remote);
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    throw new Error(`remote ${remote} refs changed during persisted submodule inspection`);
+  }
+  const commits = new Set();
+  for (const entry of after) {
+    git(root, ["cat-file", "-e", entry.commit]);
+    try {
+      commits.add(stripTerminalLineEnding(git(root, ["rev-parse", "--verify", `${entry.commit}^{commit}`])));
+    } catch {
+      continue;
+    }
+  }
+  return {
+    remote,
+    remoteUrl: String(git(root, ["remote", "get-url", remote])).trim(),
+    observedAt: nowIso(),
+    refCount: after.length,
+    commits: [...commits].sort(),
+  };
+}
+
+function commitPublished(root, commit, remoteTips) {
+  if (remoteTips.length === 0) return false;
+  const remaining = String(git(root, ["rev-list", "--max-count=1", "--stdin"], {
+    input: `${commit}\n--not\n${remoteTips.join("\n")}\n`,
+  })).trim();
+  return remaining === "";
+}
+
 function persistedSubmoduleState(root) {
   const discovered = persistedSubmoduleGitDirs(root);
   const repositories = [];
@@ -493,8 +549,8 @@ function persistedSubmoduleState(root) {
         commit: stripTerminalLineEnding(git(repository.gitDir, ["rev-parse", "--verify", "HEAD^{commit}"])),
         subject: stripTerminalLineEnding(git(repository.gitDir, ["show", "-s", "--format=%s", "HEAD"])),
       };
-      const localOnlyCommits = commitRecords(
-        git(repository.gitDir, ["log", "-z", "--format=%H%x00%s", "--all", "--not", "--remotes"], { encoding: "buffer" }),
+      const candidates = commitRecords(
+        git(repository.gitDir, ["log", "-z", "--format=%H%x00%s", "--all", "--reflog", "HEAD"], { encoding: "buffer" }),
         "persisted submodule history",
       );
       let stashCommit = null;
@@ -503,16 +559,31 @@ function persistedSubmoduleState(root) {
       } catch {
         stashCommit = null;
       }
-      const remoteContainingHead = String(git(repository.gitDir, [
-        "for-each-ref",
-        `--contains=${head.commit}`,
-        "--format=%(refname)",
-        "refs/remotes/",
-      ])).split(/\r?\n/).filter(Boolean);
-      if (remoteContainingHead.length === 0 && !localOnlyCommits.some((entry) => entry.commit === head.commit)) {
-        localOnlyCommits.unshift(head);
+      const remoteEvidence = [];
+      const publicationProblems = [];
+      const remotes = String(git(repository.gitDir, ["remote"])).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+      if (remotes.length === 0) publicationProblems.push("persisted submodule repository has no configured remote");
+      for (const remote of remotes) {
+        try {
+          remoteEvidence.push(freshRemoteCommitTips(repository.gitDir, remote));
+        } catch (error) {
+          publicationProblems.push(`remote ${remote}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
-      repositories.push({ ...repository, head, stashCommit, localOnlyCommits });
+      const remoteTips = [...new Set(remoteEvidence.flatMap((entry) => entry.commits))].sort();
+      const localOnlyCommits = candidates.filter((entry) => !commitPublished(repository.gitDir, entry.commit, remoteTips));
+      repositories.push({
+        ...repository,
+        head,
+        stashCommit,
+        localOnlyCommits,
+        publicationEvidence: {
+          candidateCommitCount: candidates.length,
+          remoteTips,
+          remotes: remoteEvidence,
+          problems: publicationProblems,
+        },
+      });
     } catch (error) {
       unreadable.push({ ...repository, error: error instanceof Error ? error.message : String(error) });
     }

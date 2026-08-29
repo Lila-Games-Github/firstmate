@@ -3764,11 +3764,51 @@ if (!residue || residue.gitDir !== process.env.GIT_DIR) process.exit(1);
 if (residue.stashCommit !== process.env.STASH_COMMIT) process.exit(1);
 if (!residue.localOnlyCommits.some(entry => entry.commit === process.env.UNPUSHED_COMMIT && entry.subject === 'unpushed submodule work')) process.exit(1);
 NODE
+pass "fm-playbot-lanes: persisted removed-submodule storage exposes stash and unpushed commits"
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore --staged prototype-game/submodule
 git --git-dir="$submodule_git_dir" update-ref -d refs/stash
+git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
+git --git-dir="$submodule_git_dir" push origin refs/heads/main:refs/heads/retirement-stale >/dev/null \
+  || fail "could not publish the stale submodule tracking fixture"
+git --git-dir="$submodule_git_dir" push --delete origin retirement-stale >/dev/null \
+  || fail "could not remove the stale submodule commit from its server"
+git --git-dir="$submodule_git_dir" update-ref refs/remotes/origin/retirement-stale "$submodule_unpushed"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" UNPUSHED_COMMIT="$submodule_unpushed" node --no-warnings <<'NODE' \
+  || fail "a server-deleted submodule commit was trusted through a stale remote-tracking ref"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'submodule-local-history');
+const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
+if (!residue?.localOnlyCommits.some(entry => entry.commit === process.env.UNPUSHED_COMMIT && entry.subject === 'unpushed submodule work')) process.exit(1);
+if (residue.publicationEvidence.remoteTips.includes(process.env.UNPUSHED_COMMIT)) process.exit(1);
+if (residue.publicationEvidence.problems.length !== 0) process.exit(1);
+NODE
+git --git-dir="$submodule_git_dir" update-ref -d refs/remotes/origin/retirement-stale
+git --git-dir="$submodule_git_dir" update-ref refs/heads/main refs/remotes/origin/main
+git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
+pass "fm-playbot-lanes: fresh submodule remote evidence rejects stale tracking refs"
+
+submodule_base=$(git --git-dir="$submodule_git_dir" rev-parse refs/remotes/origin/main)
+submodule_tree=$(git --git-dir="$submodule_git_dir" rev-parse "$submodule_base^{tree}")
+submodule_reflog_only=$(printf '%s\n' 'reflog-only submodule work' \
+  | git --git-dir="$submodule_git_dir" commit-tree "$submodule_tree" -p "$submodule_base")
+git --git-dir="$submodule_git_dir" update-ref --create-reflog refs/heads/main "$submodule_reflog_only"
+git --git-dir="$submodule_git_dir" update-ref refs/heads/main "$submodule_base"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" REFLOG_COMMIT="$submodule_reflog_only" node --no-warnings <<'NODE' \
+  || fail "a reset submodule commit reachable only through its reflog was allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'submodule-local-history');
+const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
+if (!residue?.localOnlyCommits.some(entry => entry.commit === process.env.REFLOG_COMMIT && entry.subject === 'reflog-only submodule work')) process.exit(1);
+if (residue.publicationEvidence.remoteTips.includes(process.env.REFLOG_COMMIT)) process.exit(1);
+NODE
+git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
 git --git-dir="$submodule_git_dir" update-ref refs/heads/main refs/remotes/origin/main
 git --git-dir="$submodule_git_dir" symbolic-ref HEAD refs/heads/main
-pass "fm-playbot-lanes: persisted removed-submodule storage exposes stash and unpushed commits"
+pass "fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits"
 
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore \
   prototype-game/addons/playbot/playbot_common.gd.uid \
