@@ -132,6 +132,42 @@ test_repeat_capture_is_idempotent() {
   pass "exact repeat capture converges on one durable candidate"
 }
 
+test_read_commands_reject_symlinked_state() {
+  local target exposed id command rc
+  target=$(make_home symlink-target)
+  id=$(capture_candidate "$target" symlink-source FrogPile escaped-defect \
+    "state overrides must stay inside the selected private home")
+  classify_feature "$target" "$id" curator-symlink >/dev/null
+  run_learning "$target" disposition "$id" --curator curator-symlink \
+    --status documented --note "The state boundary is documented" \
+    --reference "docs/state-boundary.md" >/dev/null
+  mv "$(candidate_path "$target" "$id" documented)" "$(candidate_path "$target" "$id")"
+
+  exposed=$(make_home symlink-reader)
+  rmdir "$exposed/state"
+  ln -s "$target/state" "$exposed/state"
+  for command in get list batch summary; do
+    case "$command" in
+      get) set -- get "$id" ;;
+      list) set -- list --all ;;
+      batch) set -- batch ;;
+      summary) set -- summary ;;
+    esac
+    set +e
+    run_learning "$exposed" "$@" >"$exposed/$command.out" 2>"$exposed/$command.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$command followed a symlinked state override"
+    assert_grep "state path must be a real directory" "$exposed/$command.err" \
+      "$command did not identify the invalid state boundary"
+  done
+  assert_present "$(candidate_path "$target" "$id")" \
+    "a read command renamed a record through the symlinked state override"
+  assert_absent "$(candidate_path "$target" "$id" documented)" \
+    "a read command corrected lifecycle state outside the selected private home"
+  pass "public read commands reject symlinked state overrides without mutation"
+}
+
 test_atomic_lifecycle_publication_and_content_authority() {
   local home id fakebin real_mv call_file rc count summary listed json
   home=$(make_home atomic-lifecycle)
@@ -734,6 +770,7 @@ EOF
 
 test_capture_validation_and_complete_record
 test_repeat_capture_is_idempotent
+test_read_commands_reject_symlinked_state
 test_atomic_lifecycle_publication_and_content_authority
 test_concurrent_suffix_rename_reresolves
 test_cutover_accepts_concurrent_read_correction

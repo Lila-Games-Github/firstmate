@@ -201,10 +201,14 @@ now_rfc3339() {
   fi
 }
 
-ensure_store() {
+validate_state_path() {
   if [ -L "$STATE" ] || { [ -e "$STATE" ] && [ ! -d "$STATE" ]; }; then
     die "state path must be a real directory: $STATE"
   fi
+}
+
+ensure_store() {
+  validate_state_path
   mkdir -p "$STATE"
   if [ -L "$CANDIDATE_DIR" ] || { [ -e "$CANDIDATE_DIR" ] && [ ! -d "$CANDIDATE_DIR" ]; }; then
     die "candidate store must be a real directory: $CANDIDATE_DIR"
@@ -214,6 +218,7 @@ ensure_store() {
 }
 
 store_available_read_only() {
+  validate_state_path
   [ -e "$CANDIDATE_DIR" ] || return 1
   [ -d "$CANDIDATE_DIR" ] && [ ! -L "$CANDIDATE_DIR" ] \
     || die "candidate store must be a real directory: $CANDIDATE_DIR"
