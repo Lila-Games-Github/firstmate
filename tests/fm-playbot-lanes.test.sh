@@ -3672,6 +3672,19 @@ git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --no-assume-unchanged 
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --no-skip-worktree prototype-game/project.godot
 pass "fm-playbot-lanes: assume-unchanged and skip-worktree paths block with exact index evidence"
 
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.fileMode false
+chmod 0755 "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an executable-mode change hidden by core.fileMode=false was allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'tracked-modifications');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/real-work.txt') process.exit(1);
+NODE
+chmod 0644 "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.fileMode true
+pass "fm-playbot-lanes: executable mode changes block despite core.fileMode false"
+
 # Commit subjects are returned, and pushing the same head to the explicitly
 # named landing branch must become visible from ls-remote even though the local
 # origin/main tracking ref is deliberately left stale.
@@ -3699,6 +3712,44 @@ if (!workspace.retirable || workspace.roots[0].commitsAhead.length !== 0) proces
 if (landing.commit !== process.env.HEAD_COMMIT || landing.remoteRef !== 'refs/heads/main' || !landing.observedAt) process.exit(1);
 NODE
 pass "fm-playbot-lanes: commit subjects block retirement until current remote evidence proves them landed"
+
+replacement_landing="$retirement_head"
+printf 'replacement-hidden workspace work\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" add prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit -m "replacement-hidden workspace work" >/dev/null \
+  || fail "could not create the replacement-ref retirement fixture"
+replacement_unpushed=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
+replacement_tree=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse "$replacement_landing^{tree}")
+replacement_object=$(printf '%s\n' 'replacement ancestry fixture' \
+  | git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit-tree "$replacement_tree" -p "$replacement_unpushed")
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" replace "$replacement_landing" "$replacement_object"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" HEAD_COMMIT="$replacement_unpushed" node --no-warnings <<'NODE' \
+  || fail "a replacement ref concealed an unlanded workspace commit"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const commits = workspace.roots[0].commitsAhead;
+if (commits.length !== 1 || commits[0].commit !== process.env.HEAD_COMMIT || commits[0].subject !== 'replacement-hidden workspace work') process.exit(1);
+if (!workspace.blockers.some(blocker => blocker.code === 'unlanded-commits')) process.exit(1);
+NODE
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" replace -d "$replacement_landing" >/dev/null
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" reset --hard "$replacement_landing" >/dev/null
+pass "fm-playbot-lanes: replacement refs cannot hide unlanded commits"
+
+git_common_dir=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse --path-format=absolute --git-common-dir)
+graft_file="$git_common_dir/info/grafts"
+mkdir -p "$(dirname "$graft_file")"
+printf '%s %s\n' "$replacement_landing" "$replacement_unpushed" > "$graft_file"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" GRAFT_FILE="$graft_file" node --no-warnings <<'NODE' \
+  || fail "repository graft metadata did not block retirement evidence"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'git-unreadable');
+if (!blocker || !blocker.message.includes(process.env.GRAFT_FILE)) process.exit(1);
+NODE
+rm -f "$graft_file"
+pass "fm-playbot-lanes: repository graft metadata blocks retirement evidence"
 
 submodule_seed="$FIXTURE_ROOT/submodule-seed"
 submodule_remote="$FIXTURE_ROOT/submodule-remote.git"
@@ -4107,8 +4158,95 @@ out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\
 retirement_lane=$(OUT="$out" node -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.lane.id)')
 [ -n "$retirement_lane" ] || fail "could not create the route cleanup fixture"
 
-rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(retirement_call ws-worker-alt ',"confirm":true')
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const rollout = path.join(process.env.FIXTURE_ROOT, 'harness', 'worker-alt-retirement-rollout.jsonl');
+const now = '2026-08-29T12:01:00.000Z';
+fs.writeFileSync(rollout, [
+  JSON.stringify({ timestamp: now, type: 'event_msg', payload: { type: 'user_message', message: 'Final retirement task' } }),
+  JSON.stringify({ timestamp: now, type: 'event_msg', payload: { type: 'agent_message', message: 'RETIREMENT ACK', phase: 'final_answer' } }),
+  JSON.stringify({ timestamp: now, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-worker-alt-retirement', last_agent_message: 'RETIREMENT ACK', completed_at: 1788004860, duration_ms: 100 } }),
+].join('\n') + '\n');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'harness', 'state_5.sqlite'));
+db.prepare('INSERT OR REPLACE INTO threads VALUES (?, ?, ?, ?, ?, ?)')
+  .run('worker-alt-session', rollout, path.join(process.env.FIXTURE_ROOT, 'worker', '.worktrees', 'alt'), 'Alt greeting', 1788004860000, 0);
+db.close();
+NODE
+route_pause="$FIXTURE_ROOT/pause-route-notification.cjs"
+route_ready="$FIXTURE_ROOT/route-notification-ready"
+route_release="$FIXTURE_ROOT/route-notification-release"
+route_hook_out="$FIXTURE_ROOT/route-notification-hook.out"
+retirement_concurrent_out="$FIXTURE_ROOT/retirement-concurrent.out"
+cat > "$route_pause" <<'NODE'
+const fs = require('node:fs');
+const originalWriteFileSync = fs.writeFileSync;
+const wait = new Int32Array(new SharedArrayBuffer(4));
+fs.writeFileSync = function pausedRouteWrite(file, data, ...rest) {
+  let route = null;
+  if (String(file).startsWith(`${process.env.FM_TEST_ROUTE_FILE}.`) && String(file).endsWith('.tmp')) {
+    try {
+      route = JSON.parse(String(data));
+    } catch {
+      route = null;
+    }
+  }
+  if (route?.lastNotifiedTurnId === 'turn-worker-alt-retirement') {
+    originalWriteFileSync.call(fs, file, data, ...rest);
+    originalWriteFileSync.call(fs, process.env.FM_TEST_ROUTE_READY, 'ready\n');
+    while (!fs.existsSync(process.env.FM_TEST_ROUTE_RELEASE)) Atomics.wait(wait, 0, 0, 20);
+    return;
+  }
+  return originalWriteFileSync.call(fs, file, data, ...rest);
+};
+NODE
+rm -f "$route_ready" "$route_release" "$route_hook_out" "$retirement_concurrent_out" "$FIXTURE_ROOT/ipc-calls.jsonl"
+(
+  printf '%s\n' '{"session_id":"worker-alt-session","stop_hook_active":false}' \
+    | FM_TEST_ROUTE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$retirement_lane.json" \
+      FM_TEST_ROUTE_READY="$route_ready" \
+      FM_TEST_ROUTE_RELEASE="$route_release" \
+      NODE_OPTIONS="--require=$route_pause" \
+      PLAYBOT_LANES_DRY_RUN=1 \
+      node --no-warnings "$SCRIPT" hook-stop > "$route_hook_out" 2>&1
+) &
+route_hook_pid=$!
+route_paused=0
+for _ in $(seq 1 100); do
+  if [ -f "$route_ready" ]; then
+    route_paused=1
+    break
+  fi
+  sleep 0.02
+done
+if [ "$route_paused" != 1 ]; then
+  wait "$route_hook_pid" >/dev/null 2>&1 || true
+  fail "the concurrent Stop notification did not reach its paused durable route write: $(cat "$route_hook_out")"
+fi
+(
+  retirement_call ws-worker-alt ',"confirm":true' > "$retirement_concurrent_out"
+) &
+retirement_pid=$!
+delete_seen=0
+for _ in $(seq 1 100); do
+  if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] \
+    && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
+    delete_seen=1
+    break
+  fi
+  sleep 0.02
+done
+sleep 0.1
+printf 'release\n' > "$route_release"
+route_hook_status=0
+wait "$route_hook_pid" || route_hook_status=$?
+retirement_status=0
+wait "$retirement_pid" || retirement_status=$?
+[ "$delete_seen" = 1 ] || fail "concurrent retirement never reached workspace:delete"
+[ "$route_hook_status" = 0 ] || fail "the concurrent Stop notification failed: $(cat "$route_hook_out")"
+[ "$retirement_status" = 0 ] || fail "concurrent retirement failed before returning JSON"
+out=$(cat "$retirement_concurrent_out")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" HEAD_COMMIT="$retirement_head" LANE_ID="$retirement_lane" node --no-warnings <<'NODE' \
   || fail "confirmed safe workspace retirement did not report complete verified deletion"
 const fs = require('node:fs');
@@ -4141,6 +4279,7 @@ LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$retirement_lane.json" node --no-warn
 const route = JSON.parse(require('node:fs').readFileSync(process.env.LANE_FILE, 'utf8'));
 if (route.active !== false || route.retiredWorkspace !== 'ws-worker-alt' || !route.retiredWorkspaceAt) process.exit(1);
 NODE
+pass "fm-playbot-lanes: concurrent Stop notification cannot reactivate retired routes"
 AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" HEAD_COMMIT="$retirement_head" LANE_ID="$retirement_lane" node --no-warnings <<'NODE' \
   || fail "retirement audit did not preserve exact Git, landing, path, and route evidence"
 const fs = require('node:fs');

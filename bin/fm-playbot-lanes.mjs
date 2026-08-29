@@ -154,6 +154,61 @@ function readJson(file, fallback = null) {
   }
 }
 
+const ROUTE_LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
+
+function withRoutesLock(action) {
+  ensurePrivateDirs();
+  const lock = path.join(stateDir(), ".routes-write.lock");
+  const deadline = Date.now() + 10_000;
+  let descriptor = null;
+  while (descriptor === null) {
+    try {
+      descriptor = fs.openSync(lock, "wx", 0o600);
+      fs.writeSync(descriptor, `${process.pid}\n`, null, "utf8");
+      fs.fsyncSync(descriptor);
+    } catch (error) {
+      if (descriptor !== null) {
+        try {
+          fs.closeSync(descriptor);
+        } finally {
+          descriptor = null;
+          try {
+            fs.unlinkSync(lock);
+          } catch (unlinkError) {
+            if (unlinkError?.code !== "ENOENT") throw unlinkError;
+          }
+        }
+      }
+      if (error?.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for durable lane route writes at ${lock}`);
+      Atomics.wait(ROUTE_LOCK_WAIT, 0, 0, 20);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    try {
+      fs.closeSync(descriptor);
+    } finally {
+      try {
+        fs.unlinkSync(lock);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    }
+  }
+}
+
+function updateRouteFile(file, allowMissing, update) {
+  return withRoutesLock(() => {
+    const current = readJson(file);
+    if (!current && !allowMissing) throw new Error(`Lane route is missing or unreadable: ${path.basename(file)}`);
+    const next = update(current);
+    if (next) atomicWriteJson(file, next);
+    return next ?? current;
+  });
+}
+
 function openDb(file) {
   if (!fs.existsSync(file)) throw new Error(`Playbot database not found: ${file}`);
   return new DatabaseSync(file, { readOnly: true });
@@ -308,7 +363,12 @@ function git(root, args, options = {}) {
   const encoding = options.encoding ?? "utf8";
   const result = spawnSync("git", ["-C", root, ...args], {
     encoding,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: {
+      ...process.env,
+      GIT_GRAFT_FILE: process.platform === "win32" ? "NUL" : "/dev/null",
+      GIT_NO_REPLACE_OBJECTS: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    },
     input: options.input,
     maxBuffer: 16 * 1024 * 1024,
   });
@@ -345,6 +405,38 @@ function prefixGitPath(prefix, value) {
   return prefix ? `${prefix}/${value}` : value;
 }
 
+function assertNoGitGrafts(root) {
+  const commonDir = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+  const grafts = path.join(commonDir, "info", "grafts");
+  if (pathPresence(grafts)) throw new Error(`Git graft metadata blocks retirement evidence: ${grafts}`);
+}
+
+function gitExecutableModeChanges(root) {
+  if (process.platform === "win32") return [];
+  const raw = git(root, ["ls-files", "--stage", "-z", "--"], { encoding: "buffer" });
+  const changed = [];
+  for (const record of raw.toString("utf8").split("\0")) {
+    if (!record) continue;
+    const separator = record.indexOf("\t");
+    if (separator < 0) throw new Error("Git returned unreadable executable-mode evidence");
+    const [mode, object, stage] = record.slice(0, separator).split(" ");
+    if (!mode || !object || stage === undefined) throw new Error("Git returned unreadable executable-mode evidence");
+    if (stage !== "0" || (mode !== "100644" && mode !== "100755")) continue;
+    const file = gitPathIdentity(record.slice(separator + 1));
+    let stat;
+    try {
+      stat = fs.lstatSync(path.join(root, file));
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    const indexExecutable = mode === "100755";
+    const filesystemExecutable = (stat.mode & 0o100) !== 0;
+    if (indexExecutable !== filesystemExecutable) changed.push(file);
+  }
+  return [...new Set(changed)].sort();
+}
+
 function shallowGitStatus(root) {
   const raw = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"], { encoding: "buffer" });
   const records = raw.toString("utf8").split("\0");
@@ -366,6 +458,7 @@ function shallowGitStatus(root) {
       index += 1;
     }
   }
+  gitExecutableModeChanges(root).forEach((file) => tracked.add(file));
   const trackedPaths = [...tracked].sort();
   return {
     trackedPaths,
@@ -545,6 +638,7 @@ function persistedSubmoduleState(root) {
   const unreadable = [...discovered.unreadable];
   for (const repository of discovered.repositories) {
     try {
+      assertNoGitGrafts(repository.gitDir);
       const head = {
         commit: stripTerminalLineEnding(git(repository.gitDir, ["rev-parse", "--verify", "HEAD^{commit}"])),
         subject: stripTerminalLineEnding(git(repository.gitDir, ["show", "-s", "--format=%s", "HEAD"])),
@@ -595,6 +689,7 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
   const canonicalRoot = canonicalPath(root);
   if (visited.has(canonicalRoot)) throw new Error(`recursive submodule path resolves to an already inspected repository: ${canonicalRoot}`);
   visited.add(canonicalRoot);
+  assertNoGitGrafts(root);
   const shallow = shallowGitStatus(root);
   const tracked = new Set(shallow.trackedPaths.map((file) => prefixGitPath(prefix, file)));
   const untracked = new Set(shallow.untrackedPaths.map((file) => prefixGitPath(prefix, file)));
@@ -711,6 +806,7 @@ function landingRemote(root, landingBranch) {
 }
 
 function aheadCommits(root, landingCommit) {
+  assertNoGitGrafts(root);
   const raw = git(root, ["log", "-z", "--format=%H%x00%s", `${landingCommit}..HEAD`], { encoding: "buffer" });
   return commitRecords(raw, "ahead-commit");
 }
@@ -911,37 +1007,45 @@ function appendRetirementAudit(record) {
 function deactivateWorkspaceRoutes(workspaceId) {
   const affected = [];
   const problems = [];
-  const routes = [];
   try {
-    ensurePrivateDirs();
-    for (const name of fs.readdirSync(routesDir()).filter((entry) => entry.endsWith(".json")).sort()) {
-      const file = path.join(routesDir(), name);
-      try {
-        const route = JSON.parse(fs.readFileSync(file, "utf8"));
-        if (!route || typeof route !== "object" || Array.isArray(route)) throw new Error("route JSON is not an object");
-        routes.push({ file, name, route });
-      } catch (error) {
-        problems.push(`Lane route ${name} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    withRoutesLock(() => {
+      const readStrict = () => {
+        const routes = [];
+        for (const name of fs.readdirSync(routesDir()).filter((entry) => entry.endsWith(".json")).sort()) {
+          const file = path.join(routesDir(), name);
+          try {
+            const route = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (!route || typeof route !== "object" || Array.isArray(route)) throw new Error("route JSON is not an object");
+            routes.push({ file, name, route });
+          } catch (error) {
+            problems.push(`Lane route ${name} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        return routes;
+      };
+      const matchesWorkspace = (route) => route.supervisor?.workspaceId === workspaceId || route.worker?.workspaceId === workspaceId;
+      for (const { file, name, route } of readStrict().filter((item) => matchesWorkspace(item.route))) {
+        const wasActive = route.active === true;
+        route.active = false;
+        route.updatedAt = nowIso();
+        route.retiredWorkspace = workspaceId;
+        route.retiredWorkspaceAt = route.updatedAt;
+        try {
+          atomicWriteJson(file, route);
+          affected.push({ id: route.id ?? null, file: name, wasActive, deactivated: true });
+        } catch (error) {
+          affected.push({ id: route.id ?? null, file: name, wasActive, deactivated: false });
+          problems.push(`Lane ${route.id ?? name} could not be deactivated: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
-    }
+      for (const { name, route } of readStrict().filter((item) => matchesWorkspace(item.route) && item.route.active === true)) {
+        problems.push(`Lane ${route.id ?? name} still names retired workspace ${workspaceId} and remains active`);
+      }
+    });
   } catch (error) {
-    return { affected, problems: [`Lane routes could not be read: ${error instanceof Error ? error.message : String(error)}`] };
+    problems.push(`Lane routes could not be deactivated and verified: ${error instanceof Error ? error.message : String(error)}`);
   }
-  for (const { file, name, route } of routes.filter((item) => item.route.supervisor?.workspaceId === workspaceId || item.route.worker?.workspaceId === workspaceId)) {
-    const wasActive = route.active === true;
-    route.active = false;
-    route.updatedAt = nowIso();
-    route.retiredWorkspace = workspaceId;
-    route.retiredWorkspaceAt = route.updatedAt;
-    try {
-      atomicWriteJson(file, route);
-      affected.push({ id: route.id ?? null, file: name, wasActive, deactivated: true });
-    } catch (error) {
-      affected.push({ id: route.id ?? null, file: name, wasActive, deactivated: false });
-      problems.push(`Lane ${route.id ?? name} could not be deactivated: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return { affected, problems };
+  return { affected, problems: [...new Set(problems)] };
 }
 
 function verifyWorkspaceRetirement(project, inspection) {
@@ -2151,28 +2255,31 @@ function loadRoutes() {
     .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
 }
 
-function saveRoute(supervisor, worker, prior = null) {
+function saveRoute(supervisor, worker) {
   if (supervisor.thread_id === worker.thread_id) throw new Error("A Playbot lane cannot route a chat back to itself");
   const id = routeIdFor(supervisor.thread_id, worker.thread_id);
-  const existingCompletion = prior ? null : recentConversation(worker, 1).completion;
-  const route = {
-    version: 1,
-    id,
-    active: true,
-    supervisor: publicThread(supervisor),
-    worker: publicThread(worker),
-    createdAt: prior?.createdAt ?? nowIso(),
-    updatedAt: nowIso(),
-    lastNotifiedTurnId: prior?.lastNotifiedTurnId ?? existingCompletion?.turnId ?? null,
-    lastNotifiedAt: prior?.lastNotifiedAt ?? null,
-  };
-  atomicWriteJson(routePath(id), route);
-  return route;
+  return updateRouteFile(routePath(id), true, (prior) => {
+    const currentSupervisor = threadRowById(supervisor.thread_id);
+    const currentWorker = threadRowById(worker.thread_id);
+    if (!currentSupervisor || currentSupervisor.archive_state !== "active") throw new Error(`Supervisor ${supervisor.thread_id} is no longer active in Playbot state`);
+    if (!currentWorker || currentWorker.archive_state !== "active") throw new Error(`Worker ${worker.thread_id} is no longer active in Playbot state`);
+    const existingCompletion = prior ? null : recentConversation(currentWorker, 1).completion;
+    return {
+      version: 1,
+      id,
+      active: true,
+      supervisor: publicThread(currentSupervisor),
+      worker: publicThread(currentWorker),
+      createdAt: prior?.createdAt ?? nowIso(),
+      updatedAt: nowIso(),
+      lastNotifiedTurnId: prior?.lastNotifiedTurnId ?? existingCompletion?.turnId ?? null,
+      lastNotifiedAt: prior?.lastNotifiedAt ?? null,
+    };
+  });
 }
 
 function registerLane(supervisor, worker) {
-  const prior = readJson(routePath(routeIdFor(supervisor.thread_id, worker.thread_id)));
-  return saveRoute(supervisor, worker, prior);
+  return saveRoute(supervisor, worker);
 }
 
 // --- Watcher supervision poll for external-terminal lanes ---------------------
@@ -3114,14 +3221,17 @@ function bounded(text, max = 4_000) {
 // describing a notification is set or removed together here, and no field from
 // an earlier one survives to contradict the wake beside it.
 function recordNotified(route, worker, eventId, deliveryState, error = null) {
-  route.lastNotifiedTurnId = eventId;
-  route.lastNotifiedAt = nowIso();
-  route.lastNotifiedDelivery = deliveryState;
-  if (error) route.lastNotifiedError = error;
-  else delete route.lastNotifiedError;
-  route.updatedAt = nowIso();
-  route.worker = publicThread(worker);
-  atomicWriteJson(routePath(route.id), route);
+  return updateRouteFile(routePath(route.id), false, (current) => {
+    if (current.active !== true) return null;
+    current.lastNotifiedTurnId = eventId;
+    current.lastNotifiedAt = nowIso();
+    current.lastNotifiedDelivery = deliveryState;
+    if (error) current.lastNotifiedError = error;
+    else delete current.lastNotifiedError;
+    current.updatedAt = nowIso();
+    current.worker = publicThread(worker);
+    return current;
+  });
 }
 
 async function processStop(payload) {
@@ -3518,11 +3628,11 @@ async function handleTool(name, args = {}) {
   if (name === "list_lanes") return { lanes: loadRoutes().filter((route) => !args.activeOnly || route.active) };
   if (name === "close_lane") {
     const file = routePath(args.laneId);
-    const route = readJson(file);
-    if (!route) throw new Error(`Lane not found: ${args.laneId}`);
-    route.active = false;
-    route.updatedAt = nowIso();
-    atomicWriteJson(file, route);
+    const route = updateRouteFile(file, false, (current) => {
+      current.active = false;
+      current.updatedAt = nowIso();
+      return current;
+    });
     return { lane: route };
   }
 
@@ -3637,10 +3747,12 @@ async function handleTool(name, args = {}) {
       // route must survive to carry every later wake even though the refusal
       // still reaches the caller.
       if (lane && !sendReachedPlaybot(error)) {
-        lane.active = false;
-        lane.updatedAt = nowIso();
-        lane.error = error instanceof Error ? error.message : String(error);
-        atomicWriteJson(routePath(lane.id), lane);
+        updateRouteFile(routePath(lane.id), false, (current) => {
+          current.active = false;
+          current.updatedAt = nowIso();
+          current.error = error instanceof Error ? error.message : String(error);
+          return current;
+        });
       }
       // The mirror of that rule for an external-terminal caller: a send Playbot
       // ACCEPTED whose verdict could not be read still leaves a worker that may
@@ -3792,11 +3904,13 @@ async function handleTool(name, args = {}) {
   if (name === "archive_chat") {
     if (args.confirm !== true) throw new Error("archive_chat requires confirm=true");
     await playbotInvoke("threads:archiveThread", { threadId: thread.thread_id, nextActiveThreadId: null });
-    for (const route of loadRoutes().filter((item) => item.supervisor?.id === thread.thread_id || item.worker?.id === thread.thread_id)) {
-      route.active = false;
-      route.updatedAt = nowIso();
-      atomicWriteJson(routePath(route.id), route);
-    }
+    withRoutesLock(() => {
+      for (const route of loadRoutes().filter((item) => item.supervisor?.id === thread.thread_id || item.worker?.id === thread.thread_id)) {
+        route.active = false;
+        route.updatedAt = nowIso();
+        atomicWriteJson(routePath(route.id), route);
+      }
+    });
     return { archived: thread.thread_id };
   }
   throw new Error(`Unknown tool: ${name}`);
