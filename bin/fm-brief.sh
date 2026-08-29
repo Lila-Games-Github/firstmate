@@ -54,6 +54,11 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout briefs also carry one conditional terminal-lifecycle pointer to
+# the learning-candidate skill plus an absolute shell-quoted capture invocation
+# bound to the selected private home and tracked command. It causes no completion
+# audit: a routine success does nothing, an originating lane performs bounded
+# capture only after a named qualifying signal, and curation never blocks cleanup.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -298,6 +303,34 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+LEARNING_HOME=$(shell_quote "$FM_HOME")
+LEARNING_STATE=$(shell_quote "$STATE")
+LEARNING_COMMAND=$(shell_quote "$SCRIPT_DIR/fm-learning-candidate.sh")
+LEARNING_TASK=$(shell_quote "$ID")
+LEARNING_PROJECT=$(shell_quote "$REPO")
+LEARNING_SKILL="$FM_ROOT/.agents/skills/learning-candidate-lifecycle/SKILL.md"
+LEARNING_SECTION=$(printf '%s\n' \
+'# Learning-candidate reminder' \
+"If this task hits a meaningful-signal condition named in \`$LEARNING_SKILL\`, read that skill and perform its bounded originating-lane capture before terminal completion when practical." \
+'When that skill requires capture, set the incident variables named below and run this generated command from any working directory.' \
+'```sh' \
+"FM_HOME=$LEARNING_HOME FM_STATE_OVERRIDE=$LEARNING_STATE $LEARNING_COMMAND capture \\" \
+"  --task $LEARNING_TASK \\" \
+"  --project $LEARNING_PROJECT \\" \
+"  --signal \"\${FM_LEARNING_SIGNAL:?set FM_LEARNING_SIGNAL}\" \\" \
+"  --impact \"\${FM_LEARNING_IMPACT:?set FM_LEARNING_IMPACT}\" \\" \
+"  --root-cause \"\${FM_LEARNING_ROOT_CAUSE:?set FM_LEARNING_ROOT_CAUSE}\" \\" \
+"  --escaped-contract \"\${FM_LEARNING_ESCAPED_CONTRACT:?set FM_LEARNING_ESCAPED_CONTRACT}\" \\" \
+"  --missing-check \"\${FM_LEARNING_MISSING_CHECK:?set FM_LEARNING_MISSING_CHECK}\" \\" \
+"  --consumer \"\${FM_LEARNING_CONSUMER:?set FM_LEARNING_CONSUMER}\" \\" \
+"  --prevention \"\${FM_LEARNING_PREVENTION:?set FM_LEARNING_PREVENTION}\" \\" \
+"  --evidence \"\${FM_LEARNING_EVIDENCE:?set FM_LEARNING_EVIDENCE}\" \\" \
+"  --proposed-owner \"\${FM_LEARNING_PROPOSED_OWNER:?set FM_LEARNING_PROPOSED_OWNER}\" \\" \
+"  --counterfactual \"\${FM_LEARNING_COUNTERFACTUAL:?set FM_LEARNING_COUNTERFACTUAL}\"" \
+'```' \
+'Do not run a completion audit to search for candidates; routine success adds nothing.' \
+"The originating lane captures only, and neither later classification nor curation may block this task's cleanup.")
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -307,6 +340,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$LEARNING_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -315,7 +350,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
+2. Stay inside this worktree; the only files you may write outside it are the report, the status file below, and a private learning candidate created through the conditional lifecycle above.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -418,6 +453,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$LEARNING_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -429,7 +466,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; modify nothing outside it except a private learning candidate created through the conditional lifecycle above.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`

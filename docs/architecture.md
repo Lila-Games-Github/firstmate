@@ -292,6 +292,15 @@ Because a terminal event's id is derived from its identity tuple rather than gen
 Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.
 The [Relay configuration reference](configuration.md#promised-public-replies-statepublic-followup) owns the operator-facing contract, and the `fmx-respond` skill owns the procedure.
 
+## Learning candidates separate capture from curation
+
+A meaningful development incident crosses context compaction and task cleanup as one private candidate record in the originating Firstmate home.
+The originating worker performs bounded structured capture only after a qualifying signal; routine success performs no audit, and cleanup never waits for classification.
+A separate curator reads a bounded batch, compares reusable causes and prevention, chooses exactly one feature, project, Firstmate, or named-tool owner, and records a recommendation or disposition without changing that destination.
+Project-skill recommendations carry explicit generality, multi-task or feature-agnostic benefit, repeatable procedure, load-trigger, and counterfactual evidence, which prevents feature-specific fixes from becoming one-off skills by default.
+`bin/fm-learning-candidate.sh` owns the durable schema and mechanical lifecycle, while the internal [`learning-candidate-lifecycle` skill](../.agents/skills/learning-candidate-lifecycle/SKILL.md) owns semantic intake, routing, and the no-one-off-skill judgment.
+The session-start fleet digest counts sorted unresolved record names and parses only the hard-bounded sample it displays, with no durable summary index or repair path.
+
 ## Project memory belongs to projects
 
 Durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a real `@AGENTS.md` import pointer.
