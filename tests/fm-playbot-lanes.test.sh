@@ -357,34 +357,36 @@ route_lock_swap="$FIXTURE_ROOT/swap-route-lock-owner.cjs"
 cat > "$route_lock_swap" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
-const originalReadDirSync = fs.readdirSync;
+const originalReadFileSync = fs.readFileSync;
 let swapped = false;
-fs.readdirSync = function swapRouteLockOwner(directory, ...rest) {
-  if (!swapped && path.resolve(String(directory)) === path.resolve(process.env.FM_TEST_ROUTE_LOCK)) {
-    const entries = originalReadDirSync.call(fs, directory);
-    const owner = entries.find(entry => entry.startsWith('owner-'));
-    if (owner) {
-      fs.renameSync(path.join(directory, owner), path.join(directory, process.env.FM_TEST_FOREIGN_OWNER));
-      swapped = true;
-    }
+fs.readFileSync = function swapRouteLockOwner(file, ...rest) {
+  if (!swapped && path.resolve(String(file)) === path.resolve(process.env.FM_TEST_ROUTE_LOCK)) {
+    fs.writeFileSync(file, `${JSON.stringify({
+      pid: process.pid,
+      identity: 'linux:foreign-generation:1',
+      token: process.env.FM_TEST_FOREIGN_TOKEN,
+    })}\n`);
+    swapped = true;
   }
-  return originalReadDirSync.call(fs, directory, ...rest);
+  return originalReadFileSync.call(fs, file, ...rest);
 };
 NODE
-foreign_identity=$(node -e "process.stdout.write(Buffer.from('linux:foreign-generation:1').toString('base64url'))")
-foreign_owner="owner-$$-$foreign_identity-33333333333333333333333333333333.json"
+foreign_token=33333333333333333333333333333333
 out=$(printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
   | FM_TEST_ROUTE_LOCK="$route_lock" \
-    FM_TEST_FOREIGN_OWNER="$foreign_owner" \
+    FM_TEST_FOREIGN_TOKEN="$foreign_token" \
     NODE_OPTIONS="--require=$route_lock_swap" \
     node --no-warnings "$SCRIPT" serve)
 OUT="$out" node --no-warnings <<'NODE' || fail "route-lock release did not refuse changed ownership"
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('ownership changed before release')) process.exit(1);
 NODE
-[ -f "$route_lock/$foreign_owner" ] || fail "route-lock release removed another owner's generation"
-rm -f "$route_lock/$foreign_owner"
-rmdir "$route_lock"
+ROUTE_LOCK="$route_lock" FOREIGN_TOKEN="$foreign_token" node --no-warnings <<'NODE' \
+  || fail "route-lock release removed another owner's generation"
+const owner = JSON.parse(require('node:fs').readFileSync(process.env.ROUTE_LOCK, 'utf8'));
+if (owner.token !== process.env.FOREIGN_TOKEN) process.exit(1);
+NODE
+rm -f "$route_lock"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
@@ -393,6 +395,59 @@ const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.lane.active !== true) process.exit(1);
 NODE
 pass "fm-playbot-lanes: route-lock release preserves another owner generation"
+
+route_lock_publish="$FIXTURE_ROOT/pause-route-lock-publish.cjs"
+route_lock_publish_ready="$FIXTURE_ROOT/route-lock-publish-ready"
+route_lock_publish_release="$FIXTURE_ROOT/route-lock-publish-release"
+route_lock_publish_out="$FIXTURE_ROOT/route-lock-publish-out.json"
+cat > "$route_lock_publish" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const originalOpenSync = fs.openSync;
+const wait = new Int32Array(new SharedArrayBuffer(4));
+let paused = false;
+fs.openSync = function pauseBeforeOwnerPublication(file, ...rest) {
+  const resolved = path.resolve(String(file));
+  const lock = path.resolve(process.env.FM_TEST_ROUTE_LOCK);
+  const legacyOwner = path.dirname(resolved) === lock && path.basename(resolved).startsWith('owner-');
+  const pendingOwner = resolved.startsWith(`${lock}.pending-`);
+  if (!paused && (legacyOwner || pendingOwner)) {
+    paused = true;
+    fs.writeFileSync(process.env.FM_TEST_ROUTE_READY, 'ready\n');
+    while (!fs.existsSync(process.env.FM_TEST_ROUTE_RELEASE)) Atomics.wait(wait, 0, 0, 20);
+  }
+  return originalOpenSync.call(fs, file, ...rest);
+};
+NODE
+(
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+    | FM_TEST_ROUTE_LOCK="$route_lock" \
+      FM_TEST_ROUTE_READY="$route_lock_publish_ready" \
+      FM_TEST_ROUTE_RELEASE="$route_lock_publish_release" \
+      NODE_OPTIONS="--require=$route_lock_publish" \
+      node --no-warnings "$SCRIPT" serve > "$route_lock_publish_out"
+) &
+route_lock_publish_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$route_lock_publish_ready" ] && break
+  sleep 0.02
+done
+[ -f "$route_lock_publish_ready" ] || fail "route-lock publisher did not reach its deterministic pause"
+sleep 2.1
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a contender could not mutate while ownership publication was pending"
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.lane?.active !== false) process.exit(1);
+NODE
+touch "$route_lock_publish_release"
+wait "$route_lock_publish_pid" || fail "a live pending route-lock owner was reclaimed"
+OUT_FILE="$route_lock_publish_out" node --no-warnings <<'NODE' || fail "the pending route-lock owner did not retry after its contender"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result?.structuredContent;
+if (value?.lane?.active !== false) process.exit(1);
+NODE
+[ ! -e "$route_lock" ] || fail "atomic route-lock publication left final lock residue"
+rm -f "$route_lock_publish" "$route_lock_publish_ready" "$route_lock_publish_release" "$route_lock_publish_out"
+pass "fm-playbot-lanes: route-lock ownership publishes atomically before acquisition"
 
 node --no-warnings "$SCRIPT" install >/dev/null
 node --no-warnings "$SCRIPT" install >/dev/null
@@ -3745,7 +3800,7 @@ const workspace = value.workspaces.find(candidate => candidate.workspace.id === 
 const root = workspace.roots[0];
 if (!workspace.retirable || workspace.verdict !== 'retirable') process.exit(1);
 if (root.tracked.paths.length !== 8 || root.tracked.allowedChurnPaths.length !== 8) process.exit(1);
-if (root.tracked.blockingPaths.length !== 0 || root.untrackedPaths.length !== 0) process.exit(1);
+if (root.tracked.blockingPaths.length !== 0 || root.untrackedPaths.length !== 0 || root.ignoredPaths.length !== 0) process.exit(1);
 if (new Set(root.tracked.allowlist).size !== 8) process.exit(1);
 NODE
 pass "fm-playbot-lanes: all and only eight exact tracked Playbot churn paths are allowed"
@@ -3778,8 +3833,13 @@ retirement_list main > "$retirement_inventory"
 OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "untracked and ignored files were not visible and blocking"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
-const blocker = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
-if (!blocker || blocker.paths.join(',') !== 'prototype-game/ignored-retirement-dir/secret.txt,prototype-game/ignored-retirement.txt,prototype-game/untracked-work.txt') process.exit(1);
+const untracked = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
+const ignored = workspace.blockers.find(candidate => candidate.code === 'ignored-files');
+if (!untracked || untracked.paths.join(',') !== 'prototype-game/untracked-work.txt') process.exit(1);
+if (!ignored || ignored.paths.join(',') !== 'prototype-game/ignored-retirement-dir/secret.txt,prototype-game/ignored-retirement.txt') process.exit(1);
+const root = workspace.roots[0];
+if (root.untrackedPaths.join(',') !== 'prototype-game/untracked-work.txt') process.exit(1);
+if (root.ignoredPaths.join(',') !== 'prototype-game/ignored-retirement-dir/secret.txt,prototype-game/ignored-retirement.txt') process.exit(1);
 NODE
 rm -f \
   "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement-dir/secret.txt" \
@@ -4065,7 +4125,7 @@ retirement_list main > "$retirement_inventory"
 OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an ignored file inside a real submodule was allowed to read clean"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
-const blocker = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'ignored-files');
 if (!blocker || !blocker.paths.includes('prototype-game/submodule/ignored.txt')) process.exit(1);
 if (!workspace.roots[0].submodules.inspected.some(entry => entry.path === 'prototype-game/submodule')) process.exit(1);
 NODE
@@ -4144,6 +4204,25 @@ git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
 git --git-dir="$submodule_git_dir" update-ref refs/heads/main refs/remotes/origin/main
 git --git-dir="$submodule_git_dir" symbolic-ref HEAD refs/heads/main
 pass "fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits"
+
+submodule_orig_head_only=$(printf '%s\n' 'ORIG_HEAD-only submodule work' \
+  | git --git-dir="$submodule_git_dir" commit-tree "$submodule_tree" -p "$submodule_base")
+printf '%s\n' "$submodule_orig_head_only" > "$submodule_git_dir/ORIG_HEAD"
+git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" ORIG_HEAD_COMMIT="$submodule_orig_head_only" node --no-warnings <<'NODE' \
+  || fail "an unpushed submodule commit reachable only through ORIG_HEAD was allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'submodule-local-history');
+const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
+if (!residue?.localOnlyCommits.some(entry => entry.commit === process.env.ORIG_HEAD_COMMIT && entry.subject === 'ORIG_HEAD-only submodule work')) process.exit(1);
+if (!residue.localOnlyPseudoRefs.some(entry => entry.ref === 'ORIG_HEAD' && entry.commit === process.env.ORIG_HEAD_COMMIT && entry.subject === 'ORIG_HEAD-only submodule work')) process.exit(1);
+if (!residue.publicationEvidence.pseudoRefs.some(entry => entry.ref === 'ORIG_HEAD' && entry.commit === process.env.ORIG_HEAD_COMMIT)) process.exit(1);
+if (residue.publicationEvidence.remoteTips.includes(process.env.ORIG_HEAD_COMMIT)) process.exit(1);
+NODE
+rm -f "$submodule_git_dir/ORIG_HEAD"
+pass "fm-playbot-lanes: persisted submodule pseudorefs expose reset unpushed commits"
 
 submodule_published=$(git --git-dir="$submodule_git_dir" rev-parse refs/remotes/origin/main)
 git --git-dir="$submodule_git_dir" update-ref refs/heads/retirement-local-branch "$submodule_published"

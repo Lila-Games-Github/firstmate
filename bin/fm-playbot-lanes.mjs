@@ -219,37 +219,48 @@ function fsyncDirectory(directory) {
 }
 
 function createRouteLock(lock) {
-  fs.mkdirSync(lock, { mode: 0o700 });
   const owner = {
     pid: process.pid,
     identity: ROUTE_PROCESS_START_IDENTITY,
     token: crypto.randomBytes(16).toString("hex"),
   };
   owner.name = routeLockOwnerName(owner);
-  const ownerPath = path.join(lock, owner.name);
+  const pendingPath = `${lock}.pending-${owner.token}`;
   let descriptor = null;
   try {
-    descriptor = fs.openSync(ownerPath, "wx", 0o600);
+    descriptor = fs.openSync(pendingPath, "wx", 0o600);
     fs.writeSync(descriptor, `${JSON.stringify({ pid: owner.pid, identity: owner.identity, token: owner.token })}\n`, null, "utf8");
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = null;
-    fsyncDirectory(lock);
-    return { ...owner, lock, ownerPath };
+    fs.linkSync(pendingPath, lock);
+    fs.unlinkSync(pendingPath);
+    fsyncDirectory(path.dirname(lock));
+    return { ...owner, lock };
   } catch (error) {
     if (descriptor !== null) fs.closeSync(descriptor);
     try {
-      fs.unlinkSync(ownerPath);
+      fs.unlinkSync(pendingPath);
     } catch (unlinkError) {
       if (unlinkError?.code !== "ENOENT") throw unlinkError;
     }
-    try {
-      fs.rmdirSync(lock);
-    } catch (rmdirError) {
-      if (rmdirError?.code !== "ENOENT" && rmdirError?.code !== "ENOTEMPTY") throw rmdirError;
-    }
     throw error;
   }
+}
+
+function parseRouteLockRecord(raw) {
+  const legacy = raw.match(/^([1-9]\d*)\s*$/);
+  if (legacy) return { pid: Number(legacy[1]), identity: null, token: null, legacy: true };
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Number.isSafeInteger(parsed?.pid) || parsed.pid <= 0
+    || (parsed.identity !== null && typeof parsed.identity !== "string")
+    || !/^[0-9a-f]{32}$/.test(parsed?.token)) return null;
+  return { pid: parsed.pid, identity: parsed.identity, token: parsed.token, legacy: false };
 }
 
 function recoverRouteLock(lock) {
@@ -262,10 +273,13 @@ function recoverRouteLock(lock) {
   }
   if (!stat.isDirectory()) {
     const raw = fs.readFileSync(lock, "utf8");
-    const match = raw.match(/^([1-9]\d*)\s*$/);
-    if (!match) throw new Error(`Durable lane route lock is unreadable: ${lock}`);
-    const pid = Number(match[1]);
-    if (processIsAlive(pid)) return false;
+    const owner = parseRouteLockRecord(raw);
+    if (!owner) throw new Error(`Durable lane route lock is unreadable: ${lock}`);
+    if (processIsAlive(owner.pid)) {
+      if (owner.legacy) return false;
+      const identity = processStartIdentity(owner.pid);
+      if (!owner.identity || !identity || identity === owner.identity) return false;
+    }
     if (fs.readFileSync(lock, "utf8") !== raw) return false;
     fs.unlinkSync(lock);
     return true;
@@ -302,18 +316,21 @@ function recoverRouteLock(lock) {
 }
 
 function releaseRouteLock(owner) {
-  let entries;
+  let raw;
   try {
-    entries = fs.readdirSync(owner.lock).sort();
+    raw = fs.readFileSync(owner.lock, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") throw new Error(`Durable lane route lock ownership disappeared before release: ${owner.lock}`);
     throw error;
   }
-  if (entries.length !== 1 || entries[0] !== owner.name) {
+  const current = parseRouteLockRecord(raw);
+  if (!current
+    || current.pid !== owner.pid
+    || current.identity !== owner.identity
+    || current.token !== owner.token) {
     throw new Error(`Durable lane route lock ownership changed before release: ${owner.lock}`);
   }
-  fs.unlinkSync(owner.ownerPath);
-  fs.rmdirSync(owner.lock);
+  fs.unlinkSync(owner.lock);
 }
 
 function withRoutesLock(action) {
@@ -676,13 +693,18 @@ function shallowGitStatus(root) {
   const records = raw.toString("utf8").split("\0");
   const tracked = new Set();
   const untracked = new Set();
+  const ignored = new Set();
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
     if (!record) continue;
     const status = record.slice(0, 2);
     const file = gitPathIdentity(record.slice(3));
-    if (status === "??" || status === "!!") {
+    if (status === "??") {
       untracked.add(file);
+      continue;
+    }
+    if (status === "!!") {
+      ignored.add(file);
       continue;
     }
     tracked.add(file);
@@ -699,6 +721,7 @@ function shallowGitStatus(root) {
     allowedTrackedChurnPaths: trackedPaths.filter((file) => PLAYBOT_TRACKED_CHURN_SET.has(file)),
     blockingTrackedPaths: trackedPaths.filter((file) => !PLAYBOT_TRACKED_CHURN_SET.has(file)),
     untrackedPaths: [...untracked].sort(),
+    ignoredPaths: [...ignored].sort(),
   };
 }
 
@@ -769,6 +792,24 @@ function commitRecords(root, raw, label) {
     throw new Error(`Git returned unreadable ${label} evidence`);
   }
   return commits.map((commit) => ({ commit, subject: exactCommitSubject(root, commit) }));
+}
+
+function commitPseudoRefRecords(root) {
+  const names = ["ORIG_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "BISECT_HEAD"];
+  const records = [];
+  for (const ref of names) {
+    const file = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-path", ref]));
+    if (!pathPresence(file)) continue;
+    const commits = fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean);
+    if (commits.length === 0 || commits.some((commit) => !/^[0-9a-f]{40,64}$/i.test(commit))) {
+      throw new Error(`Git returned unreadable persisted submodule ${ref} evidence`);
+    }
+    for (const candidate of commits) {
+      const commit = stripTerminalLineEnding(git(root, ["rev-parse", "--verify", `${candidate}^{commit}`]));
+      records.push({ ref, commit, subject: exactCommitSubject(root, commit) });
+    }
+  }
+  return records.sort((left, right) => left.ref.localeCompare(right.ref) || left.commit.localeCompare(right.commit));
 }
 
 function persistedSubmoduleGitDirs(root) {
@@ -914,11 +955,15 @@ function persistedSubmoduleState(root) {
         commit: stripTerminalLineEnding(git(repository.gitDir, ["rev-parse", "--verify", "HEAD^{commit}"])),
         subject: exactCommitSubject(repository.gitDir, "HEAD"),
       };
-      const candidates = commitRecords(
+      const historyCandidates = commitRecords(
         repository.gitDir,
         git(repository.gitDir, ["log", "-z", "--format=%H", "--all", "--reflog", "HEAD"], { encoding: "buffer" }),
         "persisted submodule history",
       );
+      const pseudoRefs = commitPseudoRefRecords(repository.gitDir);
+      const candidates = [...new Map(
+        [...historyCandidates, ...pseudoRefs].map((entry) => [entry.commit, { commit: entry.commit, subject: entry.subject }]),
+      ).values()];
       let stashCommit = null;
       try {
         stashCommit = stripTerminalLineEnding(git(repository.gitDir, ["rev-parse", "--verify", "refs/stash^{commit}"]));
@@ -938,6 +983,7 @@ function persistedSubmoduleState(root) {
       }
       const remoteTips = [...new Set(remoteEvidence.flatMap((entry) => entry.commits))].sort();
       const localOnlyCommits = candidates.filter((entry) => !commitPublished(repository.gitDir, entry.commit, remoteTips));
+      const localOnlyPseudoRefs = pseudoRefs.filter((entry) => !commitPublished(repository.gitDir, entry.commit, remoteTips));
       const localRefs = localDisposableRefRows(repository.gitDir);
       const publishedRefs = new Set(remoteEvidence.flatMap((entry) => entry.refs.map((item) => `${item.ref}\0${item.object}`)));
       const localOnlyRefs = localRefs.filter((entry) => (
@@ -951,6 +997,7 @@ function persistedSubmoduleState(root) {
         head,
         stashCommit,
         localOnlyCommits,
+        localOnlyPseudoRefs,
         localOnlyRefs,
         stagedPaths,
         indexFlags,
@@ -959,6 +1006,7 @@ function persistedSubmoduleState(root) {
           candidateCommitCount: candidates.length,
           excludedRefNamespaces: ["refs/remotes/"],
           localRefs,
+          pseudoRefs,
           remoteTips,
           remotes: remoteEvidence,
           problems: publicationProblems,
@@ -979,6 +1027,7 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
   const shallow = shallowGitStatus(root);
   const tracked = new Set(shallow.trackedPaths.map((file) => prefixGitPath(prefix, file)));
   const untracked = new Set(shallow.untrackedPaths.map((file) => prefixGitPath(prefix, file)));
+  const ignored = new Set(shallow.ignoredPaths.map((file) => prefixGitPath(prefix, file)));
   const indexFlags = gitIndexFlags(root).map((entry) => ({ ...entry, path: prefixGitPath(prefix, entry.path) }));
   const operations = gitOperationState(root).map((entry) => ({ ...entry, repositoryPath: prefix || "." }));
   const submodules = [];
@@ -1002,6 +1051,7 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
       const nested = workspaceGitStatus(nestedRoot, nestedPrefix, visited);
       nested.trackedPaths.forEach((file) => tracked.add(file));
       nested.untrackedPaths.forEach((file) => untracked.add(file));
+      nested.ignoredPaths.forEach((file) => ignored.add(file));
       indexFlags.push(...nested.indexFlags);
       operations.push(...nested.operations);
       submodules.push({ path: nestedPrefix, inspected: true }, ...nested.submodules);
@@ -1017,6 +1067,7 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
     allowedTrackedChurnPaths: trackedPaths.filter((file) => PLAYBOT_TRACKED_CHURN_SET.has(file)),
     blockingTrackedPaths: trackedPaths.filter((file) => !PLAYBOT_TRACKED_CHURN_SET.has(file)),
     untrackedPaths: [...untracked].sort(),
+    ignoredPaths: [...ignored].sort(),
     indexFlags: indexFlags.sort((left, right) => left.path.localeCompare(right.path)),
     operations,
     submodules,
@@ -1121,6 +1172,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
       allowlist: PLAYBOT_TRACKED_CHURN_PATHS,
     },
     untrackedPaths: [],
+    ignoredPaths: [],
     indexFlags: [],
     operations: [],
     submodules: { inspected: [], persisted: [], unreadable: [] },
@@ -1150,6 +1202,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     result.tracked.allowedChurnPaths = status.allowedTrackedChurnPaths;
     result.tracked.blockingPaths = status.blockingTrackedPaths;
     result.untrackedPaths = status.untrackedPaths;
+    result.ignoredPaths = status.ignoredPaths;
     result.indexFlags = status.indexFlags;
     result.operations = status.operations;
     result.submodules.inspected = status.submodules;
@@ -1227,6 +1280,13 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
       code: "untracked-files",
       message: `${result.untrackedPaths.length} untracked path(s) would be deleted and are never classified as Playbot churn`,
       paths: result.untrackedPaths,
+    });
+  }
+  if (result.ignoredPaths.length > 0) {
+    result.blockers.push({
+      code: "ignored-files",
+      message: `${result.ignoredPaths.length} ignored path(s) would be deleted and are never classified as Playbot churn`,
+      paths: result.ignoredPaths,
     });
   }
   return result;
