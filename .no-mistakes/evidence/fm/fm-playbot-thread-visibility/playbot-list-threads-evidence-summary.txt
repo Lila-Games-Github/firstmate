@@ -1,0 +1,17 @@
+{
+  "mcp_cli_result_equal": true,
+  "returned_workspace_ids": [
+    "ws-empty",
+    "ws-live-worker",
+    "ws-main"
+  ],
+  "selected_workspace_preserved": true,
+  "unselected_live_worker_preserved": true,
+  "live_worker_status": "working",
+  "empty_workspace_thread_count": 0,
+  "archived_workspace_excluded": true,
+  "filtered_workspace_ids": [
+    "ws-live-worker"
+  ],
+  "invalid_workspace_error": "Workspace not found in project-visible: missing"
+}

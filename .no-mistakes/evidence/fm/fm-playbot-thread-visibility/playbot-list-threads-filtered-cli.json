@@ -1,0 +1,48 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"project\": {\n    \"id\": \"project-visible\",\n    \"name\": \"visible-project\"\n  },\n  \"workspaces\": [\n    {\n      \"id\": \"ws-live-worker\",\n      \"name\": \"live-worker\",\n      \"kind\": \"worktree\",\n      \"selected\": false,\n      \"archiveState\": \"active\",\n      \"roots\": [\n        {\n          \"projectRootId\": \"root-visible\",\n          \"path\": \"/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M179MXEJQCSHFT3HBW0KBZWR/.test-playbot-evidence-fixture/visible-project/ws-live-worker\",\n          \"branch\": \"feature/live-worker\"\n        }\n      ],\n      \"threads\": [\n        {\n          \"id\": \"thread-live-worker\",\n          \"title\": \"Live worker\",\n          \"projectId\": \"project-visible\",\n          \"project\": \"visible-project\",\n          \"workspaceId\": \"ws-live-worker\",\n          \"workspace\": \"live-worker\",\n          \"sessionId\": \"session-live-worker\",\n          \"status\": \"working\",\n          \"queuedCount\": 0,\n          \"hasUnread\": false,\n          \"isActive\": true,\n          \"archived\": false,\n          \"updatedAt\": \"2026-08-29T12:00:00.000Z\",\n          \"url\": \"playbot://workspace/ws-live-worker/thread/thread-live-worker\"\n        }\n      ]\n    }\n  ]\n}"
+    }
+  ],
+  "structuredContent": {
+    "project": {
+      "id": "project-visible",
+      "name": "visible-project"
+    },
+    "workspaces": [
+      {
+        "id": "ws-live-worker",
+        "name": "live-worker",
+        "kind": "worktree",
+        "selected": false,
+        "archiveState": "active",
+        "roots": [
+          {
+            "projectRootId": "root-visible",
+            "path": "/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M179MXEJQCSHFT3HBW0KBZWR/.test-playbot-evidence-fixture/visible-project/ws-live-worker",
+            "branch": "feature/live-worker"
+          }
+        ],
+        "threads": [
+          {
+            "id": "thread-live-worker",
+            "title": "Live worker",
+            "projectId": "project-visible",
+            "project": "visible-project",
+            "workspaceId": "ws-live-worker",
+            "workspace": "live-worker",
+            "sessionId": "session-live-worker",
+            "status": "working",
+            "queuedCount": 0,
+            "hasUnread": false,
+            "isActive": true,
+            "archived": false,
+            "updatedAt": "2026-08-29T12:00:00.000Z",
+            "url": "playbot://workspace/ws-live-worker/thread/thread-live-worker"
+          }
+        ]
+      }
+    ]
+  }
+}
