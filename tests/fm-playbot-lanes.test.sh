@@ -497,6 +497,7 @@ const sendNonObjectFile = path.join(process.env.FIXTURE_ROOT, 'send-non-object')
 // itself throws while the send that came before it already succeeded.
 const probeAcceptedFile = path.join(process.env.FIXTURE_ROOT, 'launch-accepts-probe');
 const workspaceDeleteFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-fail-after');
+const workspaceDeleteSucceedsWithoutRemovalFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-succeeds-without-removal');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
@@ -715,6 +716,7 @@ async function electronInvoke(channel, payload) {
       const workspace = db.prepare('SELECT id, kind FROM workspaces WHERE id = ?').get(payload.workspaceId);
       if (!workspace) throw new Error(`Workspace not found: ${payload.workspaceId}`);
       if (workspace.kind === 'local') throw new Error('Cannot delete the Local workspace');
+      if (readFileOr(workspaceDeleteSucceedsWithoutRemovalFile, '')) return null;
       const roots = db.prepare(`
         SELECT wr.path, r.path AS repository_path FROM workspace_roots wr
         JOIN project_roots pr ON pr.id = wr.project_root_id
@@ -3672,28 +3674,33 @@ git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit -m "release-only workspace b
   || fail "could not create the mismatched-upstream fixture commit"
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit --allow-empty --allow-empty-message -m "" >/dev/null \
   || fail "could not create the empty-subject fixture commit"
-empty_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
-named_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^)
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit --allow-empty --cleanup=verbatim -m '  exact subject  ' >/dev/null \
+  || fail "could not create the whitespace-bearing subject fixture commit"
+exact_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
+empty_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^)
+named_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^^)
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:release >/dev/null \
   || fail "could not publish the differently named upstream branch"
 git -C "$FIXTURE_ROOT/worker" branch --set-upstream-to=origin/release main >/dev/null \
   || fail "could not configure the mismatched landing upstream"
 retirement_list main > "$retirement_inventory"
-OUT_FILE="$retirement_inventory" EMPTY_HEAD="$empty_subject_head" NAMED_HEAD="$named_subject_head" node --no-warnings <<'NODE' \
-  || fail "the explicit landing branch or empty commit subject was not preserved"
+OUT_FILE="$retirement_inventory" EXACT_HEAD="$exact_subject_head" EMPTY_HEAD="$empty_subject_head" NAMED_HEAD="$named_subject_head" node --no-warnings <<'NODE' \
+  || fail "the explicit landing branch or commit-subject whitespace was not preserved"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const root = workspace.roots[0];
 if (root.landing.remote !== 'origin' || root.landing.remoteRef !== 'refs/heads/main') process.exit(1);
-if (root.commitsAhead.length !== 2) process.exit(1);
-if (root.commitsAhead[0].commit !== process.env.EMPTY_HEAD || root.commitsAhead[0].subject !== '') process.exit(1);
-if (root.commitsAhead[1].commit !== process.env.NAMED_HEAD || root.commitsAhead[1].subject !== 'release-only workspace behavior') process.exit(1);
+if (root.head.commit !== process.env.EXACT_HEAD || root.head.subject !== '  exact subject  ') process.exit(1);
+if (root.commitsAhead.length !== 3) process.exit(1);
+if (root.commitsAhead[0].commit !== process.env.EXACT_HEAD || root.commitsAhead[0].subject !== '  exact subject  ') process.exit(1);
+if (root.commitsAhead[1].commit !== process.env.EMPTY_HEAD || root.commitsAhead[1].subject !== '') process.exit(1);
+if (root.commitsAhead[2].commit !== process.env.NAMED_HEAD || root.commitsAhead[2].subject !== 'release-only workspace behavior') process.exit(1);
 NODE
 git -C "$FIXTURE_ROOT/worker" branch --set-upstream-to=origin/main main >/dev/null \
   || fail "could not restore the fixture landing upstream"
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:main >/dev/null \
   || fail "could not land the upstream and empty-subject fixture commits"
-pass "fm-playbot-lanes: explicit landing names and empty commit subjects remain exact"
+pass "fm-playbot-lanes: explicit landing names and commit-subject whitespace remain exact"
 
 # Dirty every exact Playbot churn path.
 # All eight are evidence but none is generalized from a prefix or extension.
@@ -3754,6 +3761,73 @@ rm -f \
   "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement.txt" \
   "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
 pass "fm-playbot-lanes: tracked, untracked, and ignored work block by exact path"
+
+untracked_cache_dir="$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game"
+untracked_cache_file="$untracked_cache_dir/untracked-cache-hidden.txt"
+untracked_cache_reference="$FIXTURE_ROOT/untracked-cache-directory-time"
+untracked_cache_shim_dir="$FIXTURE_ROOT/untracked-cache-git"
+untracked_cache_filter="$FIXTURE_ROOT/untracked-cache-filter.mjs"
+untracked_cache_real_git=$(command -v git)
+mkdir -p "$untracked_cache_shim_dir"
+cat > "$untracked_cache_shim_dir/git" <<'SH'
+#!/bin/sh
+case " $* " in
+  *" status "*)
+    case " $* " in
+      *core.untrackedCache=false*core.fsmonitor=false*) ;;
+      *) "$FM_TEST_REAL_GIT" "$@" | "$FM_TEST_NODE" "$FM_TEST_UNTRACKED_FILTER" ; exit $? ;;
+    esac
+    ;;
+esac
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod +x "$untracked_cache_shim_dir/git"
+cat > "$untracked_cache_filter" <<'NODE'
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const input = Buffer.concat(chunks);
+const separator = input.includes(0) ? 0 : 10;
+const ended = input.at(-1) === separator;
+const records = [];
+let start = 0;
+for (let index = 0; index < input.length; index += 1) {
+  if (input[index] !== separator) continue;
+  records.push(input.subarray(start, index));
+  start = index + 1;
+}
+if (start < input.length) records.push(input.subarray(start));
+const kept = records.filter(record => !record.toString('utf8').includes('prototype-game/untracked-cache-hidden.txt'));
+process.stdout.write(Buffer.concat(kept.flatMap((record, index) => [record, ...(index < kept.length - 1 || ended ? [Buffer.from([separator])] : [])])));
+NODE
+touch -r "$untracked_cache_dir" "$untracked_cache_reference"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.untrackedCache true
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.trustctime false
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.checkStat minimal
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" status --porcelain=v1 --untracked-files=all >/dev/null
+printf 'cache-hidden work\n' > "$untracked_cache_file"
+touch -r "$untracked_cache_reference" "$untracked_cache_dir"
+raw_cached_status=$(FM_TEST_REAL_GIT="$untracked_cache_real_git" FM_TEST_NODE="$FM_TEST_NODE_BIN" \
+  FM_TEST_UNTRACKED_FILTER="$untracked_cache_filter" PATH="$untracked_cache_shim_dir:$PATH" \
+  git -C "$FIXTURE_ROOT/worker/.worktrees/alt" status --porcelain=v1 --untracked-files=all)
+case "$raw_cached_status" in
+  *untracked-cache-hidden.txt*) fail "the Git untracked-cache fixture did not hide its new path" ;;
+esac
+FM_TEST_REAL_GIT="$untracked_cache_real_git" FM_TEST_NODE="$FM_TEST_NODE_BIN" \
+  FM_TEST_UNTRACKED_FILTER="$untracked_cache_filter" PATH="$untracked_cache_shim_dir:$PATH" \
+  retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' \
+  || fail "cached untracked evidence was trusted by the retirement boundary"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/untracked-cache-hidden.txt') process.exit(1);
+NODE
+rm -f "$untracked_cache_file" "$untracked_cache_reference" "$untracked_cache_filter" "$untracked_cache_shim_dir/git"
+rmdir "$untracked_cache_shim_dir"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config --unset core.untrackedCache
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config --unset core.trustctime
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config --unset core.checkStat
+pass "fm-playbot-lanes: untracked inventory bypasses Git cache shortcuts"
 
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --assume-unchanged prototype-game/real-work.txt
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --skip-worktree prototype-game/project.godot
@@ -4233,6 +4307,8 @@ db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
 db.close();
 NODE
 printf '1\n' > "$FIXTURE_ROOT/workspace-delete-fail-after"
+partial_route_file="$PLAYBOT_LANES_STATE_DIR/routes/partial-retirement-route.json"
+printf '%s\n' '{"id":"partial-retirement-route","active":true,"worker":{"workspaceId":"ws-retire-partial"}}' > "$partial_route_file"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(retirement_call ws-retire-partial ',"confirm":true')
 rm -f "$FIXTURE_ROOT/workspace-delete-fail-after"
@@ -4251,6 +4327,12 @@ if (!directories[process.env.PARTIAL_ONE]?.gone || directories[process.env.PARTI
 if (!registrations[process.env.PARTIAL_ONE]?.gone || registrations[process.env.PARTIAL_TWO]?.gone) process.exit(1);
 if (!data.reconciliation.removed.directories.includes(process.env.PARTIAL_ONE)) process.exit(1);
 if (!data.reconciliation.remaining.directories.includes(process.env.PARTIAL_TWO)) process.exit(1);
+if (data.baseline.database.workspaceRows.length !== 1 || data.baseline.database.workspaceRootRows.length !== 2) process.exit(1);
+if (!data.baseline.directories.every(entry => entry.present) || data.baseline.gitRegistrations.length !== 2) process.exit(1);
+if (!data.baseline.routes.some(route => route.file === 'partial-retirement-route.json' && route.namesWorkspace && route.active)) process.exit(1);
+if (!data.routes.reconciliation.matchingBefore.includes('partial-retirement-route.json')) process.exit(1);
+if (!data.routes.reconciliation.matchingAfter.includes('partial-retirement-route.json')) process.exit(1);
+if (!data.routes.reconciliation.remainingActive.includes('partial-retirement-route.json')) process.exit(1);
 NODE
 [ ! -e "$partial_one" ] || fail "the partial-deletion fixture did not remove its first worktree"
 [ -d "$partial_two" ] || fail "the partial-deletion fixture removed its newline-bearing second worktree"
@@ -4270,8 +4352,50 @@ const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n')
 if (audit.workspace.id !== 'ws-retire-partial' || audit.ipc.succeeded || !audit.deletionObserved) process.exit(1);
 if (!audit.deletedPaths.includes(process.env.PARTIAL_ONE) || !audit.remainingPaths.includes(process.env.PARTIAL_TWO)) process.exit(1);
 if (!audit.retryWarning.includes('Do not retry') || !audit.verification.problems.length) process.exit(1);
+if (!audit.baseline.routes.some(route => route.file === 'partial-retirement-route.json' && route.namesWorkspace)) process.exit(1);
 NODE
+rm -f "$partial_route_file"
 pass "fm-playbot-lanes: rejected multi-root deletion reconciles and audits exact partial state"
+
+incomplete_success_root="$FIXTURE_ROOT/worker/.worktrees/incomplete-success"
+git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-incomplete-success "$incomplete_success_root" "$operation_base" >/dev/null \
+  || fail "could not create the incomplete-success retirement worktree"
+FIXTURE_ROOT="$FIXTURE_ROOT" INCOMPLETE_SUCCESS_ROOT="$incomplete_success_root" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = new Date().toISOString();
+db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-retire-incomplete-success', 'project-worker', 'Incomplete success', 'worktree', 0, 'active', now, now);
+db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-retire-incomplete-success', 'root-worker', process.env.INCOMPLETE_SUCCESS_ROOT, 'retirement-incomplete-success');
+db.close();
+NODE
+printf 'succeed without removal\n' > "$FIXTURE_ROOT/workspace-delete-succeeds-without-removal"
+out=$(retirement_call ws-retire-incomplete-success ',"confirm":true')
+rm -f "$FIXTURE_ROOT/workspace-delete-succeeds-without-removal"
+OUT="$out" INCOMPLETE_SUCCESS_ROOT="$incomplete_success_root" node --no-warnings <<'NODE' \
+  || fail "successful IPC mislabeled incomplete removal as deleted"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.deleted || !value.partialAction || value.postActionComplete) process.exit(1);
+if (!value.ipc.succeeded || value.verification.complete || value.deletionObserved) process.exit(1);
+if (!value.retryWarning?.includes('Do not retry')) process.exit(1);
+if (value.reconciliation.remaining.workspaceRowCount !== 1) process.exit(1);
+if (value.reconciliation.remaining.workspaceRootRows.length !== 1) process.exit(1);
+if (!value.reconciliation.remaining.directories.includes(process.env.INCOMPLETE_SUCCESS_ROOT)) process.exit(1);
+if (!value.reconciliation.remaining.gitRegistrations.includes(process.env.INCOMPLETE_SUCCESS_ROOT)) process.exit(1);
+if (!value.audit.appended) process.exit(1);
+NODE
+[ -d "$incomplete_success_root" ] || fail "the incomplete-success fixture unexpectedly removed its worktree"
+AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" INCOMPLETE_SUCCESS_ROOT="$incomplete_success_root" node --no-warnings <<'NODE' \
+  || fail "successful incomplete removal lost reconciliation in the durable audit"
+const fs = require('node:fs');
+const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+if (audit.workspace.id !== 'ws-retire-incomplete-success' || !audit.ipc.succeeded) process.exit(1);
+if (audit.deletionObserved || !audit.retryWarning?.includes('Do not retry')) process.exit(1);
+if (!audit.remainingPaths.includes(process.env.INCOMPLETE_SUCCESS_ROOT)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: successful IPC cannot label incomplete removal deleted"
 
 malformed_route_root="$FIXTURE_ROOT/worker/.worktrees/malformed-route"
 git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-malformed-route "$malformed_route_root" "$operation_base" >/dev/null \
@@ -4295,6 +4419,7 @@ OUT="$out" ROUTE_FILE_NAME="$(basename "$malformed_route_file")" node --no-warni
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (!value.deleted || !value.verification.complete || value.postActionComplete) process.exit(1);
 if (!value.routes.problems.some(problem => problem.includes(process.env.ROUTE_FILE_NAME))) process.exit(1);
+if (!value.routes.reconciliation.uncertain.some(problem => problem.includes(`baseline ${process.env.ROUTE_FILE_NAME}`))) process.exit(1);
 if (!value.audit.appended || !value.problems.some(problem => problem.includes(process.env.ROUTE_FILE_NAME))) process.exit(1);
 NODE
 [ -f "$malformed_route_file" ] || fail "retirement silently removed the malformed route evidence"
@@ -4386,22 +4511,19 @@ fi
   retirement_call ws-worker-alt ',"confirm":true' > "$retirement_concurrent_out"
 ) &
 retirement_pid=$!
-delete_seen=0
-for _ in $(seq 1 100); do
-  if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] \
-    && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
-    delete_seen=1
-    break
-  fi
-  sleep 0.02
-done
-sleep 0.1
+sleep 0.2
+if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] \
+  && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
+  printf 'release\n' > "$route_release"
+  wait "$route_hook_pid" >/dev/null 2>&1 || true
+  wait "$retirement_pid" >/dev/null 2>&1 || true
+  fail "retirement reached workspace:delete before capturing its serialized route baseline"
+fi
 printf 'release\n' > "$route_release"
 route_hook_status=0
 wait "$route_hook_pid" || route_hook_status=$?
 retirement_status=0
 wait "$retirement_pid" || retirement_status=$?
-[ "$delete_seen" = 1 ] || fail "concurrent retirement never reached workspace:delete"
 [ "$route_hook_status" = 0 ] || fail "the concurrent Stop notification failed: $(cat "$route_hook_out")"
 [ "$retirement_status" = 0 ] || fail "concurrent retirement failed before returning JSON"
 out=$(cat "$retirement_concurrent_out")
@@ -4418,6 +4540,7 @@ if (!value.verification.checks.workspaceRowGone || !value.verification.checks.wo
 if (!value.verification.checks.worktreeDirectoriesGone.every(check => check.gone)) process.exit(1);
 if (!value.verification.checks.gitRegistrationsGone.every(check => check.gone)) process.exit(1);
 if (!value.routes.affected.some(route => route.id === process.env.LANE_ID && route.deactivated)) process.exit(1);
+if (!value.routes.reconciliation.changedFiles.includes(`${process.env.LANE_ID}.json`)) process.exit(1);
 if (!value.audit.appended || value.problems.length !== 0) process.exit(1);
 NODE
 
