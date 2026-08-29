@@ -853,7 +853,7 @@ if [ -e "$STATE/learning-candidates" ]; then
   else
     subsection "Unresolved learning candidates"
     printf 'LEARNING CANDIDATES: summary unavailable - %s\n' \
-      "$(printf '%s\n' "$LEARNING_SUMMARY" | head -1)"
+      "$(printf '%s\n' "$LEARNING_SUMMARY" | head -1 | LC_ALL=C tr '\000-\037\177-\237' ' ')"
   fi
 fi
 

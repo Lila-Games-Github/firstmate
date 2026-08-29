@@ -104,9 +104,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+while [ "$STATE" != / ] && [ "${STATE%/}" != "$STATE" ]; do
+  STATE=${STATE%/}
+done
 CANDIDATE_DIR="$STATE/learning-candidates"
 MUTATION_LOCK="$STATE/.learning-candidates.lock"
 MAX_TEXT_BYTES=8192
+
+die() {
+  printf 'fm-learning-candidate: %s\n' "$*" >&2
+  exit 2
+}
+
+validate_state_path() {
+  if [ -L "$STATE" ] || { [ -e "$STATE" ] && [ ! -d "$STATE" ]; }; then
+    die "state path must be a real directory: $STATE"
+  fi
+}
+
+validate_state_path
+export FM_STATE_OVERRIDE=$STATE
 
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
@@ -114,11 +131,6 @@ MAX_TEXT_BYTES=8192
 
 usage() {
   sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//'
-}
-
-die() {
-  printf 'fm-learning-candidate: %s\n' "$*" >&2
-  exit 2
 }
 
 require_jq() {
@@ -201,12 +213,6 @@ now_rfc3339() {
   fi
 }
 
-validate_state_path() {
-  if [ -L "$STATE" ] || { [ -e "$STATE" ] && [ ! -d "$STATE" ]; }; then
-    die "state path must be a real directory: $STATE"
-  fi
-}
-
 ensure_store() {
   validate_state_path
   mkdir -p "$STATE"
@@ -254,7 +260,8 @@ record_path() { # <candidate-id> <lifecycle-state>
 
 validate_record_json() { # <json> [expected-id]
   local json=$1 expected=${2:-}
-  printf '%s\n' "$json" | jq -e --arg expected "$expected" '
+  printf '%s\n' "$json" | jq -se --arg expected "$expected" '
+    length == 1 and (.[0] |
     .schema == 1
     and (.id | type == "string")
     and ($expected == "" or .id == $expected)
@@ -313,7 +320,7 @@ validate_record_json() { # <json> [expected-id]
       type == "object"
       and (.at | type == "string" and length > 0)
       and (.event | type == "string" and length > 0)
-      and (.actor | type == "string" and length > 0)))
+      and (.actor | type == "string" and length > 0))))
   ' >/dev/null || die "invalid candidate record${expected:+: $expected}"
 }
 
@@ -399,8 +406,9 @@ replace_record() { # <old-path> <json>
     load_record "$id"
     [ "$RECORD_PATH" = "$new_path" ] \
       || die "could not update candidate lifecycle hint: $id"
-    printf '%s\n' "$RECORD_JSON" | jq -e --argjson expected "$json" \
-      '. == $expected' >/dev/null || die "candidate changed during lifecycle cutover: $id"
+    printf '%s\n%s\n' "$RECORD_JSON" "$json" | jq -en \
+      'input as $actual | input as $expected | $actual == $expected' >/dev/null \
+      || die "candidate changed during lifecycle cutover: $id"
   fi
 }
 
@@ -478,9 +486,10 @@ capture_command() {
   digest=$(sha256_text "$payload")
   id="lc-${digest:0:24}"
   timestamp=$(now_rfc3339)
-  record=$(jq -cnS --arg id "$id" --arg digest "$digest" --arg at "$timestamp" \
-    --argjson incident "$payload" \
-    '{schema:1, id:$id, capture_digest:$digest, captured_at:$at,
+  record=$(printf '%s\n' "$payload" | jq -cnS \
+    --arg id "$id" --arg digest "$digest" --arg at "$timestamp" \
+    'input as $incident |
+    {schema:1, id:$id, capture_digest:$digest, captured_at:$at,
       lifecycle_state:"unresolved", incident:$incident, classification:null,
       disposition:null, duplicates:[], history:[{at:$at,event:"captured",actor:$incident.origin_task}]}')
 
@@ -493,8 +502,9 @@ capture_command() {
     existing=$RECORD_JSON
     [ "$(printf '%s\n' "$existing" | jq -r '.capture_digest')" = "$digest" ] \
       || die "candidate digest collision: $id"
-    printf '%s\n' "$existing" | jq -e --argjson incident "$payload" \
-      '.incident == $incident' >/dev/null || die "candidate digest collision: $id"
+    printf '%s\n%s\n' "$existing" "$payload" | jq -en \
+      'input as $existing | input as $incident | $existing.incident == $incident' >/dev/null \
+      || die "candidate digest collision: $id"
     printf '%s\n' "$id"
     return 0
   done
@@ -653,12 +663,13 @@ classify_command() {
     elif [ -n "$skill_feature_agnostic" ]; then
       validate_text skill-feature-agnostic-evidence "$skill_feature_agnostic"
     fi
-    skill_gate=$(jq -cnS --arg statement "$skill_statement" \
+    skill_gate=$(printf '%s\n' "$task_types_json" | jq -cnS --arg statement "$skill_statement" \
       --arg feature_neutral "$skill_feature_neutral" \
       --arg feature_agnostic "$skill_feature_agnostic" \
-      --argjson task_types "$task_types_json" --arg procedure "$skill_procedure" \
+      --arg procedure "$skill_procedure" \
       --arg load_trigger "$skill_load_trigger" --arg counterfactual "$skill_counterfactual" \
-      '{general_statement:$statement, feature_neutral_evidence:$feature_neutral,
+      'input as $task_types |
+      {general_statement:$statement, feature_neutral_evidence:$feature_neutral,
         task_types:$task_types, feature_agnostic_evidence:
           (if $feature_agnostic == "" then null else $feature_agnostic end),
         repeatable_procedure:$procedure, load_trigger:$load_trigger,
@@ -673,14 +684,16 @@ classify_command() {
   load_record "$id"
   [ "$(printf '%s\n' "$RECORD_JSON" | jq -r '.incident.origin_task')" != "$curator" ] \
     || die "curator must differ from the originating task"
-  comparable=$(jq -cnS --arg curator "$curator" --arg route "$route" --arg owner "$owner" \
+  comparable=$(printf '%s\n' "$skill_gate" | jq -cnS \
+    --arg curator "$curator" --arg route "$route" --arg owner "$owner" \
     --arg surface "$surface" --arg recommendation "$recommendation" --arg rationale "$rationale" \
-    --argjson skill_gate "$skill_gate" \
-    '{curator:$curator, route:$route, owner:$owner, surface:$surface,
+    'input as $skill_gate |
+    {curator:$curator, route:$route, owner:$owner, surface:$surface,
       recommendation:$recommendation, rationale:$rationale, skill_gate:$skill_gate}')
   existing=$(printf '%s\n' "$RECORD_JSON" | jq -cS '.classification // null')
   if [ "$existing" != null ]; then
-    if printf '%s\n' "$existing" | jq -e --argjson wanted "$comparable" 'del(.at) == $wanted' >/dev/null; then
+    if printf '%s\n%s\n' "$existing" "$comparable" | jq -en \
+      'input as $existing | input as $wanted | ($existing | del(.at)) == $wanted' >/dev/null; then
       printf '%s\n' "$id"
       return 0
     fi
@@ -690,9 +703,10 @@ classify_command() {
     || die "only an unresolved candidate can be classified"
   timestamp=$(now_rfc3339)
   classification=$(printf '%s\n' "$comparable" | jq -cS --arg at "$timestamp" '. + {at:$at}')
-  updated=$(printf '%s\n' "$RECORD_JSON" | jq -cS --argjson classification "$classification" \
+  updated=$(printf '%s\n%s\n' "$RECORD_JSON" "$classification" | jq -cnS \
     --arg at "$timestamp" --arg curator "$curator" --arg route "$route" \
-    '.classification=$classification |
+    'input as $record | input as $classification | $record |
+     .classification=$classification |
      .history += [{at:$at,event:"classified",actor:$curator,detail:$route}]')
   replace_record "$RECORD_PATH" "$updated"
   printf '%s\n' "$id"
@@ -731,7 +745,8 @@ disposition_command() {
       reference:(if $reference == "" then null else $reference end)}')
   existing=$(printf '%s\n' "$RECORD_JSON" | jq -cS '.disposition // null')
   if [ "$existing" != null ]; then
-    if printf '%s\n' "$existing" | jq -e --argjson wanted "$comparable" 'del(.at) == $wanted' >/dev/null; then
+    if printf '%s\n%s\n' "$existing" "$comparable" | jq -en \
+      'input as $existing | input as $wanted | ($existing | del(.at)) == $wanted' >/dev/null; then
       printf '%s\n' "$id"
       return 0
     fi
@@ -745,9 +760,10 @@ disposition_command() {
   fi
   timestamp=$(now_rfc3339)
   disposition=$(printf '%s\n' "$comparable" | jq -cS --arg at "$timestamp" '. + {at:$at}')
-  updated=$(printf '%s\n' "$RECORD_JSON" | jq -cS --argjson disposition "$disposition" \
+  updated=$(printf '%s\n%s\n' "$RECORD_JSON" "$disposition" | jq -cnS \
     --arg at "$timestamp" --arg curator "$curator" --arg outcome "$outcome" \
-    '.lifecycle_state=$outcome | .disposition=$disposition |
+    'input as $record | input as $disposition | $record |
+     .lifecycle_state=$outcome | .disposition=$disposition |
      .history += [{at:$at,event:"disposed",actor:$curator,detail:$outcome}]')
   replace_record "$RECORD_PATH" "$updated"
   printf '%s\n' "$id"
@@ -811,9 +827,10 @@ dedupe_command() {
     disposition=$(jq -cnS --arg at "$timestamp" --arg curator "$curator" \
       --arg note "$reason" --arg reference "$canonical" \
       '{at:$at,curator:$curator,outcome:"duplicate",note:$note,reference:$reference}')
-    updated_duplicate=$(printf '%s\n' "$duplicate_json" | jq -cS --argjson disposition "$disposition" \
+    updated_duplicate=$(printf '%s\n%s\n' "$duplicate_json" "$disposition" | jq -cnS \
       --arg at "$timestamp" --arg curator "$curator" --arg canonical "$canonical" \
-      '.lifecycle_state="duplicate" | .disposition=$disposition |
+      'input as $record | input as $disposition | $record |
+       .lifecycle_state="duplicate" | .disposition=$disposition |
        .history += [{at:$at,event:"deduplicated",actor:$curator,detail:$canonical}]')
     replace_record "$duplicate_path" "$updated_duplicate"
   fi

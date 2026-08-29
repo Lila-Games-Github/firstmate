@@ -2240,6 +2240,29 @@ EOF
   pass "session start exposes a bounded learning-candidate count and sample"
 }
 
+test_learning_candidate_summary_error_is_terminal_safe() {
+  local rec root home fakebin out bad_name
+  rec=$(new_world learning-candidate-summary-error)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+  mkdir -p "$home/state/learning-candidates"
+  bad_name=$'lc-bad\e[2J\233.unresolved.json'
+  printf '{}\n' >"$home/state/learning-candidates/$bad_name"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
+    "session start omitted the candidate summary diagnostic"
+  assert_not_contains "$out" $'\e' \
+    "session start exposed an ESC byte from the candidate summary diagnostic"
+  assert_not_contains "$out" $'\233' \
+    "session start exposed a C1 byte from the candidate summary diagnostic"
+  pass "session start terminal-sanitizes candidate summary diagnostics"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -2466,6 +2489,7 @@ test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_learning_candidate_summary_is_bounded
+test_learning_candidate_summary_error_is_terminal_safe
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic

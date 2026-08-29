@@ -58,7 +58,7 @@ classify_feature() { # <home> <id> <curator> [owner]
 }
 
 test_capture_validation_and_complete_record() {
-  local home id json rc path
+  local home id json rc path original
   home=$(make_home validation)
   set +e
   run_learning "$home" capture \
@@ -96,6 +96,17 @@ test_capture_validation_and_complete_record() {
   ' >/dev/null || fail "capture omitted required independent-classification fields: $json"
 
   path=$(candidate_path "$home" "$id")
+  original=$(cat "$path")
+  printf '{}\n%s\n' "$original" >"$path"
+  set +e
+  run_learning "$home" get "$id" >"$home/multiple.out" 2>"$home/multiple.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "record validation accepted multiple top-level JSON values"
+  assert_grep "invalid candidate record" "$home/multiple.err" \
+    "multiple-value record validation failure was not explicit"
+  printf '%s\n' "$original" >"$path"
+
   jq '.incident.signal_type="routine-success"' "$path" >"$home/corrupt.json"
   mv "$home/corrupt.json" "$path"
   set +e
@@ -106,6 +117,35 @@ test_capture_validation_and_complete_record() {
   assert_grep "invalid candidate record" "$home/corrupt.err" \
     "stored-record validation failure was not explicit"
   pass "learning candidates validate qualifying signals and preserve every required incident field"
+}
+
+test_large_escaped_capture_avoids_argv_limits() {
+  local home large first second json
+  home=$(make_home large-escaped-capture)
+  printf -v large '%*s' 8192 ''
+  large=${large// /\\}
+  first=$(run_learning "$home" capture \
+    --task large-escaped --project FrogPile --signal escaped-defect \
+    --impact "$large" --root-cause "$large" --escaped-contract "$large" \
+    --missing-check "$large" --consumer "$large" --prevention "$large" \
+    --evidence "$large" --proposed-owner "$large" --counterfactual "$large") \
+    || fail "maximum-size escaped capture failed"
+  second=$(run_learning "$home" capture \
+    --task large-escaped --project FrogPile --signal escaped-defect \
+    --impact "$large" --root-cause "$large" --escaped-contract "$large" \
+    --missing-check "$large" --consumer "$large" --prevention "$large" \
+    --evidence "$large" --proposed-owner "$large" --counterfactual "$large") \
+    || fail "maximum-size escaped repeat capture failed"
+  [ "$first" = "$second" ] || fail "maximum-size escaped repeat changed candidate identity"
+  json=$(run_learning "$home" get "$first") || fail "maximum-size escaped record was unreadable"
+  printf '%s\n' "$json" | jq -e '
+    [.incident.user_visible_impact, .incident.root_cause,
+     .incident.escaped_contract, .incident.missing_check,
+     .incident.affected_consumer, .incident.proposed_prevention,
+     .incident.evidence, .incident.proposed_owner,
+     .incident.counterfactual] | all(length == 8192)
+  ' >/dev/null || fail "maximum-size escaped record did not preserve accepted field bounds"
+  pass "maximum-size escaped capture and repeat avoid argv limits"
 }
 
 test_repeat_capture_is_idempotent() {
@@ -154,7 +194,9 @@ test_read_commands_reject_symlinked_state() {
       summary) set -- summary ;;
     esac
     set +e
-    run_learning "$exposed" "$@" >"$exposed/$command.out" 2>"$exposed/$command.err"
+    FM_HOME="$exposed" FM_STATE_OVERRIDE="$exposed/state/" \
+      FM_LEARNING_NOW=2026-08-28T12:00:00Z "$COMMAND" "$@" \
+      >"$exposed/$command.out" 2>"$exposed/$command.err"
     rc=$?
     set -e
     [ "$rc" -ne 0 ] || fail "$command followed a symlinked state override"
@@ -769,6 +811,7 @@ EOF
 }
 
 test_capture_validation_and_complete_record
+test_large_escaped_capture_avoids_argv_limits
 test_repeat_capture_is_idempotent
 test_read_commands_reject_symlinked_state
 test_atomic_lifecycle_publication_and_content_authority
