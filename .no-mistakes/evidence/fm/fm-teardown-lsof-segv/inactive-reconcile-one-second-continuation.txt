@@ -1,0 +1,6 @@
+INACTIVE RECONCILE: ONE-SECOND BUDGET WITH DURABLE CONTINUATION
+first invocation: configured_budget_seconds=1 elapsed_ms=1024 stalled_child=a
+actionable: inactive terminal outcome awaiting captain presentation: child=b state=done pr=https://example.test/owner/repo/pull/1
+continuation invocation: configured_budget_seconds=1 elapsed_ms=1024
+durable output:
+1788042430	1	check	inactive-outcome:20ca33b4307db5cac9592b9e0fc554d6	inactive terminal outcome awaiting captain presentation: child=b state=done pr=https://example.test/owner/repo/pull/1

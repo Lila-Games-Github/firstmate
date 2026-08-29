@@ -1,0 +1,12 @@
+PUBLIC CLEANUP: LSOF/OD-ABSENT PROCESS-GROUP FALLBACK
+ok - missing lsof falls back to reaping the tmux pane process group
+precondition: lsof=absent od=absent
+cleanup stderr:
+teardown: reaping leaked worktree process group for task-x1: 245105
+postcondition: cleanup_rc=0 fixture_pid=245105 fixture_process=not-running task_record=retired
+
+PUBLIC CLEANUP: OVER-LIMIT STALE METADATA-LOCK CHAIN
+ok - a persisted stale metadata-lock .steal chain refuses promptly at the recovery depth limit
+cleanup_rc=2
+error: refusing stale lock recovery for /tmp/fm-teardown-tests.PtW5ks/persisted-steal-chain/state/.meta-task-x1.lock.steal.steal.steal.steal.steal.steal.steal.steal: nested .steal lock depth reached 8; inspect and clear the persisted stale lock chain, then retry
+postcondition: task_record=preserved
