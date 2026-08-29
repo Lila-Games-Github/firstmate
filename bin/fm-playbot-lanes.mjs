@@ -324,8 +324,28 @@ function gitPathIdentity(value) {
   return process.platform === "win32" ? String(value).replaceAll("\\", "/") : String(value);
 }
 
-function workspaceGitStatus(root) {
-  const raw = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"], { encoding: "buffer" });
+function stripTerminalLineEnding(value) {
+  const text = String(value);
+  if (text.endsWith("\r\n")) return text.slice(0, -2);
+  return text.endsWith("\n") ? text.slice(0, -1) : text;
+}
+
+function pathPresence(value) {
+  try {
+    fs.lstatSync(value);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function prefixGitPath(prefix, value) {
+  return prefix ? `${prefix}/${value}` : value;
+}
+
+function shallowGitStatus(root) {
+  const raw = git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"], { encoding: "buffer" });
   const records = raw.toString("utf8").split("\0");
   const tracked = new Set();
   const untracked = new Set();
@@ -351,6 +371,108 @@ function workspaceGitStatus(root) {
     allowedTrackedChurnPaths: trackedPaths.filter((file) => PLAYBOT_TRACKED_CHURN_SET.has(file)),
     blockingTrackedPaths: trackedPaths.filter((file) => !PLAYBOT_TRACKED_CHURN_SET.has(file)),
     untrackedPaths: [...untracked].sort(),
+  };
+}
+
+function gitIndexFlags(root) {
+  const raw = git(root, ["ls-files", "-v", "-z", "--"], { encoding: "buffer" });
+  const flagged = [];
+  for (const record of raw.toString("utf8").split("\0")) {
+    if (!record) continue;
+    if (record.length < 3 || record[1] !== " ") throw new Error("Git returned unreadable index-flag evidence");
+    const flag = record[0];
+    const assumeUnchanged = /^[a-z]$/.test(flag);
+    const skipWorktree = flag.toUpperCase() === "S";
+    if (assumeUnchanged || skipWorktree) {
+      flagged.push({
+        path: gitPathIdentity(record.slice(2)),
+        assumeUnchanged,
+        skipWorktree,
+      });
+    }
+  }
+  return flagged.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function gitOperationState(root) {
+  const markers = [
+    { operation: "merge", marker: "MERGE_HEAD" },
+    { operation: "rebase", marker: "rebase-merge" },
+    { operation: "rebase", marker: "rebase-apply" },
+    { operation: "cherry-pick", marker: "CHERRY_PICK_HEAD" },
+    { operation: "cherry-pick-or-revert-sequence", marker: "sequencer" },
+    { operation: "revert", marker: "REVERT_HEAD" },
+  ];
+  const active = [];
+  for (const candidate of markers) {
+    const markerPath = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-path", candidate.marker]));
+    if (pathPresence(markerPath)) active.push(candidate);
+  }
+  return active;
+}
+
+function gitSubmodulePaths(root) {
+  const raw = git(root, ["ls-files", "--stage", "-z", "--"], { encoding: "buffer" });
+  const paths = [];
+  for (const record of raw.toString("utf8").split("\0")) {
+    if (!record) continue;
+    const separator = record.indexOf("\t");
+    if (separator < 0) throw new Error("Git returned unreadable staged-path evidence");
+    const [mode, object, stage] = record.slice(0, separator).split(" ");
+    if (!mode || !object || stage === undefined) throw new Error("Git returned unreadable staged-path evidence");
+    if (mode === "160000" && stage === "0") paths.push(gitPathIdentity(record.slice(separator + 1)));
+  }
+  return [...new Set(paths)].sort();
+}
+
+function workspaceGitStatus(root, prefix = "", visited = new Set()) {
+  const canonicalRoot = canonicalPath(root);
+  if (visited.has(canonicalRoot)) throw new Error(`recursive submodule path resolves to an already inspected repository: ${canonicalRoot}`);
+  visited.add(canonicalRoot);
+  const shallow = shallowGitStatus(root);
+  const tracked = new Set(shallow.trackedPaths.map((file) => prefixGitPath(prefix, file)));
+  const untracked = new Set(shallow.untrackedPaths.map((file) => prefixGitPath(prefix, file)));
+  const indexFlags = gitIndexFlags(root).map((entry) => ({ ...entry, path: prefixGitPath(prefix, entry.path) }));
+  const operations = gitOperationState(root).map((entry) => ({ ...entry, repositoryPath: prefix || "." }));
+  const submodules = [];
+  const unreadableSubmodules = [];
+  for (const relativePath of gitSubmodulePaths(root)) {
+    const nestedPrefix = prefixGitPath(prefix, relativePath);
+    const nestedRoot = path.resolve(root, relativePath);
+    if (!pathPresence(nestedRoot)) continue;
+    let entries;
+    try {
+      entries = fs.readdirSync(nestedRoot);
+    } catch (error) {
+      unreadableSubmodules.push({ path: nestedPrefix, error: error instanceof Error ? error.message : String(error) });
+      continue;
+    }
+    if (entries.length === 0) continue;
+    try {
+      const nestedTop = canonicalPath(stripTerminalLineEnding(git(nestedRoot, ["rev-parse", "--show-toplevel"])));
+      if (nestedTop !== canonicalPath(nestedRoot)) throw new Error(`path resolves inside Git worktree ${nestedTop} instead of naming it exactly`);
+      const nested = workspaceGitStatus(nestedRoot, nestedPrefix, visited);
+      nested.trackedPaths.forEach((file) => tracked.add(file));
+      nested.untrackedPaths.forEach((file) => untracked.add(file));
+      indexFlags.push(...nested.indexFlags);
+      operations.push(...nested.operations);
+      submodules.push({ path: nestedPrefix, inspected: true }, ...nested.submodules);
+      unreadableSubmodules.push(...nested.unreadableSubmodules);
+    } catch (error) {
+      unreadableSubmodules.push({ path: nestedPrefix, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  visited.delete(canonicalRoot);
+  const trackedPaths = [...tracked].sort();
+  return {
+    trackedPaths,
+    allowedTrackedChurnPaths: trackedPaths.filter((file) => PLAYBOT_TRACKED_CHURN_SET.has(file)),
+    blockingTrackedPaths: trackedPaths.filter((file) => !PLAYBOT_TRACKED_CHURN_SET.has(file)),
+    untrackedPaths: [...untracked].sort(),
+    indexFlags: indexFlags.sort((left, right) => left.path.localeCompare(right.path)),
+    operations,
+    submodules,
+    unreadableSubmodules,
   };
 }
 
@@ -448,17 +570,27 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache
       allowlist: PLAYBOT_TRACKED_CHURN_PATHS,
     },
     untrackedPaths: [],
+    indexFlags: [],
+    operations: [],
+    submodules: { inspected: [], unreadable: [] },
     blockers: [],
   };
-  if (!rootPath || !fs.existsSync(rootPath)) {
+  let rootPresent;
+  try {
+    rootPresent = rootPath ? pathPresence(rootPath) : false;
+  } catch (error) {
+    result.blockers.push({ code: "git-unreadable", message: `Workspace root cannot be checked at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
+    return result;
+  }
+  if (!rootPresent) {
     result.blockers.push({ code: "missing-root", message: `Workspace root is missing: ${workspaceRoot.path || "<empty>"}` });
     return result;
   }
   let commonDir;
   try {
-    const top = canonicalPath(String(git(rootPath, ["rev-parse", "--show-toplevel"])).trim());
+    const top = canonicalPath(stripTerminalLineEnding(git(rootPath, ["rev-parse", "--show-toplevel"])));
     if (top !== rootPath) throw new Error(`root resolves inside Git worktree ${top} instead of naming it exactly`);
-    commonDir = String(git(rootPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+    commonDir = stripTerminalLineEnding(git(rootPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
     result.head = {
       commit: String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim(),
       subject: String(git(rootPath, ["show", "-s", "--format=%s", "HEAD"])).trim(),
@@ -468,6 +600,10 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache
     result.tracked.allowedChurnPaths = status.allowedTrackedChurnPaths;
     result.tracked.blockingPaths = status.blockingTrackedPaths;
     result.untrackedPaths = status.untrackedPaths;
+    result.indexFlags = status.indexFlags;
+    result.operations = status.operations;
+    result.submodules.inspected = status.submodules;
+    result.submodules.unreadable = status.unreadableSubmodules;
   } catch (error) {
     result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
     return result;
@@ -492,6 +628,28 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache
       code: "tracked-modifications",
       message: `${result.tracked.blockingPaths.length} tracked path(s) fall outside Playbot's exact churn allowlist`,
       paths: result.tracked.blockingPaths,
+    });
+  }
+  if (result.indexFlags.length > 0) {
+    result.blockers.push({
+      code: "index-flags",
+      message: `${result.indexFlags.length} tracked path(s) have assume-unchanged or skip-worktree index flags and cannot be proven clean`,
+      paths: result.indexFlags.map((entry) => entry.path),
+      entries: result.indexFlags,
+    });
+  }
+  if (result.operations.length > 0) {
+    result.blockers.push({
+      code: "git-operation-in-progress",
+      message: `${result.operations.length} in-progress Git operation marker(s) prevent a complete clean-workspace verdict`,
+      operations: result.operations,
+    });
+  }
+  if (result.submodules.unreadable.length > 0) {
+    result.blockers.push({
+      code: "submodule-unreadable",
+      message: `${result.submodules.unreadable.length} populated submodule path(s) cannot be completely inspected`,
+      submodules: result.submodules.unreadable,
     });
   }
   if (result.untrackedPaths.length > 0) {
@@ -599,7 +757,10 @@ function verifyWorkspaceRetirement(project, inspection) {
   const workspaceId = inspection.workspace.id;
   const checks = {
     workspaceRowGone: false,
+    workspaceRowCount: null,
     workspaceRootRowsGone: false,
+    workspaceRootRowCount: null,
+    workspaceRootRows: [],
     worktreeDirectoriesGone: [],
     gitRegistrationsGone: [],
   };
@@ -607,8 +768,12 @@ function verifyWorkspaceRetirement(project, inspection) {
   try {
     const db = openDb(appDbPath());
     try {
-      checks.workspaceRowGone = Number(queryOne(db, "SELECT COUNT(*) AS count FROM workspaces WHERE id = ?", [workspaceId])?.count ?? -1) === 0;
-      checks.workspaceRootRowsGone = Number(queryOne(db, "SELECT COUNT(*) AS count FROM workspace_roots WHERE workspace_id = ?", [workspaceId])?.count ?? -1) === 0;
+      checks.workspaceRowCount = Number(queryOne(db, "SELECT COUNT(*) AS count FROM workspaces WHERE id = ?", [workspaceId])?.count ?? -1);
+      checks.workspaceRootRows = queryAll(db, "SELECT project_root_id, path, branch FROM workspace_roots WHERE workspace_id = ? ORDER BY project_root_id, path", [workspaceId])
+        .map((row) => ({ projectRootId: row.project_root_id, path: row.path, branch: row.branch }));
+      checks.workspaceRootRowCount = checks.workspaceRootRows.length;
+      checks.workspaceRowGone = checks.workspaceRowCount === 0;
+      checks.workspaceRootRowsGone = checks.workspaceRootRowCount === 0;
     } finally {
       db.close();
     }
@@ -618,9 +783,14 @@ function verifyWorkspaceRetirement(project, inspection) {
   if (!checks.workspaceRowGone) problems.push(`Playbot workspaces row still exists for ${workspaceId}`);
   if (!checks.workspaceRootRowsGone) problems.push(`Playbot workspace_roots rows still exist for ${workspaceId}`);
   for (const root of inspection.roots) {
-    const directoryGone = !fs.existsSync(root.path);
-    checks.worktreeDirectoriesGone.push({ path: root.path, gone: directoryGone });
-    if (!directoryGone) problems.push(`Worktree directory still exists: ${root.path}`);
+    try {
+      const directoryGone = !pathPresence(root.path);
+      checks.worktreeDirectoriesGone.push({ path: root.path, gone: directoryGone });
+      if (!directoryGone) problems.push(`Worktree directory still exists: ${root.path}`);
+    } catch (error) {
+      checks.worktreeDirectoriesGone.push({ path: root.path, gone: false, error: error instanceof Error ? error.message : String(error) });
+      problems.push(`Worktree directory removal cannot be verified for ${root.path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
     const projectRoot = project.roots.find((candidate) => candidate.id === root.projectRootId);
     if (!projectRoot?.path) {
       checks.gitRegistrationsGone.push({ path: root.path, gone: false, error: "project root path missing" });
@@ -628,10 +798,11 @@ function verifyWorkspaceRetirement(project, inspection) {
       continue;
     }
     try {
-      const registered = String(git(projectRoot.path, ["worktree", "list", "--porcelain"]))
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith("worktree "))
-        .map((line) => canonicalPath(line.slice("worktree ".length)));
+      const registered = git(projectRoot.path, ["worktree", "list", "--porcelain", "-z"], { encoding: "buffer" })
+        .toString("utf8")
+        .split("\0")
+        .filter((field) => field.startsWith("worktree "))
+        .map((field) => canonicalPath(field.slice("worktree ".length)));
       const gone = !registered.includes(canonicalPath(root.path));
       checks.gitRegistrationsGone.push({ path: root.path, gone });
       if (!gone) problems.push(`Git worktree registration still exists: ${root.path}`);
@@ -643,6 +814,30 @@ function verifyWorkspaceRetirement(project, inspection) {
   return { complete: problems.length === 0, checks, problems };
 }
 
+function retirementReconciliation(verification) {
+  const directoryChecks = verification.checks.worktreeDirectoriesGone;
+  const registrationChecks = verification.checks.gitRegistrationsGone;
+  const removed = {
+    workspaceRow: verification.checks.workspaceRowGone,
+    workspaceRootRows: verification.checks.workspaceRootRowsGone,
+    directories: directoryChecks.filter((entry) => entry.gone).map((entry) => entry.path),
+    gitRegistrations: registrationChecks.filter((entry) => entry.gone).map((entry) => entry.path),
+  };
+  const remaining = {
+    workspaceRowCount: verification.checks.workspaceRowCount,
+    workspaceRootRows: verification.checks.workspaceRootRows,
+    directories: directoryChecks.filter((entry) => !entry.gone && !entry.error).map((entry) => entry.path),
+    gitRegistrations: registrationChecks.filter((entry) => !entry.gone && !entry.error).map((entry) => entry.path),
+  };
+  const uncertain = [
+    ...(verification.checks.workspaceRowCount === null ? ["workspace row"] : []),
+    ...(verification.checks.workspaceRootRowCount === null ? ["workspace root rows"] : []),
+    ...directoryChecks.filter((entry) => entry.error).map((entry) => `directory ${entry.path}: ${entry.error}`),
+    ...registrationChecks.filter((entry) => entry.error).map((entry) => `Git registration ${entry.path}: ${entry.error}`),
+  ];
+  return { removed, remaining, uncertain };
+}
+
 async function retireWorkspace(project, workspace, landingBranch) {
   const inspection = inspectWorkspace(project, workspace, landingBranch, new Map());
   if (!inspection.retirable) {
@@ -652,21 +847,89 @@ async function retireWorkspace(project, workspace, landingBranch) {
     });
   }
   const ipcPayload = { workspaceId: workspace.id, preserveWorktrees: false };
-  await playbotInvoke("workspace:delete", ipcPayload);
+  let ipcError = null;
+  try {
+    await playbotInvoke("workspace:delete", ipcPayload);
+  } catch (error) {
+    ipcError = error instanceof Error ? error.message : String(error);
+  }
+
+  if (ipcError) {
+    const verification = verifyWorkspaceRetirement(project, inspection);
+    const reconciliation = retirementReconciliation(verification);
+    const deletionObserved = verification.checks.workspaceRowGone
+      || verification.checks.workspaceRootRowsGone
+      || verification.checks.worktreeDirectoriesGone.some((entry) => entry.gone)
+      || verification.checks.gitRegistrationsGone.some((entry) => entry.gone);
+    const routes = verification.complete ? deactivateWorkspaceRoutes(workspace.id) : { affected: [], problems: [] };
+    const retryWarning = "Do not retry workspace deletion blindly; inspect the workspace and this reconciliation evidence first.";
+    const audit = {
+      at: nowIso(),
+      project: { id: project.id, name: project.name },
+      workspace: inspection.workspace,
+      workspacePaths: inspection.roots.map((root) => root.path),
+      deletedPaths: reconciliation.removed.directories,
+      remainingPaths: reconciliation.remaining.directories,
+      heads: inspection.roots.map((root) => ({ projectRootId: root.projectRootId, path: root.path, ...root.head })),
+      landingBranch: inspection.landingBranch,
+      verifiedLandingCommits: inspection.roots.map((root) => ({
+        projectRootId: root.projectRootId,
+        remote: root.landing.remote,
+        remoteRef: root.landing.remoteRef,
+        commit: root.landing.commit,
+        observedAt: root.landing.observedAt,
+      })),
+      affectedLaneRoutes: routes.affected,
+      ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: false, error: ipcError },
+      verification,
+      reconciliation,
+      deletionObserved,
+      retryWarning,
+      routeProblems: routes.problems,
+    };
+    let auditResult;
+    try {
+      auditResult = { appended: true, path: appendRetirementAudit(audit) };
+    } catch (error) {
+      auditResult = { appended: false, path: retirementAuditPath(), error: error instanceof Error ? error.message : String(error) };
+    }
+    const failure = {
+      deleted: verification.complete,
+      partialAction: deletionObserved && !verification.complete,
+      workspace: inspection.workspace,
+      landingBranch: inspection.landingBranch,
+      ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: false, error: ipcError },
+      verification,
+      reconciliation,
+      routes,
+      audit: auditResult,
+      postActionComplete: false,
+      retryWarning,
+      problems: [
+        `Playbot workspace:delete rejected: ${ipcError}`,
+        ...verification.problems,
+        ...routes.problems,
+        ...(auditResult.appended ? [] : [`Audit record could not be appended: ${auditResult.error}`]),
+      ],
+    };
+    const outcome = verification.complete ? "deletion occurred despite the rejection" : deletionObserved ? "partial deletion occurred" : "no removal was verified";
+    throw Object.assign(new Error(`Playbot workspace:delete rejected for ${workspace.id}; ${outcome}. ${retryWarning}`), { data: failure });
+  }
 
   // Everything below is post-action accounting. Once Playbot's awaited delete
   // resolves, failures are data in a result whose deleted=true, never a thrown
   // pre-action-looking refusal that could invite an unsafe retry.
   const routes = deactivateWorkspaceRoutes(workspace.id);
   const verification = verifyWorkspaceRetirement(project, inspection);
-  const deletedPaths = inspection.roots.filter((root) => !fs.existsSync(root.path)).map((root) => root.path);
+  const reconciliation = retirementReconciliation(verification);
+  const deletedPaths = reconciliation.removed.directories;
   const audit = {
     at: nowIso(),
     project: { id: project.id, name: project.name },
     workspace: inspection.workspace,
     workspacePaths: inspection.roots.map((root) => root.path),
     deletedPaths,
-    remainingPaths: inspection.roots.filter((root) => fs.existsSync(root.path)).map((root) => root.path),
+    remainingPaths: reconciliation.remaining.directories,
     heads: inspection.roots.map((root) => ({ projectRootId: root.projectRootId, path: root.path, ...root.head })),
     landingBranch: inspection.landingBranch,
     verifiedLandingCommits: inspection.roots.map((root) => ({
@@ -679,6 +942,7 @@ async function retireWorkspace(project, workspace, landingBranch) {
     affectedLaneRoutes: routes.affected,
     ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: true },
     verification,
+    reconciliation,
     routeProblems: routes.problems,
   };
   let auditResult;

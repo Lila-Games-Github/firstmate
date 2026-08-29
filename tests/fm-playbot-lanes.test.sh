@@ -397,6 +397,7 @@ const sendNonObjectFile = path.join(process.env.FIXTURE_ROOT, 'send-non-object')
 // it: the adapter refuses to guess which API it is talking to, so the detection
 // itself throws while the send that came before it already succeeded.
 const probeAcceptedFile = path.join(process.env.FIXTURE_ROOT, 'launch-accepts-probe');
+const workspaceDeleteFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-fail-after');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
@@ -620,10 +621,15 @@ async function electronInvoke(channel, payload) {
         JOIN project_roots pr ON pr.id = wr.project_root_id
         JOIN repositories r ON r.id = pr.repository_id
         WHERE wr.workspace_id = ?
+        ORDER BY pr.position
       `).all(payload.workspaceId);
+      const failAfter = Number(readFileOr(workspaceDeleteFailAfterFile, '0'));
+      let removedCount = 0;
       for (const root of roots) {
+        if (failAfter > 0 && removedCount >= failAfter) throw new Error(`fixture rejected after removing ${removedCount} root(s)`);
         const removed = spawnSync('git', ['-C', root.repository_path, 'worktree', 'remove', '--force', root.path], { encoding: 'utf8' });
         if (removed.status !== 0) throw new Error((removed.stderr || removed.stdout || 'git worktree remove failed').trim());
+        removedCount += 1;
       }
       db.prepare('DELETE FROM workspace_threads WHERE workspace_id = ?').run(payload.workspaceId);
       db.prepare('DELETE FROM workspace_roots WHERE workspace_id = ?').run(payload.workspaceId);
@@ -3650,6 +3656,22 @@ rm -f \
   "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
 pass "fm-playbot-lanes: tracked, untracked, and ignored work block by exact path"
 
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --assume-unchanged prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --skip-worktree prototype-game/project.godot
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "assume-unchanged and skip-worktree paths were allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'index-flags');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/project.godot,prototype-game/real-work.txt') process.exit(1);
+const byPath = Object.fromEntries(blocker.entries.map(entry => [entry.path, entry]));
+if (!byPath['prototype-game/real-work.txt']?.assumeUnchanged || byPath['prototype-game/real-work.txt']?.skipWorktree) process.exit(1);
+if (byPath['prototype-game/project.godot']?.assumeUnchanged || !byPath['prototype-game/project.godot']?.skipWorktree) process.exit(1);
+NODE
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --no-assume-unchanged prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --no-skip-worktree prototype-game/project.godot
+pass "fm-playbot-lanes: assume-unchanged and skip-worktree paths block with exact index evidence"
+
 # Commit subjects are returned, and pushing the same head to the explicitly
 # named landing branch must become visible from ls-remote even though the local
 # origin/main tracking ref is deliberately left stale.
@@ -3677,6 +3699,99 @@ if (!workspace.retirable || workspace.roots[0].commitsAhead.length !== 0) proces
 if (landing.commit !== process.env.HEAD_COMMIT || landing.remoteRef !== 'refs/heads/main' || !landing.observedAt) process.exit(1);
 NODE
 pass "fm-playbot-lanes: commit subjects block retirement until current remote evidence proves them landed"
+
+submodule_seed="$FIXTURE_ROOT/submodule-seed"
+submodule_remote="$FIXTURE_ROOT/submodule-remote.git"
+git init --initial-branch=main "$submodule_seed" >/dev/null \
+  || fail "could not initialize the submodule retirement fixture"
+git -C "$submodule_seed" config user.name "Firstmate tests"
+git -C "$submodule_seed" config user.email "firstmate-tests@example.invalid"
+printf 'nested tracked work\n' > "$submodule_seed/tracked.txt"
+printf 'ignored.txt\n' > "$submodule_seed/.gitignore"
+git -C "$submodule_seed" add .
+git -C "$submodule_seed" commit -m "submodule baseline" >/dev/null \
+  || fail "could not commit the submodule retirement fixture"
+git init --bare --initial-branch=main "$submodule_remote" >/dev/null \
+  || fail "could not initialize the submodule fixture remote"
+git -C "$submodule_seed" remote add origin "$submodule_remote"
+git -C "$submodule_seed" push -u origin main >/dev/null \
+  || fail "could not publish the submodule fixture"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" -c protocol.file.allow=always submodule add \
+  "$submodule_remote" prototype-game/submodule >/dev/null \
+  || fail "could not add the real submodule retirement fixture"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" add .gitmodules prototype-game/submodule
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit -m "add submodule retirement fixture" >/dev/null \
+  || fail "could not commit the submodule retirement fixture"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:main >/dev/null \
+  || fail "could not land the submodule retirement fixture"
+retirement_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
+printf 'nested ignored work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/submodule/ignored.txt"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an ignored file inside a real submodule was allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
+if (!blocker || !blocker.paths.includes('prototype-game/submodule/ignored.txt')) process.exit(1);
+if (!workspace.roots[0].submodules.inspected.some(entry => entry.path === 'prototype-game/submodule')) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/submodule/ignored.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" submodule deinit -f prototype-game/submodule >/dev/null \
+  || fail "could not return the submodule fixture to an uninitialized worktree"
+pass "fm-playbot-lanes: initialized submodules expose nested ignored work before retirement"
+
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore \
+  prototype-game/addons/playbot/playbot_common.gd.uid \
+  prototype-game/addons/playbot/playbot_export_plugin.gd \
+  prototype-game/addons/playbot/playbot_export_plugin.gd.uid \
+  prototype-game/addons/playbot/playbot_log_capture.gd.source \
+  prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid \
+  prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid \
+  prototype-game/addons/playbot/plugin.gd.uid \
+  prototype-game/project.godot
+
+operation_base=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
+printf 'operation side\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" add prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit -m "operation side" >/dev/null \
+  || fail "could not create the operation-side fixture commit"
+operation_side=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" branch -f retirement-operation-side "$operation_side"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" reset --hard "$operation_base" >/dev/null
+printf 'operation target\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" add prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit -m "operation target" >/dev/null \
+  || fail "could not create the operation-target fixture commit"
+
+assert_retirement_operation() {
+  retirement_list main > "$retirement_inventory"
+  OUT_FILE="$retirement_inventory" EXPECTED_OPERATION="$1" node --no-warnings <<'NODE'
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'git-operation-in-progress');
+if (!blocker?.operations.some(entry => entry.operation === process.env.EXPECTED_OPERATION && entry.repositoryPath === '.')) process.exit(1);
+NODE
+}
+
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" merge --no-commit retirement-operation-side >/dev/null 2>&1 \
+  && fail "the merge operation fixture did not stop on its expected conflict"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore --source=HEAD --staged --worktree prototype-game/real-work.txt
+assert_retirement_operation merge || fail "a clean-looking in-progress merge was allowed to read clean"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" merge --abort
+
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" cherry-pick retirement-operation-side >/dev/null 2>&1 \
+  && fail "the cherry-pick operation fixture did not stop on its expected conflict"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore --source=HEAD --staged --worktree prototype-game/real-work.txt
+assert_retirement_operation cherry-pick || fail "a clean-looking in-progress cherry-pick was allowed to read clean"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" cherry-pick --abort
+
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rebase retirement-operation-side >/dev/null 2>&1 \
+  && fail "the rebase operation fixture did not stop on its expected conflict"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore --source=HEAD --staged --worktree prototype-game/real-work.txt
+assert_retirement_operation rebase || fail "a clean-looking in-progress rebase was allowed to read clean"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rebase --abort
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" reset --hard "$operation_base" >/dev/null
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" branch -D retirement-operation-side >/dev/null
+pass "fm-playbot-lanes: clean-looking merge, cherry-pick, and rebase states block retirement"
 
 # A safe inventory is never authorization: change a persisted safety condition
 # after the read and prove retire_workspace catches it before workspace:delete.
@@ -3716,6 +3831,87 @@ NODE
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore prototype-game/real-work.txt
 rm -f "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/recheck-untracked.txt"
 pass "fm-playbot-lanes: immediate recheck returns exact thread and path blockers"
+
+partial_repository="$FIXTURE_ROOT/partial-repository"
+partial_remote="$FIXTURE_ROOT/partial-remote.git"
+partial_one="$FIXTURE_ROOT/worker/.worktrees/partial-one"
+partial_two="$partial_repository/.worktrees/partial
+two"
+git -C "$FIXTURE_ROOT/worker" fetch --quiet origin main
+git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-partial-one "$partial_one" origin/main >/dev/null \
+  || fail "could not create the first partial-deletion worktree"
+git init --initial-branch=main "$partial_repository" >/dev/null \
+  || fail "could not initialize the second partial-deletion repository"
+git -C "$partial_repository" config user.name "Firstmate tests"
+git -C "$partial_repository" config user.email "firstmate-tests@example.invalid"
+printf 'second root\n' > "$partial_repository/root.txt"
+git -C "$partial_repository" add root.txt
+git -C "$partial_repository" commit -m "second root baseline" >/dev/null \
+  || fail "could not commit the second partial-deletion repository"
+git init --bare --initial-branch=main "$partial_remote" >/dev/null \
+  || fail "could not initialize the second partial-deletion remote"
+git -C "$partial_repository" remote add origin "$partial_remote"
+git -C "$partial_repository" push -u origin main >/dev/null \
+  || fail "could not publish the second partial-deletion repository"
+git -C "$partial_repository" worktree add -b retirement-partial-two "$partial_two" main >/dev/null \
+  || fail "could not create the newline-bearing partial-deletion worktree"
+FIXTURE_ROOT="$FIXTURE_ROOT" PARTIAL_ONE="$partial_one" PARTIAL_TWO="$partial_two" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = new Date().toISOString();
+db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)')
+  .run('repo-partial-two', 'partial-two', path.join(process.env.FIXTURE_ROOT, 'partial-repository'), 'main');
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)')
+  .run('root-partial-two', 'project-worker', 'repo-partial-two', 1);
+db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-retire-partial', 'project-worker', 'Partial deletion', 'worktree', 0, 'active', now, now);
+db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-retire-partial', 'root-worker', process.env.PARTIAL_ONE, 'retirement-partial-one');
+db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-retire-partial', 'root-partial-two', process.env.PARTIAL_TWO, 'retirement-partial-two');
+db.close();
+NODE
+printf '1\n' > "$FIXTURE_ROOT/workspace-delete-fail-after"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(retirement_call ws-retire-partial ',"confirm":true')
+rm -f "$FIXTURE_ROOT/workspace-delete-fail-after"
+OUT="$out" PARTIAL_ONE="$partial_one" PARTIAL_TWO="$partial_two" node --no-warnings <<'NODE' \
+  || fail "a multi-root IPC rejection did not return exact partial-deletion evidence"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('partial deletion occurred') || !value.error.message.includes('Do not retry')) process.exit(1);
+const data = value.error.data;
+if (!data || data.deleted || !data.partialAction || data.postActionComplete) process.exit(1);
+if (data.ipc.succeeded || !data.ipc.error.includes('after removing 1 root')) process.exit(1);
+if (!data.audit.appended || !data.retryWarning.includes('Do not retry')) process.exit(1);
+if (data.verification.checks.workspaceRowCount !== 1 || data.verification.checks.workspaceRootRowCount !== 2) process.exit(1);
+const directories = Object.fromEntries(data.verification.checks.worktreeDirectoriesGone.map(entry => [entry.path, entry]));
+const registrations = Object.fromEntries(data.verification.checks.gitRegistrationsGone.map(entry => [entry.path, entry]));
+if (!directories[process.env.PARTIAL_ONE]?.gone || directories[process.env.PARTIAL_TWO]?.gone) process.exit(1);
+if (!registrations[process.env.PARTIAL_ONE]?.gone || registrations[process.env.PARTIAL_TWO]?.gone) process.exit(1);
+if (!data.reconciliation.removed.directories.includes(process.env.PARTIAL_ONE)) process.exit(1);
+if (!data.reconciliation.remaining.directories.includes(process.env.PARTIAL_TWO)) process.exit(1);
+NODE
+[ ! -e "$partial_one" ] || fail "the partial-deletion fixture did not remove its first worktree"
+[ -d "$partial_two" ] || fail "the partial-deletion fixture removed its newline-bearing second worktree"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" PARTIAL_ONE="$partial_one" PARTIAL_TWO="$partial_two" node --no-warnings <<'NODE' \
+  || fail "inventory became untruthful after a partial Playbot deletion"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-partial');
+if (!workspace || workspace.retirable || !workspace.blockers.some(blocker => blocker.code === 'missing-root')) process.exit(1);
+if (!workspace.roots.some(root => root.path === process.env.PARTIAL_ONE && root.blockers.some(blocker => blocker.code === 'missing-root'))) process.exit(1);
+if (!workspace.roots.some(root => root.path === process.env.PARTIAL_TWO && root.blockers.length === 0)) process.exit(1);
+NODE
+AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" PARTIAL_ONE="$partial_one" PARTIAL_TWO="$partial_two" node --no-warnings <<'NODE' \
+  || fail "the partial-deletion audit did not preserve exact reconciliation evidence"
+const fs = require('node:fs');
+const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+if (audit.workspace.id !== 'ws-retire-partial' || audit.ipc.succeeded || !audit.deletionObserved) process.exit(1);
+if (!audit.deletedPaths.includes(process.env.PARTIAL_ONE) || !audit.remainingPaths.includes(process.env.PARTIAL_TWO)) process.exit(1);
+if (!audit.retryWarning.includes('Do not retry') || !audit.verification.problems.length) process.exit(1);
+NODE
+pass "fm-playbot-lanes: rejected multi-root deletion reconciles and audits exact partial state"
 
 # Register a real durable route naming the retiring workspace so deletion has
 # to clean it up as part of the public behavior.

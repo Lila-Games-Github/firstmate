@@ -22,6 +22,7 @@ Use the `playbot_lanes` MCP for the entire retirement workflow.
    The tool re-runs the complete safety inspection immediately before invoking Playbot.
 5. Require `deleted: true`, `verification.complete: true`, `postActionComplete: true`, and an appended audit record before calling the retirement shipshape.
    If `deleted: true` arrives with verification, lane cleanup, or audit problems, report that deletion happened but post-action work is incomplete and never retry the destructive call as though nothing happened.
+   If Playbot rejects the deletion, read the returned reconciliation and audit evidence for every database row, directory, and Git registration, report any partial removal exactly, and never retry blindly.
 
 Never replace either tool with raw CDP or IPC code, manual worktree-folder deletion, direct Playbot database edits, or `git worktree remove`.
 Never add a bulk deletion loop or confirm more than one workspace per call.

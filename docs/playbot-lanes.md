@@ -63,7 +63,8 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 `list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
 It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
 It reports the verified landing commit, each workspace root's exact head, every ahead commit and subject including an empty subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
-Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, an ahead commit, and a tracked modification outside Playbot's exact churn allowlist are blocking evidence rather than a bare false verdict.
+Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, an ahead commit, a tracked modification outside Playbot's exact churn allowlist, assume-unchanged or skip-worktree index flags, and an in-progress merge, rebase, cherry-pick, revert, or sequencer are blocking evidence rather than a bare false verdict.
+Initialized submodules receive the same recursive tracked, untracked, ignored, index-flag, and operation-state inspection, and a populated submodule that cannot be inspected blocks retirement.
 Untracked and ignored files also block retirement and are returned by exact path, because the tracked-churn allowlist never classifies them.
 The allowlist is eight literal repository-relative paths returned as `trackedChurnAllowlist`: seven files under `prototype-game/addons/playbot/` plus `prototype-game/project.godot` that Playbot's editor integration rewrites across unrelated worktrees.
 No directory, extension, basename, or broader pattern is treated as churn.
@@ -76,6 +77,7 @@ A failed immediate recheck returns that complete structured inspection, includin
 After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, deactivates every durable lane route naming the workspace, and appends a mode-0600 private audit record under the lane state directory.
 That record names the time, project, workspace, workspace paths, exact root heads, explicit landing branch and remotely verified landing commits, affected lane routes, IPC outcome, and removal verification.
 Once the IPC succeeds, later verification, route, or audit failures return `deleted: true` with `postActionComplete: false` and exact problems instead of throwing an ordinary refusal that could make a caller retry a deletion that already happened.
+If Playbot rejects the deletion after removing anything, the tool reconciles every database row, directory, and NUL-parsed Git worktree registration, appends a partial-action audit, returns the exact removed, remaining, and uncertain evidence with the error, and warns against a blind retry.
 
 ## Lane lifecycle
 
