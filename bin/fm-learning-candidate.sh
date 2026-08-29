@@ -234,8 +234,10 @@ ensure_store() {
 
 store_available_read_only() {
   validate_state_path
+  [ ! -L "$CANDIDATE_DIR" ] \
+    || die "candidate store must be a real directory: $CANDIDATE_DIR"
   [ -e "$CANDIDATE_DIR" ] || return 1
-  [ -d "$CANDIDATE_DIR" ] && [ ! -L "$CANDIDATE_DIR" ] \
+  [ -d "$CANDIDATE_DIR" ] \
     || die "candidate store must be a real directory: $CANDIDATE_DIR"
 }
 
@@ -341,8 +343,9 @@ resolve_record_path() { # <candidate-id>; sets RECORD_PATH
     multiple=0
     for state in unresolved dismissed documented promoted follow-up duplicate; do
       path=$(record_path "$id" "$state")
+      [ ! -L "$path" ] || die "candidate path must be a regular file: $path"
       [ -e "$path" ] || continue
-      if [ ! -f "$path" ] || [ -L "$path" ]; then
+      if [ ! -f "$path" ]; then
         [ -e "$path" ] || { changed=1; break; }
         die "candidate path must be a regular file: $path"
       fi
@@ -567,8 +570,8 @@ batch_command() {
 }
 
 summary_command() {
-  local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
-  local producer_pid correct_hint=1
+  local limit=3 count=0 sample_count=0 idx=0 name id hint state impact project signal line
+  local producer_pid correct_hint=1 entry_path
   local -a samples=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -589,6 +592,15 @@ summary_command() {
     [ -n "$name" ] || continue
     name=${name#./}
     id=${name%%.*}
+    hint=${name#"$id."}
+    hint=${hint%.json}
+    validate_candidate_id "$id"
+    validate_lifecycle_state "$hint"
+    [ "$name" = "$id.$hint.json" ] || die "invalid candidate record name: $name"
+    entry_path="$CANDIDATE_DIR/$name"
+    if [ -L "$entry_path" ] || { [ -e "$entry_path" ] && [ ! -f "$entry_path" ]; }; then
+      die "candidate path must be a regular file: $entry_path"
+    fi
     load_record "$id" "$correct_hint"
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
     [ "$state" = unresolved ] || continue

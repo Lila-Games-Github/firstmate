@@ -2317,6 +2317,25 @@ EOF
   pass "session start reports unsafe candidate entries as unavailable"
 }
 
+test_learning_candidate_summary_rejects_dangling_store() {
+  local rec root home fakebin out
+  rec=$(new_world learning-candidate-dangling-store)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+  ln -s "$home/missing-store" "$home/state/learning-candidates"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
+    "session start treated a dangling candidate store as absent"
+  assert_contains "$out" "candidate store must be a real directory" \
+    "session start did not surface dangling candidate-store validation"
+  pass "session start reports a dangling candidate store as unavailable"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -2545,6 +2564,7 @@ test_fleet_digest_empty_fleet
 test_learning_candidate_summary_is_bounded
 test_learning_candidate_summary_error_is_terminal_safe
 test_learning_candidate_summary_rejects_unsafe_entry
+test_learning_candidate_summary_rejects_dangling_store
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic

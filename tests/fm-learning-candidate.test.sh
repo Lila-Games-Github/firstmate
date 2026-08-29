@@ -774,7 +774,7 @@ SH
 }
 
 test_summary_rejects_unsafe_entries() {
-  local home id rc
+  local home extra_home dangling_home id valid rc
   home=$(make_home unsafe-summary-entry)
   id=lc-000000000000000000000000
   mkdir -p "$home/state/learning-candidates"
@@ -788,7 +788,49 @@ test_summary_rejects_unsafe_entries() {
   assert_grep "candidate path must be a regular file" "$home/unsafe.err" \
     "summary did not route an unsafe entry through record-path validation"
   [ ! -s "$home/unsafe.out" ] || fail "summary rendered output after finding an unsafe entry"
-  pass "summary rejects unsafe matching candidate entries"
+
+  extra_home=$(make_home extra-summary-entry)
+  valid=$(capture_candidate "$extra_home" extra-summary FrogPile escaped-defect \
+    "summary must validate the exact enumerated basename")
+  ln -s "$(candidate_path "$extra_home" "$valid")" \
+    "$(candidate_path "$extra_home" "$valid" backup)"
+  set +e
+  run_learning "$extra_home" summary >"$extra_home/extra.out" 2>"$extra_home/extra.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "summary reloaded a valid record for an invalid extra entry"
+  assert_grep "invalid lifecycle state: backup" "$extra_home/extra.err" \
+    "summary did not validate the exact enumerated lifecycle suffix"
+
+  dangling_home=$(make_home dangling-record-entry)
+  valid=$(capture_candidate "$dangling_home" dangling-record FrogPile escaped-defect \
+    "record discovery must reject dangling symlink siblings")
+  ln -s "$dangling_home/missing-record" "$(candidate_path "$dangling_home" "$valid" documented)"
+  set +e
+  run_learning "$dangling_home" get "$valid" \
+    >"$dangling_home/dangling.out" 2>"$dangling_home/dangling.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "record discovery skipped a dangling symlink sibling"
+  assert_grep "candidate path must be a regular file" "$dangling_home/dangling.err" \
+    "record discovery did not reject the dangling symlink sibling"
+  pass "summary and record discovery reject unsafe exact entries"
+}
+
+test_read_commands_reject_dangling_store() {
+  local home command rc
+  home=$(make_home dangling-candidate-store)
+  ln -s "$home/missing-store" "$home/state/learning-candidates"
+  for command in list batch summary; do
+    set +e
+    run_learning "$home" "$command" >"$home/$command.out" 2>"$home/$command.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$command treated a dangling candidate store as absent"
+    assert_grep "candidate store must be a real directory" "$home/$command.err" \
+      "$command did not identify the dangling candidate store"
+  done
+  pass "public read commands reject a dangling candidate store"
 }
 
 test_capture_does_not_wait_for_curation() {
@@ -910,6 +952,7 @@ test_concise_outputs_strip_terminal_controls
 test_bounded_summary_and_batch
 test_summary_producer_failure_propagates
 test_summary_rejects_unsafe_entries
+test_read_commands_reject_dangling_store
 test_capture_does_not_wait_for_curation
 test_candidate_survives_nonblocking_task_cleanup
 
