@@ -4126,6 +4126,26 @@ git --git-dir="$submodule_git_dir" update-ref refs/heads/main refs/remotes/origi
 git --git-dir="$submodule_git_dir" symbolic-ref HEAD refs/heads/main
 pass "fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits"
 
+submodule_published=$(git --git-dir="$submodule_git_dir" rev-parse refs/remotes/origin/main)
+git --git-dir="$submodule_git_dir" update-ref refs/heads/retirement-local-branch "$submodule_published"
+git --git-dir="$submodule_git_dir" tag -a retirement-local-tag "$submodule_published" -m "local retirement tag"
+submodule_local_tag=$(git --git-dir="$submodule_git_dir" rev-parse refs/tags/retirement-local-tag)
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" BRANCH_OBJECT="$submodule_published" TAG_OBJECT="$submodule_local_tag" node --no-warnings <<'NODE' \
+  || fail "published submodule commits hid unpublished branch or tag refs"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'submodule-local-history');
+const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
+if (!residue || residue.localOnlyCommits.length !== 0) process.exit(1);
+if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/heads/retirement-local-branch' && entry.object === process.env.BRANCH_OBJECT)) process.exit(1);
+if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/tags/retirement-local-tag' && entry.object === process.env.TAG_OBJECT)) process.exit(1);
+if (!residue.publicationEvidence.localRefs.some(entry => entry.ref === 'refs/heads/main' && entry.object === process.env.BRANCH_OBJECT)) process.exit(1);
+NODE
+git --git-dir="$submodule_git_dir" update-ref -d refs/heads/retirement-local-branch
+git --git-dir="$submodule_git_dir" tag -d retirement-local-tag >/dev/null
+pass "fm-playbot-lanes: persisted submodule unpublished branches and tags block"
+
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore \
   prototype-game/addons/playbot/playbot_common.gd.uid \
   prototype-game/addons/playbot/playbot_export_plugin.gd \
@@ -4404,6 +4424,8 @@ db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
   .run('ws-retire-incomplete-success', 'root-worker', process.env.INCOMPLETE_SUCCESS_ROOT, 'retirement-incomplete-success');
 db.close();
 NODE
+incomplete_success_route="$PLAYBOT_LANES_STATE_DIR/routes/incomplete-success-route.json"
+printf '%s\n' '{"version":1,"id":"incomplete-success-route","active":true,"supervisor":{"id":"chat-controller","workspaceId":"ws-controller"},"worker":{"id":"chat-retire-incomplete-success","workspaceId":"ws-retire-incomplete-success"},"createdAt":"2026-08-30T00:00:00.000Z","updatedAt":"2026-08-30T00:00:00.000Z"}' > "$incomplete_success_route"
 printf 'succeed without removal\n' > "$FIXTURE_ROOT/workspace-delete-succeeds-without-removal"
 out=$(retirement_call ws-retire-incomplete-success ',"confirm":true')
 rm -f "$FIXTURE_ROOT/workspace-delete-succeeds-without-removal"
@@ -4418,16 +4440,24 @@ if (value.reconciliation.remaining.workspaceRootRows.length !== 1) process.exit(
 if (!value.reconciliation.remaining.directories.includes(process.env.INCOMPLETE_SUCCESS_ROOT)) process.exit(1);
 if (!value.reconciliation.remaining.gitRegistrations.includes(process.env.INCOMPLETE_SUCCESS_ROOT)) process.exit(1);
 if (!value.audit.appended) process.exit(1);
+if (value.routes.affected.length !== 0) process.exit(1);
+if (!value.routes.reconciliation.matchingBefore.includes('incomplete-success-route.json')) process.exit(1);
+if (!value.routes.reconciliation.matchingAfter.includes('incomplete-success-route.json')) process.exit(1);
+if (!value.routes.reconciliation.remainingActive.includes('incomplete-success-route.json')) process.exit(1);
 NODE
 [ -d "$incomplete_success_root" ] || fail "the incomplete-success fixture unexpectedly removed its worktree"
-AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" INCOMPLETE_SUCCESS_ROOT="$incomplete_success_root" node --no-warnings <<'NODE' \
+AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" INCOMPLETE_SUCCESS_ROOT="$incomplete_success_root" ROUTE_FILE="$incomplete_success_route" node --no-warnings <<'NODE' \
   || fail "successful incomplete removal lost reconciliation in the durable audit"
 const fs = require('node:fs');
 const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
 if (audit.workspace.id !== 'ws-retire-incomplete-success' || !audit.ipc.succeeded) process.exit(1);
 if (audit.deletionObserved || !audit.retryWarning?.includes('Do not retry')) process.exit(1);
 if (!audit.remainingPaths.includes(process.env.INCOMPLETE_SUCCESS_ROOT)) process.exit(1);
+if (audit.affectedLaneRoutes.length !== 0 || !audit.routeReconciliation.remainingActive.includes('incomplete-success-route.json')) process.exit(1);
+const route = JSON.parse(fs.readFileSync(process.env.ROUTE_FILE, 'utf8'));
+if (!route.active || route.retiredWorkspace || route.retiredWorkspaceAt) process.exit(1);
 NODE
+rm -f "$incomplete_success_route"
 pass "fm-playbot-lanes: successful IPC cannot label incomplete removal deleted"
 
 malformed_route_root="$FIXTURE_ROOT/worker/.worktrees/malformed-route"

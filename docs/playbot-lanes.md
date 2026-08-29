@@ -67,7 +67,8 @@ Local workspaces, missing roots, unreadable Git state, an unresolvable landing b
 Tracked-content inspection compares each index object with the actual regular file, symlink target, or populated submodule head using Git's clean filters, so stat-cache shortcuts cannot produce a clean verdict.
 Git evidence clears inherited repository, worktree, index, object-store, namespace, shallow-file, replacement-base, and command-line configuration overrides before inspecting the caller-selected root.
 Initialized submodules receive the same recursive tracked, untracked, ignored, index-flag, and operation-state inspection, and persisted per-worktree submodule Git directories are inspected even after the submodule is deinitialized or removed from the index.
-A populated submodule that cannot be inspected blocks retirement, as does a persisted submodule stash, detached head, or ref- or reflog-reachable commit not proven reachable from a stable fresh snapshot of the configured remotes.
+A populated submodule that cannot be inspected blocks retirement, as does a persisted submodule stash or ref- or reflog-reachable commit not proven reachable from a stable fresh snapshot of the configured remotes.
+Every local submodule branch and tag must also match the same ref name and object identity in at least one fresh remote snapshot, so publication of its target commit alone cannot hide unpublished ref metadata.
 Revision evidence disables replacement objects, and any `refs/replace/*` or repository graft metadata blocks inspection instead of being allowed to rewrite the ancestry used for a deletion verdict.
 Untracked and ignored files also block retirement and are returned by exact path, because the tracked-churn allowlist never classifies them.
 The allowlist is eight literal repository-relative paths returned as `trackedChurnAllowlist`: seven files under `prototype-game/addons/playbot/` plus `prototype-game/project.godot` that Playbot's editor integration rewrites across unrelated worktrees.
@@ -78,7 +79,7 @@ Path matching preserves Git pathname identity, so a literal backslash in a POSIX
 There is no bulk destructive form.
 It repeats the complete inspection immediately before action and calls Playbot's own `workspace:delete` IPC with `preserveWorktrees: false`; it never deletes a folder or changes Playbot's database itself.
 A failed immediate recheck returns that complete structured inspection, including the blocking chat states and tracked, untracked, and ignored paths, without calling the destructive IPC.
-After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, deactivates every durable lane route naming the workspace, and appends a mode-0600 private audit record under the lane state directory.
+After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, then deactivates every durable lane route naming the workspace and appends a mode-0600 private audit record under the lane state directory.
 Each root resolves remote evidence independently so worktree-specific Git configuration cannot borrow another root's remote or commit.
 The immediate inspection captures whether each Git worktree registration existed, and post-action reconciliation reports a registration as removed only when that captured registration changed from present to absent.
 Retirement enumerates every route file strictly and validates its version, filename-bound id, active flag, endpoint identities, workspace identities, and timestamps, so malformed or unreadable route state makes post-action cleanup incomplete instead of disappearing from the result and audit.
@@ -86,6 +87,7 @@ Durable route mutations share one cross-process lock whose owner record includes
 The serialized mutation preserves a concurrent retirement deactivation and re-reads every matching route as inactive before post-action cleanup can be complete.
 That record names the time, project, workspace, workspace paths, exact root heads, explicit landing branch and remotely verified landing commits, affected lane routes, IPC outcome, and removal verification.
 If the IPC succeeds but database, directory, or Git-registration verification is incomplete, the tool returns `deleted: false`, `partialAction: true`, `postActionComplete: false`, the full reconciliation, and a warning against blind retry.
+That incomplete outcome preserves matching active routes because the workspace still exists or its removal is uncertain.
 If removal verification is complete but route cleanup or audit append fails, the tool returns `deleted: true` with `postActionComplete: false` and exact problems because the workspace deletion is verified even though post-action work remains incomplete.
 If Playbot rejects the deletion after removing anything, the tool reconciles every database row, directory, and NUL-parsed Git worktree registration, appends a partial-action audit, returns the exact removed, remaining, and uncertain evidence with the error, and warns against a blind retry.
 

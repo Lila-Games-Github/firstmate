@@ -813,14 +813,33 @@ function persistedSubmoduleGitDirs(root) {
 function remoteRefRows(root, remote) {
   const rows = String(git(root, ["ls-remote", "--refs", remote])).split(/\r?\n/).filter(Boolean).map((row) => {
     const separator = row.indexOf("\t");
-    const commit = separator < 0 ? "" : row.slice(0, separator);
+    const object = separator < 0 ? "" : row.slice(0, separator);
     const ref = separator < 0 ? "" : row.slice(separator + 1);
-    if (!/^[0-9a-f]{40,64}$/i.test(commit) || !ref.startsWith("refs/") || ref.includes("\t")) {
+    if (!/^[0-9a-f]{40,64}$/i.test(object) || !ref.startsWith("refs/") || ref.includes("\t")) {
       throw new Error(`remote ${remote} returned unreadable ref evidence`);
     }
-    return { ref, commit };
+    return { ref, object };
   });
-  return rows.sort((left, right) => left.ref.localeCompare(right.ref) || left.commit.localeCompare(right.commit));
+  return rows.sort((left, right) => left.ref.localeCompare(right.ref) || left.object.localeCompare(right.object));
+}
+
+function localPublishableRefRows(root) {
+  const rows = String(git(root, [
+    "for-each-ref",
+    "--format=%(refname)%09%(objectname)",
+    "refs/heads/",
+    "refs/tags/",
+  ])).split(/\r?\n/).filter(Boolean).map((row) => {
+    const separator = row.indexOf("\t");
+    const ref = separator < 0 ? "" : row.slice(0, separator);
+    const object = separator < 0 ? "" : row.slice(separator + 1);
+    if ((!ref.startsWith("refs/heads/") && !ref.startsWith("refs/tags/"))
+      || !/^[0-9a-f]{40,64}$/i.test(object)) {
+      throw new Error("Git returned unreadable local submodule ref evidence");
+    }
+    return { ref, object };
+  });
+  return rows.sort((left, right) => left.ref.localeCompare(right.ref) || left.object.localeCompare(right.object));
 }
 
 function freshRemoteCommitTips(root, remote) {
@@ -841,9 +860,9 @@ function freshRemoteCommitTips(root, remote) {
   }
   const commits = new Set();
   for (const entry of after) {
-    git(root, ["cat-file", "-e", entry.commit]);
+    git(root, ["cat-file", "-e", entry.object]);
     try {
-      commits.add(stripTerminalLineEnding(git(root, ["rev-parse", "--verify", `${entry.commit}^{commit}`])));
+      commits.add(stripTerminalLineEnding(git(root, ["rev-parse", "--verify", `${entry.object}^{commit}`])));
     } catch {
       continue;
     }
@@ -853,6 +872,7 @@ function freshRemoteCommitTips(root, remote) {
     remoteUrl: String(git(root, ["remote", "get-url", remote])).trim(),
     observedAt: nowIso(),
     refCount: after.length,
+    refs: after,
     commits: [...commits].sort(),
   };
 }
@@ -900,13 +920,18 @@ function persistedSubmoduleState(root) {
       }
       const remoteTips = [...new Set(remoteEvidence.flatMap((entry) => entry.commits))].sort();
       const localOnlyCommits = candidates.filter((entry) => !commitPublished(repository.gitDir, entry.commit, remoteTips));
+      const localRefs = localPublishableRefRows(repository.gitDir);
+      const publishedRefs = new Set(remoteEvidence.flatMap((entry) => entry.refs.map((item) => `${item.ref}\0${item.object}`)));
+      const localOnlyRefs = localRefs.filter((entry) => !publishedRefs.has(`${entry.ref}\0${entry.object}`));
       repositories.push({
         ...repository,
         head,
         stashCommit,
         localOnlyCommits,
+        localOnlyRefs,
         publicationEvidence: {
           candidateCommitCount: candidates.length,
+          localRefs,
           remoteTips,
           remotes: remoteEvidence,
           problems: publicationProblems,
@@ -1155,11 +1180,13 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
       submodules: result.submodules.unreadable,
     });
   }
-  const submoduleLocalHistory = result.submodules.persisted.filter((entry) => entry.stashCommit || entry.localOnlyCommits.length > 0);
+  const submoduleLocalHistory = result.submodules.persisted.filter((entry) => (
+    entry.stashCommit || entry.localOnlyCommits.length > 0 || entry.localOnlyRefs.length > 0
+  ));
   if (submoduleLocalHistory.length > 0) {
     result.blockers.push({
       code: "submodule-local-history",
-      message: `${submoduleLocalHistory.length} persisted submodule Git director${submoduleLocalHistory.length === 1 ? "y contains" : "ies contain"} stashed or unpushed history that workspace deletion would remove`,
+      message: `${submoduleLocalHistory.length} persisted submodule Git director${submoduleLocalHistory.length === 1 ? "y contains" : "ies contain"} stashed history, unpushed commits, or unpublished refs that workspace deletion would remove`,
       submodules: submoduleLocalHistory,
     });
   }
@@ -1666,9 +1693,11 @@ async function retireWorkspace(project, workspace, landingBranch) {
     throw Object.assign(new Error(`Playbot workspace:delete rejected for ${workspace.id}; ${outcome}. ${retryWarning}`), { data: failure });
   }
 
-  const routes = deactivateWorkspaceRoutes(workspace.id, routeBaseline);
   const verification = verifyWorkspaceRetirement(project, inspection);
   const reconciliation = retirementReconciliation(verification);
+  const routes = verification.complete
+    ? deactivateWorkspaceRoutes(workspace.id, routeBaseline)
+    : observeWorkspaceRoutes(workspace.id, routeBaseline);
   const deletionObserved = verification.checks.workspaceRowGone
     || verification.checks.workspaceRootRowsGone
     || verification.checks.worktreeDirectoriesGone.some((entry) => entry.gone)

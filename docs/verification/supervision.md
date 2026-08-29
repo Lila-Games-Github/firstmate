@@ -539,7 +539,7 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
-On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 119 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
+On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 120 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
 The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
 The remote cases deliberately leave `origin/main` stale, advance the bare remote's `main`, and bind local `main` to `origin/release`, proving that inventory uses the `ls-remote` commit while preserving the explicitly named landing branch.
 The clean-evidence audit covered assume-unchanged and skip-worktree index flags, inherited repository and index overrides, initialized and uninitialized submodules, merge, rebase, cherry-pick and sequencer state, stashes, and every Git command that contributes deletion evidence.
@@ -549,8 +549,9 @@ Every stage-zero index object is also compared with the actual worktree represen
 A same-length edit with restored mtime stays blocking when `core.trustctime=false` and `core.checkStat=minimal` make `git status` report no change, while a smudged worktree representation whose raw blob differs from its clean-filtered index blob remains correctly clean.
 The untracked and ignored inventory disables Git's untracked cache and filesystem monitor for its safety read, and an executable Git compatibility fixture models a stale cache result after warming the real untracked cache and restoring the directory mtime, proving the otherwise hidden file remains blocking by exact path.
 Initialized submodules are inspected recursively with ignored files visible.
-Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixtures prove an exact stash, a server-deleted commit hidden by a stale remote-tracking ref, and a reset commit reachable only through a reflog remain visible and blocking after the submodule worktree is emptied.
+Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixtures prove an exact stash, a server-deleted commit hidden by a stale remote-tracking ref, a reset commit reachable only through a reflog, and unpublished local branch and annotated-tag refs remain visible and blocking after the submodule worktree is emptied.
 Publication proof enumerates every ref- and reflog-reachable candidate, fetches the objects behind a fresh configured-remote ref snapshot without updating local refs, rejects a snapshot that changes during inspection, and compares candidates against those authoritative remote tips rather than local `refs/remotes/*`.
+It separately compares every local branch and tag name plus direct object identity against those snapshots, so an already-published target commit cannot conceal unpublished ref metadata.
 Every Git invocation contributing retirement evidence disables replacement objects, and a real `refs/replace` fixture proves the exact replacement ref blocks even after the workspace head is otherwise clean and landed.
 An executable `GIT_INDEX_FILE` fixture points the MCP process at a clean alternate index while the real linked-worktree index holds a staged-only change, proving inherited repository overrides are cleared before evidence collection.
 Repository and persisted-submodule `info/grafts` metadata blocks as unreadable evidence, with a real top-level graft fixture proving the exact metadata path is returned.
@@ -564,7 +565,7 @@ Fresh remote-ref snapshots use validated hash-tab-ref rows because Git ref synta
 The post-delete audit also covered a real two-root workspace whose first worktree was removed before the fake Playbot endpoint rejected the second removal.
 The MCP error, durable audit, later inventory, database counts, both directory checks, and both Git registration checks all agreed on the exact partial result, including the surviving registration whose real path contained a newline.
 The rejection result and durable audit also preserve the pre-action strict route baseline and reconcile the still-active route against the post-action inventory.
-Another executable fixture makes `workspace:delete` resolve successfully without removing its database rows, directory, or Git registration, and proves the MCP reports `deleted: false`, a partial action, full remaining evidence, and the blind-retry warning.
+Another executable fixture makes `workspace:delete` resolve successfully without removing its database rows, directory, or Git registration, and proves the MCP reports `deleted: false`, a partial action, full remaining evidence, the blind-retry warning, and an unchanged active route.
 Another real rejection fixture uses a valid standalone Git directory that was never registered in the project repository and proves the pre-action baseline prevents its already-absent registration from being mislabeled as destructive change.
 A real worktree-specific landing-branch remote binding gives two roots sharing one common Git directory different landing commits and proves both roots retain their own remote evidence.
 A syntactically valid empty route object fixture survives successful workspace deletion while schema validation makes the result and durable audit explicitly incomplete.
@@ -604,6 +605,7 @@ ok - fm-playbot-lanes: initialized submodules expose nested ignored work before 
 ok - fm-playbot-lanes: persisted removed-submodule storage exposes stash and unpushed commits
 ok - fm-playbot-lanes: fresh submodule remote evidence rejects stale tracking refs
 ok - fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits
+ok - fm-playbot-lanes: persisted submodule unpublished branches and tags block
 ok - fm-playbot-lanes: clean-looking merge, cherry-pick, and rebase states block retirement
 ok - fm-playbot-lanes: every root resolves its own worktree-specific remote evidence
 ok - fm-playbot-lanes: immediate recheck returns exact thread and path blockers
