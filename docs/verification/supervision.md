@@ -539,7 +539,7 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
-On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 125 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
+On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 127 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
 The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
 The remote cases deliberately leave `origin/main` stale, advance the bare remote's `main`, and bind local `main` to `origin/release`, proving that inventory uses the `ls-remote` commit while preserving the explicitly named landing branch.
 The clean-evidence audit covered assume-unchanged and skip-worktree index flags, inherited repository and index overrides, initialized and uninitialized submodules, merge, rebase, cherry-pick and sequencer state, stashes, and every Git command that contributes deletion evidence.
@@ -566,8 +566,10 @@ Commit history is enumerated as NUL-terminated object identities and Git transco
 Fresh remote-ref snapshots use validated hash-tab-ref rows because Git ref syntax excludes record separators, while the remaining Git outputs are constrained names, validated hashes, or single scalars.
 The post-delete audit also covered a real two-root workspace whose first worktree was removed before the fake Playbot endpoint rejected the second removal.
 The MCP error, durable audit, later inventory, database counts, both directory checks, and both Git registration checks all agreed on the exact partial result, including the surviving registration whose real path contained a newline.
+Another two-root rejection removes only one exact `workspace_roots` row while leaving the workspace row, both directories, and both Git registrations intact, proving baseline row identity deltas still report and audit a partial action when the aggregate root-row count remains nonzero.
 The rejection result and durable audit also preserve the pre-action strict route baseline and reconcile the still-active route against the post-action inventory.
 Another executable fixture makes `workspace:delete` resolve successfully without removing its database rows, directory, or Git registration, and proves the MCP reports `deleted: false`, a partial action, full remaining evidence, the blind-retry warning, and an unchanged active route.
+That fixture forces the audit append's first write to be short, then observes a complete parseable JSONL record, file fsync, and parent-directory fsync before `appended: true` is returned.
 Destructive selection accepts only the exact active workspace id returned by inventory, with executable name, case-folded name, and path refusals proving no alias reaches Playbot IPC.
 Another real rejection fixture uses a valid standalone Git directory that was never registered in the project repository and proves the pre-action baseline prevents its already-absent registration from being mislabeled as destructive change.
 A real worktree-specific landing-branch remote binding gives two roots sharing one common Git directory different landing commits and proves both roots retain their own remote evidence.
@@ -619,6 +621,8 @@ ok - fm-playbot-lanes: every root resolves its own worktree-specific remote evid
 ok - fm-playbot-lanes: immediate recheck returns exact thread and path blockers
 ok - fm-playbot-lanes: rejection distinguishes already-missing registration from removal
 ok - fm-playbot-lanes: rejected multi-root deletion reconciles and audits exact partial state
+ok - fm-playbot-lanes: exact root-row deltas report partial deletion
+ok - fm-playbot-lanes: audit append completes short writes and syncs creation
 ok - fm-playbot-lanes: successful IPC cannot label incomplete removal deleted
 ok - fm-playbot-lanes: invalid route objects make post-action cleanup incomplete
 ok - fm-playbot-lanes: concurrent Stop notification cannot reactivate retired routes

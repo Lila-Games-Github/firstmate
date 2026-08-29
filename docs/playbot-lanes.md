@@ -79,7 +79,7 @@ Path matching preserves Git pathname identity, so a literal backslash in a POSIX
 There is no bulk destructive form.
 It repeats the complete inspection immediately before action and calls Playbot's own `workspace:delete` IPC with `preserveWorktrees: false`; it never deletes a folder or changes Playbot's database itself.
 A failed immediate recheck returns that complete structured inspection, including the blocking chat states and tracked, untracked, and ignored paths, without calling the destructive IPC.
-After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, then deactivates every durable lane route naming the workspace and appends a mode-0600 private audit record under the lane state directory.
+After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, then deactivates every durable lane route naming the workspace and completely writes and syncs a mode-0600 private audit record under the lane state directory, including its directory entry on first creation.
 Each root resolves remote evidence independently so worktree-specific Git configuration cannot borrow another root's remote or commit.
 The immediate inspection captures whether each Git worktree registration existed, and post-action reconciliation reports a registration as removed only when that captured registration changed from present to absent.
 Retirement enumerates every route file strictly and validates its version, filename-bound id, active flag, endpoint identities, workspace identities, and timestamps, so malformed or unreadable route state makes post-action cleanup incomplete instead of disappearing from the result and audit.
@@ -89,7 +89,7 @@ That record names the time, project, workspace, workspace paths, exact root head
 If the IPC succeeds but database, directory, or Git-registration verification is incomplete, the tool returns `deleted: false`, `partialAction: true`, `postActionComplete: false`, the full reconciliation, and a warning against blind retry.
 That incomplete outcome preserves matching active routes because the workspace still exists or its removal is uncertain.
 If removal verification is complete but route cleanup or audit append fails, the tool returns `deleted: true` with `postActionComplete: false` and exact problems because the workspace deletion is verified even though post-action work remains incomplete.
-If Playbot rejects the deletion after removing anything, the tool reconciles every database row, directory, and NUL-parsed Git worktree registration, appends a partial-action audit, returns the exact removed, remaining, and uncertain evidence with the error, and warns against a blind retry.
+If Playbot rejects the deletion after removing anything, the tool compares every exact database root row with its pre-action baseline, reconciles every directory and NUL-parsed Git worktree registration, appends a partial-action audit, returns the exact removed, added, remaining, and uncertain evidence with the error, and warns against a blind retry.
 
 ## Lane lifecycle
 

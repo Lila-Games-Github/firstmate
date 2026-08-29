@@ -651,6 +651,7 @@ const sendNonObjectFile = path.join(process.env.FIXTURE_ROOT, 'send-non-object')
 // itself throws while the send that came before it already succeeded.
 const probeAcceptedFile = path.join(process.env.FIXTURE_ROOT, 'launch-accepts-probe');
 const workspaceDeleteFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-fail-after');
+const workspaceDeleteRootRowFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-root-row-fail-after');
 const workspaceDeleteSucceedsWithoutRemovalFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-succeeds-without-removal');
 let createCounter = 0;
 let threadCounter = 0;
@@ -872,12 +873,23 @@ async function electronInvoke(channel, payload) {
       if (workspace.kind === 'local') throw new Error('Cannot delete the Local workspace');
       if (readFileOr(workspaceDeleteSucceedsWithoutRemovalFile, '')) return null;
       const roots = db.prepare(`
-        SELECT wr.path, r.path AS repository_path FROM workspace_roots wr
+        SELECT wr.project_root_id, wr.path, wr.branch, r.path AS repository_path FROM workspace_roots wr
         JOIN project_roots pr ON pr.id = wr.project_root_id
         JOIN repositories r ON r.id = pr.repository_id
         WHERE wr.workspace_id = ?
         ORDER BY pr.position
       `).all(payload.workspaceId);
+      const rootRowFailAfter = Number(readFileOr(workspaceDeleteRootRowFailAfterFile, '0'));
+      if (rootRowFailAfter > 0) {
+        const removeRootRow = db.prepare(`
+          DELETE FROM workspace_roots
+          WHERE workspace_id = ? AND project_root_id = ? AND path = ? AND branch = ?
+        `);
+        for (const root of roots.slice(0, rootRowFailAfter)) {
+          removeRootRow.run(payload.workspaceId, root.project_root_id, root.path, root.branch);
+        }
+        throw new Error(`fixture rejected after removing ${Math.min(rootRowFailAfter, roots.length)} root row(s)`);
+      }
       const failAfter = Number(readFileOr(workspaceDeleteFailAfterFile, '0'));
       let removedCount = 0;
       for (const root of roots) {
@@ -4689,6 +4701,62 @@ NODE
 rm -f "$partial_route_file"
 pass "fm-playbot-lanes: rejected multi-root deletion reconciles and audits exact partial state"
 
+root_row_one="$FIXTURE_ROOT/worker/.worktrees/root-row-one"
+root_row_two="$partial_repository/.worktrees/root-row-two"
+git -C "$FIXTURE_ROOT/worker" fetch --quiet origin main
+git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-root-row-one "$root_row_one" origin/main >/dev/null \
+  || fail "could not create the first root-row reconciliation worktree"
+git -C "$partial_repository" worktree add -b retirement-root-row-two "$root_row_two" main >/dev/null \
+  || fail "could not create the second root-row reconciliation worktree"
+FIXTURE_ROOT="$FIXTURE_ROOT" ROOT_ROW_ONE="$root_row_one" ROOT_ROW_TWO="$root_row_two" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = new Date().toISOString();
+db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-retire-root-row', 'project-worker', 'Root row partial', 'worktree', 0, 'active', now, now);
+db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-retire-root-row', 'root-worker', process.env.ROOT_ROW_ONE, 'retirement-root-row-one');
+db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-retire-root-row', 'root-partial-two', process.env.ROOT_ROW_TWO, 'retirement-root-row-two');
+db.close();
+NODE
+printf '1\n' > "$FIXTURE_ROOT/workspace-delete-root-row-fail-after"
+out=$(retirement_call ws-retire-root-row ',"confirm":true')
+rm -f "$FIXTURE_ROOT/workspace-delete-root-row-fail-after"
+OUT="$out" ROOT_ROW_ONE="$root_row_one" ROOT_ROW_TWO="$root_row_two" node --no-warnings <<'NODE' \
+  || fail "an exact root-row removal was not reported as a partial deletion"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('partial deletion occurred')) process.exit(1);
+const data = value.error.data;
+if (!data.partialAction || data.deleted) process.exit(1);
+if (data.verification.checks.workspaceRootRowCount !== 1 || data.verification.checks.workspaceRootRowsGone) process.exit(1);
+if (data.reconciliation.removed.workspaceRootRows.length !== 1) process.exit(1);
+const removed = data.reconciliation.removed.workspaceRootRows[0];
+if (data.reconciliation.remaining.workspaceRootRows.length !== 1) process.exit(1);
+const remaining = data.reconciliation.remaining.workspaceRootRows[0];
+const expectedRemoved = data.baseline.database.workspaceRootRows.find((row) => row.path !== remaining.path);
+if (JSON.stringify(removed) !== JSON.stringify(expectedRemoved)) process.exit(1);
+if (!new Set([removed.path, remaining.path]).has(process.env.ROOT_ROW_ONE)) process.exit(1);
+if (!new Set([removed.path, remaining.path]).has(process.env.ROOT_ROW_TWO)) process.exit(1);
+if (data.reconciliation.added.workspaceRootRows.length !== 0) process.exit(1);
+if (data.reconciliation.removed.directories.length !== 0 || data.reconciliation.removed.gitRegistrations.length !== 0) process.exit(1);
+if (!data.audit.appended) process.exit(1);
+NODE
+[ -d "$root_row_one" ] || fail "root-row reconciliation unexpectedly removed the first directory"
+[ -d "$root_row_two" ] || fail "root-row reconciliation unexpectedly removed the second directory"
+AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" node --no-warnings <<'NODE' \
+  || fail "the root-row partial-deletion audit lost its exact row delta"
+const fs = require('node:fs');
+const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+if (audit.workspace.id !== 'ws-retire-root-row' || !audit.deletionObserved) process.exit(1);
+if (audit.reconciliation.removed.workspaceRootRows.length !== 1) process.exit(1);
+const remaining = audit.reconciliation.remaining.workspaceRootRows[0];
+const expectedRemoved = audit.baseline.database.workspaceRootRows.find((row) => row.path !== remaining.path);
+if (JSON.stringify(audit.reconciliation.removed.workspaceRootRows[0]) !== JSON.stringify(expectedRemoved)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: exact root-row deltas report partial deletion"
+
 incomplete_success_root="$FIXTURE_ROOT/worker/.worktrees/incomplete-success"
 git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-incomplete-success "$incomplete_success_root" "$operation_base" >/dev/null \
   || fail "could not create the incomplete-success retirement worktree"
@@ -4706,7 +4774,55 @@ NODE
 incomplete_success_route="$PLAYBOT_LANES_STATE_DIR/routes/incomplete-success-route.json"
 printf '%s\n' '{"version":1,"id":"incomplete-success-route","active":true,"supervisor":{"id":"chat-controller","workspaceId":"ws-controller"},"worker":{"id":"chat-retire-incomplete-success","workspaceId":"ws-retire-incomplete-success"},"createdAt":"2026-08-30T00:00:00.000Z","updatedAt":"2026-08-30T00:00:00.000Z"}' > "$incomplete_success_route"
 printf 'succeed without removal\n' > "$FIXTURE_ROOT/workspace-delete-succeeds-without-removal"
-out=$(retirement_call ws-retire-incomplete-success ',"confirm":true')
+audit_short_write_shim="$FIXTURE_ROOT/audit-short-write-shim.cjs"
+audit_file="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl"
+audit_file_sync="$FIXTURE_ROOT/audit-file-synced"
+audit_directory_sync="$FIXTURE_ROOT/audit-directory-synced"
+cat > "$audit_short_write_shim" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const originalOpenSync = fs.openSync;
+const originalWriteSync = fs.writeSync;
+const originalFsyncSync = fs.fsyncSync;
+const originalWriteFileSync = fs.writeFileSync;
+let auditDescriptor = null;
+let directoryDescriptor = null;
+let shortened = false;
+let auditOpened = false;
+fs.openSync = function trackAuditOpen(file, ...rest) {
+  const descriptor = originalOpenSync.call(fs, file, ...rest);
+  const resolved = path.resolve(String(file));
+  if (resolved === path.resolve(process.env.FM_TEST_AUDIT_FILE)) {
+    auditDescriptor = descriptor;
+    auditOpened = true;
+  }
+  if (resolved === path.dirname(path.resolve(process.env.FM_TEST_AUDIT_FILE))) directoryDescriptor = descriptor;
+  return descriptor;
+};
+fs.writeSync = function shortAuditWrite(descriptor, data, ...rest) {
+  if (descriptor === auditDescriptor && !shortened) {
+    shortened = true;
+    if (Buffer.isBuffer(data)) {
+      const [offset, length, position] = rest;
+      return originalWriteSync.call(fs, descriptor, data, offset, Math.max(1, Math.floor(length / 2)), position);
+    }
+    return originalWriteSync.call(fs, descriptor, String(data).slice(0, Math.max(1, Math.floor(String(data).length / 2))), ...rest);
+  }
+  return originalWriteSync.call(fs, descriptor, data, ...rest);
+};
+fs.fsyncSync = function recordDurability(descriptor) {
+  const result = originalFsyncSync.call(fs, descriptor);
+  if (descriptor === auditDescriptor) originalWriteFileSync.call(fs, process.env.FM_TEST_AUDIT_FILE_SYNC, 'synced\n');
+  if (descriptor === directoryDescriptor && auditOpened) originalWriteFileSync.call(fs, process.env.FM_TEST_AUDIT_DIRECTORY_SYNC, 'synced\n');
+  return result;
+};
+NODE
+rm -f "$audit_file"
+out=$(FM_TEST_AUDIT_FILE="$audit_file" \
+  FM_TEST_AUDIT_FILE_SYNC="$audit_file_sync" \
+  FM_TEST_AUDIT_DIRECTORY_SYNC="$audit_directory_sync" \
+  NODE_OPTIONS="--require=$audit_short_write_shim" \
+  retirement_call ws-retire-incomplete-success ',"confirm":true')
 rm -f "$FIXTURE_ROOT/workspace-delete-succeeds-without-removal"
 OUT="$out" INCOMPLETE_SUCCESS_ROOT="$incomplete_success_root" node --no-warnings <<'NODE' \
   || fail "successful IPC mislabeled incomplete removal as deleted"
@@ -4724,6 +4840,15 @@ if (!value.routes.reconciliation.matchingBefore.includes('incomplete-success-rou
 if (!value.routes.reconciliation.matchingAfter.includes('incomplete-success-route.json')) process.exit(1);
 if (!value.routes.reconciliation.remainingActive.includes('incomplete-success-route.json')) process.exit(1);
 NODE
+[ -f "$audit_file_sync" ] || fail "the completed audit record was not fsynced"
+[ -f "$audit_directory_sync" ] || fail "the first audit-file creation was not directory-synced"
+AUDIT_FILE="$audit_file" node --no-warnings <<'NODE' \
+  || fail "a short audit write left an incomplete durable record"
+const rows = require('node:fs').readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n');
+if (rows.length !== 1 || JSON.parse(rows[0]).workspace.id !== 'ws-retire-incomplete-success') process.exit(1);
+NODE
+rm -f "$audit_short_write_shim" "$audit_file_sync" "$audit_directory_sync"
+pass "fm-playbot-lanes: audit append completes short writes and syncs creation"
 [ -d "$incomplete_success_root" ] || fail "the incomplete-success fixture unexpectedly removed its worktree"
 AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" INCOMPLETE_SUCCESS_ROOT="$incomplete_success_root" ROUTE_FILE="$incomplete_success_route" node --no-warnings <<'NODE' \
   || fail "successful incomplete removal lost reconciliation in the durable audit"

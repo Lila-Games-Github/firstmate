@@ -1383,14 +1383,29 @@ function retirementAuditPath() {
 function appendRetirementAudit(record) {
   ensurePrivateDirs();
   const file = retirementAuditPath();
-  const descriptor = fs.openSync(file, "a", 0o600);
+  const encoded = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  let descriptor;
+  let created = false;
   try {
-    fs.writeSync(descriptor, `${JSON.stringify(record)}\n`, null, "utf8");
+    descriptor = fs.openSync(file, "ax", 0o600);
+    created = true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    descriptor = fs.openSync(file, "a", 0o600);
+  }
+  try {
+    let offset = 0;
+    while (offset < encoded.length) {
+      const written = fs.writeSync(descriptor, encoded, offset, encoded.length - offset, null);
+      if (!Number.isSafeInteger(written) || written <= 0) throw new Error("Audit append made no forward progress");
+      offset += written;
+    }
+    fs.chmodSync(file, 0o600);
     fs.fsyncSync(descriptor);
   } finally {
     fs.closeSync(descriptor);
   }
-  fs.chmodSync(file, 0o600);
+  if (created) fsyncDirectory(path.dirname(file));
   return file;
 }
 
@@ -1628,15 +1643,39 @@ function verifyWorkspaceRetirement(project, inspection) {
   return { complete: problems.length === 0, checks, problems };
 }
 
-function retirementReconciliation(verification) {
+function rowMultisetDifference(left, right) {
+  const available = new Map();
+  for (const row of right) {
+    const key = JSON.stringify([row.projectRootId, row.path, row.branch]);
+    available.set(key, (available.get(key) ?? 0) + 1);
+  }
+  return left.filter((row) => {
+    const key = JSON.stringify([row.projectRootId, row.path, row.branch]);
+    const count = available.get(key) ?? 0;
+    if (count === 0) return true;
+    available.set(key, count - 1);
+    return false;
+  });
+}
+
+function retirementReconciliation(verification, baseline) {
   const directoryChecks = verification.checks.worktreeDirectoriesGone;
   const registrationChecks = verification.checks.gitRegistrationsGone;
+  const rootRowsComparable = verification.checks.workspaceRootRowCount !== null
+    && Array.isArray(baseline?.database?.workspaceRootRows);
+  const removedRootRows = rootRowsComparable
+    ? rowMultisetDifference(baseline.database.workspaceRootRows, verification.checks.workspaceRootRows)
+    : [];
+  const addedRootRows = rootRowsComparable
+    ? rowMultisetDifference(verification.checks.workspaceRootRows, baseline.database.workspaceRootRows)
+    : [];
   const removed = {
     workspaceRow: verification.checks.workspaceRowGone,
-    workspaceRootRows: verification.checks.workspaceRootRowsGone,
+    workspaceRootRows: removedRootRows,
     directories: directoryChecks.filter((entry) => entry.gone).map((entry) => entry.path),
     gitRegistrations: registrationChecks.filter((entry) => entry.removed).map((entry) => entry.path),
   };
+  const added = { workspaceRootRows: addedRootRows };
   const remaining = {
     workspaceRowCount: verification.checks.workspaceRowCount,
     workspaceRootRows: verification.checks.workspaceRootRows,
@@ -1650,7 +1689,14 @@ function retirementReconciliation(verification) {
     ...directoryChecks.filter((entry) => entry.error).map((entry) => `directory ${entry.path}: ${entry.error}`),
     ...registrationChecks.filter((entry) => entry.error).map((entry) => `Git registration ${entry.path}: ${entry.error}`),
   ];
-  return { removed, remaining, uncertain };
+  return { removed, added, remaining, uncertain };
+}
+
+function retirementDeletionObserved(verification, reconciliation) {
+  return verification.checks.workspaceRowGone
+    || reconciliation.removed.workspaceRootRows.length > 0
+    || verification.checks.worktreeDirectoriesGone.some((entry) => entry.gone)
+    || verification.checks.gitRegistrationsGone.some((entry) => entry.removed);
 }
 
 function captureWorkspaceRetirementBaseline(project, inspection) {
@@ -1755,11 +1801,8 @@ async function retireWorkspace(project, workspace, landingBranch) {
 
   if (ipcError) {
     const verification = verifyWorkspaceRetirement(project, inspection);
-    const reconciliation = retirementReconciliation(verification);
-    const deletionObserved = verification.checks.workspaceRowGone
-      || verification.checks.workspaceRootRowsGone
-      || verification.checks.worktreeDirectoriesGone.some((entry) => entry.gone)
-      || verification.checks.gitRegistrationsGone.some((entry) => entry.removed);
+    const reconciliation = retirementReconciliation(verification, baseline);
+    const deletionObserved = retirementDeletionObserved(verification, reconciliation);
     const routes = verification.complete
       ? deactivateWorkspaceRoutes(workspace.id, routeBaseline)
       : observeWorkspaceRoutes(workspace.id, routeBaseline);
@@ -1822,14 +1865,11 @@ async function retireWorkspace(project, workspace, landingBranch) {
   }
 
   const verification = verifyWorkspaceRetirement(project, inspection);
-  const reconciliation = retirementReconciliation(verification);
+  const reconciliation = retirementReconciliation(verification, baseline);
   const routes = verification.complete
     ? deactivateWorkspaceRoutes(workspace.id, routeBaseline)
     : observeWorkspaceRoutes(workspace.id, routeBaseline);
-  const deletionObserved = verification.checks.workspaceRowGone
-    || verification.checks.workspaceRootRowsGone
-    || verification.checks.worktreeDirectoriesGone.some((entry) => entry.gone)
-    || verification.checks.gitRegistrationsGone.some((entry) => entry.removed);
+  const deletionObserved = retirementDeletionObserved(verification, reconciliation);
   const deletedPaths = reconciliation.removed.directories;
   const retryWarning = verification.complete
     ? null
