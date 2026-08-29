@@ -743,10 +743,6 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
-# Failure to prepare a lock owner is not lock contention. In particular, a
-# required pid identity can fail before any lock path exists. The stale-owner
-# path must return that failure promptly instead of recursively attempting
-# .steal locks until bash exhausts its stack.
 test_lock_owner_preparation_failure_is_bounded() {
   local dir state rc
   dir=$(make_case lock-owner-preparation-failure)
@@ -757,13 +753,17 @@ test_lock_owner_preparation_failure_is_bounded() {
     . "$1"
     fm_pid_identity() { return 1; }
     FM_LOCK_REQUIRE_IDENTITY=1
-    if fm_lock_try_acquire "$2/.fixture.lock"; then
-      exit 10
-    fi
+    lock_rc=0
+    fm_lock_acquire_wait "$2/.fixture.lock" || lock_rc=$?
+    [ "$lock_rc" -eq 3 ] || exit 10
     [ ! -e "$2/.fixture.lock" ] && [ ! -L "$2/.fixture.lock" ] || exit 11
+    fm_lock_try_create() { return 1; }
+    lock_rc=0
+    fm_lock_try_acquire "$2/.released-race.lock" || lock_rc=$?
+    [ "$lock_rc" -eq 1 ] || exit 12
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
-  [ "$rc" -eq 0 ] || fail "a lock owner-preparation failure did not return cleanly (rc=$rc)"
-  pass "lock owner-preparation failure returns without recursive stale-lock recovery"
+  [ "$rc" -eq 0 ] || fail "a lock owner-preparation failure did not propagate promptly (rc=$rc)"
+  pass "lock owner-preparation failure is terminal while an absent contention race remains retryable"
 }
 
 # Drain-time historical annotation staleness: a turn-ended-only wake row must

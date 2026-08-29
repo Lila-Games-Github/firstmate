@@ -11,6 +11,7 @@ FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 FM_LOCK_RECOVERY_MAX_DEPTH=8
 FM_LOCK_RECOVERY_REFUSED_STATUS=2
+FM_LOCK_OWNER_PREPARATION_FAILED_STATUS=3
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -485,10 +486,10 @@ fm_lock_try_create() {
   FM_LOCK_OWNER_DIR=
   if fm_lock_uses_directory_owner; then
     [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
-    ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+    ownerdir=$(fm_lock_owner_dir "$lockdir") || return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
     if ! fm_lock_prepare_owner "$ownerdir"; then
       fm_lock_discard_owner "$ownerdir"
-      return 1
+      return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
     fi
     if ! mkdir "$lockdir" 2>/dev/null; then
       fm_lock_discard_owner "$ownerdir"
@@ -510,14 +511,11 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
-  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
-    fm_lock_discard_owner "$ownerdir"
-    return 1
-  fi
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+  ownerdir=$(fm_lock_owner_dir "$lockdir") || return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
   if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
-    return 1
+    return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
@@ -838,11 +836,10 @@ fm_lock_try_acquire() {
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  else
+    rc=$?
   fi
-  # A failed owner preparation is not contention: identity generation or an
-  # owner-file write can fail before a lock path exists. Stale-owner recovery
-  # is meaningful only for an observed lock. Treating an absent path as a stale
-  # owner recursively tries <lock>.steal, then <lock>.steal.steal forever.
+  [ "$rc" -ne "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS" ] || return "$rc"
   if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
     return 1
   fi
@@ -862,8 +859,11 @@ fm_lock_try_acquire() {
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
       return 0
+    else
+      rc=$?
     fi
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    [ "$rc" -ne "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS" ] || return "$rc"
     return 1
   fi
   if fm_lock_owner_alive "$lockdir" "$pid"; then
@@ -887,7 +887,9 @@ fm_lock_try_acquire() {
     rc=$?
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
-    [ "$rc" -ne "$FM_LOCK_RECOVERY_REFUSED_STATUS" ] || return "$rc"
+    case "$rc" in
+      "$FM_LOCK_RECOVERY_REFUSED_STATUS"|"$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS") return "$rc" ;;
+    esac
     return 1
   fi
 
@@ -933,11 +935,12 @@ fm_lock_try_acquire() {
     return 1
   fi
   fm_lock_remove_path "$lockdir" || true
-  rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
+  else
+    rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
@@ -956,7 +959,9 @@ fm_lock_acquire_wait() {
     else
       rc=$?
     fi
-    [ "$rc" -ne "$FM_LOCK_RECOVERY_REFUSED_STATUS" ] || return "$rc"
+    case "$rc" in
+      "$FM_LOCK_RECOVERY_REFUSED_STATUS"|"$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS") return "$rc" ;;
+    esac
     sleep 0.1
   done
 }
