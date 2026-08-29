@@ -195,7 +195,14 @@ test_repeat_capture_is_idempotent() {
 }
 
 test_read_commands_reject_symlinked_state() {
-  local target exposed id override command rc
+  local target exposed normal id override command output rc
+  normal=$(make_home state-alias-normalization)
+  for override in "$normal/state/" "$normal/state/."; do
+    output=$(FM_HOME="$normal" FM_STATE_OVERRIDE="$override" "$COMMAND" list --all) \
+      || fail "list rejected real state alias $override"
+    [ -z "$output" ] || fail "empty real state alias produced candidate output"
+  done
+
   target=$(make_home symlink-target)
   id=$(capture_candidate "$target" symlink-source FrogPile escaped-defect \
     "state overrides must stay inside the selected private home")
@@ -235,7 +242,7 @@ test_read_commands_reject_symlinked_state() {
     "a read command renamed a record through the symlinked state override"
   assert_absent "$(candidate_path "$target" "$id" documented)" \
     "a read command corrected lifecycle state outside the selected private home"
-  pass "public lifecycle commands reject symlinked trailing state aliases"
+  pass "state aliases normalize before public lifecycle path validation"
 }
 
 test_atomic_lifecycle_publication_and_content_authority() {
@@ -817,6 +824,107 @@ test_summary_rejects_unsafe_entries() {
   pass "summary and record discovery reject unsafe exact entries"
 }
 
+test_canonical_path_boundary_forms() {
+  local seed dangling_home escape_home nonregular_home store_target store_home file_store_home
+  local mutation_home id outside rc
+  seed=$(make_home capture-sibling-seed)
+  id=$(capture_candidate "$seed" capture-sibling FrogPile escaped-defect \
+    "capture must reject every unsafe deterministic sibling")
+  dangling_home=$(make_home capture-dangling-sibling)
+  mkdir -p "$dangling_home/state/learning-candidates"
+  ln -s "$dangling_home/missing-record" "$(candidate_path "$dangling_home" "$id" documented)"
+  set +e
+  capture_candidate "$dangling_home" capture-sibling FrogPile escaped-defect \
+    "capture must reject every unsafe deterministic sibling" \
+    >"$dangling_home/capture.out" 2>"$dangling_home/capture.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "capture accepted a dangling deterministic sibling"
+  assert_grep "candidate path must be a regular file" "$dangling_home/capture.err" \
+    "capture did not route its deterministic sibling through path validation"
+  assert_absent "$(candidate_path "$dangling_home" "$id")" \
+    "capture published a record beside a dangling deterministic sibling"
+
+  escape_home=$(make_home record-symlink-escape)
+  mkdir -p "$escape_home/state/learning-candidates"
+  outside="$escape_home/outside-record.json"
+  printf '{}\n' >"$outside"
+  id=lc-000000000000000000000001
+  ln -s "$outside" "$(candidate_path "$escape_home" "$id")"
+  set +e
+  run_learning "$escape_home" summary >"$escape_home/summary.out" 2>"$escape_home/summary.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "summary followed a candidate symlink outside the store"
+  assert_grep "candidate path must be a regular file" "$escape_home/summary.err" \
+    "summary did not reject the store-escaping candidate symlink"
+
+  nonregular_home=$(make_home nonregular-record-entry)
+  id=lc-000000000000000000000002
+  mkdir -p "$(candidate_path "$nonregular_home" "$id")"
+  set +e
+  run_learning "$nonregular_home" summary \
+    >"$nonregular_home/summary.out" 2>"$nonregular_home/summary.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "summary accepted a non-regular candidate entry"
+  assert_grep "candidate path must be a regular file" "$nonregular_home/summary.err" \
+    "summary did not reject a non-regular candidate entry"
+
+  store_target=$(make_home candidate-store-target)
+  mkdir -p "$store_target/external-candidates"
+  store_home=$(make_home candidate-store-symlink)
+  ln -s "$store_target/external-candidates" "$store_home/state/learning-candidates"
+  set +e
+  run_learning "$store_home" list --all >"$store_home/list.out" 2>"$store_home/list.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "list followed a candidate-store directory symlink"
+  assert_grep "candidate store must be a real directory" "$store_home/list.err" \
+    "list did not reject a candidate-store directory symlink"
+  set +e
+  capture_candidate "$store_home" store-symlink FrogPile escaped-defect \
+    "capture must reject a symlinked candidate store" \
+    >"$store_home/capture.out" 2>"$store_home/capture.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "capture followed a candidate-store directory symlink"
+  assert_grep "candidate store must be a real directory" "$store_home/capture.err" \
+    "capture did not reject a candidate-store directory symlink"
+
+  file_store_home=$(make_home nonregular-candidate-store)
+  printf 'not a directory\n' >"$file_store_home/state/learning-candidates"
+  set +e
+  run_learning "$file_store_home" batch \
+    >"$file_store_home/batch.out" 2>"$file_store_home/batch.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "batch accepted a non-directory candidate store"
+  assert_grep "candidate store must be a real directory" "$file_store_home/batch.err" \
+    "batch did not reject a non-directory candidate store"
+
+  mutation_home=$(make_home lifecycle-destination-symlink)
+  id=$(capture_candidate "$mutation_home" lifecycle-destination FrogPile escaped-defect \
+    "lifecycle mutation must reject unsafe destination paths")
+  classify_feature "$mutation_home" "$id" curator-path >/dev/null
+  outside="$mutation_home/outside-destination.json"
+  printf '{}\n' >"$outside"
+  ln -s "$outside" "$(candidate_path "$mutation_home" "$id" documented)"
+  set +e
+  run_learning "$mutation_home" disposition "$id" --curator curator-path \
+    --status documented --note "The path boundary is documented" \
+    --reference "docs/path-boundary.md" \
+    >"$mutation_home/disposition.out" 2>"$mutation_home/disposition.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "lifecycle mutation accepted a symlink destination"
+  assert_grep "candidate path must be a regular file" "$mutation_home/disposition.err" \
+    "lifecycle mutation did not validate its destination path"
+  [ "$(jq -r '.lifecycle_state' "$(candidate_path "$mutation_home" "$id")")" = unresolved ] \
+    || fail "failed lifecycle path validation changed authoritative record content"
+  pass "canonical path boundary rejects unsafe state, store, record, capture, and mutation forms"
+}
+
 test_read_commands_reject_dangling_store() {
   local home command rc
   home=$(make_home dangling-candidate-store)
@@ -952,6 +1060,7 @@ test_concise_outputs_strip_terminal_controls
 test_bounded_summary_and_batch
 test_summary_producer_failure_propagates
 test_summary_rejects_unsafe_entries
+test_canonical_path_boundary_forms
 test_read_commands_reject_dangling_store
 test_capture_does_not_wait_for_curation
 test_candidate_survives_nonblocking_task_cleanup

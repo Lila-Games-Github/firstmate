@@ -41,6 +41,29 @@ Those runs cover required-field and stored-record validation, deterministic repe
 The brief regression executes the absolute shell-quoted capture command from a foreign working directory with conflicting ambient home, state, and code-root values, and confirms ship and scout records land only in the intended private home.
 The same runs confirm routine success still requires no audit or state creation, the originating lane never waits for curator-held state, and the originating lane is not assigned asynchronous curation.
 
+The canonical path-boundary regression was refreshed on 2026-08-30 with:
+
+```sh
+bash tests/fm-learning-candidate.test.sh && bash tests/fm-session-start.test.sh
+```
+
+The relevant output was:
+
+```text
+ok - state aliases normalize before public lifecycle path validation
+ok - summary and record discovery reject unsafe exact entries
+ok - canonical path boundary rejects unsafe state, store, record, capture, and mutation forms
+ok - public read commands reject a dangling candidate store
+# fm-learning-candidate.test.sh: all assertions passed
+ok - session start reports unsafe candidate entries as unavailable
+ok - session start reports a dangling candidate store as unavailable
+# fm-session-start.test.sh: all assertions passed
+```
+
+The exercised forms are a real state path with a trailing slash, a real state path with trailing slash-dot, both aliases on a symlinked state path, a dangling lifecycle sibling, a candidate symlink to a directory, a candidate symlink to a regular file outside the store, a candidate-store symlink to a directory, a dangling candidate-store symlink, a directory in a record slot, and a regular file in the store slot.
+Capture, get, list, batch, summary, session startup, and lifecycle disposition exercise those forms through their public interfaces, including the deterministic capture sibling and lifecycle destination paths.
+All named path forms are applicable and exercised; none are marked non-applicable.
+
 The relevant broader contract family and portable-lane coverage check used:
 
 ```sh

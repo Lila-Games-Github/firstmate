@@ -12,6 +12,8 @@
 # state/learning-candidates/<candidate-id>.<lifecycle-state>.json in the active
 # FM_HOME. Record content owns lifecycle state; the suffix is a derived hint.
 # The directory is outside task-scoped state, so fm-teardown.sh never removes it.
+# One path resolver normalizes the selected state alias and validates the store,
+# every enumerated entry, every lifecycle sibling, and every mutation destination.
 # Every record replacement publishes at the current path by atomic temp-plus-rename,
 # then renames that sole record when its lifecycle hint changes. A read that finds
 # a stale hint trusts readable content and corrects the name in passing unless
@@ -113,15 +115,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-while [ "$STATE" != / ]; do
-  case "$STATE" in
-    */) STATE=${STATE%/} ;;
-    */.) STATE=${STATE%/.}; [ -n "$STATE" ] || STATE=/ ;;
-    *) break ;;
-  esac
-done
-CANDIDATE_DIR="$STATE/learning-candidates"
-MUTATION_LOCK="$STATE/.learning-candidates.lock"
 MAX_TEXT_BYTES=8192
 
 die() {
@@ -129,13 +122,128 @@ die() {
   exit 2
 }
 
-validate_state_path() {
-  if [ -L "$STATE" ] || { [ -e "$STATE" ] && [ ! -d "$STATE" ]; }; then
-    die "state path must be a real directory: $STATE"
-  fi
+RESOLVED_PATH=
+RESOLVED_ID=
+RESOLVED_HINT=
+RESOLVED_EXISTS=0
+resolve_candidate_path() { # <state|store|entry|slot|record> <value> [value] [policy]
+  local kind=$1 value=$2 policy=${3:-required} path base id hint state
+  local found multiple attempt slot_exists slot_path
+  RESOLVED_PATH=
+  RESOLVED_ID=
+  RESOLVED_HINT=
+  RESOLVED_EXISTS=0
+  case "$kind" in
+    state)
+      path=$value
+      while [ "$path" != / ]; do
+        case "$path" in
+          */) path=${path%/} ;;
+          */.) path=${path%/.}; [ -n "$path" ] || path=/ ;;
+          *) break ;;
+        esac
+      done
+      if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+        die "state path must be a real directory: $path"
+      fi
+      RESOLVED_PATH=$path
+      [ ! -e "$path" ] || RESOLVED_EXISTS=1
+      ;;
+    store)
+      path="$STATE/learning-candidates"
+      if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+        die "candidate store must be a real directory: $path"
+      fi
+      RESOLVED_PATH=$path
+      [ ! -e "$path" ] || RESOLVED_EXISTS=1
+      ;;
+    entry)
+      path=$value
+      case "$path" in
+        ./*) path="$CANDIDATE_DIR/${path#./}" ;;
+        "$CANDIDATE_DIR"/*) ;;
+        *) die "candidate path is outside the candidate store: $path" ;;
+      esac
+      base=${path##*/}
+      if [ "$base" = 'lc-*.json' ] && [ ! -L "$path" ] && [ ! -e "$path" ]; then
+        RESOLVED_PATH=$path
+        return 0
+      fi
+      id=${base%%.*}
+      hint=${base#"$id."}
+      hint=${hint%.json}
+      validate_candidate_id "$id"
+      validate_lifecycle_state "$hint"
+      [ "$base" = "$id.$hint.json" ] || die "invalid candidate record name: $base"
+      [ "$path" = "$CANDIDATE_DIR/$base" ] \
+        || die "candidate path is outside the candidate store: $path"
+      RESOLVED_PATH=$path
+      RESOLVED_ID=$id
+      RESOLVED_HINT=$hint
+      if [ -L "$path" ]; then
+        die "candidate path must be a regular file: $path"
+      fi
+      if [ ! -e "$path" ]; then
+        [ "$policy" = allow-missing ] || die "candidate record not found: $path"
+        return 0
+      fi
+      if [ ! -f "$path" ]; then
+        if [ ! -e "$path" ]; then
+          return 0
+        fi
+        die "candidate path must be a regular file: $path"
+      fi
+      RESOLVED_EXISTS=1
+      ;;
+    slot)
+      id=$value
+      hint=$policy
+      policy=${4:-required}
+      validate_candidate_id "$id"
+      validate_lifecycle_state "$hint"
+      resolve_candidate_path entry "$CANDIDATE_DIR/$id.$hint.json" "$policy"
+      ;;
+    record)
+      id=$value
+      validate_candidate_id "$id"
+      attempt=0
+      while [ "$attempt" -lt 2 ]; do
+        found=
+        multiple=0
+        for state in unresolved dismissed documented promoted follow-up duplicate; do
+          resolve_candidate_path slot "$id" "$state" allow-missing
+          slot_exists=$RESOLVED_EXISTS
+          slot_path=$RESOLVED_PATH
+          [ "$slot_exists" -eq 1 ] || continue
+          if [ -n "$found" ]; then
+            multiple=1
+            break
+          fi
+          found=$slot_path
+        done
+        if [ "$multiple" -eq 0 ] && [ -n "$found" ]; then
+          RESOLVED_PATH=$found
+          RESOLVED_ID=$id
+          RESOLVED_EXISTS=1
+          return 0
+        fi
+        attempt=$((attempt + 1))
+      done
+      [ "$multiple" -eq 0 ] || die "candidate has multiple lifecycle records: $id"
+      if [ "$policy" = allow-missing ]; then
+        RESOLVED_ID=$id
+        return 0
+      fi
+      die "candidate not found: $id"
+      ;;
+    *) die "invalid candidate path resolver kind: $kind" ;;
+  esac
 }
 
-validate_state_path
+resolve_candidate_path state "$STATE"
+STATE=$RESOLVED_PATH
+CANDIDATE_DIR="$STATE/learning-candidates"
+MUTATION_LOCK="$STATE/.learning-candidates.lock"
 export FM_STATE_OVERRIDE=$STATE
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -223,22 +331,18 @@ now_rfc3339() {
 }
 
 ensure_store() {
-  validate_state_path
+  resolve_candidate_path state "$STATE"
   mkdir -p "$STATE"
-  if [ -L "$CANDIDATE_DIR" ] || { [ -e "$CANDIDATE_DIR" ] && [ ! -d "$CANDIDATE_DIR" ]; }; then
-    die "candidate store must be a real directory: $CANDIDATE_DIR"
-  fi
-  mkdir -p "$CANDIDATE_DIR"
+  resolve_candidate_path store "$CANDIDATE_DIR" allow-missing
+  [ "$RESOLVED_EXISTS" -eq 1 ] || mkdir -p "$RESOLVED_PATH"
+  resolve_candidate_path store "$CANDIDATE_DIR"
   chmod 700 "$CANDIDATE_DIR"
 }
 
 store_available_read_only() {
-  validate_state_path
-  [ ! -L "$CANDIDATE_DIR" ] \
-    || die "candidate store must be a real directory: $CANDIDATE_DIR"
-  [ -e "$CANDIDATE_DIR" ] || return 1
-  [ -d "$CANDIDATE_DIR" ] \
-    || die "candidate store must be a real directory: $CANDIDATE_DIR"
+  resolve_candidate_path state "$STATE"
+  resolve_candidate_path store "$CANDIDATE_DIR" allow-missing
+  [ "$RESOLVED_EXISTS" -eq 1 ]
 }
 
 LOCK_HELD=0
@@ -263,10 +367,6 @@ acquire_capture_lock() {
   fm_lock_try_acquire "$MUTATION_LOCK" \
     || die "capture is temporarily unavailable while learning-candidate curation is active"
   LOCK_HELD=1
-}
-
-record_path() { # <candidate-id> <lifecycle-state>
-  printf '%s/%s.%s.json\n' "$CANDIDATE_DIR" "$1" "$2"
 }
 
 validate_record_json() { # <json> [expected-id]
@@ -335,52 +435,25 @@ validate_record_json() { # <json> [expected-id]
   ' >/dev/null || die "invalid candidate record${expected:+: $expected}"
 }
 
-resolve_record_path() { # <candidate-id>; sets RECORD_PATH
-  local id=$1 state path found changed multiple attempt=0
-  while [ "$attempt" -lt 2 ]; do
-    found=
-    changed=0
-    multiple=0
-    for state in unresolved dismissed documented promoted follow-up duplicate; do
-      path=$(record_path "$id" "$state")
-      [ ! -L "$path" ] || die "candidate path must be a regular file: $path"
-      [ -e "$path" ] || continue
-      if [ ! -f "$path" ]; then
-        [ -e "$path" ] || { changed=1; break; }
-        die "candidate path must be a regular file: $path"
-      fi
-      if [ -n "$found" ]; then
-        multiple=1
-        break
-      fi
-      found=$path
-    done
-    if [ "$changed" -eq 0 ] && [ "$multiple" -eq 0 ] && [ -n "$found" ]; then
-      RECORD_PATH=$found
-      return 0
-    fi
-    attempt=$((attempt + 1))
-  done
-  [ "$multiple" -eq 0 ] || die "candidate has multiple lifecycle records: $id"
-  die "candidate not found: $id"
-}
-
 load_record() { # <candidate-id> [correct-hint]; sets RECORD_JSON and RECORD_PATH
-  local id=$1 correct_hint=${2:-1} content_state corrected_path attempt=0
+  local id=$1 correct_hint=${2:-1} content_state corrected_path corrected_exists attempt=0
   validate_candidate_id "$id"
   store_available_read_only || die "candidate not found: $id"
   while [ "$attempt" -lt 2 ]; do
-    resolve_record_path "$id"
+    resolve_candidate_path record "$id"
+    RECORD_PATH=$RESOLVED_PATH
     if ! RECORD_JSON=$(cat "$RECORD_PATH" 2>/dev/null); then
       attempt=$((attempt + 1))
       continue
     fi
     validate_record_json "$RECORD_JSON" "$id"
     content_state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
-    corrected_path=$(record_path "$id" "$content_state")
+    resolve_candidate_path slot "$id" "$content_state" allow-missing
+    corrected_path=$RESOLVED_PATH
+    corrected_exists=$RESOLVED_EXISTS
     [ "$corrected_path" != "$RECORD_PATH" ] || return 0
     [ "$correct_hint" -eq 1 ] || return 0
-    if [ -e "$corrected_path" ] || ! mv -- "$RECORD_PATH" "$corrected_path" 2>/dev/null; then
+    if [ "$corrected_exists" -eq 1 ] || ! mv -- "$RECORD_PATH" "$corrected_path" 2>/dev/null; then
       attempt=$((attempt + 1))
       continue
     fi
@@ -391,13 +464,11 @@ load_record() { # <candidate-id> [correct-hint]; sets RECORD_JSON and RECORD_PAT
 }
 
 write_record() { # <path> <json>
-  local path=$1 json=$2 id hint candidate_path=false
+  local path=$1 json=$2 id
   id=$(printf '%s\n' "$json" | jq -r '.id')
   validate_record_json "$json" "$id"
-  for hint in unresolved dismissed documented promoted follow-up duplicate; do
-    [ "$path" != "$(record_path "$id" "$hint")" ] || candidate_path=true
-  done
-  [ "$candidate_path" = true ] || die "candidate destination does not match record id: $id"
+  resolve_candidate_path entry "$path" allow-missing
+  [ "$RESOLVED_ID" = "$id" ] || die "candidate destination does not match record id: $id"
   TEMP_FILE=$(mktemp "$CANDIDATE_DIR/.candidate.XXXXXX") || die "could not create candidate temporary file"
   printf '%s\n' "$json" > "$TEMP_FILE"
   chmod 600 "$TEMP_FILE"
@@ -406,16 +477,20 @@ write_record() { # <path> <json>
 }
 
 replace_record() { # <old-path> <json>
-  local old_path=$1 json=$2 id state new_path
+  local old_path=$1 json=$2 id state new_path new_exists old_exists
   id=$(printf '%s\n' "$json" | jq -r '.id')
   state=$(printf '%s\n' "$json" | jq -r '.lifecycle_state')
-  new_path=$(record_path "$id" "$state")
+  resolve_candidate_path slot "$id" "$state" allow-missing
+  new_path=$RESOLVED_PATH
+  new_exists=$RESOLVED_EXISTS
   if [ "$new_path" != "$old_path" ]; then
-    [ ! -e "$new_path" ] || die "candidate lifecycle destination already exists: $id"
+    [ "$new_exists" -eq 0 ] || die "candidate lifecycle destination already exists: $id"
   fi
   write_record "$old_path" "$json"
   if [ "$new_path" != "$old_path" ] && ! mv -- "$old_path" "$new_path" 2>/dev/null; then
-    [ ! -e "$old_path" ] || die "could not update candidate lifecycle hint: $id"
+    resolve_candidate_path entry "$old_path" allow-missing
+    old_exists=$RESOLVED_EXISTS
+    [ "$old_exists" -eq 0 ] || die "could not update candidate lifecycle hint: $id"
     load_record "$id"
     [ "$RECORD_PATH" = "$new_path" ] \
       || die "could not update candidate lifecycle hint: $id"
@@ -426,16 +501,12 @@ replace_record() { # <old-path> <json>
 }
 
 records_stream() {
-  local path id state base previous=''
+  local path id previous=''
   store_available_read_only || return 0
   for path in "$CANDIDATE_DIR"/lc-*.json; do
-    base=${path##*/}
-    [ "$base" != 'lc-*.json' ] || continue
-    id=${base%%.*}
-    state=${base#"$id."}
-    state=${state%.json}
-    validate_candidate_id "$id"
-    validate_lifecycle_state "$state"
+    resolve_candidate_path entry "$path" allow-missing
+    id=$RESOLVED_ID
+    [ -n "$id" ] || continue
     [ "$id" != "$previous" ] || continue
     previous=$id
     load_record "$id"
@@ -450,7 +521,7 @@ records_array() {
 capture_command() {
   local task='' project='' signal='' impact='' root_cause='' escaped_contract='' missing_check=''
   local consumer='' prevention='' evidence='' proposed_owner='' counterfactual=''
-  local payload digest id path timestamp record existing existing_state existing_path
+  local payload digest id path timestamp record existing
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -507,10 +578,8 @@ capture_command() {
       disposition:null, duplicates:[], history:[{at:$at,event:"captured",actor:$incident.origin_task}]}')
 
   acquire_capture_lock
-  path=$(record_path "$id" unresolved)
-  for existing_state in unresolved dismissed documented promoted follow-up duplicate; do
-    existing_path=$(record_path "$id" "$existing_state")
-    [ -e "$existing_path" ] || continue
+  resolve_candidate_path record "$id" allow-missing
+  if [ "$RESOLVED_EXISTS" -eq 1 ]; then
     load_record "$id"
     existing=$RECORD_JSON
     [ "$(printf '%s\n' "$existing" | jq -r '.capture_digest')" = "$digest" ] \
@@ -520,7 +589,9 @@ capture_command() {
       || die "candidate digest collision: $id"
     printf '%s\n' "$id"
     return 0
-  done
+  fi
+  resolve_candidate_path slot "$id" unresolved allow-missing
+  path=$RESOLVED_PATH
   write_record "$path" "$record"
   printf '%s\n' "$id"
 }
@@ -570,8 +641,8 @@ batch_command() {
 }
 
 summary_command() {
-  local limit=3 count=0 sample_count=0 idx=0 name id hint state impact project signal line
-  local producer_pid correct_hint=1 entry_path
+  local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
+  local producer_pid correct_hint=1
   local -a samples=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -590,17 +661,8 @@ summary_command() {
   producer_pid=$!
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    name=${name#./}
-    id=${name%%.*}
-    hint=${name#"$id."}
-    hint=${hint%.json}
-    validate_candidate_id "$id"
-    validate_lifecycle_state "$hint"
-    [ "$name" = "$id.$hint.json" ] || die "invalid candidate record name: $name"
-    entry_path="$CANDIDATE_DIR/$name"
-    if [ -L "$entry_path" ] || { [ -e "$entry_path" ] && [ ! -f "$entry_path" ]; }; then
-      die "candidate path must be a regular file: $entry_path"
-    fi
+    resolve_candidate_path entry "$name" allow-missing
+    id=$RESOLVED_ID
     load_record "$id" "$correct_hint"
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
     [ "$state" = unresolved ] || continue

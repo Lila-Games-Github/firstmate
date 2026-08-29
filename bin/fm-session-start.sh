@@ -840,23 +840,21 @@ fi
 
 # Candidate records deliberately outlive task state, but the startup surface is
 # only a bounded count and concise sample. The lifecycle command owns both the
-# record schema and the hard output cap. An absent store is a zero-cost silent
-# case and is not created by this read-only path.
-if [ -e "$STATE/learning-candidates" ] || [ -L "$STATE/learning-candidates" ]; then
-  LEARNING_SUMMARY_ARGS=()
-  [ "$READ_ONLY" -eq 0 ] || LEARNING_SUMMARY_ARGS=(--read-only)
-  if LEARNING_SUMMARY=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-learning-candidate.sh" summary "${LEARNING_SUMMARY_ARGS[@]}" 2>&1); then
-    if [ -n "$LEARNING_SUMMARY" ]; then
-      subsection "Unresolved learning candidates"
-      printf '%s\n' "$LEARNING_SUMMARY"
-      printf '\nLoad learning-candidate-lifecycle before curating a bounded batch.\n'
-    fi
-  else
+# record schema, path validation, and hard output cap. An absent store is silent
+# and is not created by this read-only path.
+LEARNING_SUMMARY_ARGS=()
+[ "$READ_ONLY" -eq 0 ] || LEARNING_SUMMARY_ARGS=(--read-only)
+if LEARNING_SUMMARY=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-learning-candidate.sh" summary "${LEARNING_SUMMARY_ARGS[@]}" 2>&1); then
+  if [ -n "$LEARNING_SUMMARY" ]; then
     subsection "Unresolved learning candidates"
-    printf 'LEARNING CANDIDATES: summary unavailable - %s\n' \
-      "$(printf '%s\n' "$LEARNING_SUMMARY" | head -1 | LC_ALL=C tr '\000-\037\177-\237' ' ')"
+    printf '%s\n' "$LEARNING_SUMMARY"
+    printf '\nLoad learning-candidate-lifecycle before curating a bounded batch.\n'
   fi
+else
+  subsection "Unresolved learning candidates"
+  printf 'LEARNING CANDIDATES: summary unavailable - %s\n' \
+    "$(printf '%s\n' "$LEARNING_SUMMARY" | head -1 | LC_ALL=C tr '\000-\037\177-\237' ' ')"
 fi
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
