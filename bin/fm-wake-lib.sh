@@ -27,6 +27,24 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+fm_proc_cmdline_hex() {
+  local path=$1 arg encoded='' ordinal index saw_arg=0
+  local LC_ALL=C
+  [ -r "$path" ] || return 1
+  while IFS= read -r -d '' arg; do
+    saw_arg=1
+    index=0
+    while [ "$index" -lt "${#arg}" ]; do
+      printf -v ordinal '%d' "'${arg:index:1}"
+      printf -v encoded '%s%02x' "$encoded" "$((ordinal & 255))"
+      index=$((index + 1))
+    done
+    encoded="${encoded}00"
+  done < "$path"
+  [ "$saw_arg" -eq 1 ] || return 1
+  printf '%s\n' "$encoded"
+}
+
 fm_pid_identity() {
   local pid=$1 out proc_root stat_line starttime cmdline_hex identity_key
   local -a stat_fields
@@ -49,7 +67,7 @@ fm_pid_identity() {
     case "$starttime" in
       ''|*[!0-9]*) return 1 ;;
     esac
-    cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
+    cmdline_hex=$(fm_proc_cmdline_hex "$proc_root/$pid/cmdline") || return 1
     [ -n "$cmdline_hex" ] || return 1
     identity_key=proc-starttime
     [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
@@ -808,6 +826,13 @@ fm_lock_try_acquire() {
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  fi
+  # A failed owner preparation is not contention: identity generation or an
+  # owner-file write can fail before a lock path exists. Stale-owner recovery
+  # is meaningful only for an observed lock. Treating an absent path as a stale
+  # owner recursively tries <lock>.steal, then <lock>.steal.steal forever.
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 1
   fi
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:

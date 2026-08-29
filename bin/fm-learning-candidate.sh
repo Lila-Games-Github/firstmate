@@ -124,14 +124,12 @@ die() {
 
 RESOLVED_PATH=
 RESOLVED_ID=
-RESOLVED_HINT=
 RESOLVED_EXISTS=0
 resolve_candidate_path() { # <state|store|entry|slot|record> <value> [value] [policy]
   local kind=$1 value=$2 policy=${3:-required} path base id hint state
   local found multiple attempt slot_exists slot_path
   RESOLVED_PATH=
   RESOLVED_ID=
-  RESOLVED_HINT=
   RESOLVED_EXISTS=0
   case "$kind" in
     state)
@@ -179,7 +177,6 @@ resolve_candidate_path() { # <state|store|entry|slot|record> <value> [value] [po
         || die "candidate path is outside the candidate store: $path"
       RESOLVED_PATH=$path
       RESOLVED_ID=$id
-      RESOLVED_HINT=$hint
       if [ -L "$path" ]; then
         die "candidate path must be a regular file: $path"
       fi

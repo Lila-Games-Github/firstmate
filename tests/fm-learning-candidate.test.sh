@@ -254,6 +254,7 @@ test_atomic_lifecycle_publication_and_content_authority() {
   fakebin=$(fm_fakebin "$home/rename-interruption")
   real_mv=$(command -v mv)
   call_file="$home/mv-calls"
+  # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'count=0' \
@@ -320,6 +321,7 @@ test_concurrent_suffix_rename_reresolves() {
   fakebin=$(fm_fakebin "$home/concurrent-rename")
   real_cat=$(command -v cat)
   real_mv=$(command -v mv)
+  # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'if [ "$1" = "$FM_TEST_RACE_SOURCE" ] && [ ! -e "$FM_TEST_RACE_DONE" ]; then' \
@@ -349,7 +351,7 @@ test_concurrent_suffix_rename_reresolves() {
 }
 
 test_cutover_accepts_concurrent_read_correction() {
-  local home id fakebin real_mv call_file json count
+  local home id fakebin real_mv call_file json count base_path
   home=$(make_home concurrent-cutover)
   id=$(capture_candidate "$home" concurrent-cutover FrogPile escaped-defect \
     "a reader may correct the lifecycle hint during cutover")
@@ -357,6 +359,7 @@ test_cutover_accepts_concurrent_read_correction() {
   fakebin=$(fm_fakebin "$home/cutover-reader")
   real_mv=$(command -v mv)
   call_file="$home/mv-calls"
+  # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'count=0' \
@@ -368,7 +371,8 @@ test_cutover_accepts_concurrent_read_correction() {
     'fi' \
     'exec "$FM_TEST_REAL_MV" "$@"' >"$fakebin/mv"
   chmod +x "$fakebin/mv"
-  PATH="$fakebin:$PATH" FM_TEST_BASE_PATH="$PATH" FM_TEST_COMMAND="$COMMAND" \
+  base_path=$PATH
+  PATH="$fakebin:$base_path" FM_TEST_BASE_PATH="$base_path" FM_TEST_COMMAND="$COMMAND" \
     FM_TEST_CANDIDATE="$id" FM_TEST_READ_OUT="$home/read.out" \
     FM_TEST_REAL_MV="$real_mv" FM_TEST_MV_CALLS="$call_file" run_learning "$home" \
     disposition "$id" --curator curator-cutover --status documented \
@@ -408,6 +412,7 @@ test_list_resolves_ids_after_suffix_rename() {
   fakebin=$(fm_fakebin "$home/list-reader")
   real_cat=$(command -v cat)
   real_mv=$(command -v mv)
+  # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'if [ "$1" = "$FM_TEST_TRIGGER_PATH" ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
@@ -649,6 +654,7 @@ test_dedupe_interruption_and_terminal_retry() {
   real_mv=$(command -v mv)
   call_file="$home/mv-calls"
   failed_file="$home/mv-failed"
+  # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     'count=0' \
