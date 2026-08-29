@@ -449,6 +449,105 @@ NODE
 rm -f "$route_lock_publish" "$route_lock_publish_ready" "$route_lock_publish_release" "$route_lock_publish_out"
 pass "fm-playbot-lanes: route-lock ownership publishes atomically before acquisition"
 
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the lane could not be reactivated for portable lock identity coverage"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.lane.active !== true) process.exit(1);
+NODE
+route_lock_identity_shim="$FIXTURE_ROOT/route-lock-identity-shim.cjs"
+route_lock_identity_ready="$FIXTURE_ROOT/route-lock-identity-ready"
+route_lock_identity_release="$FIXTURE_ROOT/route-lock-identity-release"
+route_lock_identity_owner_out="$FIXTURE_ROOT/route-lock-identity-owner.json"
+route_lock_identity_contender_out="$FIXTURE_ROOT/route-lock-identity-contender.json"
+cat > "$route_lock_identity_shim" <<'NODE'
+Object.defineProperty(process, 'platform', { value: 'darwin' });
+const childProcess = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const { syncBuiltinESMExports } = require('node:module');
+const originalSpawnSync = childProcess.spawnSync;
+const originalWriteFileSync = fs.writeFileSync;
+const wait = new Int32Array(new SharedArrayBuffer(4));
+childProcess.spawnSync = function stableProcessStart(command, args, options = {}) {
+  if ((command === 'ps' || command === '/bin/ps') && args?.includes('lstart=')) {
+    const environment = options.env ?? process.env;
+    const pid = args.at(-1);
+    return {
+      status: 0,
+      stdout: `start pid=${pid} tz=${environment.TZ ?? ''} locale=${environment.LC_ALL ?? ''}\n`,
+      stderr: '',
+    };
+  }
+  return originalSpawnSync.call(childProcess, command, args, options);
+};
+syncBuiltinESMExports();
+fs.writeFileSync = function pauseRouteMutation(file, ...rest) {
+  const resolved = path.resolve(String(file));
+  const route = path.resolve(process.env.FM_TEST_ROUTE_FILE);
+  if (process.env.FM_TEST_PAUSE_ROUTE === '1'
+    && resolved.startsWith(`${route}.`)
+    && resolved.endsWith('.tmp')) {
+    originalWriteFileSync.call(fs, file, ...rest);
+    originalWriteFileSync.call(fs, process.env.FM_TEST_ROUTE_READY, 'ready\n');
+    while (!fs.existsSync(process.env.FM_TEST_ROUTE_RELEASE)) Atomics.wait(wait, 0, 0, 20);
+    return;
+  }
+  return originalWriteFileSync.call(fs, file, ...rest);
+};
+NODE
+(
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+    | TZ=Pacific/Honolulu \
+      FM_TEST_ROUTE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$lane_id.json" \
+      FM_TEST_ROUTE_READY="$route_lock_identity_ready" \
+      FM_TEST_ROUTE_RELEASE="$route_lock_identity_release" \
+      FM_TEST_PAUSE_ROUTE=1 \
+      NODE_OPTIONS="--require=$route_lock_identity_shim" \
+      node --no-warnings "$SCRIPT" serve > "$route_lock_identity_owner_out"
+) &
+route_lock_identity_owner_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$route_lock_identity_ready" ] && break
+  sleep 0.02
+done
+[ -f "$route_lock_identity_ready" ] || fail "portable route-lock owner did not reach its deterministic pause"
+(
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+    | TZ=Asia/Kolkata \
+      FM_TEST_ROUTE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$lane_id.json" \
+      NODE_OPTIONS="--require=$route_lock_identity_shim" \
+      node --no-warnings "$SCRIPT" serve > "$route_lock_identity_contender_out"
+) &
+route_lock_identity_contender_pid=$!
+sleep 0.5
+if [ -s "$route_lock_identity_contender_out" ]; then
+  touch "$route_lock_identity_release"
+  wait "$route_lock_identity_owner_pid" || true
+  wait "$route_lock_identity_contender_pid" || true
+  fail "caller timezone differences reclaimed a live route-lock owner"
+fi
+touch "$route_lock_identity_release"
+wait "$route_lock_identity_owner_pid" || fail "portable route-lock owner failed after release"
+wait "$route_lock_identity_contender_pid" || fail "portable route-lock contender failed after owner release"
+OWNER_OUT="$route_lock_identity_owner_out" CONTENDER_OUT="$route_lock_identity_contender_out" node --no-warnings <<'NODE' \
+  || fail "portable route-lock identity did not serialize both mutations"
+const fs = require('node:fs');
+for (const file of [process.env.OWNER_OUT, process.env.CONTENDER_OUT]) {
+  const value = JSON.parse(fs.readFileSync(file, 'utf8')).result?.structuredContent;
+  if (value?.lane?.active !== false) process.exit(1);
+}
+NODE
+[ ! -e "$route_lock" ] || fail "portable route-lock identity left final lock residue"
+rm -f \
+  "$route_lock_identity_shim" \
+  "$route_lock_identity_ready" \
+  "$route_lock_identity_release" \
+  "$route_lock_identity_owner_out" \
+  "$route_lock_identity_contender_out"
+pass "fm-playbot-lanes: route-lock identity ignores caller timezone and locale"
+
 node --no-warnings "$SCRIPT" install >/dev/null
 node --no-warnings "$SCRIPT" install >/dev/null
 CONFIG="$PLAYBOT_HARNESS_HOME/config.toml" HOOKS="$PLAYBOT_HARNESS_HOME/hooks.json" node --no-warnings <<'NODE' || fail "install was not idempotent"
@@ -4223,6 +4322,33 @@ if (residue.publicationEvidence.remoteTips.includes(process.env.ORIG_HEAD_COMMIT
 NODE
 rm -f "$submodule_git_dir/ORIG_HEAD"
 pass "fm-playbot-lanes: persisted submodule pseudorefs expose reset unpushed commits"
+
+submodule_fetch_head_only=$(printf '%s\n' 'FETCH_HEAD-only submodule work' \
+  | git --git-dir="$submodule_git_dir" commit-tree "$submodule_tree" -p "$submodule_base")
+git --git-dir="$submodule_git_dir" update-ref refs/heads/retirement-fetch-source "$submodule_fetch_head_only"
+git --git-dir="$submodule_git_dir" push origin \
+  refs/heads/retirement-fetch-source:refs/heads/retirement-fetch-only >/dev/null \
+  || fail "could not publish the FETCH_HEAD-only submodule fixture"
+git --git-dir="$submodule_git_dir" update-ref -d refs/heads/retirement-fetch-source
+git --git-dir="$submodule_git_dir" fetch origin refs/heads/retirement-fetch-only >/dev/null \
+  || fail "could not fetch the FETCH_HEAD-only submodule fixture"
+git --git-dir="$submodule_git_dir" push --delete origin retirement-fetch-only >/dev/null \
+  || fail "could not remove the FETCH_HEAD-only commit from its server"
+git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" FETCH_HEAD_COMMIT="$submodule_fetch_head_only" node --no-warnings <<'NODE' \
+  || fail "an unpushed submodule commit reachable only through FETCH_HEAD was allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'submodule-local-history');
+const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
+if (!residue?.localOnlyCommits.some(entry => entry.commit === process.env.FETCH_HEAD_COMMIT && entry.subject === 'FETCH_HEAD-only submodule work')) process.exit(1);
+if (!residue.localOnlyPseudoRefs.some(entry => entry.ref === 'FETCH_HEAD' && entry.commit === process.env.FETCH_HEAD_COMMIT && entry.subject === 'FETCH_HEAD-only submodule work')) process.exit(1);
+if (!residue.publicationEvidence.pseudoRefs.some(entry => entry.ref === 'FETCH_HEAD' && entry.commit === process.env.FETCH_HEAD_COMMIT)) process.exit(1);
+if (residue.publicationEvidence.remoteTips.includes(process.env.FETCH_HEAD_COMMIT)) process.exit(1);
+NODE
+rm -f "$submodule_git_dir/FETCH_HEAD"
+pass "fm-playbot-lanes: persisted FETCH_HEAD exposes deleted remote commits"
 
 submodule_published=$(git --git-dir="$submodule_git_dir" rev-parse refs/remotes/origin/main)
 git --git-dir="$submodule_git_dir" update-ref refs/heads/retirement-local-branch "$submodule_published"

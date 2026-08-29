@@ -171,14 +171,29 @@ function processStartIdentity(pid) {
     }
   }
   if (process.platform !== "win32") {
-    const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 1_000 });
+    const command = process.platform === "darwin" ? "/bin/ps" : "ps";
+    const result = spawnSync(command, ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 1_000,
+      env: { ...process.env, LC_ALL: "C", LANG: "C", TZ: "UTC" },
+    });
     const started = result.status === 0 ? String(result.stdout ?? "").trim() : "";
-    return started ? `${process.platform}:${started}` : null;
+    return started ? `${process.platform}-utc-c:${started}` : null;
   }
   const command = `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`;
   const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { encoding: "utf8", timeout: 3_000, windowsHide: true });
   const started = result.status === 0 ? String(result.stdout ?? "").trim() : "";
   return /^\d+$/.test(started) ? `win32:${started}` : null;
+}
+
+function processStartIdentityProvesReuse(recorded, current) {
+  if (!recorded || !current) return false;
+  const recordedSeparator = recorded.indexOf(":");
+  const currentSeparator = current.indexOf(":");
+  if (recordedSeparator <= 0 || currentSeparator <= 0) return false;
+  const recordedKind = recorded.slice(0, recordedSeparator);
+  const currentKind = current.slice(0, currentSeparator);
+  return recordedKind === currentKind && recorded !== current;
 }
 
 const ROUTE_PROCESS_START_IDENTITY = processStartIdentity(process.pid);
@@ -278,7 +293,7 @@ function recoverRouteLock(lock) {
     if (processIsAlive(owner.pid)) {
       if (owner.legacy) return false;
       const identity = processStartIdentity(owner.pid);
-      if (!owner.identity || !identity || identity === owner.identity) return false;
+      if (!processStartIdentityProvesReuse(owner.identity, identity)) return false;
     }
     if (fs.readFileSync(lock, "utf8") !== raw) return false;
     fs.unlinkSync(lock);
@@ -301,7 +316,7 @@ function recoverRouteLock(lock) {
   if (!owner) throw new Error(`Durable lane route lock has unreadable ownership: ${lock}`);
   if (processIsAlive(owner.pid)) {
     const identity = processStartIdentity(owner.pid);
-    if (!owner.identity || !identity || identity === owner.identity) return false;
+    if (!processStartIdentityProvesReuse(owner.identity, identity)) return false;
   }
   if (fs.readdirSync(lock).join("\n") !== owner.name) return false;
   fs.unlinkSync(path.join(lock, owner.name));
@@ -809,7 +824,28 @@ function commitPseudoRefRecords(root) {
       records.push({ ref, commit, subject: exactCommitSubject(root, commit) });
     }
   }
-  return records.sort((left, right) => left.ref.localeCompare(right.ref) || left.commit.localeCompare(right.commit));
+  const fetchHead = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"]));
+  if (pathPresence(fetchHead)) {
+    const rows = fs.readFileSync(fetchHead, "utf8").split(/\r?\n/);
+    if (rows.at(-1) === "") rows.pop();
+    if (rows.length === 0 || rows.some((row) => row.length === 0)) {
+      throw new Error("Git returned unreadable persisted submodule FETCH_HEAD evidence");
+    }
+    for (const row of rows) {
+      const firstTab = row.indexOf("\t");
+      const secondTab = firstTab < 0 ? -1 : row.indexOf("\t", firstTab + 1);
+      const candidate = firstTab < 0 ? "" : row.slice(0, firstTab);
+      const disposition = secondTab < 0 ? null : row.slice(firstTab + 1, secondTab);
+      if (!/^[0-9a-f]{40,64}$/i.test(candidate)
+        || (disposition !== "" && disposition !== "not-for-merge")) {
+        throw new Error("Git returned unreadable persisted submodule FETCH_HEAD evidence");
+      }
+      const commit = stripTerminalLineEnding(git(root, ["rev-parse", "--verify", `${candidate}^{commit}`]));
+      records.push({ ref: "FETCH_HEAD", commit, subject: exactCommitSubject(root, commit) });
+    }
+  }
+  return [...new Map(records.map((entry) => [`${entry.ref}\0${entry.commit}`, entry])).values()]
+    .sort((left, right) => left.ref.localeCompare(right.ref) || left.commit.localeCompare(right.commit));
 }
 
 function persistedSubmoduleGitDirs(root) {
