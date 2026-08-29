@@ -227,6 +227,87 @@ test_concurrent_suffix_rename_reresolves() {
   pass "concurrent suffix renames re-resolve without hiding genuine duplicates"
 }
 
+test_cutover_accepts_concurrent_read_correction() {
+  local home id fakebin real_mv call_file json count
+  home=$(make_home concurrent-cutover)
+  id=$(capture_candidate "$home" concurrent-cutover FrogPile escaped-defect \
+    "a reader may correct the lifecycle hint during cutover")
+  classify_feature "$home" "$id" curator-cutover >/dev/null
+  fakebin=$(fm_fakebin "$home/cutover-reader")
+  real_mv=$(command -v mv)
+  call_file="$home/mv-calls"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'count=0' \
+    '[ ! -f "$FM_TEST_MV_CALLS" ] || count=$(cat "$FM_TEST_MV_CALLS")' \
+    'count=$((count + 1))' \
+    'printf "%s\n" "$count" >"$FM_TEST_MV_CALLS"' \
+    'if [ "$count" -eq 2 ]; then' \
+    '  PATH="$FM_TEST_BASE_PATH" "$FM_TEST_COMMAND" get "$FM_TEST_CANDIDATE" >"$FM_TEST_READ_OUT"' \
+    'fi' \
+    'exec "$FM_TEST_REAL_MV" "$@"' >"$fakebin/mv"
+  chmod +x "$fakebin/mv"
+  PATH="$fakebin:$PATH" FM_TEST_BASE_PATH="$PATH" FM_TEST_COMMAND="$COMMAND" \
+    FM_TEST_CANDIDATE="$id" FM_TEST_READ_OUT="$home/read.out" \
+    FM_TEST_REAL_MV="$real_mv" FM_TEST_MV_CALLS="$call_file" run_learning "$home" \
+    disposition "$id" --curator curator-cutover --status documented \
+    --note "The lifecycle contract is documented" --reference "docs/cutover.md" >/dev/null \
+    || fail "cutover rejected an already-corrected sole record"
+  json=$(run_learning "$home" get "$id")
+  [ "$(printf '%s\n' "$json" | jq -r '.lifecycle_state')" = documented ] \
+    || fail "concurrent cutover lost the committed lifecycle content"
+  count=$(find "$home/state/learning-candidates" -type f -name "$id.*.json" | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ] || fail "concurrent cutover left $count candidate records"
+  pass "cutover accepts a sole record already corrected by a reader"
+}
+
+test_list_resolves_ids_after_suffix_rename() {
+  local home first second trigger target trigger_path source destination fakebin
+  local real_cat real_mv listed lines
+  home=$(make_home list-rename)
+  first=$(capture_candidate "$home" list-first FrogPile escaped-defect \
+    "first candidate drives concurrent list timing")
+  second=$(capture_candidate "$home" list-second FrogPile review-rejection \
+    "second candidate must remain visible after rename")
+  if [ "$first" \< "$second" ]; then
+    trigger=$first
+    target=$second
+  else
+    trigger=$second
+    target=$first
+  fi
+  classify_feature "$home" "$target" curator-list >/dev/null
+  run_learning "$home" disposition "$target" --curator curator-list \
+    --status documented --note "The list contract is documented" \
+    --reference "docs/list.md" >/dev/null
+  trigger_path=$(candidate_path "$home" "$trigger")
+  source=$(candidate_path "$home" "$target")
+  destination=$(candidate_path "$home" "$target" documented)
+  mv "$destination" "$source"
+  fakebin=$(fm_fakebin "$home/list-reader")
+  real_cat=$(command -v cat)
+  real_mv=$(command -v mv)
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "$1" = "$FM_TEST_TRIGGER_PATH" ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
+    '  : >"$FM_TEST_RENAME_DONE"' \
+    '  "$FM_TEST_REAL_MV" "$FM_TEST_RENAME_SOURCE" "$FM_TEST_RENAME_DESTINATION"' \
+    'fi' \
+    'exec "$FM_TEST_REAL_CAT" "$@"' >"$fakebin/cat"
+  chmod +x "$fakebin/cat"
+  listed=$(PATH="$fakebin:$PATH" FM_TEST_TRIGGER_PATH="$trigger_path" \
+    FM_TEST_RENAME_SOURCE="$source" FM_TEST_RENAME_DESTINATION="$destination" \
+    FM_TEST_RENAME_DONE="$home/rename-done" FM_TEST_REAL_CAT="$real_cat" \
+    FM_TEST_REAL_MV="$real_mv" run_learning "$home" list --all) \
+    || fail "list failed while a later candidate suffix was renamed"
+  lines=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
+  [ "$lines" -eq 2 ] || fail "list omitted a candidate renamed after path enumeration"
+  assert_contains "$listed" "$target" "list omitted the concurrently renamed candidate id"
+  assert_contains "$listed" $'\tdocumented\t' \
+    "list did not resolve the renamed candidate through content"
+  pass "list resolves enumerated candidate ids after suffix renames"
+}
+
 test_routes_and_no_one_off_skill_gate() {
   local home quest hud lost playbot pointer json rc
   home=$(make_home routes)
@@ -655,6 +736,8 @@ test_capture_validation_and_complete_record
 test_repeat_capture_is_idempotent
 test_atomic_lifecycle_publication_and_content_authority
 test_concurrent_suffix_rename_reresolves
+test_cutover_accepts_concurrent_read_correction
+test_list_resolves_ids_after_suffix_rename
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry

@@ -389,21 +389,29 @@ replace_record() { # <old-path> <json>
     [ ! -e "$new_path" ] || die "candidate lifecycle destination already exists: $id"
   fi
   write_record "$old_path" "$json"
-  [ "$new_path" = "$old_path" ] || mv -- "$old_path" "$new_path"
+  if [ "$new_path" != "$old_path" ] && ! mv -- "$old_path" "$new_path" 2>/dev/null; then
+    [ ! -e "$old_path" ] || die "could not update candidate lifecycle hint: $id"
+    load_record "$id"
+    [ "$RECORD_PATH" = "$new_path" ] \
+      || die "could not update candidate lifecycle hint: $id"
+    printf '%s\n' "$RECORD_JSON" | jq -e --argjson expected "$json" \
+      '. == $expected' >/dev/null || die "candidate changed during lifecycle cutover: $id"
+  fi
 }
 
 records_stream() {
-  local path id state base
+  local path id state base previous=''
   store_available_read_only || return 0
   for path in "$CANDIDATE_DIR"/lc-*.json; do
-    [ -e "$path" ] || continue
-    [ -f "$path" ] && [ ! -L "$path" ] || die "candidate store contains a non-regular record: $path"
     base=${path##*/}
+    [ "$base" != 'lc-*.json' ] || continue
     id=${base%%.*}
     state=${base#"$id."}
     state=${state%.json}
     validate_candidate_id "$id"
     validate_lifecycle_state "$state"
+    [ "$id" != "$previous" ] || continue
+    previous=$id
     load_record "$id"
     printf '%s\n' "$RECORD_JSON" | jq -cS .
   done
