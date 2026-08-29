@@ -566,7 +566,7 @@ batch_command() {
 
 summary_command() {
   local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
-  local producer_pid producer_fd
+  local producer_pid
   local -a samples=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -577,12 +577,11 @@ summary_command() {
   done
   validate_summary_limit "$limit"
   store_available_read_only || return 0
-  coproc SUMMARY_ENUMERATOR {
+  exec 3< <(
     CDPATH='' cd -- "$CANDIDATE_DIR" && \
       find . -maxdepth 1 -type f -name 'lc-*.json' -print | LC_ALL=C sort
-  }
-  producer_pid=$SUMMARY_ENUMERATOR_PID
-  producer_fd=${SUMMARY_ENUMERATOR[0]}
+  )
+  producer_pid=$!
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     name=${name#./}
@@ -603,8 +602,8 @@ summary_command() {
     printf -v line -- '- %s [%s/%s] %s' "$id" "$project" "$signal" "$impact"
     samples[sample_count]=$line
     sample_count=$((sample_count + 1))
-  done <&"$producer_fd"
-  exec {producer_fd}<&-
+  done <&3
+  exec 3<&-
   wait "$producer_pid" || die "could not enumerate candidate store: $CANDIDATE_DIR"
   [ "$count" -gt 0 ] || return 0
 
