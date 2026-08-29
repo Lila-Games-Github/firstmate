@@ -1,0 +1,58 @@
+{
+  "capture_digest": "22c287231a98c6bed3161bc58e7cf81cf4fa39630822bea22911d71f1e5b5dfb",
+  "captured_at": "2026-08-30T10:00:00Z",
+  "classification": {
+    "at": "2026-08-30T10:00:00Z",
+    "curator": "reviewer",
+    "owner": "FrogPile-HUD",
+    "rationale": "The escaped behavior belongs to one product feature",
+    "recommendation": "Add the rendered narrow-width regression",
+    "route": "feature",
+    "skill_gate": null,
+    "surface": "tests"
+  },
+  "disposition": {
+    "at": "2026-08-30T10:00:00Z",
+    "curator": "reviewer",
+    "note": "The feature verification now records the missing rendered case",
+    "outcome": "documented",
+    "reference": "docs/verification/hud-narrow-width.md"
+  },
+  "duplicates": [],
+  "history": [
+    {
+      "actor": "finished-review",
+      "at": "2026-08-30T10:00:00Z",
+      "event": "captured"
+    },
+    {
+      "actor": "reviewer",
+      "at": "2026-08-30T10:00:00Z",
+      "detail": "feature",
+      "event": "classified"
+    },
+    {
+      "actor": "reviewer",
+      "at": "2026-08-30T10:00:00Z",
+      "detail": "documented",
+      "event": "disposed"
+    }
+  ],
+  "id": "lc-22c287231a98c6bed3161bc5",
+  "incident": {
+    "affected_consumer": "Players using the narrow HUD layout",
+    "counterfactual": "The rendered regression would have exposed clipping before completion",
+    "escaped_contract": "Finished UI work must match the accepted visual reference",
+    "evidence": "The captain rejected the finished screenshot at narrow width",
+    "missing_check": "A rendered narrow-width regression was missing",
+    "origin_task": "finished-review",
+    "project": "FrogPile",
+    "proposed_owner": "FrogPile HUD feature",
+    "proposed_prevention": "Add the rendered narrow-width case to feature review",
+    "root_cause": "The implementation checked selectors but not the rendered edge case",
+    "signal_type": "review-rejection",
+    "user_visible_impact": "Captain saw the supposedly finished HUD still clip text"
+  },
+  "lifecycle_state": "documented",
+  "schema": 1
+}

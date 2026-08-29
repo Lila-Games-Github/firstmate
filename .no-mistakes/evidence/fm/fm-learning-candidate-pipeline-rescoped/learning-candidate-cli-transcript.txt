@@ -1,0 +1,40 @@
+$ fm-learning-candidate.sh capture <complete meaningful review-rejection incident>
+lc-22c287231a98c6bed3161bc5
+$ fm-learning-candidate.sh capture <exact repeat>
+lc-22c287231a98c6bed3161bc5
+deterministic_repeat: same candidate id
+
+$ fm-learning-candidate.sh summary --limit 2
+LEARNING CANDIDATES: 1 unresolved
+- lc-22c287231a98c6bed3161bc5 [FrogPile/review-rejection] Captain saw the supposedly finished HUD still clip text
+
+$ fm-learning-candidate.sh classify <id> --route feature --surface tests ...
+lc-22c287231a98c6bed3161bc5
+
+$ fm-learning-candidate.sh disposition <id> --status documented ...
+lc-22c287231a98c6bed3161bc5
+
+$ fm-learning-candidate.sh get <id> | jq <public record projection>
+{
+  "id": "lc-22c287231a98c6bed3161bc5",
+  "lifecycle_state": "documented",
+  "origin_task": "finished-review",
+  "project": "FrogPile",
+  "signal": "review-rejection",
+  "impact": "Captain saw the supposedly finished HUD still clip text",
+  "route": "feature",
+  "owner": "FrogPile-HUD",
+  "outcome": "documented",
+  "reference": "docs/verification/hud-narrow-width.md"
+}
+persisted_record: lc-22c287231a98c6bed3161bc5.documented.json
+
+$ FM_STATE_OVERRIDE=<real-state>/ fm-learning-candidate.sh list --all
+lc-22c287231a98c6bed3161bc5	documented	FrogPile	review-rejection	Captain saw the supposedly finished HUD still clip text
+$ FM_STATE_OVERRIDE=<real-state>/. fm-learning-candidate.sh list --all
+lc-22c287231a98c6bed3161bc5	documented	FrogPile	review-rejection	Captain saw the supposedly finished HUD still clip text
+
+$ fm-learning-candidate.sh capture <same incident beside dangling lifecycle sibling>
+fm-learning-candidate: candidate path must be a regular file: /tmp/learning-candidate-evidence.4Vnye2/unsafe-home/state/learning-candidates/lc-22c287231a98c6bed3161bc5.documented.json
+exit_status: 2
+published_unresolved_record: no
