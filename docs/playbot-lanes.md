@@ -67,10 +67,10 @@ Local workspaces, missing roots, unreadable Git state, an unresolvable landing b
 Tracked-content inspection compares each index object with the actual regular file, symlink target, or populated submodule head using Git's clean filters, so stat-cache shortcuts cannot produce a clean verdict.
 Git evidence clears inherited repository, worktree, index, object-store, namespace, shallow-file, replacement-base, and command-line configuration overrides before inspecting the caller-selected root.
 Initialized submodules receive the same recursive tracked, untracked, ignored, index-flag, and operation-state inspection, and persisted per-worktree submodule Git directories are inspected even after the submodule is deinitialized or removed from the index.
-A populated submodule that cannot be inspected blocks retirement, as does a persisted submodule stash or ref- or reflog-reachable commit not proven reachable from a stable fresh snapshot of the configured remotes.
-Every local submodule branch and tag must also match the same ref name and object identity in at least one fresh remote snapshot, so publication of its target commit alone cannot hide unpublished ref metadata.
+A populated submodule that cannot be inspected blocks retirement, as does a persisted submodule stash, staged index change, index flag, in-progress Git operation, or ref- or reflog-reachable commit not proven reachable from a stable fresh snapshot of the configured remotes.
+Every local submodule ref outside the reconstructible `refs/remotes/` cache must also match the same ref name and object identity in at least one fresh remote snapshot, so publication of its target commit alone cannot hide unpublished ref metadata.
 Revision evidence disables replacement objects, and any `refs/replace/*` or repository graft metadata blocks inspection instead of being allowed to rewrite the ancestry used for a deletion verdict.
-Untracked and ignored files also block retirement and are returned by exact path, because the tracked-churn allowlist never classifies them.
+Untracked and ignored files also block retirement and are returned by exact path, including every file beneath an explicitly ignored directory, because the tracked-churn allowlist never classifies them.
 The allowlist is eight literal repository-relative paths returned as `trackedChurnAllowlist`: seven files under `prototype-game/addons/playbot/` plus `prototype-game/project.godot` that Playbot's editor integration rewrites across unrelated worktrees.
 No directory, extension, basename, or broader pattern is treated as churn.
 Path matching preserves Git pathname identity, so a literal backslash in a POSIX filename cannot alias a slash in an allowlisted path.

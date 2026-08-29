@@ -131,7 +131,7 @@ printf 'worktree: filtered work\n' > "$FIXTURE_ROOT/worker/prototype-game/filter
 printf 'prototype-game/filtered-work.txt filter=retirement-test\n' > "$FIXTURE_ROOT/worker/.gitattributes"
 ln -s real-work.txt "$FIXTURE_ROOT/worker/prototype-game/real-link"
 printf 'tracked backslash work\n' > "$FIXTURE_ROOT/worker/prototype-game/addons/playbot\\plugin.gd.uid"
-printf 'prototype-game/ignored-retirement.txt\n' > "$FIXTURE_ROOT/worker/.gitignore"
+printf 'prototype-game/ignored-retirement.txt\nprototype-game/ignored-retirement-dir/\n' > "$FIXTURE_ROOT/worker/.gitignore"
 git -C "$FIXTURE_ROOT/worker" add .
 git -C "$FIXTURE_ROOT/worker" commit -m "fixture baseline" >/dev/null \
   || fail "could not commit the retirement fixture baseline"
@@ -3757,16 +3757,20 @@ NODE
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore prototype-game/real-work.txt
 printf 'untracked work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
 printf 'ignored work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement.txt"
+mkdir -p "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement-dir"
+printf 'nested ignored work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement-dir/secret.txt"
 retirement_list main > "$retirement_inventory"
 OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "untracked and ignored files were not visible and blocking"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const blocker = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
-if (!blocker || blocker.paths.join(',') !== 'prototype-game/ignored-retirement.txt,prototype-game/untracked-work.txt') process.exit(1);
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/ignored-retirement-dir/secret.txt,prototype-game/ignored-retirement.txt,prototype-game/untracked-work.txt') process.exit(1);
 NODE
 rm -f \
+  "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement-dir/secret.txt" \
   "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement.txt" \
   "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/untracked-work.txt"
+rmdir "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement-dir"
 pass "fm-playbot-lanes: tracked, untracked, and ignored work block by exact path"
 
 untracked_cache_dir="$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game"
@@ -4129,6 +4133,7 @@ pass "fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commit
 submodule_published=$(git --git-dir="$submodule_git_dir" rev-parse refs/remotes/origin/main)
 git --git-dir="$submodule_git_dir" update-ref refs/heads/retirement-local-branch "$submodule_published"
 git --git-dir="$submodule_git_dir" tag -a retirement-local-tag "$submodule_published" -m "local retirement tag"
+git --git-dir="$submodule_git_dir" update-ref refs/archive/safety "$submodule_published"
 submodule_local_tag=$(git --git-dir="$submodule_git_dir" rev-parse refs/tags/retirement-local-tag)
 retirement_list main > "$retirement_inventory"
 OUT_FILE="$retirement_inventory" BRANCH_OBJECT="$submodule_published" TAG_OBJECT="$submodule_local_tag" node --no-warnings <<'NODE' \
@@ -4140,11 +4145,51 @@ const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game
 if (!residue || residue.localOnlyCommits.length !== 0) process.exit(1);
 if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/heads/retirement-local-branch' && entry.object === process.env.BRANCH_OBJECT)) process.exit(1);
 if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/tags/retirement-local-tag' && entry.object === process.env.TAG_OBJECT)) process.exit(1);
+if (!residue.localOnlyRefs.some(entry => entry.ref === 'refs/archive/safety' && entry.object === process.env.BRANCH_OBJECT)) process.exit(1);
 if (!residue.publicationEvidence.localRefs.some(entry => entry.ref === 'refs/heads/main' && entry.object === process.env.BRANCH_OBJECT)) process.exit(1);
+if (residue.publicationEvidence.localRefs.some(entry => entry.ref.startsWith('refs/remotes/'))) process.exit(1);
 NODE
 git --git-dir="$submodule_git_dir" update-ref -d refs/heads/retirement-local-branch
 git --git-dir="$submodule_git_dir" tag -d retirement-local-tag >/dev/null
-pass "fm-playbot-lanes: persisted submodule unpublished branches and tags block"
+git --git-dir="$submodule_git_dir" update-ref -d refs/archive/safety
+pass "fm-playbot-lanes: persisted submodule unpublished refs block"
+
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" -c protocol.file.allow=always submodule update --init --force prototype-game/submodule >/dev/null \
+  || fail "could not restore the persisted-operation submodule worktree"
+git -C "$submodule_worktree" checkout -B main refs/remotes/origin/main >/dev/null
+git -C "$submodule_worktree" checkout -b retirement-persisted-operation >/dev/null
+printf 'persisted operation index state\n' > "$submodule_worktree/operation-state.txt"
+git -C "$submodule_worktree" add operation-state.txt
+git -C "$submodule_worktree" commit -m "persisted operation side" >/dev/null \
+  || fail "could not commit the persisted-operation side"
+git -C "$submodule_worktree" push -u origin retirement-persisted-operation >/dev/null \
+  || fail "could not publish the persisted-operation side"
+git -C "$submodule_worktree" checkout main >/dev/null
+git -C "$submodule_worktree" merge --no-ff --no-commit retirement-persisted-operation >/dev/null \
+  || fail "could not create the persisted merge and index state"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" submodule deinit -f prototype-game/submodule >/dev/null \
+  || fail "could not remove the submodule worktree with persisted operation state"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rm --cached prototype-game/submodule >/dev/null \
+  || fail "could not stage persisted operation residue"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' \
+  || fail "persisted submodule operation or index state was allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'submodule-local-history');
+const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
+if (!residue || residue.localOnlyCommits.length !== 0 || residue.localOnlyRefs.length !== 0) process.exit(1);
+if (!residue.operations.some(entry => entry.operation === 'merge' && entry.marker === 'MERGE_HEAD')) process.exit(1);
+if (residue.stagedPaths.join(',') !== 'operation-state.txt') process.exit(1);
+NODE
+rm -f "$submodule_git_dir/MERGE_HEAD" "$submodule_git_dir/MERGE_MODE" "$submodule_git_dir/MERGE_MSG" "$submodule_git_dir/AUTO_MERGE"
+git --git-dir="$submodule_git_dir" read-tree --reset HEAD
+git --git-dir="$submodule_git_dir" update-ref -d refs/heads/retirement-persisted-operation
+git --git-dir="$submodule_git_dir" push --delete origin retirement-persisted-operation >/dev/null
+git --git-dir="$submodule_git_dir" update-ref -d refs/remotes/origin/retirement-persisted-operation
+git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore --staged prototype-game/submodule
+pass "fm-playbot-lanes: persisted submodule operations and index state block"
 
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore \
   prototype-game/addons/playbot/playbot_common.gd.uid \

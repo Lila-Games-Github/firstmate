@@ -539,7 +539,7 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
-On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 120 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
+On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 121 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
 The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
 The remote cases deliberately leave `origin/main` stale, advance the bare remote's `main`, and bind local `main` to `origin/release`, proving that inventory uses the `ls-remote` commit while preserving the explicitly named landing branch.
 The clean-evidence audit covered assume-unchanged and skip-worktree index flags, inherited repository and index overrides, initialized and uninitialized submodules, merge, rebase, cherry-pick and sequencer state, stashes, and every Git command that contributes deletion evidence.
@@ -547,11 +547,12 @@ Any assume-unchanged or skip-worktree entry blocks by exact path, even when its 
 On POSIX, index executable modes are compared directly with filesystem owner-executable modes, so `core.fileMode=false` cannot hide a non-allowlisted mode change.
 Every stage-zero index object is also compared with the actual worktree representation using Git's clean filters for regular files, raw link-target bytes for symlinks, and checked-out heads for populated submodules.
 A same-length edit with restored mtime stays blocking when `core.trustctime=false` and `core.checkStat=minimal` make `git status` report no change, while a smudged worktree representation whose raw blob differs from its clean-filtered index blob remains correctly clean.
-The untracked and ignored inventory disables Git's untracked cache and filesystem monitor for its safety read, and an executable Git compatibility fixture models a stale cache result after warming the real untracked cache and restoring the directory mtime, proving the otherwise hidden file remains blocking by exact path.
+The untracked and ignored inventory disables Git's untracked cache and filesystem monitor for its safety read, uses traditional ignored traversal with all untracked files, and returns the exact nested file beneath an explicitly ignored directory instead of collapsing it to the directory.
+An executable Git compatibility fixture models a stale cache result after warming the real untracked cache and restoring the directory mtime, proving the otherwise hidden file remains blocking by exact path.
 Initialized submodules are inspected recursively with ignored files visible.
-Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixtures prove an exact stash, a server-deleted commit hidden by a stale remote-tracking ref, a reset commit reachable only through a reflog, and unpublished local branch and annotated-tag refs remain visible and blocking after the submodule worktree is emptied.
+Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixtures prove an exact stash, a server-deleted commit hidden by a stale remote-tracking ref, a reset commit reachable only through a reflog, unpublished local branch, annotated-tag, and custom refs, plus staged index and merge-operation state remain visible and blocking after the submodule worktree is emptied.
 Publication proof enumerates every ref- and reflog-reachable candidate, fetches the objects behind a fresh configured-remote ref snapshot without updating local refs, rejects a snapshot that changes during inspection, and compares candidates against those authoritative remote tips rather than local `refs/remotes/*`.
-It separately compares every local branch and tag name plus direct object identity against those snapshots, so an already-published target commit cannot conceal unpublished ref metadata.
+It separately compares every disposable local ref name plus direct object identity against those snapshots, excluding only the reconstructible `refs/remotes/` cache, so an already-published target commit cannot conceal custom unpublished ref metadata.
 Every Git invocation contributing retirement evidence disables replacement objects, and a real `refs/replace` fixture proves the exact replacement ref blocks even after the workspace head is otherwise clean and landed.
 An executable `GIT_INDEX_FILE` fixture points the MCP process at a clean alternate index while the real linked-worktree index holds a staged-only change, proving inherited repository overrides are cleared before evidence collection.
 Repository and persisted-submodule `info/grafts` metadata blocks as unreadable evidence, with a real top-level graft fixture proving the exact metadata path is returned.
@@ -605,7 +606,8 @@ ok - fm-playbot-lanes: initialized submodules expose nested ignored work before 
 ok - fm-playbot-lanes: persisted removed-submodule storage exposes stash and unpushed commits
 ok - fm-playbot-lanes: fresh submodule remote evidence rejects stale tracking refs
 ok - fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits
-ok - fm-playbot-lanes: persisted submodule unpublished branches and tags block
+ok - fm-playbot-lanes: persisted submodule unpublished refs block
+ok - fm-playbot-lanes: persisted submodule operations and index state block
 ok - fm-playbot-lanes: clean-looking merge, cherry-pick, and rebase states block retirement
 ok - fm-playbot-lanes: every root resolves its own worktree-specific remote evidence
 ok - fm-playbot-lanes: immediate recheck returns exact thread and path blockers

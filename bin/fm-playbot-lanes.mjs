@@ -663,7 +663,7 @@ function shallowGitStatus(root) {
   const raw = git(root, [
     "-c", "core.untrackedCache=false",
     "-c", "core.fsmonitor=false",
-    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none",
+    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=traditional", "--ignore-submodules=none",
   ], { encoding: "buffer" });
   const records = raw.toString("utf8").split("\0");
   const tracked = new Set();
@@ -823,23 +823,26 @@ function remoteRefRows(root, remote) {
   return rows.sort((left, right) => left.ref.localeCompare(right.ref) || left.object.localeCompare(right.object));
 }
 
-function localPublishableRefRows(root) {
+function localDisposableRefRows(root) {
   const rows = String(git(root, [
     "for-each-ref",
     "--format=%(refname)%09%(objectname)",
-    "refs/heads/",
-    "refs/tags/",
+    "refs/",
   ])).split(/\r?\n/).filter(Boolean).map((row) => {
     const separator = row.indexOf("\t");
     const ref = separator < 0 ? "" : row.slice(0, separator);
     const object = separator < 0 ? "" : row.slice(separator + 1);
-    if ((!ref.startsWith("refs/heads/") && !ref.startsWith("refs/tags/"))
-      || !/^[0-9a-f]{40,64}$/i.test(object)) {
+    if (!ref.startsWith("refs/") || !/^[0-9a-f]{40,64}$/i.test(object)) {
       throw new Error("Git returned unreadable local submodule ref evidence");
     }
     return { ref, object };
-  });
+  }).filter((entry) => !entry.ref.startsWith("refs/remotes/"));
   return rows.sort((left, right) => left.ref.localeCompare(right.ref) || left.object.localeCompare(right.object));
+}
+
+function gitIndexHeadChanges(root) {
+  const raw = git(root, ["diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD", "--"], { encoding: "buffer" });
+  return [...new Set(raw.toString("utf8").split("\0").filter(Boolean).map(gitPathIdentity))].sort();
 }
 
 function freshRemoteCommitTips(root, remote) {
@@ -920,17 +923,24 @@ function persistedSubmoduleState(root) {
       }
       const remoteTips = [...new Set(remoteEvidence.flatMap((entry) => entry.commits))].sort();
       const localOnlyCommits = candidates.filter((entry) => !commitPublished(repository.gitDir, entry.commit, remoteTips));
-      const localRefs = localPublishableRefRows(repository.gitDir);
+      const localRefs = localDisposableRefRows(repository.gitDir);
       const publishedRefs = new Set(remoteEvidence.flatMap((entry) => entry.refs.map((item) => `${item.ref}\0${item.object}`)));
       const localOnlyRefs = localRefs.filter((entry) => !publishedRefs.has(`${entry.ref}\0${entry.object}`));
+      const stagedPaths = gitIndexHeadChanges(repository.gitDir);
+      const indexFlags = gitIndexFlags(repository.gitDir);
+      const operations = gitOperationState(repository.gitDir);
       repositories.push({
         ...repository,
         head,
         stashCommit,
         localOnlyCommits,
         localOnlyRefs,
+        stagedPaths,
+        indexFlags,
+        operations,
         publicationEvidence: {
           candidateCommitCount: candidates.length,
+          excludedRefNamespaces: ["refs/remotes/"],
           localRefs,
           remoteTips,
           remotes: remoteEvidence,
@@ -1181,12 +1191,17 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     });
   }
   const submoduleLocalHistory = result.submodules.persisted.filter((entry) => (
-    entry.stashCommit || entry.localOnlyCommits.length > 0 || entry.localOnlyRefs.length > 0
+    entry.stashCommit
+      || entry.localOnlyCommits.length > 0
+      || entry.localOnlyRefs.length > 0
+      || entry.stagedPaths.length > 0
+      || entry.indexFlags.length > 0
+      || entry.operations.length > 0
   ));
   if (submoduleLocalHistory.length > 0) {
     result.blockers.push({
       code: "submodule-local-history",
-      message: `${submoduleLocalHistory.length} persisted submodule Git director${submoduleLocalHistory.length === 1 ? "y contains" : "ies contain"} stashed history, unpushed commits, or unpublished refs that workspace deletion would remove`,
+      message: `${submoduleLocalHistory.length} persisted submodule Git director${submoduleLocalHistory.length === 1 ? "y contains" : "ies contain"} stashed history, unpushed commits, unpublished refs, staged index state, index flags, or in-progress operations that workspace deletion would remove`,
       submodules: submoduleLocalHistory,
     });
   }
