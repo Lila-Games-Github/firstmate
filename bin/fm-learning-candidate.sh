@@ -100,6 +100,14 @@
 # every lifecycle command; capture additionally requires shasum or sha256sum.
 set -euo pipefail
 
+usage() {
+  sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -128,10 +136,6 @@ export FM_STATE_OVERRIDE=$STATE
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-
-usage() {
-  sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//'
-}
 
 require_jq() {
   command -v jq >/dev/null 2>&1 || die "jq is required"
@@ -558,6 +562,7 @@ batch_command() {
 
 summary_command() {
   local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
+  local producer_pid producer_fd
   local -a samples=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -568,6 +573,12 @@ summary_command() {
   done
   validate_summary_limit "$limit"
   store_available_read_only || return 0
+  coproc SUMMARY_ENUMERATOR {
+    CDPATH='' cd -- "$CANDIDATE_DIR" && \
+      find . -maxdepth 1 -type f -name 'lc-*.json' -print | LC_ALL=C sort
+  }
+  producer_pid=$SUMMARY_ENUMERATOR_PID
+  producer_fd=${SUMMARY_ENUMERATOR[0]}
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     name=${name#./}
@@ -588,8 +599,9 @@ summary_command() {
     printf -v line -- '- %s [%s/%s] %s' "$id" "$project" "$signal" "$impact"
     samples[sample_count]=$line
     sample_count=$((sample_count + 1))
-  done < <(CDPATH='' cd -- "$CANDIDATE_DIR" && \
-    find . -maxdepth 1 -type f -name 'lc-*.json' -print | LC_ALL=C sort)
+  done <&"$producer_fd"
+  exec {producer_fd}<&-
+  wait "$producer_pid" || die "could not enumerate candidate store: $CANDIDATE_DIR"
   [ "$count" -gt 0 ] || return 0
 
   printf 'LEARNING CANDIDATES: %s unresolved\n' "$count"
@@ -845,7 +857,6 @@ dedupe_command() {
 }
 
 case "${1:-}" in
-  -h|--help) usage; exit 0 ;;
   '') usage >&2; exit 2 ;;
 esac
 require_jq

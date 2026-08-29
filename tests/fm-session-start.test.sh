@@ -2241,7 +2241,7 @@ EOF
 }
 
 test_learning_candidate_summary_error_is_terminal_safe() {
-  local rec root home fakebin out bad_name
+  local rec root home fakebin out real_find
   rec=$(new_world learning-candidate-summary-error)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2250,12 +2250,21 @@ EOF
   make_fake_ps_claude "$fakebin"
   ln -s "$(command -v jq)" "$fakebin/jq"
   mkdir -p "$home/state/learning-candidates"
-  bad_name=$'lc-bad\e[2J\233.unresolved.json'
-  printf '{}\n' >"$home/state/learning-candidates/$bad_name"
+  real_find=$(command -v find)
+  cat >"$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+if [ "$PWD" = "$FM_TEST_CANDIDATE_DIR" ]; then
+  printf 'candidate enumeration failed\e[2J\233\n' >&2
+  exit 9
+fi
+exec "$FM_TEST_REAL_FIND" "$@"
+SH
+  chmod +x "$fakebin/find"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_TEST_CANDIDATE_DIR="$home/state/learning-candidates" \
+    FM_TEST_REAL_FIND="$real_find" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
-    "session start omitted the candidate summary diagnostic"
+    "session start treated a failed candidate enumeration as successful"
   assert_not_contains "$out" $'\e' \
     "session start exposed an ESC byte from the candidate summary diagnostic"
   assert_not_contains "$out" $'\233' \

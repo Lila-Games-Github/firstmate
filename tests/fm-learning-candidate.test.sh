@@ -57,6 +57,28 @@ classify_feature() { # <home> <id> <curator> [owner]
     --rationale "The behavior belongs to one feature"
 }
 
+test_help_avoids_private_state_access() {
+  local home absent invalid output rc
+  home="$TMP_ROOT/help-state"
+  absent="$home/absent-state"
+  invalid="$home/not-a-directory"
+  mkdir -p "$home"
+
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$absent" "$COMMAND" --help) \
+    || fail "help failed for an absent private state path"
+  assert_contains "$output" "Usage:" "help omitted the executable mechanics contract"
+  assert_absent "$absent" "help created an absent private state path"
+
+  printf 'not a directory\n' >"$invalid"
+  set +e
+  output=$(FM_HOME="$home" FM_STATE_OVERRIDE="$invalid" "$COMMAND" --help 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "help consulted an invalid private state override: $output"
+  assert_contains "$output" "Usage:" "help was unavailable with an invalid state override"
+  pass "help remains available without private state access"
+}
+
 test_capture_validation_and_complete_record() {
   local home id json rc path original
   home=$(make_home validation)
@@ -707,6 +729,36 @@ test_bounded_summary_and_batch() {
   pass "summary and batch output remain bounded as the unresolved inbox grows"
 }
 
+test_summary_producer_failure_propagates() {
+  local home fakebin real_find rc
+  home=$(make_home summary-producer-failure)
+  capture_candidate "$home" summary-producer FrogPile escaped-defect \
+    "summary enumeration failures must be visible" >/dev/null
+  fakebin=$(fm_fakebin "$home/failed-find")
+  real_find=$(command -v find)
+  cat >"$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+if [ "$PWD" = "$FM_TEST_CANDIDATE_DIR" ]; then
+  printf 'candidate enumeration failed\n' >&2
+  exit 9
+fi
+exec "$FM_TEST_REAL_FIND" "$@"
+SH
+  chmod +x "$fakebin/find"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_CANDIDATE_DIR="$home/state/learning-candidates" \
+    FM_TEST_REAL_FIND="$real_find" run_learning "$home" summary \
+    >"$home/summary.out" 2>"$home/summary.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "summary accepted a failed enumeration producer"
+  assert_grep "could not enumerate candidate store" "$home/summary.err" \
+    "summary did not report its failed enumeration"
+  [ ! -s "$home/summary.out" ] || fail "summary rendered output after enumeration failed"
+  pass "summary propagates enumeration failures before rendering"
+}
+
 test_capture_does_not_wait_for_curation() {
   local home lock ready release holder capture_pid attempt rc count
   home=$(make_home bounded-capture)
@@ -810,6 +862,7 @@ EOF
   pass "ordinary task cleanup neither waits for classification nor removes the captured candidate"
 }
 
+test_help_avoids_private_state_access
 test_capture_validation_and_complete_record
 test_large_escaped_capture_avoids_argv_limits
 test_repeat_capture_is_idempotent
@@ -823,6 +876,7 @@ test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry
 test_concise_outputs_strip_terminal_controls
 test_bounded_summary_and_batch
+test_summary_producer_failure_propagates
 test_capture_does_not_wait_for_curation
 test_candidate_survives_nonblocking_task_cleanup
 
