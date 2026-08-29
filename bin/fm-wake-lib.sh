@@ -31,6 +31,12 @@ fm_proc_cmdline_hex() {
   local path=$1 arg encoded='' ordinal index saw_arg=0
   local LC_ALL=C
   [ -r "$path" ] || return 1
+  if command -v perl >/dev/null 2>&1; then
+    encoded=$(perl -0777 -ne 'print unpack("H*", $_)' "$path" 2>/dev/null) || return 1
+    [ -n "$encoded" ] || return 1
+    printf '%s\n' "$encoded"
+    return 0
+  fi
   while IFS= read -r -d '' arg; do
     saw_arg=1
     index=0
@@ -67,7 +73,11 @@ fm_pid_identity() {
     case "$starttime" in
       ''|*[!0-9]*) return 1 ;;
     esac
-    cmdline_hex=$(fm_proc_cmdline_hex "$proc_root/$pid/cmdline") || return 1
+    if command -v od >/dev/null 2>&1; then
+      cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
+    else
+      cmdline_hex=$(fm_proc_cmdline_hex "$proc_root/$pid/cmdline") || return 1
+    fi
     [ -n "$cmdline_hex" ] || return 1
     identity_key=proc-starttime
     [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime

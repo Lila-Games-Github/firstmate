@@ -419,7 +419,10 @@ scan() {
       return 0
     fi
   fi
-  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
+  # The outer fm_run_timed call owns the exact aggregate bound.
+  # Round this whole-second bookkeeping deadline up so it cannot expire a
+  # fractional second before that hard timer and skip the next cursor child.
+  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS + 1 ))
   scan_pass "$cursor" after "$deadline" "$self" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then
     scan_pass "$cursor" through "$deadline" "$self" || rc=$?
