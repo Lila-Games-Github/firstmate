@@ -9,6 +9,7 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+FM_LOCK_RECOVERY_MAX_DEPTH=8
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -829,7 +830,7 @@ fm_recovery_marker_arm_check() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 recovery_depth=${2:-0} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -873,8 +874,13 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  if [ "$recovery_depth" -ge "$FM_LOCK_RECOVERY_MAX_DEPTH" ]; then
+    printf 'error: refusing stale lock recovery for %s: nested .steal lock depth reached %s; inspect and clear the persisted stale lock chain, then retry\n' \
+      "$lockdir" "$FM_LOCK_RECOVERY_MAX_DEPTH" >&2
+    return 1
+  fi
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire "$steal" "$((recovery_depth + 1))"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
