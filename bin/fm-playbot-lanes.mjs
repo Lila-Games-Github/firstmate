@@ -155,31 +155,178 @@ function readJson(file, fallback = null) {
 }
 
 const ROUTE_LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
+const ROUTE_LOCK_INCOMPLETE_MS = 2_000;
+
+function processStartIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/);
+      const started = fields[19];
+      const boot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      return started && boot ? `linux:${boot}:${started}` : null;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform !== "win32") {
+    const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 1_000 });
+    const started = result.status === 0 ? String(result.stdout ?? "").trim() : "";
+    return started ? `${process.platform}:${started}` : null;
+  }
+  const command = `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`;
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { encoding: "utf8", timeout: 3_000, windowsHide: true });
+  const started = result.status === 0 ? String(result.stdout ?? "").trim() : "";
+  return /^\d+$/.test(started) ? `win32:${started}` : null;
+}
+
+const ROUTE_PROCESS_START_IDENTITY = processStartIdentity(process.pid);
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    if (error?.code === "EPERM") return true;
+    throw error;
+  }
+}
+
+function routeLockOwnerName(owner) {
+  const identity = Buffer.from(owner.identity ?? "unavailable", "utf8").toString("base64url");
+  return `owner-${owner.pid}-${identity}-${owner.token}.json`;
+}
+
+function parseRouteLockOwner(name) {
+  const match = String(name).match(/^owner-([1-9]\d*)-([A-Za-z0-9_-]+)-([0-9a-f]{32})\.json$/);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  if (!Number.isSafeInteger(pid)) return null;
+  const encodedIdentity = Buffer.from(match[2], "base64url").toString("utf8");
+  return { pid, identity: encodedIdentity === "unavailable" ? null : encodedIdentity, token: match[3], name };
+}
+
+function fsyncDirectory(directory) {
+  if (process.platform === "win32") return;
+  const descriptor = fs.openSync(directory, "r");
+  try {
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function createRouteLock(lock) {
+  fs.mkdirSync(lock, { mode: 0o700 });
+  const owner = {
+    pid: process.pid,
+    identity: ROUTE_PROCESS_START_IDENTITY,
+    token: crypto.randomBytes(16).toString("hex"),
+  };
+  owner.name = routeLockOwnerName(owner);
+  const ownerPath = path.join(lock, owner.name);
+  let descriptor = null;
+  try {
+    descriptor = fs.openSync(ownerPath, "wx", 0o600);
+    fs.writeSync(descriptor, `${JSON.stringify({ pid: owner.pid, identity: owner.identity, token: owner.token })}\n`, null, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = null;
+    fsyncDirectory(lock);
+    return { ...owner, lock, ownerPath };
+  } catch (error) {
+    if (descriptor !== null) fs.closeSync(descriptor);
+    try {
+      fs.unlinkSync(ownerPath);
+    } catch (unlinkError) {
+      if (unlinkError?.code !== "ENOENT") throw unlinkError;
+    }
+    try {
+      fs.rmdirSync(lock);
+    } catch (rmdirError) {
+      if (rmdirError?.code !== "ENOENT" && rmdirError?.code !== "ENOTEMPTY") throw rmdirError;
+    }
+    throw error;
+  }
+}
+
+function recoverRouteLock(lock) {
+  let stat;
+  try {
+    stat = fs.lstatSync(lock);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  if (!stat.isDirectory()) {
+    const raw = fs.readFileSync(lock, "utf8");
+    const match = raw.match(/^([1-9]\d*)\s*$/);
+    if (!match) throw new Error(`Durable lane route lock is unreadable: ${lock}`);
+    const pid = Number(match[1]);
+    if (processIsAlive(pid)) return false;
+    if (fs.readFileSync(lock, "utf8") !== raw) return false;
+    fs.unlinkSync(lock);
+    return true;
+  }
+  const entries = fs.readdirSync(lock).sort();
+  if (entries.length === 0) {
+    if (Date.now() - stat.mtimeMs < ROUTE_LOCK_INCOMPLETE_MS) return false;
+    try {
+      fs.rmdirSync(lock);
+      return true;
+    } catch (error) {
+      if (error?.code === "ENOENT") return true;
+      if (error?.code === "ENOTEMPTY") return false;
+      throw error;
+    }
+  }
+  if (entries.length !== 1) throw new Error(`Durable lane route lock has ambiguous ownership: ${lock}`);
+  const owner = parseRouteLockOwner(entries[0]);
+  if (!owner) throw new Error(`Durable lane route lock has unreadable ownership: ${lock}`);
+  if (processIsAlive(owner.pid)) {
+    const identity = processStartIdentity(owner.pid);
+    if (!owner.identity || !identity || identity === owner.identity) return false;
+  }
+  if (fs.readdirSync(lock).join("\n") !== owner.name) return false;
+  fs.unlinkSync(path.join(lock, owner.name));
+  try {
+    fs.rmdirSync(lock);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    if (error?.code === "ENOTEMPTY") return false;
+    throw error;
+  }
+}
+
+function releaseRouteLock(owner) {
+  let entries;
+  try {
+    entries = fs.readdirSync(owner.lock).sort();
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error(`Durable lane route lock ownership disappeared before release: ${owner.lock}`);
+    throw error;
+  }
+  if (entries.length !== 1 || entries[0] !== owner.name) {
+    throw new Error(`Durable lane route lock ownership changed before release: ${owner.lock}`);
+  }
+  fs.unlinkSync(owner.ownerPath);
+  fs.rmdirSync(owner.lock);
+}
 
 function withRoutesLock(action) {
   ensurePrivateDirs();
   const lock = path.join(stateDir(), ".routes-write.lock");
   const deadline = Date.now() + 10_000;
-  let descriptor = null;
-  while (descriptor === null) {
+  let owner = null;
+  while (owner === null) {
     try {
-      descriptor = fs.openSync(lock, "wx", 0o600);
-      fs.writeSync(descriptor, `${process.pid}\n`, null, "utf8");
-      fs.fsyncSync(descriptor);
+      owner = createRouteLock(lock);
     } catch (error) {
-      if (descriptor !== null) {
-        try {
-          fs.closeSync(descriptor);
-        } finally {
-          descriptor = null;
-          try {
-            fs.unlinkSync(lock);
-          } catch (unlinkError) {
-            if (unlinkError?.code !== "ENOENT") throw unlinkError;
-          }
-        }
-      }
       if (error?.code !== "EEXIST") throw error;
+      if (recoverRouteLock(lock)) continue;
       if (Date.now() >= deadline) throw new Error(`Timed out waiting for durable lane route writes at ${lock}`);
       Atomics.wait(ROUTE_LOCK_WAIT, 0, 0, 20);
     }
@@ -187,15 +334,7 @@ function withRoutesLock(action) {
   try {
     return action();
   } finally {
-    try {
-      fs.closeSync(descriptor);
-    } finally {
-      try {
-        fs.unlinkSync(lock);
-      } catch (error) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-    }
+    releaseRouteLock(owner);
   }
 }
 
@@ -411,30 +550,84 @@ function assertNoGitGrafts(root) {
   if (pathPresence(grafts)) throw new Error(`Git graft metadata blocks retirement evidence: ${grafts}`);
 }
 
-function gitExecutableModeChanges(root) {
-  if (process.platform === "win32") return [];
+function gitIndexWorktreeChanges(root) {
   const raw = git(root, ["ls-files", "--stage", "-z", "--"], { encoding: "buffer" });
-  const changed = [];
+  const changed = new Set();
+  const filteredFiles = [];
   for (const record of raw.toString("utf8").split("\0")) {
     if (!record) continue;
     const separator = record.indexOf("\t");
-    if (separator < 0) throw new Error("Git returned unreadable executable-mode evidence");
+    if (separator < 0) throw new Error("Git returned unreadable index-to-worktree evidence");
     const [mode, object, stage] = record.slice(0, separator).split(" ");
-    if (!mode || !object || stage === undefined) throw new Error("Git returned unreadable executable-mode evidence");
-    if (stage !== "0" || (mode !== "100644" && mode !== "100755")) continue;
+    if (!mode || !/^[0-9a-f]{40,64}$/i.test(object) || stage === undefined) throw new Error("Git returned unreadable index-to-worktree evidence");
     const file = gitPathIdentity(record.slice(separator + 1));
+    if (stage !== "0") {
+      changed.add(file);
+      continue;
+    }
+    const worktreePath = path.join(root, file);
     let stat;
     try {
-      stat = fs.lstatSync(path.join(root, file));
+      stat = fs.lstatSync(worktreePath);
     } catch (error) {
-      if (error?.code === "ENOENT") continue;
+      if (error?.code === "ENOENT") {
+        if (mode !== "160000") changed.add(file);
+        continue;
+      }
       throw error;
     }
-    const indexExecutable = mode === "100755";
-    const filesystemExecutable = (stat.mode & 0o100) !== 0;
-    if (indexExecutable !== filesystemExecutable) changed.push(file);
+    if (mode === "100644" || mode === "100755") {
+      if (!stat.isFile()) {
+        changed.add(file);
+        continue;
+      }
+      if (process.platform !== "win32" && ((stat.mode & 0o100) !== 0) !== (mode === "100755")) changed.add(file);
+      filteredFiles.push({ file, object, worktreePath });
+      continue;
+    }
+    if (mode === "120000") {
+      let input;
+      if (stat.isSymbolicLink()) input = fs.readlinkSync(worktreePath, { encoding: "buffer" });
+      else if (stat.isFile()) input = fs.readFileSync(worktreePath);
+      else {
+        changed.add(file);
+        continue;
+      }
+      const worktreeObject = stripTerminalLineEnding(git(root, ["hash-object", "--stdin"], { input }));
+      if (worktreeObject !== object) changed.add(file);
+      continue;
+    }
+    if (mode === "160000") {
+      if (!stat.isDirectory()) {
+        changed.add(file);
+        continue;
+      }
+      if (fs.readdirSync(worktreePath).length === 0) continue;
+      const worktreeObject = stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"]));
+      if (worktreeObject !== object) changed.add(file);
+      continue;
+    }
+    throw new Error(`Git returned unsupported tracked mode ${mode} for ${file}`);
   }
-  return [...new Set(changed)].sort();
+  const ordinary = filteredFiles.filter((entry) => /^[A-Za-z0-9._/ -]+$/.test(entry.file));
+  const ordinaryPaths = new Set(ordinary.map((entry) => entry.file));
+  if (ordinary.length > 0) {
+    const output = String(git(root, ["hash-object", "--filters", "--stdin-paths"], {
+      input: `${ordinary.map((entry) => entry.file).join("\n")}\n`,
+    })).trim().split(/\r?\n/);
+    if (output.length !== ordinary.length || output.some((object) => !/^[0-9a-f]{40,64}$/i.test(object))) {
+      throw new Error("Git returned unreadable filtered worktree-object evidence");
+    }
+    ordinary.forEach((entry, index) => {
+      if (output[index] !== entry.object) changed.add(entry.file);
+    });
+  }
+  for (const entry of filteredFiles.filter((candidate) => !ordinaryPaths.has(candidate.file))) {
+    const input = fs.readFileSync(entry.worktreePath);
+    const worktreeObject = stripTerminalLineEnding(git(root, ["hash-object", "--filters", `--path=${entry.file}`, "--stdin"], { input }));
+    if (worktreeObject !== entry.object) changed.add(entry.file);
+  }
+  return [...changed].sort();
 }
 
 function shallowGitStatus(root) {
@@ -458,7 +651,7 @@ function shallowGitStatus(root) {
       index += 1;
     }
   }
-  gitExecutableModeChanges(root).forEach((file) => tracked.add(file));
+  gitIndexWorktreeChanges(root).forEach((file) => tracked.add(file));
   const trackedPaths = [...tracked].sort();
   return {
     trackedPaths,

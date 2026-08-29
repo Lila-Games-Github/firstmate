@@ -110,6 +110,9 @@ git -C "$FIXTURE_ROOT/worker" init --initial-branch=main >/dev/null \
   || fail "could not initialize the retirement fixture repository"
 git -C "$FIXTURE_ROOT/worker" config user.name "Firstmate tests"
 git -C "$FIXTURE_ROOT/worker" config user.email "firstmate-tests@example.invalid"
+git -C "$FIXTURE_ROOT/worker" config filter.retirement-test.clean "sed 's/^worktree:/index:/'"
+git -C "$FIXTURE_ROOT/worker" config filter.retirement-test.smudge "sed 's/^index:/worktree:/'"
+git -C "$FIXTURE_ROOT/worker" config filter.retirement-test.required true
 mkdir -p "$FIXTURE_ROOT/worker/prototype-game/addons/playbot"
 for churn_path in \
   playbot_common.gd.uid \
@@ -124,6 +127,9 @@ do
 done
 printf 'baseline project\n' > "$FIXTURE_ROOT/worker/prototype-game/project.godot"
 printf 'tracked work\n' > "$FIXTURE_ROOT/worker/prototype-game/real-work.txt"
+printf 'worktree: filtered work\n' > "$FIXTURE_ROOT/worker/prototype-game/filtered-work.txt"
+printf 'prototype-game/filtered-work.txt filter=retirement-test\n' > "$FIXTURE_ROOT/worker/.gitattributes"
+ln -s real-work.txt "$FIXTURE_ROOT/worker/prototype-game/real-link"
 printf 'tracked backslash work\n' > "$FIXTURE_ROOT/worker/prototype-game/addons/playbot\\plugin.gd.uid"
 printf 'prototype-game/ignored-retirement.txt\n' > "$FIXTURE_ROOT/worker/.gitignore"
 git -C "$FIXTURE_ROOT/worker" add .
@@ -294,6 +300,99 @@ printf '%s\n' '{"session_id":"worker-session","stop_hook_active":true}' \
 after=$(cksum "$PLAYBOT_LANES_STATE_DIR/routes/$lane_id.json")
 [ "$before" = "$after" ] || fail "Stop hook did not deduplicate the completed turn"
 pass "fm-playbot-lanes: Stop wake delivery is routed, durable, and turn-deduplicated"
+
+route_lock="$PLAYBOT_LANES_STATE_DIR/.routes-write.lock"
+make_route_lock_owner() {
+  LOCK_DIR="$route_lock" LOCK_PID="$1" LOCK_IDENTITY="$2" LOCK_TOKEN="$3" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const owner = {
+  pid: Number(process.env.LOCK_PID),
+  identity: process.env.LOCK_IDENTITY,
+  token: process.env.LOCK_TOKEN,
+};
+const encoded = Buffer.from(owner.identity, 'utf8').toString('base64url');
+const name = `owner-${owner.pid}-${encoded}-${owner.token}.json`;
+fs.mkdirSync(process.env.LOCK_DIR, { mode: 0o700 });
+fs.writeFileSync(path.join(process.env.LOCK_DIR, name), `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+NODE
+}
+
+node -e '' &
+route_dead_pid=$!
+wait "$route_dead_pid"
+make_route_lock_owner "$route_dead_pid" linux:dead-owner:1 11111111111111111111111111111111
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a dead route-lock owner prevented the next mutation"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.lane.active !== false) process.exit(1);
+NODE
+[ ! -e "$route_lock" ] || fail "dead route-lock residue survived successful recovery"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the lane could not be reactivated after dead-owner recovery"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.lane.active !== true) process.exit(1);
+NODE
+pass "fm-playbot-lanes: dead route-lock owners recover without wedging mutations"
+
+make_route_lock_owner "$$" linux:reused-pid:1 22222222222222222222222222222222
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a reused PID was mistaken for the durable route-lock owner"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.lane.active !== false) process.exit(1);
+NODE
+[ ! -e "$route_lock" ] || fail "PID-reused route-lock residue survived successful recovery"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the lane could not be reactivated after PID-reuse recovery"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.lane.active !== true) process.exit(1);
+NODE
+pass "fm-playbot-lanes: PID reuse cannot preserve another route-lock generation"
+
+route_lock_swap="$FIXTURE_ROOT/swap-route-lock-owner.cjs"
+cat > "$route_lock_swap" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const originalReadDirSync = fs.readdirSync;
+let swapped = false;
+fs.readdirSync = function swapRouteLockOwner(directory, ...rest) {
+  if (!swapped && path.resolve(String(directory)) === path.resolve(process.env.FM_TEST_ROUTE_LOCK)) {
+    const entries = originalReadDirSync.call(fs, directory);
+    const owner = entries.find(entry => entry.startsWith('owner-'));
+    if (owner) {
+      fs.renameSync(path.join(directory, owner), path.join(directory, process.env.FM_TEST_FOREIGN_OWNER));
+      swapped = true;
+    }
+  }
+  return originalReadDirSync.call(fs, directory, ...rest);
+};
+NODE
+foreign_identity=$(node -e "process.stdout.write(Buffer.from('linux:foreign-generation:1').toString('base64url'))")
+foreign_owner="owner-$$-$foreign_identity-33333333333333333333333333333333.json"
+out=$(printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+  | FM_TEST_ROUTE_LOCK="$route_lock" \
+    FM_TEST_FOREIGN_OWNER="$foreign_owner" \
+    NODE_OPTIONS="--require=$route_lock_swap" \
+    node --no-warnings "$SCRIPT" serve)
+OUT="$out" node --no-warnings <<'NODE' || fail "route-lock release did not refuse changed ownership"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('ownership changed before release')) process.exit(1);
+NODE
+[ -f "$route_lock/$foreign_owner" ] || fail "route-lock release removed another owner's generation"
+rm -f "$route_lock/$foreign_owner"
+rmdir "$route_lock"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"register_lane\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the lane could not be reactivated after the ownership-release fixture"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.lane.active !== true) process.exit(1);
+NODE
+pass "fm-playbot-lanes: route-lock release preserves another owner generation"
 
 node --no-warnings "$SCRIPT" install >/dev/null
 node --no-warnings "$SCRIPT" install >/dev/null
@@ -3671,6 +3770,65 @@ NODE
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --no-assume-unchanged prototype-game/real-work.txt
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --no-skip-worktree prototype-game/project.godot
 pass "fm-playbot-lanes: assume-unchanged and skip-worktree paths block with exact index evidence"
+
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.trustctime false
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.checkStat minimal
+touch -t 202001010000 "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" update-index --refresh -- prototype-game/real-work.txt >/dev/null 2>&1 || true
+baseline_status=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" status --porcelain -- prototype-game/real-work.txt)
+[ -z "$baseline_status" ] || fail "the stat-cache masking fixture did not start clean: $baseline_status"
+cp -p "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt" "$FIXTURE_ROOT/real-work.mtime"
+FILE="$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const value = fs.readFileSync(process.env.FILE);
+value[0] = value[0] === 88 ? 89 : 88;
+fs.writeFileSync(process.env.FILE, value);
+NODE
+touch -r "$FIXTURE_ROOT/real-work.mtime" "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+masked_status=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" status --porcelain -- prototype-game/real-work.txt)
+[ -z "$masked_status" ] || fail "the same-length stat-cache fixture was not actually hidden from git status: $masked_status"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "a same-length content change hidden by Git's stat cache was allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'tracked-modifications');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/real-work.txt') process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" checkout-index -- prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config --unset core.trustctime
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config --unset core.checkStat
+post_cache_status=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" status --porcelain -- prototype-game/real-work.txt)
+[ -z "$post_cache_status" ] || fail "the stat-cache fixture did not restore its tracked file: $post_cache_status"
+pass "fm-playbot-lanes: tracked content comparison bypasses Git stat-cache shortcuts"
+
+ln -sfn project.godot "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-link"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "a changed tracked symlink target did not block by exact path"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'tracked-modifications');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/real-link') {
+  console.error(JSON.stringify(workspace.blockers));
+  process.exit(1);
+}
+NODE
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore prototype-game/real-link
+pass "fm-playbot-lanes: tracked symlink targets compare against index blobs"
+
+filtered_worktree_object=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" hash-object --no-filters prototype-game/filtered-work.txt)
+filtered_index_object=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse :prototype-game/filtered-work.txt)
+[ "$filtered_worktree_object" != "$filtered_index_object" ] || fail "the clean-filter fixture did not produce distinct worktree and index representations"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "Git-clean-filter-equivalent worktree content produced a false blocker"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+if (!workspace.retirable || workspace.blockers.some(blocker => blocker.paths?.includes('prototype-game/filtered-work.txt'))) {
+  console.error(JSON.stringify(workspace.blockers));
+  process.exit(1);
+}
+NODE
+pass "fm-playbot-lanes: tracked content comparison honors Git clean filters"
 
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.fileMode false
 chmod 0755 "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
