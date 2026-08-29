@@ -2560,6 +2560,8 @@ test_lsof_absent_reaps_tmux_process_group() {
   path_without_lsof=$(make_path_without_lsof "$case_dir")
   PATH="$path_without_lsof" command -v lsof >/dev/null 2>&1 \
     && fail "lsof-absent-process-group-reap: fixture path unexpectedly exposes lsof"
+  PATH="$path_without_lsof" command -v od >/dev/null 2>&1 \
+    && fail "lsof-absent-process-group-reap: fixture path unexpectedly exposes od"
 
   perl -e 'setpgrp(0, 0); chdir shift or die; exec "sleep", "300"' "$case_dir/wt" &
   pid=$!
