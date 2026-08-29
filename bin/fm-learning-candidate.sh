@@ -244,9 +244,9 @@ record_path() { # <candidate-id> <lifecycle-state>
   printf '%s/%s.%s.json\n' "$CANDIDATE_DIR" "$1" "$2"
 }
 
-validate_record_json() { # <json> [expected-id]
-  local json=$1 expected=${2:-}
-  printf '%s\n' "$json" | jq -e --arg expected "$expected" '
+validate_record_json() { # <json> [expected-id] [expected-state]
+  local json=$1 expected=${2:-} expected_state=${3:-}
+  printf '%s\n' "$json" | jq -e --arg expected "$expected" --arg expected_state "$expected_state" '
     .schema == 1
     and (.id | type == "string")
     and ($expected == "" or .id == $expected)
@@ -254,6 +254,7 @@ validate_record_json() { # <json> [expected-id]
     and .id == ("lc-" + .capture_digest[0:24])
     and (.captured_at | type == "string" and length > 0)
     and (.lifecycle_state | IN("unresolved", "dismissed", "documented", "promoted", "follow-up", "duplicate"))
+    and ($expected_state == "" or .lifecycle_state == $expected_state)
     and (.incident | type == "object")
     and ([.incident.origin_task, .incident.project, .incident.signal_type,
           .incident.user_visible_impact, .incident.root_cause,
@@ -310,7 +311,7 @@ validate_record_json() { # <json> [expected-id]
 }
 
 load_record() { # <candidate-id>; sets RECORD_JSON and RECORD_PATH
-  local id=$1 state path found=''
+  local id=$1 state path found='' found_state=''
   validate_candidate_id "$id"
   store_available_read_only || die "candidate not found: $id"
   for state in unresolved dismissed documented promoted follow-up duplicate; do
@@ -319,11 +320,12 @@ load_record() { # <candidate-id>; sets RECORD_JSON and RECORD_PATH
     [ -f "$path" ] && [ ! -L "$path" ] || die "candidate path must be a regular file: $path"
     [ -z "$found" ] || die "candidate has multiple lifecycle records: $id"
     found=$path
+    found_state=$state
   done
   [ -n "$found" ] || die "candidate not found: $id"
   RECORD_PATH=$found
   RECORD_JSON=$(cat "$RECORD_PATH")
-  validate_record_json "$RECORD_JSON" "$id"
+  validate_record_json "$RECORD_JSON" "$id" "$found_state"
 }
 
 write_record() { # <path> <json>
@@ -350,7 +352,9 @@ replace_record() { # <old-path> <json>
   new_path=$(record_path "$id" "$state")
   if [ "$new_path" != "$old_path" ]; then
     [ ! -e "$new_path" ] || die "candidate lifecycle destination already exists: $id"
-    mv -- "$old_path" "$new_path"
+    write_record "$new_path" "$json"
+    rm -f -- "$old_path"
+    return 0
   fi
   write_record "$new_path" "$json"
 }
@@ -368,7 +372,7 @@ records_stream() {
     validate_candidate_id "$id"
     validate_lifecycle_state "$state"
     json=$(cat "$path")
-    validate_record_json "$json" "$id"
+    validate_record_json "$json" "$id" "$state"
     printf '%s\n' "$json" | jq -cS .
   done
 }
@@ -444,6 +448,8 @@ capture_command() {
     existing=$RECORD_JSON
     [ "$(printf '%s\n' "$existing" | jq -r '.capture_digest')" = "$digest" ] \
       || die "candidate digest collision: $id"
+    printf '%s\n' "$existing" | jq -e --argjson incident "$payload" \
+      '.incident == $incident' >/dev/null || die "candidate digest collision: $id"
     printf '%s\n' "$id"
     return 0
   done
@@ -472,9 +478,11 @@ list_command() {
   validate_positive_limit "$limit" 500
   array=$(records_array)
   printf '%s\n' "$array" | jq -r --arg filter "$filter" --argjson limit "$limit" '
-    def compact: gsub("[\\r\\n\\t]+"; " ") | if length > 160 then .[:157] + "..." else . end;
+    def terminal_safe:
+      explode | map(if (. < 32 or (. >= 127 and . <= 159)) then 32 else . end) | implode;
+    def compact: terminal_safe | if length > 160 then .[:157] + "..." else . end;
     [.[] | select($filter == "all" or .lifecycle_state == $filter)][: $limit][] |
-    [.id, .lifecycle_state, .incident.project, .incident.signal_type,
+    [.id, .lifecycle_state, (.incident.project | terminal_safe), .incident.signal_type,
      (.incident.user_visible_impact | compact)] | @tsv
   '
 }
@@ -521,11 +529,13 @@ summary_command() {
     name=${samples[$idx]}
     id=${name%.unresolved.json}
     load_record "$id"
-    project=$(printf '%s\n' "$RECORD_JSON" | jq -r '.incident.project')
+    project=$(printf '%s\n' "$RECORD_JSON" | jq -r '
+      .incident.project |
+      explode | map(if (. < 32 or (. >= 127 and . <= 159)) then 32 else . end) | implode')
     signal=$(printf '%s\n' "$RECORD_JSON" | jq -r '.incident.signal_type')
     impact=$(printf '%s\n' "$RECORD_JSON" | jq -r '
       .incident.user_visible_impact |
-      gsub("[\\r\\n\\t]+"; " ") |
+      explode | map(if (. < 32 or (. >= 127 and . <= 159)) then 32 else . end) | implode |
       if length > 120 then .[:117] + "..." else . end')
     printf -- '- %s [%s/%s] %s\n' "$id" "$project" "$signal" "$impact"
     idx=$((idx + 1))
@@ -698,7 +708,7 @@ disposition_command() {
 
 dedupe_command() {
   local duplicate=${2:-} canonical='' curator='' reason='' timestamp duplicate_json duplicate_path
-  local canonical_json canonical_path disposition updated_canonical updated_duplicate existing
+  local canonical_json canonical_path disposition updated_canonical updated_duplicate existing exact_retry=0
   [ -n "$duplicate" ] || die "dedupe requires a duplicate candidate id"
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -722,42 +732,51 @@ dedupe_command() {
   [ "$(printf '%s\n' "$duplicate_json" | jq -r '.incident.origin_task')" != "$curator" ] \
     || die "curator must differ from the originating task"
 
+  existing=$(printf '%s\n' "$duplicate_json" | jq -cS '.disposition // null')
+  if [ "$existing" != null ]; then
+    if printf '%s\n' "$existing" | jq -e --arg curator "$curator" --arg canonical "$canonical" --arg reason "$reason" \
+      '.outcome == "duplicate" and .curator == $curator and .reference == $canonical and .note == $reason' >/dev/null; then
+      exact_retry=1
+    else
+      die "candidate already has a different disposition: $duplicate"
+    fi
+  else
+    [ "$(printf '%s\n' "$duplicate_json" | jq -r '.lifecycle_state')" = unresolved ] \
+      || die "only an unresolved candidate can be deduplicated"
+  fi
+
   load_record "$canonical"
   canonical_json=$RECORD_JSON
   canonical_path=$RECORD_PATH
   [ "$(printf '%s\n' "$canonical_json" | jq -r '.incident.origin_task')" != "$curator" ] \
     || die "curator must differ from both originating tasks"
-  [ "$(printf '%s\n' "$canonical_json" | jq -r '.lifecycle_state')" = unresolved ] \
-    || die "canonical candidate must remain unresolved"
-
-  existing=$(printf '%s\n' "$duplicate_json" | jq -cS '.disposition // null')
-  if [ "$existing" != null ]; then
-    if printf '%s\n' "$existing" | jq -e --arg curator "$curator" --arg canonical "$canonical" --arg reason "$reason" \
-      '.outcome == "duplicate" and .curator == $curator and .reference == $canonical and .note == $reason' >/dev/null; then
-      printf '%s\n' "$canonical"
-      return 0
-    fi
-    die "candidate already has a different disposition: $duplicate"
+  if [ "$exact_retry" -eq 0 ]; then
+    [ "$(printf '%s\n' "$canonical_json" | jq -r '.lifecycle_state')" = unresolved ] \
+      || die "canonical candidate must remain unresolved"
+  elif printf '%s\n' "$canonical_json" | jq -e --arg duplicate "$duplicate" \
+    '.duplicates | index($duplicate) != null' >/dev/null; then
+    printf '%s\n' "$canonical"
+    return 0
   fi
-  [ "$(printf '%s\n' "$duplicate_json" | jq -r '.lifecycle_state')" = unresolved ] \
-    || die "only an unresolved candidate can be deduplicated"
 
   timestamp=$(now_rfc3339)
+  if [ "$exact_retry" -eq 0 ]; then
+    disposition=$(jq -cnS --arg at "$timestamp" --arg curator "$curator" \
+      --arg note "$reason" --arg reference "$canonical" \
+      '{at:$at,curator:$curator,outcome:"duplicate",note:$note,reference:$reference}')
+    updated_duplicate=$(printf '%s\n' "$duplicate_json" | jq -cS --argjson disposition "$disposition" \
+      --arg at "$timestamp" --arg curator "$curator" --arg canonical "$canonical" \
+      '.lifecycle_state="duplicate" | .disposition=$disposition |
+       .history += [{at:$at,event:"deduplicated",actor:$curator,detail:$canonical}]')
+    replace_record "$duplicate_path" "$updated_duplicate"
+  fi
   updated_canonical=$(printf '%s\n' "$canonical_json" | jq -cS --arg duplicate "$duplicate" \
     --arg at "$timestamp" --arg curator "$curator" --arg reason "$reason" \
     'if (.duplicates | index($duplicate)) == null then
        .duplicates = ((.duplicates + [$duplicate]) | unique) |
        .history += [{at:$at,event:"dedupe-canonical",actor:$curator,detail:$reason}]
      else . end')
-  disposition=$(jq -cnS --arg at "$timestamp" --arg curator "$curator" \
-    --arg note "$reason" --arg reference "$canonical" \
-    '{at:$at,curator:$curator,outcome:"duplicate",note:$note,reference:$reference}')
-  updated_duplicate=$(printf '%s\n' "$duplicate_json" | jq -cS --argjson disposition "$disposition" \
-    --arg at "$timestamp" --arg curator "$curator" --arg canonical "$canonical" \
-    '.lifecycle_state="duplicate" | .disposition=$disposition |
-     .history += [{at:$at,event:"deduplicated",actor:$curator,detail:$canonical}]')
   replace_record "$canonical_path" "$updated_canonical"
-  replace_record "$duplicate_path" "$updated_duplicate"
   printf '%s\n' "$canonical"
 }
 

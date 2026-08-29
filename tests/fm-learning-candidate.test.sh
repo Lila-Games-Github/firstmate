@@ -109,7 +109,7 @@ test_capture_validation_and_complete_record() {
 }
 
 test_repeat_capture_is_idempotent() {
-  local home first second count
+  local home first second count path rc
   home=$(make_home repeat)
   first=$(capture_candidate "$home" repeated-review FrogPile review-rejection \
     "review rejected the completed HUD") || fail "first capture failed"
@@ -118,7 +118,65 @@ test_repeat_capture_is_idempotent() {
   [ "$first" = "$second" ] || fail "exact repeat capture produced a different identity"
   count=$(find "$home/state/learning-candidates" -type f -name '*.json' | wc -l | tr -d ' ')
   [ "$count" -eq 1 ] || fail "exact repeat capture created $count records"
+  path=$(candidate_path "$home" "$first")
+  jq '.incident.evidence="altered while retaining the original digest"' "$path" >"$home/altered.json"
+  mv "$home/altered.json" "$path"
+  set +e
+  capture_candidate "$home" repeated-review FrogPile review-rejection \
+    "review rejected the completed HUD" >"$home/altered.out" 2>"$home/altered.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "repeat capture accepted incident content not bound to its digest"
+  assert_grep "candidate digest collision" "$home/altered.err" \
+    "altered repeat-capture refusal was not explicit"
   pass "exact repeat capture converges on one durable candidate"
+}
+
+test_atomic_lifecycle_publication_and_suffix_binding() {
+  local home id fakebin real_chmod rc listed path
+  home=$(make_home atomic-lifecycle)
+  id=$(capture_candidate "$home" atomic-transition FrogPile escaped-defect \
+    "lifecycle publication must preserve the authoritative record")
+  classify_feature "$home" "$id" curator-atomic >/dev/null
+  fakebin=$(fm_fakebin "$home/chmod-failure")
+  real_chmod=$(command -v chmod)
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "$1" = 600 ]; then exit 1; fi' \
+    'exec "$FM_TEST_REAL_CHMOD" "$@"' >"$fakebin/chmod"
+  chmod +x "$fakebin/chmod"
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_REAL_CHMOD="$real_chmod" run_learning "$home" \
+    disposition "$id" --curator curator-atomic --status documented \
+    --note "The contract now documents the transition" --reference "docs/atomic.md" \
+    >"$home/publish.out" 2>"$home/publish.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "lifecycle publication unexpectedly survived a failed record permission step"
+  assert_present "$(candidate_path "$home" "$id")" \
+    "failed lifecycle publication removed the authoritative unresolved record"
+  assert_absent "$(candidate_path "$home" "$id" documented)" \
+    "failed lifecycle publication exposed a mismatched documented record"
+  listed=$(run_learning "$home" list)
+  assert_contains "$listed" "$id" "failed lifecycle publication made the candidate unreadable"
+
+  run_learning "$home" disposition "$id" --curator curator-atomic --status documented \
+    --note "The contract now documents the transition" --reference "docs/atomic.md" >/dev/null
+  path=$(candidate_path "$home" "$id" documented)
+  mv "$path" "$(candidate_path "$home" "$id")"
+  set +e
+  run_learning "$home" get "$id" >"$home/suffix-get.out" 2>"$home/suffix-get.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "get accepted a record whose filename disagreed with its lifecycle"
+  assert_grep "invalid candidate record" "$home/suffix-get.err" \
+    "suffix disagreement did not fail record validation"
+  set +e
+  run_learning "$home" list --all >"$home/suffix-list.out" 2>"$home/suffix-list.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "list accepted a record whose filename disagreed with its lifecycle"
+  pass "lifecycle publication preserves authority and rejects suffix disagreement"
 }
 
 test_routes_and_no_one_off_skill_gate() {
@@ -330,6 +388,88 @@ test_lifecycle_dispositions_and_deduplication() {
   pass "candidates can be dismissed, documented, promoted, linked to follow-up, or deduplicated"
 }
 
+test_dedupe_interruption_and_terminal_retry() {
+  local home canonical duplicate fakebin real_mv call_file failed_file rc json
+  home=$(make_home dedupe-interruption)
+  canonical=$(capture_candidate "$home" canonical-interrupted FrogPile review-rejection \
+    "canonical incident for interrupted dedupe")
+  duplicate=$(capture_candidate "$home" duplicate-interrupted FrogPile review-rejection \
+    "duplicate incident for interrupted dedupe" "matching escaped behavior")
+  fakebin=$(fm_fakebin "$home/mv-failure")
+  real_mv=$(command -v mv)
+  call_file="$home/mv-calls"
+  failed_file="$home/mv-failed"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'count=0' \
+    '[ ! -f "$FM_TEST_MV_CALLS" ] || count=$(cat "$FM_TEST_MV_CALLS")' \
+    'count=$((count + 1))' \
+    'printf "%s\n" "$count" >"$FM_TEST_MV_CALLS"' \
+    'if [ "$count" -eq 2 ] && [ ! -e "$FM_TEST_MV_FAILED" ]; then' \
+    '  : >"$FM_TEST_MV_FAILED"' \
+    '  exit 1' \
+    'fi' \
+    'exec "$FM_TEST_REAL_MV" "$@"' >"$fakebin/mv"
+  chmod +x "$fakebin/mv"
+  set +e
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_MV_CALLS="$call_file" \
+    FM_TEST_MV_FAILED="$failed_file" run_learning "$home" dedupe "$duplicate" \
+    --into "$canonical" --curator curator-interrupted --reason "same escaped behavior" \
+    >"$home/interrupted.out" 2>"$home/interrupted.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dedupe fixture did not interrupt the canonical backlink publication"
+  json=$(run_learning "$home" get "$duplicate")
+  printf '%s\n' "$json" | jq -e --arg canonical "$canonical" '
+    .lifecycle_state == "duplicate" and .disposition.reference == $canonical
+  ' >/dev/null || fail "interrupted dedupe did not make the duplicate disposition authoritative first"
+  json=$(run_learning "$home" get "$canonical")
+  printf '%s\n' "$json" | jq -e --arg duplicate "$duplicate" \
+    '.duplicates | index($duplicate) == null' >/dev/null \
+    || fail "interrupted dedupe published the canonical backlink before duplicate authority"
+
+  run_learning "$home" dedupe "$duplicate" --into "$canonical" \
+    --curator curator-interrupted --reason "same escaped behavior" >/dev/null \
+    || fail "exact dedupe retry did not complete the missing canonical backlink"
+  json=$(run_learning "$home" get "$canonical")
+  printf '%s\n' "$json" | jq -e --arg duplicate "$duplicate" '
+    ([.duplicates[] | select(. == $duplicate)] | length) == 1
+  ' >/dev/null || fail "dedupe retry did not add exactly one canonical backlink"
+  classify_feature "$home" "$canonical" curator-interrupted >/dev/null
+  run_learning "$home" disposition "$canonical" --curator curator-interrupted \
+    --status documented --note "The canonical prevention is documented" \
+    --reference "docs/canonical.md" >/dev/null
+  run_learning "$home" dedupe "$duplicate" --into "$canonical" \
+    --curator curator-interrupted --reason "same escaped behavior" >/dev/null \
+    || fail "exact dedupe retry rejected a later-disposed canonical candidate"
+  pass "dedupe interruption converges and exact retries survive canonical disposition"
+}
+
+test_concise_outputs_strip_terminal_controls() {
+  local home id project impact list summary get batch
+  home=$(make_home terminal-controls)
+  project=$'Frog\e[2JPile\177'
+  impact=$'visible impact\e[31m\tforged\u009b'
+  id=$(capture_candidate "$home" terminal-control "$project" escaped-defect "$impact")
+  list=$(run_learning "$home" list)
+  summary=$(run_learning "$home" summary)
+  assert_not_contains "$list" $'\e' "list preserved an escape control from candidate text"
+  assert_not_contains "$list" $'\177' "list preserved a delete control from candidate text"
+  assert_not_contains "$list" $'\u009b' "list preserved a C1 control from candidate text"
+  assert_not_contains "$summary" $'\e' "summary preserved an escape control from candidate text"
+  assert_not_contains "$summary" $'\177' "summary preserved a delete control from candidate text"
+  assert_not_contains "$summary" $'\u009b' "summary preserved a C1 control from candidate text"
+  get=$(run_learning "$home" get "$id")
+  batch=$(run_learning "$home" batch)
+  printf '%s\n' "$get" | jq -e --arg project "$project" --arg impact "$impact" \
+    '.incident.project == $project and .incident.user_visible_impact == $impact' >/dev/null \
+    || fail "get did not preserve complete terminal-control evidence"
+  printf '%s\n' "$batch" | jq -e --arg project "$project" --arg impact "$impact" \
+    '.[0].incident.project == $project and .[0].incident.user_visible_impact == $impact' >/dev/null \
+    || fail "batch did not preserve complete terminal-control evidence"
+  pass "concise views strip terminal controls while complete views preserve evidence"
+}
+
 test_bounded_summary_and_batch() {
   local home empty_home i summary lines batch rc unparsed
   empty_home=$(make_home empty-summary)
@@ -474,8 +614,11 @@ EOF
 
 test_capture_validation_and_complete_record
 test_repeat_capture_is_idempotent
+test_atomic_lifecycle_publication_and_suffix_binding
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
+test_dedupe_interruption_and_terminal_retry
+test_concise_outputs_strip_terminal_controls
 test_bounded_summary_and_batch
 test_capture_does_not_wait_for_curation
 test_candidate_survives_nonblocking_task_cleanup
