@@ -312,28 +312,57 @@ validate_record_json() { # <json> [expected-id]
   ' >/dev/null || die "invalid candidate record${expected:+: $expected}"
 }
 
+resolve_record_path() { # <candidate-id>; sets RECORD_PATH
+  local id=$1 state path found changed multiple attempt=0
+  while [ "$attempt" -lt 2 ]; do
+    found=
+    changed=0
+    multiple=0
+    for state in unresolved dismissed documented promoted follow-up duplicate; do
+      path=$(record_path "$id" "$state")
+      [ -e "$path" ] || continue
+      if [ ! -f "$path" ] || [ -L "$path" ]; then
+        [ -e "$path" ] || { changed=1; break; }
+        die "candidate path must be a regular file: $path"
+      fi
+      if [ -n "$found" ]; then
+        multiple=1
+        break
+      fi
+      found=$path
+    done
+    if [ "$changed" -eq 0 ] && [ "$multiple" -eq 0 ] && [ -n "$found" ]; then
+      RECORD_PATH=$found
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  [ "$multiple" -eq 0 ] || die "candidate has multiple lifecycle records: $id"
+  die "candidate not found: $id"
+}
+
 load_record() { # <candidate-id>; sets RECORD_JSON and RECORD_PATH
-  local id=$1 state path found='' content_state corrected_path
+  local id=$1 content_state corrected_path attempt=0
   validate_candidate_id "$id"
   store_available_read_only || die "candidate not found: $id"
-  for state in unresolved dismissed documented promoted follow-up duplicate; do
-    path=$(record_path "$id" "$state")
-    [ -e "$path" ] || continue
-    [ -f "$path" ] && [ ! -L "$path" ] || die "candidate path must be a regular file: $path"
-    [ -z "$found" ] || die "candidate has multiple lifecycle records: $id"
-    found=$path
-  done
-  [ -n "$found" ] || die "candidate not found: $id"
-  RECORD_PATH=$found
-  RECORD_JSON=$(cat "$RECORD_PATH")
-  validate_record_json "$RECORD_JSON" "$id"
-  content_state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
-  corrected_path=$(record_path "$id" "$content_state")
-  if [ "$corrected_path" != "$RECORD_PATH" ]; then
-    [ ! -e "$corrected_path" ] || die "candidate has multiple lifecycle records: $id"
-    mv -- "$RECORD_PATH" "$corrected_path"
+  while [ "$attempt" -lt 2 ]; do
+    resolve_record_path "$id"
+    if ! RECORD_JSON=$(cat "$RECORD_PATH" 2>/dev/null); then
+      attempt=$((attempt + 1))
+      continue
+    fi
+    validate_record_json "$RECORD_JSON" "$id"
+    content_state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
+    corrected_path=$(record_path "$id" "$content_state")
+    [ "$corrected_path" != "$RECORD_PATH" ] || return 0
+    if [ -e "$corrected_path" ] || ! mv -- "$RECORD_PATH" "$corrected_path" 2>/dev/null; then
+      attempt=$((attempt + 1))
+      continue
+    fi
     RECORD_PATH=$corrected_path
-  fi
+    return 0
+  done
+  die "candidate changed while being read: $id"
 }
 
 write_record() { # <path> <json>

@@ -184,6 +184,49 @@ test_atomic_lifecycle_publication_and_content_authority() {
   pass "interrupted lifecycle cutover keeps one content-authoritative record"
 }
 
+test_concurrent_suffix_rename_reresolves() {
+  local home id source destination fakebin real_cat real_mv json rc count
+  home=$(make_home concurrent-read)
+  id=$(capture_candidate "$home" concurrent-reader FrogPile escaped-defect \
+    "a reader must tolerate an overlapping lifecycle rename")
+  classify_feature "$home" "$id" curator-reader >/dev/null
+  run_learning "$home" disposition "$id" --curator curator-reader \
+    --status documented --note "The lifecycle contract is documented" \
+    --reference "docs/concurrent.md" >/dev/null
+  source=$(candidate_path "$home" "$id")
+  destination=$(candidate_path "$home" "$id" documented)
+  mv "$destination" "$source"
+  fakebin=$(fm_fakebin "$home/concurrent-rename")
+  real_cat=$(command -v cat)
+  real_mv=$(command -v mv)
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "$1" = "$FM_TEST_RACE_SOURCE" ] && [ ! -e "$FM_TEST_RACE_DONE" ]; then' \
+    '  : >"$FM_TEST_RACE_DONE"' \
+    '  "$FM_TEST_REAL_MV" "$FM_TEST_RACE_SOURCE" "$FM_TEST_RACE_DESTINATION"' \
+    'fi' \
+    'exec "$FM_TEST_REAL_CAT" "$@"' >"$fakebin/cat"
+  chmod +x "$fakebin/cat"
+  json=$(PATH="$fakebin:$PATH" FM_TEST_REAL_CAT="$real_cat" FM_TEST_REAL_MV="$real_mv" \
+    FM_TEST_RACE_SOURCE="$source" FM_TEST_RACE_DESTINATION="$destination" \
+    FM_TEST_RACE_DONE="$home/race-done" run_learning "$home" get "$id") \
+    || fail "get rejected one record renamed after discovery"
+  [ "$(printf '%s\n' "$json" | jq -r '.lifecycle_state')" = documented ] \
+    || fail "concurrent read did not preserve content-authoritative lifecycle state"
+  count=$(find "$home/state/learning-candidates" -type f -name "$id.*.json" | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ] || fail "concurrent suffix rename produced $count candidate records"
+
+  cp "$destination" "$source"
+  set +e
+  run_learning "$home" get "$id" >"$home/duplicate.out" 2>"$home/duplicate.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "bounded re-resolution accepted genuine duplicate records"
+  assert_grep "candidate has multiple lifecycle records" "$home/duplicate.err" \
+    "genuine duplicate refusal was not explicit"
+  pass "concurrent suffix renames re-resolve without hiding genuine duplicates"
+}
+
 test_routes_and_no_one_off_skill_gate() {
   local home quest hud lost playbot pointer json rc
   home=$(make_home routes)
@@ -611,6 +654,7 @@ EOF
 test_capture_validation_and_complete_record
 test_repeat_capture_is_idempotent
 test_atomic_lifecycle_publication_and_content_authority
+test_concurrent_suffix_rename_reresolves
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry
