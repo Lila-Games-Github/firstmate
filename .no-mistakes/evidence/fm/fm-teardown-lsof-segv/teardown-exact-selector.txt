@@ -1,0 +1,1 @@
+ok - missing lsof falls back to reaping the tmux pane process group

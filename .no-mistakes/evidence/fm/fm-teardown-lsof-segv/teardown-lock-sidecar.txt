@@ -1,0 +1,2 @@
+ok - direct registration refreshes authenticated v1 X shims across marker states
+ok - teardown serializes and removes safe poll artifacts while refusing unsafe quarantine paths

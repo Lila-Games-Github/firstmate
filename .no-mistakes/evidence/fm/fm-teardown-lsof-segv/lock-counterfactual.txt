@@ -1,0 +1,3 @@
+pre-1465fdd: rc=0; identity preparation was not required
+1465fdd: rc=124; identity failure entered unbounded stale-lock recursion
+74ed071: rc=0; identity failure returned promptly with no lock path
