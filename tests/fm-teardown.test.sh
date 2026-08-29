@@ -1212,7 +1212,7 @@ test_persisted_steal_chain_refuses_at_depth_limit() {
   local case_dir lock rc depth
   case_dir=$(make_case persisted-steal-chain)
   write_meta "$case_dir" no-mistakes ship
-  lock="$case_dir/state/.control-task-x1.lock"
+  lock="$case_dir/state/.meta-task-x1.lock"
   depth=0
   while [ "$depth" -le 10 ]; do
     mkdir "$lock"
@@ -1222,17 +1222,22 @@ test_persisted_steal_chain_refuses_at_depth_limit() {
   done
 
   rc=0
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    timeout 5 "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
+  [ "$rc" -ne 124 ] || fail "persisted-steal-chain: teardown hung waiting on the metadata lock"
   [ "$rc" -ne 139 ] || fail "persisted-steal-chain: teardown exited with SIGSEGV status 139"
-  expect_code 1 "$rc" "persisted-steal-chain: teardown should refuse cleanly"
+  expect_code 2 "$rc" "persisted-steal-chain: teardown should propagate the terminal recovery refusal"
   assert_grep "nested .steal lock depth reached 8" "$case_dir/stderr" \
     "persisted-steal-chain: teardown did not report the recovery depth limit"
   assert_grep "inspect and clear the persisted stale lock chain, then retry" "$case_dir/stderr" \
     "persisted-steal-chain: teardown did not provide actionable recovery guidance"
   assert_present "$case_dir/state/task-x1.meta" \
-    "persisted-steal-chain: teardown changed task state after refusing the lifecycle lock"
-  pass "a persisted stale .steal chain refuses cleanly at the recovery depth limit"
+    "persisted-steal-chain: teardown changed task state after refusing the metadata lock"
+  pass "a persisted stale metadata-lock .steal chain refuses promptly at the recovery depth limit"
 }
 
 test_live_index_lock_is_never_removed_and_teardown_refuses() {

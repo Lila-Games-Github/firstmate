@@ -10,6 +10,7 @@ FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 FM_LOCK_RECOVERY_MAX_DEPTH=8
+FM_LOCK_RECOVERY_REFUSED_STATUS=2
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -877,15 +878,18 @@ fm_lock_try_acquire() {
   if [ "$recovery_depth" -ge "$FM_LOCK_RECOVERY_MAX_DEPTH" ]; then
     printf 'error: refusing stale lock recovery for %s: nested .steal lock depth reached %s; inspect and clear the persisted stale lock chain, then retry\n' \
       "$lockdir" "$FM_LOCK_RECOVERY_MAX_DEPTH" >&2
-    return 1
+    return "$FM_LOCK_RECOVERY_REFUSED_STATUS"
   fi
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal" "$((recovery_depth + 1))"; then
+  if fm_lock_try_acquire "$steal" "$((recovery_depth + 1))"; then
+    steal_owner=${FM_LOCK_OWNER_DIR:-}
+  else
+    rc=$?
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    [ "$rc" -ne "$FM_LOCK_RECOVERY_REFUSED_STATUS" ] || return "$rc"
     return 1
   fi
-  steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_lock_owner_alive "$lockdir" "$cur"; then
@@ -945,8 +949,14 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while true; do
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -ne "$FM_LOCK_RECOVERY_REFUSED_STATUS" ] || return "$rc"
     sleep 0.1
   done
 }
