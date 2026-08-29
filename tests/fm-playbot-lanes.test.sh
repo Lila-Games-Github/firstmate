@@ -3676,31 +3676,38 @@ git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit --allow-empty --allow-empty-
   || fail "could not create the empty-subject fixture commit"
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit --allow-empty --cleanup=verbatim -m '  exact subject  ' >/dev/null \
   || fail "could not create the whitespace-bearing subject fixture commit"
-exact_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
-empty_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^)
-named_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^^)
+encoded_subject_tree=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse 'HEAD^{tree}')
+encoded_subject_head=$(printf '  caf\351  \n' \
+  | git -C "$FIXTURE_ROOT/worker/.worktrees/alt" -c i18n.commitEncoding=ISO-8859-1 \
+    commit-tree "$encoded_subject_tree" -p HEAD) \
+  || fail "could not create the encoded subject fixture commit"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" reset --hard "$encoded_subject_head" >/dev/null
+exact_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^)
+empty_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^^)
+named_subject_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD^^^)
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:release >/dev/null \
   || fail "could not publish the differently named upstream branch"
 git -C "$FIXTURE_ROOT/worker" branch --set-upstream-to=origin/release main >/dev/null \
   || fail "could not configure the mismatched landing upstream"
 retirement_list main > "$retirement_inventory"
-OUT_FILE="$retirement_inventory" EXACT_HEAD="$exact_subject_head" EMPTY_HEAD="$empty_subject_head" NAMED_HEAD="$named_subject_head" node --no-warnings <<'NODE' \
-  || fail "the explicit landing branch or commit-subject whitespace was not preserved"
+OUT_FILE="$retirement_inventory" ENCODED_HEAD="$encoded_subject_head" EXACT_HEAD="$exact_subject_head" EMPTY_HEAD="$empty_subject_head" NAMED_HEAD="$named_subject_head" node --no-warnings <<'NODE' \
+  || fail "the explicit landing branch, encoding, or commit-subject whitespace was not preserved"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const root = workspace.roots[0];
 if (root.landing.remote !== 'origin' || root.landing.remoteRef !== 'refs/heads/main') process.exit(1);
-if (root.head.commit !== process.env.EXACT_HEAD || root.head.subject !== '  exact subject  ') process.exit(1);
-if (root.commitsAhead.length !== 3) process.exit(1);
-if (root.commitsAhead[0].commit !== process.env.EXACT_HEAD || root.commitsAhead[0].subject !== '  exact subject  ') process.exit(1);
-if (root.commitsAhead[1].commit !== process.env.EMPTY_HEAD || root.commitsAhead[1].subject !== '') process.exit(1);
-if (root.commitsAhead[2].commit !== process.env.NAMED_HEAD || root.commitsAhead[2].subject !== 'release-only workspace behavior') process.exit(1);
+if (root.head.commit !== process.env.ENCODED_HEAD || root.head.subject !== '  café  ') process.exit(1);
+if (root.commitsAhead.length !== 4) process.exit(1);
+if (root.commitsAhead[0].commit !== process.env.ENCODED_HEAD || root.commitsAhead[0].subject !== '  café  ') process.exit(1);
+if (root.commitsAhead[1].commit !== process.env.EXACT_HEAD || root.commitsAhead[1].subject !== '  exact subject  ') process.exit(1);
+if (root.commitsAhead[2].commit !== process.env.EMPTY_HEAD || root.commitsAhead[2].subject !== '') process.exit(1);
+if (root.commitsAhead[3].commit !== process.env.NAMED_HEAD || root.commitsAhead[3].subject !== 'release-only workspace behavior') process.exit(1);
 NODE
 git -C "$FIXTURE_ROOT/worker" branch --set-upstream-to=origin/main main >/dev/null \
   || fail "could not restore the fixture landing upstream"
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:main >/dev/null \
   || fail "could not land the upstream and empty-subject fixture commits"
-pass "fm-playbot-lanes: explicit landing names and commit-subject whitespace remain exact"
+pass "fm-playbot-lanes: explicit landing names and encoded commit subjects remain exact"
 
 # Dirty every exact Playbot churn path.
 # All eight are evidence but none is generalized from a prefix or extension.
@@ -3917,6 +3924,24 @@ chmod 0644 "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" config core.fileMode true
 pass "fm-playbot-lanes: executable mode changes block despite core.fileMode false"
 
+real_worktree_index=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse --path-format=absolute --git-path index)
+clean_override_index="$FIXTURE_ROOT/clean-override-index"
+cp "$real_worktree_index" "$clean_override_index"
+printf 'staged-only work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" add prototype-game/real-work.txt
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore --worktree --source=HEAD prototype-game/real-work.txt
+GIT_INDEX_FILE="$clean_override_index" retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' \
+  || fail "an inherited GIT_INDEX_FILE hid the real staged workspace change"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'tracked-modifications');
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/real-work.txt') process.exit(1);
+NODE
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore --staged prototype-game/real-work.txt
+rm -f "$clean_override_index"
+pass "fm-playbot-lanes: inherited Git repository overrides cannot hide tracked work"
+
 # Commit subjects are returned, and pushing the same head to the explicitly
 # named landing branch must become visible from ls-remote even though the local
 # origin/main tracking ref is deliberately left stale.
@@ -3956,17 +3981,25 @@ replacement_object=$(printf '%s\n' 'replacement ancestry fixture' \
   | git -C "$FIXTURE_ROOT/worker/.worktrees/alt" commit-tree "$replacement_tree" -p "$replacement_unpushed")
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" replace "$replacement_landing" "$replacement_object"
 retirement_list main > "$retirement_inventory"
-OUT_FILE="$retirement_inventory" HEAD_COMMIT="$replacement_unpushed" node --no-warnings <<'NODE' \
-  || fail "a replacement ref concealed an unlanded workspace commit"
+OUT_FILE="$retirement_inventory" REPLACED_COMMIT="$replacement_landing" node --no-warnings <<'NODE' \
+  || fail "a replacement ref was not returned as explicit blocking evidence"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
-const commits = workspace.roots[0].commitsAhead;
-if (commits.length !== 1 || commits[0].commit !== process.env.HEAD_COMMIT || commits[0].subject !== 'replacement-hidden workspace work') process.exit(1);
-if (!workspace.blockers.some(blocker => blocker.code === 'unlanded-commits')) process.exit(1);
+const blocker = workspace.roots[0].blockers.find(candidate => candidate.code === 'git-unreadable');
+if (!blocker || !blocker.message.includes(`refs/replace/${process.env.REPLACED_COMMIT}`)) process.exit(1);
+NODE
+GIT_NO_REPLACE_OBJECTS=1 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" reset --hard "$replacement_landing" >/dev/null
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" LANDING_COMMIT="$replacement_landing" node --no-warnings <<'NODE' \
+  || fail "a replacement ref on an otherwise landed clean workspace did not block retirement"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const root = workspace.roots[0];
+if (workspace.retirable || root.head.commit !== process.env.LANDING_COMMIT) process.exit(1);
+if (!root.blockers.some(blocker => blocker.code === 'git-unreadable' && blocker.message.includes('refs/replace/'))) process.exit(1);
 NODE
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" replace -d "$replacement_landing" >/dev/null
-git -C "$FIXTURE_ROOT/worker/.worktrees/alt" reset --hard "$replacement_landing" >/dev/null
-pass "fm-playbot-lanes: replacement refs cannot hide unlanded commits"
+pass "fm-playbot-lanes: replacement refs are explicit blocking evidence"
 
 git_common_dir=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse --path-format=absolute --git-common-dir)
 graft_file="$git_common_dir/info/grafts"
@@ -4308,7 +4341,7 @@ db.close();
 NODE
 printf '1\n' > "$FIXTURE_ROOT/workspace-delete-fail-after"
 partial_route_file="$PLAYBOT_LANES_STATE_DIR/routes/partial-retirement-route.json"
-printf '%s\n' '{"id":"partial-retirement-route","active":true,"worker":{"workspaceId":"ws-retire-partial"}}' > "$partial_route_file"
+printf '%s\n' '{"version":1,"id":"partial-retirement-route","active":true,"supervisor":{"id":"chat-controller","workspaceId":"ws-controller"},"worker":{"id":"chat-retire-partial","workspaceId":"ws-retire-partial"},"createdAt":"2026-08-30T00:00:00.000Z","updatedAt":"2026-08-30T00:00:00.000Z"}' > "$partial_route_file"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(retirement_call ws-retire-partial ',"confirm":true')
 rm -f "$FIXTURE_ROOT/workspace-delete-fail-after"
@@ -4412,7 +4445,7 @@ db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
 db.close();
 NODE
 malformed_route_file="$PLAYBOT_LANES_STATE_DIR/routes/malformed-retirement-route.json"
-printf '%s\n' '{"active":true,"worker":{"workspaceId":"ws-retire-malformed-route"}' > "$malformed_route_file"
+printf '%s\n' '{}' > "$malformed_route_file"
 out=$(retirement_call ws-retire-malformed-route ',"confirm":true')
 OUT="$out" ROUTE_FILE_NAME="$(basename "$malformed_route_file")" node --no-warnings <<'NODE' \
   || fail "malformed route state disappeared from post-action cleanup"
@@ -4431,7 +4464,7 @@ if (audit.workspace.id !== 'ws-retire-malformed-route' || !audit.ipc.succeeded) 
 if (!audit.routeProblems.some(problem => problem.includes(process.env.ROUTE_FILE_NAME))) process.exit(1);
 NODE
 rm -f "$malformed_route_file"
-pass "fm-playbot-lanes: malformed route state makes post-action cleanup incomplete"
+pass "fm-playbot-lanes: invalid route objects make post-action cleanup incomplete"
 
 # Register a real durable route naming the retiring workspace so deletion has
 # to clean it up as part of the public behavior.

@@ -62,12 +62,13 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 
 `list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
 It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
-It reports the verified landing commit, each workspace root's exact head, every ahead commit and subject including an empty subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
-Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, an ahead commit, a tracked modification outside Playbot's exact churn allowlist, a POSIX executable-mode change hidden by `core.fileMode=false`, assume-unchanged or skip-worktree index flags, and an in-progress merge, rebase, cherry-pick, revert, or sequencer are blocking evidence rather than a bare false verdict.
+It reports the verified landing commit, each workspace root's exact head, every ahead commit and subject including an empty or non-UTF-8-encoded subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
+Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, an ahead commit, a tracked modification outside Playbot's exact churn allowlist, a POSIX executable-mode change hidden by `core.fileMode=false`, assume-unchanged or skip-worktree index flags, replacement refs, and an in-progress merge, rebase, cherry-pick, revert, or sequencer are blocking evidence rather than a bare false verdict.
 Tracked-content inspection compares each index object with the actual regular file, symlink target, or populated submodule head using Git's clean filters, so stat-cache shortcuts cannot produce a clean verdict.
+Git evidence clears inherited repository, worktree, index, object-store, namespace, shallow-file, replacement-base, and command-line configuration overrides before inspecting the caller-selected root.
 Initialized submodules receive the same recursive tracked, untracked, ignored, index-flag, and operation-state inspection, and persisted per-worktree submodule Git directories are inspected even after the submodule is deinitialized or removed from the index.
 A populated submodule that cannot be inspected blocks retirement, as does a persisted submodule stash, detached head, or ref- or reflog-reachable commit not proven reachable from a stable fresh snapshot of the configured remotes.
-Revision evidence disables replacement objects, and repository graft metadata blocks inspection instead of being allowed to rewrite the ancestry used for a deletion verdict.
+Revision evidence disables replacement objects, and any `refs/replace/*` or repository graft metadata blocks inspection instead of being allowed to rewrite the ancestry used for a deletion verdict.
 Untracked and ignored files also block retirement and are returned by exact path, because the tracked-churn allowlist never classifies them.
 The allowlist is eight literal repository-relative paths returned as `trackedChurnAllowlist`: seven files under `prototype-game/addons/playbot/` plus `prototype-game/project.godot` that Playbot's editor integration rewrites across unrelated worktrees.
 No directory, extension, basename, or broader pattern is treated as churn.
@@ -80,11 +81,12 @@ A failed immediate recheck returns that complete structured inspection, includin
 After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, deactivates every durable lane route naming the workspace, and appends a mode-0600 private audit record under the lane state directory.
 Each root resolves remote evidence independently so worktree-specific Git configuration cannot borrow another root's remote or commit.
 The immediate inspection captures whether each Git worktree registration existed, and post-action reconciliation reports a registration as removed only when that captured registration changed from present to absent.
-Retirement enumerates every route file strictly, so malformed or unreadable route state makes post-action cleanup incomplete instead of disappearing from the result and audit.
+Retirement enumerates every route file strictly and validates its version, filename-bound id, active flag, endpoint identities, workspace identities, and timestamps, so malformed or unreadable route state makes post-action cleanup incomplete instead of disappearing from the result and audit.
 Durable route mutations share one cross-process lock whose owner record includes the process start identity, so dead owners and reused PIDs recover without letting one generation release another's lock.
 The serialized mutation preserves a concurrent retirement deactivation and re-reads every matching route as inactive before post-action cleanup can be complete.
 That record names the time, project, workspace, workspace paths, exact root heads, explicit landing branch and remotely verified landing commits, affected lane routes, IPC outcome, and removal verification.
-Once the IPC succeeds, later verification, route, or audit failures return `deleted: true` with `postActionComplete: false` and exact problems instead of throwing an ordinary refusal that could make a caller retry a deletion that already happened.
+If the IPC succeeds but database, directory, or Git-registration verification is incomplete, the tool returns `deleted: false`, `partialAction: true`, `postActionComplete: false`, the full reconciliation, and a warning against blind retry.
+If removal verification is complete but route cleanup or audit append fails, the tool returns `deleted: true` with `postActionComplete: false` and exact problems because the workspace deletion is verified even though post-action work remains incomplete.
 If Playbot rejects the deletion after removing anything, the tool reconciles every database row, directory, and NUL-parsed Git worktree registration, appends a partial-action audit, returns the exact removed, remaining, and uncertain evidence with the error, and warns against a blind retry.
 
 ## Lane lifecycle

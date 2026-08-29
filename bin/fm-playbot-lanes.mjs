@@ -498,16 +498,38 @@ function resolveWorkspace(project, selector) {
   throw new Error(`Project ${project.id} has multiple active workspaces; provide workspace id or path`);
 }
 
+function gitEnvironment() {
+  const env = { ...process.env };
+  const overrides = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+  ];
+  for (const name of overrides) delete env[name];
+  for (const name of Object.keys(env)) {
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(name)) delete env[name];
+  }
+  return {
+    ...env,
+    GIT_GRAFT_FILE: process.platform === "win32" ? "NUL" : "/dev/null",
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
 function git(root, args, options = {}) {
   const encoding = options.encoding ?? "utf8";
   const result = spawnSync("git", ["-C", root, ...args], {
     encoding,
-    env: {
-      ...process.env,
-      GIT_GRAFT_FILE: process.platform === "win32" ? "NUL" : "/dev/null",
-      GIT_NO_REPLACE_OBJECTS: "1",
-      GIT_TERMINAL_PROMPT: "0",
-    },
+    env: gitEnvironment(),
     input: options.input,
     maxBuffer: 16 * 1024 * 1024,
   });
@@ -544,10 +566,17 @@ function prefixGitPath(prefix, value) {
   return prefix ? `${prefix}/${value}` : value;
 }
 
-function assertNoGitGrafts(root) {
+function assertNoGitAncestryOverrides(root) {
   const commonDir = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
   const grafts = path.join(commonDir, "info", "grafts");
   if (pathPresence(grafts)) throw new Error(`Git graft metadata blocks retirement evidence: ${grafts}`);
+  const replacementRefs = String(git(root, ["for-each-ref", "--format=%(refname)", "refs/replace/"]))
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .sort();
+  if (replacementRefs.length > 0) {
+    throw new Error(`Git replacement refs block retirement evidence: ${replacementRefs.join(", ")}`);
+  }
 }
 
 function gitIndexWorktreeChanges(root) {
@@ -717,10 +746,11 @@ function gitSubmodulePaths(root) {
 }
 
 function exactCommitSubject(root, commit) {
-  const raw = git(root, ["cat-file", "commit", commit], { encoding: "buffer" });
-  const messageStart = raw.indexOf(Buffer.from("\n\n"));
-  if (messageStart < 0) throw new Error(`Git returned unreadable commit-object evidence for ${commit}`);
-  const message = raw.subarray(messageStart + 2);
+  const raw = git(root, ["show", "-s", "--encoding=UTF-8", "--format=format:%B%x00", commit], { encoding: "buffer" });
+  if (raw.length === 0 || raw.at(-1) !== 0 || raw.subarray(0, -1).includes(0)) {
+    throw new Error(`Git returned unreadable commit-subject evidence for ${commit}`);
+  }
+  const message = raw.subarray(0, -1);
   const lineEnd = message.indexOf(0x0a);
   return message.subarray(0, lineEnd < 0 ? message.length : lineEnd).toString("utf8");
 }
@@ -841,7 +871,7 @@ function persistedSubmoduleState(root) {
   const unreadable = [...discovered.unreadable];
   for (const repository of discovered.repositories) {
     try {
-      assertNoGitGrafts(repository.gitDir);
+      assertNoGitAncestryOverrides(repository.gitDir);
       const head = {
         commit: stripTerminalLineEnding(git(repository.gitDir, ["rev-parse", "--verify", "HEAD^{commit}"])),
         subject: exactCommitSubject(repository.gitDir, "HEAD"),
@@ -893,7 +923,7 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
   const canonicalRoot = canonicalPath(root);
   if (visited.has(canonicalRoot)) throw new Error(`recursive submodule path resolves to an already inspected repository: ${canonicalRoot}`);
   visited.add(canonicalRoot);
-  assertNoGitGrafts(root);
+  assertNoGitAncestryOverrides(root);
   const shallow = shallowGitStatus(root);
   const tracked = new Set(shallow.trackedPaths.map((file) => prefixGitPath(prefix, file)));
   const untracked = new Set(shallow.untrackedPaths.map((file) => prefixGitPath(prefix, file)));
@@ -1010,7 +1040,7 @@ function landingRemote(root, landingBranch) {
 }
 
 function aheadCommits(root, landingCommit) {
-  assertNoGitGrafts(root);
+  assertNoGitAncestryOverrides(root);
   const raw = git(root, ["log", "-z", "--format=%H", `${landingCommit}..HEAD`], { encoding: "buffer" });
   return commitRecords(root, raw, "ahead-commit");
 }
@@ -1209,6 +1239,28 @@ function appendRetirementAudit(record) {
   return file;
 }
 
+function validateRetirementRoute(route, name) {
+  if (!route || typeof route !== "object" || Array.isArray(route)) throw new Error("route JSON is not an object");
+  const failures = [];
+  if (route.version !== 1) failures.push("version is not 1");
+  if (typeof route.id !== "string" || !route.id.trim()) failures.push("id is missing");
+  else if (`${safeId(route.id)}.json` !== name) failures.push("id does not match the route filename");
+  if (typeof route.active !== "boolean") failures.push("active is not boolean");
+  for (const endpoint of ["supervisor", "worker"]) {
+    const value = route[endpoint];
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      failures.push(`${endpoint} is missing`);
+      continue;
+    }
+    if (typeof value.id !== "string" || !value.id.trim()) failures.push(`${endpoint}.id is missing`);
+    if (typeof value.workspaceId !== "string" || !value.workspaceId.trim()) failures.push(`${endpoint}.workspaceId is missing`);
+  }
+  if (typeof route.createdAt !== "string" || !route.createdAt.trim()) failures.push("createdAt is missing");
+  if (typeof route.updatedAt !== "string" || !route.updatedAt.trim()) failures.push("updatedAt is missing");
+  if (failures.length > 0) throw new Error(`route schema is invalid: ${failures.join(", ")}`);
+  return route;
+}
+
 function strictRouteInventory(workspaceId) {
   ensurePrivateDirs();
   const inventory = [];
@@ -1218,8 +1270,7 @@ function strictRouteInventory(workspaceId) {
     try {
       const raw = fs.readFileSync(file);
       contentSha256 = crypto.createHash("sha256").update(raw).digest("hex");
-      const route = JSON.parse(raw.toString("utf8"));
-      if (!route || typeof route !== "object" || Array.isArray(route)) throw new Error("route JSON is not an object");
+      const route = validateRetirementRoute(JSON.parse(raw.toString("utf8")), name);
       inventory.push({
         file: name,
         id: route.id ?? null,
