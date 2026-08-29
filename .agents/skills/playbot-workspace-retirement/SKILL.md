@@ -15,7 +15,7 @@ Use the `playbot_lanes` MCP for the entire retirement workflow.
    Derive that branch from the task's accepted delivery contract and never substitute a repository default.
 2. Read the returned evidence for every candidate.
    A retirable verdict includes current remote landing commit evidence, exact head and ahead-commit subjects, every unarchived thread state, tracked paths classified against the tool's exact churn allowlist, and distinct exact-path evidence for every untracked or ignored path.
-   Stop on any blocker or unreadable evidence and preserve the workspace.
+   Stop on any blocker or unreadable evidence and preserve the workspace, including when an unarchived thread state is missing or unrecognized.
 3. Select one exact workspace id from that fresh result.
    Retirement is destructive, so set `confirm: true` only when deletion of that specific workspace is already authorized and the immediately preceding evidence still supports it.
 4. Call `retire_workspace` for that one id with the same explicit `landingBranch` and `confirm: true`.

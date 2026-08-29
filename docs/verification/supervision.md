@@ -539,7 +539,7 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
-On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 127 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
+On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 131 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
 The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
 The remote cases deliberately leave `origin/main` stale, advance the bare remote's `main`, and bind local `main` to `origin/release`, proving that inventory uses the `ls-remote` commit while preserving the explicitly named landing branch.
 The clean-evidence audit covered assume-unchanged and skip-worktree index flags, inherited repository and index overrides, initialized and uninitialized submodules, merge, rebase, cherry-pick and sequencer state, stashes, and every Git command that contributes deletion evidence.
@@ -570,18 +570,22 @@ Another two-root rejection removes only one exact `workspace_roots` row while le
 The rejection result and durable audit also preserve the pre-action strict route baseline and reconcile the still-active route against the post-action inventory.
 Another executable fixture makes `workspace:delete` resolve successfully without removing its database rows, directory, or Git registration, and proves the MCP reports `deleted: false`, a partial action, full remaining evidence, the blind-retry warning, and an unchanged active route.
 That fixture forces the audit append's first write to be short, then observes a complete parseable JSONL record, file fsync, and parent-directory fsync before `appended: true` is returned.
+Two concurrent incomplete-success calls then pause one audit append after a short first write, proving the other cannot interleave and that an incomplete trailing record is rolled back before both complete JSONL records are appended.
 Destructive selection accepts only the exact active workspace id returned by inventory, with executable name, case-folded name, and path refusals proving no alias reaches Playbot IPC.
 Another real rejection fixture uses a valid standalone Git directory that was never registered in the project repository and proves the pre-action baseline prevents its already-absent registration from being mislabeled as destructive change.
 A real worktree-specific landing-branch remote binding gives two roots sharing one common Git directory different landing commits and proves both roots retain their own remote evidence.
 A syntactically valid empty route object fixture survives successful workspace deletion while schema validation makes the result and durable audit explicitly incomplete.
 Every confirmed retirement captures database rows, directory presence, Git registration, and every strict route record before IPC, then includes the route baseline and post-action route reconciliation in both resolved and rejected IPC accounting.
 All durable route read-modify-write operations share one cross-process lock whose complete random generation token, PID, and timezone- and locale-independent process-start identity are atomically published with acquisition.
-Executable fixtures prove dead-owner residue and a reused live PID are reclaimed, caller timezone and locale differences cannot impersonate PID reuse, a paused publisher cannot have its live generation reclaimed, and the deterministic paused Stop-hook race proves a live owner remains serialized, releases its own generation, and leaves the final route inactive with truthful post-action verification.
+Acquisition and recovery share a transactional SQLite gate, so an exact compare-and-delete of a dead gate owner completes before any reaper can inspect or replace the route-lock generation.
+Executable fixtures prove concurrent dead-owner reapers serialize, short owner-record writes complete before publication, dead-owner residue and a reused live PID are reclaimed, caller timezone and locale differences cannot impersonate PID reuse, a paused publisher cannot have its live generation reclaimed, and the deterministic paused Stop-hook race proves a live owner remains serialized, releases its own generation, and leaves the final route inactive with truthful post-action verification.
 The lock-lifecycle additions reported:
 
 ```text
 ok - fm-playbot-lanes: dead route-lock owners recover without wedging mutations
 ok - fm-playbot-lanes: PID reuse cannot preserve another route-lock generation
+ok - fm-playbot-lanes: concurrent dead-owner reapers preserve one lock generation
+ok - fm-playbot-lanes: route-lock owner publication completes short writes
 ok - fm-playbot-lanes: route-lock release preserves another owner generation
 ok - fm-playbot-lanes: route-lock ownership publishes atomically before acquisition
 ok - fm-playbot-lanes: route-lock identity ignores caller timezone and locale
@@ -618,11 +622,13 @@ ok - fm-playbot-lanes: persisted submodule unpublished and symbolic refs block
 ok - fm-playbot-lanes: persisted submodule operations and index state block
 ok - fm-playbot-lanes: clean-looking merge, cherry-pick, and rebase states block retirement
 ok - fm-playbot-lanes: every root resolves its own worktree-specific remote evidence
+ok - fm-playbot-lanes: missing and unknown thread states block retirement
 ok - fm-playbot-lanes: immediate recheck returns exact thread and path blockers
 ok - fm-playbot-lanes: rejection distinguishes already-missing registration from removal
 ok - fm-playbot-lanes: rejected multi-root deletion reconciles and audits exact partial state
 ok - fm-playbot-lanes: exact root-row deltas report partial deletion
 ok - fm-playbot-lanes: audit append completes short writes and syncs creation
+ok - fm-playbot-lanes: audit appends serialize and recover incomplete tails
 ok - fm-playbot-lanes: successful IPC cannot label incomplete removal deleted
 ok - fm-playbot-lanes: invalid route objects make post-action cleanup incomplete
 ok - fm-playbot-lanes: concurrent Stop notification cannot reactivate retired routes

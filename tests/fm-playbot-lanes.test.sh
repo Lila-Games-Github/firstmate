@@ -353,6 +353,96 @@ if (value.lane.active !== true) process.exit(1);
 NODE
 pass "fm-playbot-lanes: PID reuse cannot preserve another route-lock generation"
 
+route_reaper_shim="$FIXTURE_ROOT/pause-route-lock-reaper.cjs"
+route_reaper_ready="$FIXTURE_ROOT/route-lock-reaper-ready"
+route_reaper_one_out="$FIXTURE_ROOT/route-lock-reaper-one.json"
+route_reaper_two_out="$FIXTURE_ROOT/route-lock-reaper-two.json"
+cat > "$route_reaper_shim" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const originalReadFileSync = fs.readFileSync;
+const originalWriteFileSync = fs.writeFileSync;
+const wait = new Int32Array(new SharedArrayBuffer(4));
+let reads = 0;
+fs.readFileSync = function pauseConfirmedReaper(file, ...rest) {
+  const result = originalReadFileSync.call(fs, file, ...rest);
+  if (path.resolve(String(file)) === path.resolve(process.env.FM_TEST_ROUTE_LOCK) && ++reads === 2) {
+    originalWriteFileSync.call(fs, process.env.FM_TEST_REAPER_READY, 'ready\n');
+    Atomics.wait(wait, 0, 0, 750);
+  }
+  return result;
+};
+NODE
+node -e '' &
+route_reaper_dead_pid=$!
+wait "$route_reaper_dead_pid"
+printf '%s\n' "{\"pid\":$route_reaper_dead_pid,\"identity\":\"linux:dead-reaper:1\",\"token\":\"44444444444444444444444444444444\"}" > "$route_lock"
+(
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+    | FM_TEST_ROUTE_LOCK="$route_lock" \
+      FM_TEST_REAPER_READY="$route_reaper_ready" \
+      NODE_OPTIONS="--require=$route_reaper_shim" \
+      node --no-warnings "$SCRIPT" serve > "$route_reaper_one_out"
+) &
+route_reaper_one_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$route_reaper_ready" ] && break
+  sleep 0.02
+done
+[ -f "$route_reaper_ready" ] || fail "the first dead-owner reaper did not reach its confirming read"
+(
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+    | node --no-warnings "$SCRIPT" serve > "$route_reaper_two_out"
+) &
+route_reaper_two_pid=$!
+wait "$route_reaper_one_pid" || fail "the first concurrent route-lock reaper failed"
+wait "$route_reaper_two_pid" || fail "the second concurrent route-lock reaper failed"
+OUT_ONE="$route_reaper_one_out" OUT_TWO="$route_reaper_two_out" node --no-warnings <<'NODE' \
+  || fail "concurrent route-lock reapers did not serialize through exact ownership"
+const fs = require('node:fs');
+for (const file of [process.env.OUT_ONE, process.env.OUT_TWO]) {
+  const value = JSON.parse(fs.readFileSync(file, 'utf8')).result?.structuredContent;
+  if (value?.lane?.active !== false) process.exit(1);
+}
+NODE
+[ ! -e "$route_lock" ] || fail "concurrent reapers left route-lock residue"
+rm -f "$route_reaper_shim" "$route_reaper_ready" "$route_reaper_one_out" "$route_reaper_two_out"
+pass "fm-playbot-lanes: concurrent dead-owner reapers preserve one lock generation"
+
+route_short_write_shim="$FIXTURE_ROOT/short-route-lock-owner.cjs"
+cat > "$route_short_write_shim" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const originalOpenSync = fs.openSync;
+const originalWriteSync = fs.writeSync;
+const pendingDescriptors = new Set();
+let shortened = false;
+fs.openSync = function trackPendingOwner(file, ...rest) {
+  const descriptor = originalOpenSync.call(fs, file, ...rest);
+  if (path.resolve(String(file)).startsWith(`${path.resolve(process.env.FM_TEST_ROUTE_LOCK)}.pending-`)) pendingDescriptors.add(descriptor);
+  return descriptor;
+};
+fs.writeSync = function shortOwnerWrite(descriptor, data, ...rest) {
+  if (pendingDescriptors.has(descriptor) && !shortened && Buffer.isBuffer(data)) {
+    shortened = true;
+    const [offset, length, position] = rest;
+    return originalWriteSync.call(fs, descriptor, data, offset, Math.max(1, Math.floor(length / 2)), position);
+  }
+  return originalWriteSync.call(fs, descriptor, data, ...rest);
+};
+NODE
+out=$(printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+  | FM_TEST_ROUTE_LOCK="$route_lock" \
+    NODE_OPTIONS="--require=$route_short_write_shim" \
+    node --no-warnings "$SCRIPT" serve)
+OUT="$out" node --no-warnings <<'NODE' || fail "a short owner-record write published an unreadable route lock"
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.lane?.active !== false) process.exit(1);
+NODE
+[ ! -e "$route_lock" ] || fail "short owner-record write left route-lock residue"
+rm -f "$route_short_write_shim"
+pass "fm-playbot-lanes: route-lock owner publication completes short writes"
+
 route_lock_swap="$FIXTURE_ROOT/swap-route-lock-owner.cjs"
 cat > "$route_lock_swap" <<'NODE'
 const fs = require('node:fs');
@@ -400,6 +490,7 @@ route_lock_publish="$FIXTURE_ROOT/pause-route-lock-publish.cjs"
 route_lock_publish_ready="$FIXTURE_ROOT/route-lock-publish-ready"
 route_lock_publish_release="$FIXTURE_ROOT/route-lock-publish-release"
 route_lock_publish_out="$FIXTURE_ROOT/route-lock-publish-out.json"
+route_lock_publish_contender_out="$FIXTURE_ROOT/route-lock-publish-contender-out.json"
 cat > "$route_lock_publish" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
@@ -433,20 +524,31 @@ for _ in $(seq 1 100); do
   sleep 0.02
 done
 [ -f "$route_lock_publish_ready" ] || fail "route-lock publisher did not reach its deterministic pause"
-sleep 2.1
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}")
-OUT="$out" node --no-warnings <<'NODE' || fail "a contender could not mutate while ownership publication was pending"
-const value = JSON.parse(process.env.OUT).result?.structuredContent;
-if (value?.lane?.active !== false) process.exit(1);
-NODE
+(
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+    | node --no-warnings "$SCRIPT" serve > "$route_lock_publish_contender_out"
+) &
+route_lock_publish_contender_pid=$!
+sleep 0.2
+[ ! -s "$route_lock_publish_contender_out" ] || fail "a contender crossed the pending ownership publication boundary"
 touch "$route_lock_publish_release"
 wait "$route_lock_publish_pid" || fail "a live pending route-lock owner was reclaimed"
-OUT_FILE="$route_lock_publish_out" node --no-warnings <<'NODE' || fail "the pending route-lock owner did not retry after its contender"
-const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result?.structuredContent;
-if (value?.lane?.active !== false) process.exit(1);
+wait "$route_lock_publish_contender_pid" || fail "the pending route-lock contender failed after publication"
+OWNER_OUT="$route_lock_publish_out" CONTENDER_OUT="$route_lock_publish_contender_out" node --no-warnings <<'NODE' \
+  || fail "pending ownership publication did not serialize both route mutations"
+const fs = require('node:fs');
+for (const file of [process.env.OWNER_OUT, process.env.CONTENDER_OUT]) {
+  const value = JSON.parse(fs.readFileSync(file, 'utf8')).result?.structuredContent;
+  if (value?.lane?.active !== false) process.exit(1);
+}
 NODE
 [ ! -e "$route_lock" ] || fail "atomic route-lock publication left final lock residue"
-rm -f "$route_lock_publish" "$route_lock_publish_ready" "$route_lock_publish_release" "$route_lock_publish_out"
+rm -f \
+  "$route_lock_publish" \
+  "$route_lock_publish_ready" \
+  "$route_lock_publish_release" \
+  "$route_lock_publish_out" \
+  "$route_lock_publish_contender_out"
 pass "fm-playbot-lanes: route-lock ownership publishes atomically before acquisition"
 
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__register_lane"}' \
@@ -4529,6 +4631,50 @@ git -C "$worktree_remote_root" config --worktree --unset-all branch.main.merge
 git -C "$FIXTURE_ROOT/worker" remote remove retirement-specific
 pass "fm-playbot-lanes: every root resolves its own worktree-specific remote evidence"
 
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET agent_status = NULL WHERE id = ?').run('chat-worker-alt');
+db.close();
+NODE
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' \
+  || fail "a missing unarchived thread state did not block retirement inventory"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'thread-state-uncertain');
+if (workspace.retirable || blocker?.threads[0]?.id !== 'chat-worker-alt' || blocker.threads[0].status !== null) process.exit(1);
+NODE
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET agent_status = ? WHERE id = ?').run('future_state', 'chat-worker-alt');
+db.close();
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(retirement_call ws-worker-alt ',"confirm":true')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "an unrecognized immediate thread state reached workspace deletion"
+const value = JSON.parse(process.env.OUT);
+const inspection = value.error?.data?.inspection;
+const blocker = inspection?.blockers.find(candidate => candidate.code === 'thread-state-uncertain');
+if (!value.error?.message.includes('thread-state-uncertain')) process.exit(1);
+if (blocker?.threads[0]?.id !== 'chat-worker-alt' || blocker.threads[0].status !== 'future_state') process.exit(1);
+NODE
+if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
+  fail "an uncertain thread state still invoked workspace:delete"
+fi
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE workspace_threads SET agent_status = ? WHERE id = ?').run('ready', 'chat-worker-alt');
+db.close();
+NODE
+pass "fm-playbot-lanes: missing and unknown thread states block retirement"
+
 # A safe inventory is never authorization: change a persisted safety condition
 # after the read and prove retire_workspace catches it before workspace:delete.
 FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
@@ -4849,6 +4995,80 @@ if (rows.length !== 1 || JSON.parse(rows[0]).workspace.id !== 'ws-retire-incompl
 NODE
 rm -f "$audit_short_write_shim" "$audit_file_sync" "$audit_directory_sync"
 pass "fm-playbot-lanes: audit append completes short writes and syncs creation"
+
+audit_concurrency_shim="$FIXTURE_ROOT/pause-audit-append.cjs"
+audit_concurrency_ready="$FIXTURE_ROOT/audit-concurrency-ready"
+audit_concurrency_release="$FIXTURE_ROOT/audit-concurrency-release"
+audit_concurrency_one_out="$FIXTURE_ROOT/audit-concurrency-one.json"
+audit_concurrency_two_out="$FIXTURE_ROOT/audit-concurrency-two.json"
+cat > "$audit_concurrency_shim" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const originalOpenSync = fs.openSync;
+const originalWriteSync = fs.writeSync;
+const originalWriteFileSync = fs.writeFileSync;
+const wait = new Int32Array(new SharedArrayBuffer(4));
+let auditDescriptor = null;
+let paused = false;
+fs.openSync = function trackAuditOpen(file, ...rest) {
+  const descriptor = originalOpenSync.call(fs, file, ...rest);
+  if (path.resolve(String(file)) === path.resolve(process.env.FM_TEST_AUDIT_FILE)) auditDescriptor = descriptor;
+  return descriptor;
+};
+fs.writeSync = function pauseShortAuditWrite(descriptor, data, ...rest) {
+  if (descriptor === auditDescriptor && !paused && Buffer.isBuffer(data)) {
+    paused = true;
+    const [offset, length, position] = rest;
+    const written = originalWriteSync.call(fs, descriptor, data, offset, Math.max(1, Math.floor(length / 2)), position);
+    originalWriteFileSync.call(fs, process.env.FM_TEST_AUDIT_READY, 'ready\n');
+    while (!fs.existsSync(process.env.FM_TEST_AUDIT_RELEASE)) Atomics.wait(wait, 0, 0, 20);
+    return written;
+  }
+  return originalWriteSync.call(fs, descriptor, data, ...rest);
+};
+NODE
+printf '%s\n%s' '{"seed":true}' '{"incomplete":' > "$audit_file"
+printf 'succeed without removal\n' > "$FIXTURE_ROOT/workspace-delete-succeeds-without-removal"
+(
+  FM_TEST_AUDIT_FILE="$audit_file" \
+    FM_TEST_AUDIT_READY="$audit_concurrency_ready" \
+    FM_TEST_AUDIT_RELEASE="$audit_concurrency_release" \
+    NODE_OPTIONS="--require=$audit_concurrency_shim" \
+    retirement_call ws-retire-incomplete-success ',"confirm":true' > "$audit_concurrency_one_out"
+) &
+audit_concurrency_one_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$audit_concurrency_ready" ] && break
+  sleep 0.02
+done
+[ -f "$audit_concurrency_ready" ] || fail "the first audit append did not reach its deterministic short write"
+(
+  retirement_call ws-retire-incomplete-success ',"confirm":true' > "$audit_concurrency_two_out"
+) &
+audit_concurrency_two_pid=$!
+sleep 0.2
+touch "$audit_concurrency_release"
+wait "$audit_concurrency_one_pid" || fail "the first concurrent audit append failed"
+wait "$audit_concurrency_two_pid" || fail "the second concurrent audit append failed"
+rm -f "$FIXTURE_ROOT/workspace-delete-succeeds-without-removal"
+OUT_ONE="$audit_concurrency_one_out" OUT_TWO="$audit_concurrency_two_out" AUDIT_FILE="$audit_file" node --no-warnings <<'NODE' \
+  || fail "concurrent audit appends interleaved or preserved an incomplete tail"
+const fs = require('node:fs');
+for (const file of [process.env.OUT_ONE, process.env.OUT_TWO]) {
+  const value = JSON.parse(fs.readFileSync(file, 'utf8')).result?.structuredContent;
+  if (!value?.audit?.appended || value.workspace?.id !== 'ws-retire-incomplete-success') process.exit(1);
+}
+const rows = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse);
+if (rows.length !== 3 || rows[0].seed !== true) process.exit(1);
+if (rows.slice(1).some(row => row.workspace?.id !== 'ws-retire-incomplete-success')) process.exit(1);
+NODE
+rm -f \
+  "$audit_concurrency_shim" \
+  "$audit_concurrency_ready" \
+  "$audit_concurrency_release" \
+  "$audit_concurrency_one_out" \
+  "$audit_concurrency_two_out"
+pass "fm-playbot-lanes: audit appends serialize and recover incomplete tails"
 [ -d "$incomplete_success_root" ] || fail "the incomplete-success fixture unexpectedly removed its worktree"
 AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" INCOMPLETE_SUCCESS_ROOT="$incomplete_success_root" ROUTE_FILE="$incomplete_success_route" node --no-warnings <<'NODE' \
   || fail "successful incomplete removal lost reconciliation in the durable audit"

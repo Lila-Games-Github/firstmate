@@ -156,6 +156,7 @@ function readJson(file, fallback = null) {
 
 const ROUTE_LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
 const ROUTE_LOCK_INCOMPLETE_MS = 2_000;
+const RETIRABLE_THREAD_STATES = new Set(["ready"]);
 
 function processStartIdentity(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
@@ -233,6 +234,15 @@ function fsyncDirectory(directory) {
   }
 }
 
+function writeBufferFully(descriptor, buffer, position = null) {
+  let offset = 0;
+  while (offset < buffer.length) {
+    const written = fs.writeSync(descriptor, buffer, offset, buffer.length - offset, position === null ? null : position + offset);
+    if (!Number.isSafeInteger(written) || written <= 0) throw new Error("Durable write made no forward progress");
+    offset += written;
+  }
+}
+
 function createRouteLock(lock) {
   const owner = {
     pid: process.pid,
@@ -241,13 +251,15 @@ function createRouteLock(lock) {
   };
   owner.name = routeLockOwnerName(owner);
   const pendingPath = `${lock}.pending-${owner.token}`;
+  const encoded = Buffer.from(`${JSON.stringify({ pid: owner.pid, identity: owner.identity, token: owner.token })}\n`, "utf8");
   let descriptor = null;
   try {
     descriptor = fs.openSync(pendingPath, "wx", 0o600);
-    fs.writeSync(descriptor, `${JSON.stringify({ pid: owner.pid, identity: owner.identity, token: owner.token })}\n`, null, "utf8");
+    writeBufferFully(descriptor, encoded);
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = null;
+    if (!fs.readFileSync(pendingPath).equals(encoded)) throw new Error("Durable lane route lock owner record could not be verified");
     fs.linkSync(pendingPath, lock);
     fs.unlinkSync(pendingPath);
     fsyncDirectory(path.dirname(lock));
@@ -260,6 +272,133 @@ function createRouteLock(lock) {
       if (unlinkError?.code !== "ENOENT") throw unlinkError;
     }
     throw error;
+  }
+}
+
+function routeLockAcquisitionDbPath() {
+  return path.join(stateDir(), ".routes-write-acquisition.sqlite");
+}
+
+function openRouteLockAcquisitionDb() {
+  ensurePrivateDirs();
+  const file = routeLockAcquisitionDbPath();
+  const created = !fs.existsSync(file);
+  const db = new DatabaseSync(file);
+  try {
+    db.exec("PRAGMA busy_timeout = 1000");
+    db.exec("PRAGMA synchronous = FULL");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS route_lock_acquisition (
+        name TEXT PRIMARY KEY,
+        pid INTEGER NOT NULL,
+        identity TEXT,
+        token TEXT NOT NULL
+      )
+    `);
+    fs.chmodSync(file, 0o600);
+    if (created) fsyncDirectory(path.dirname(file));
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+function routeLockOwnerIsRecoverable(owner) {
+  if (!processIsAlive(owner.pid)) return true;
+  return processStartIdentityProvesReuse(owner.identity, processStartIdentity(owner.pid));
+}
+
+function rollbackRouteLockAcquisition(db) {
+  try {
+    db.exec("ROLLBACK");
+  } catch {
+  }
+}
+
+function acquireRouteLockAcquisition(deadline) {
+  const owner = {
+    name: "routes",
+    pid: process.pid,
+    identity: ROUTE_PROCESS_START_IDENTITY,
+    token: crypto.randomBytes(16).toString("hex"),
+  };
+  const db = openRouteLockAcquisitionDb();
+  while (true) {
+    let transaction = false;
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      transaction = true;
+      const current = queryOne(db, "SELECT name, pid, identity, token FROM route_lock_acquisition WHERE name = ?", [owner.name]);
+      if (current && !routeLockOwnerIsRecoverable(current)) {
+        db.exec("ROLLBACK");
+        transaction = false;
+      } else {
+        if (current) {
+          const deleted = db.prepare(`
+            DELETE FROM route_lock_acquisition
+            WHERE name = ? AND pid = ? AND identity IS ? AND token = ?
+          `).run(current.name, current.pid, current.identity, current.token);
+          if (deleted.changes !== 1) {
+            db.exec("ROLLBACK");
+            transaction = false;
+          }
+        }
+        if (transaction) {
+          db.prepare("INSERT INTO route_lock_acquisition (name, pid, identity, token) VALUES (?, ?, ?, ?)")
+            .run(owner.name, owner.pid, owner.identity, owner.token);
+          db.exec("COMMIT");
+          db.close();
+          return owner;
+        }
+      }
+    } catch (error) {
+      if (transaction) rollbackRouteLockAcquisition(db);
+      if (!String(error?.message ?? error).includes("database is locked")) {
+        db.close();
+        throw error;
+      }
+    }
+    if (Date.now() >= deadline) {
+      db.close();
+      throw new Error(`Timed out waiting for durable lane route lock acquisition at ${routeLockAcquisitionDbPath()}`);
+    }
+    Atomics.wait(ROUTE_LOCK_WAIT, 0, 0, 20);
+  }
+}
+
+function releaseRouteLockAcquisition(owner, deadline) {
+  const db = openRouteLockAcquisitionDb();
+  while (true) {
+    let transaction = false;
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      transaction = true;
+      const deleted = db.prepare(`
+        DELETE FROM route_lock_acquisition
+        WHERE name = ? AND pid = ? AND identity IS ? AND token = ?
+      `).run(owner.name, owner.pid, owner.identity, owner.token);
+      if (deleted.changes !== 1) throw new Error("Durable lane route acquisition ownership changed before release");
+      db.exec("COMMIT");
+      db.close();
+      return;
+    } catch (error) {
+      if (transaction) rollbackRouteLockAcquisition(db);
+      if (!String(error?.message ?? error).includes("database is locked") || Date.now() >= deadline) {
+        db.close();
+        throw error;
+      }
+    }
+    Atomics.wait(ROUTE_LOCK_WAIT, 0, 0, 20);
+  }
+}
+
+function withRouteLockAcquisition(deadline, action) {
+  const owner = acquireRouteLockAcquisition(deadline);
+  try {
+    return action();
+  } finally {
+    releaseRouteLockAcquisition(owner, deadline);
   }
 }
 
@@ -354,11 +493,16 @@ function withRoutesLock(action) {
   const deadline = Date.now() + 10_000;
   let owner = null;
   while (owner === null) {
-    try {
-      owner = createRouteLock(lock);
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      if (recoverRouteLock(lock)) continue;
+    owner = withRouteLockAcquisition(deadline, () => {
+      try {
+        return createRouteLock(lock);
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+        if (!recoverRouteLock(lock)) return null;
+        return createRouteLock(lock);
+      }
+    });
+    if (owner === null) {
       if (Date.now() >= deadline) throw new Error(`Timed out waiting for durable lane route writes at ${lock}`);
       Atomics.wait(ROUTE_LOCK_WAIT, 0, 0, 20);
     }
@@ -1333,6 +1477,7 @@ function inspectWorkspace(project, workspace, landingBranch) {
     .filter((row) => row.workspace_id === workspace.id && !row.archived)
     .map((row) => ({ id: row.thread_id, title: row.title, status: row.agent_status, updatedAt: row.updated_at }));
   const blockingThreads = unarchivedThreads.filter((thread) => thread.status === "working" || thread.status === "pending_input");
+  const uncertainThreads = unarchivedThreads.filter((thread) => !RETIRABLE_THREAD_STATES.has(thread.status) && !blockingThreads.includes(thread));
   const evidence = {
     workspace: {
       id: workspace.id,
@@ -1344,7 +1489,7 @@ function inspectWorkspace(project, workspace, landingBranch) {
       project: project.name,
     },
     landingBranch: String(landingBranch ?? ""),
-    threads: { unarchived: unarchivedThreads, blocking: blockingThreads },
+    threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
     roots: [],
     blockers: [],
   };
@@ -1356,6 +1501,13 @@ function inspectWorkspace(project, workspace, landingBranch) {
       code: "active-threads",
       message: `${blockingThreads.length} unarchived chat(s) are working or pending input`,
       threads: blockingThreads,
+    });
+  }
+  if (uncertainThreads.length > 0) {
+    evidence.blockers.push({
+      code: "thread-state-uncertain",
+      message: `${uncertainThreads.length} unarchived chat(s) have missing or unrecognized persisted states`,
+      threads: uncertainThreads,
     });
   }
   if (workspace.roots.length === 0) {
@@ -1381,32 +1533,42 @@ function retirementAuditPath() {
 }
 
 function appendRetirementAudit(record) {
-  ensurePrivateDirs();
-  const file = retirementAuditPath();
-  const encoded = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
-  let descriptor;
-  let created = false;
-  try {
-    descriptor = fs.openSync(file, "ax", 0o600);
-    created = true;
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    descriptor = fs.openSync(file, "a", 0o600);
-  }
-  try {
-    let offset = 0;
-    while (offset < encoded.length) {
-      const written = fs.writeSync(descriptor, encoded, offset, encoded.length - offset, null);
-      if (!Number.isSafeInteger(written) || written <= 0) throw new Error("Audit append made no forward progress");
-      offset += written;
+  return withRoutesLock(() => {
+    ensurePrivateDirs();
+    const file = retirementAuditPath();
+    const encoded = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+    let descriptor;
+    let created = false;
+    try {
+      descriptor = fs.openSync(file, "wx+", 0o600);
+      created = true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      descriptor = fs.openSync(file, "r+");
     }
-    fs.chmodSync(file, 0o600);
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
-  }
-  if (created) fsyncDirectory(path.dirname(file));
-  return file;
+    try {
+      const existing = fs.readFileSync(descriptor);
+      const lastNewline = existing.lastIndexOf(0x0a);
+      const completeLength = lastNewline < 0 ? 0 : lastNewline + 1;
+      const complete = existing.subarray(0, completeLength).toString("utf8");
+      for (const line of complete.split("\n").slice(0, -1)) {
+        if (!line) throw new Error("Durable retirement audit contains an empty record");
+        try {
+          JSON.parse(line);
+        } catch {
+          throw new Error("Durable retirement audit contains an unreadable completed record");
+        }
+      }
+      if (completeLength !== existing.length) fs.ftruncateSync(descriptor, completeLength);
+      writeBufferFully(descriptor, encoded, completeLength);
+      fs.chmodSync(file, 0o600);
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    if (created) fsyncDirectory(path.dirname(file));
+    return file;
+  });
 }
 
 function validateRetirementRoute(route, name) {
