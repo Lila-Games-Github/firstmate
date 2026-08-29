@@ -195,7 +195,7 @@ test_repeat_capture_is_idempotent() {
 }
 
 test_read_commands_reject_symlinked_state() {
-  local target exposed id command rc
+  local target exposed id override command rc
   target=$(make_home symlink-target)
   id=$(capture_candidate "$target" symlink-source FrogPile escaped-defect \
     "state overrides must stay inside the selected private home")
@@ -208,28 +208,34 @@ test_read_commands_reject_symlinked_state() {
   exposed=$(make_home symlink-reader)
   rmdir "$exposed/state"
   ln -s "$target/state" "$exposed/state"
-  for command in get list batch summary; do
-    case "$command" in
-      get) set -- get "$id" ;;
-      list) set -- list --all ;;
-      batch) set -- batch ;;
-      summary) set -- summary ;;
-    esac
-    set +e
-    FM_HOME="$exposed" FM_STATE_OVERRIDE="$exposed/state/" \
-      FM_LEARNING_NOW=2026-08-28T12:00:00Z "$COMMAND" "$@" \
-      >"$exposed/$command.out" 2>"$exposed/$command.err"
-    rc=$?
-    set -e
-    [ "$rc" -ne 0 ] || fail "$command followed a symlinked state override"
-    assert_grep "state path must be a real directory" "$exposed/$command.err" \
-      "$command did not identify the invalid state boundary"
+  for override in "$exposed/state/" "$exposed/state/."; do
+    for command in get list batch summary capture classify disposition dedupe; do
+      case "$command" in
+        get) set -- get "$id" ;;
+        list) set -- list --all ;;
+        batch) set -- batch ;;
+        summary) set -- summary ;;
+        capture) set -- capture ;;
+        classify) set -- classify "$id" ;;
+        disposition) set -- disposition "$id" ;;
+        dedupe) set -- dedupe "$id" ;;
+      esac
+      set +e
+      FM_HOME="$exposed" FM_STATE_OVERRIDE="$override" \
+        FM_LEARNING_NOW=2026-08-28T12:00:00Z "$COMMAND" "$@" \
+        >"$exposed/$command.out" 2>"$exposed/$command.err"
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] || fail "$command followed symlinked state alias $override"
+      assert_grep "state path must be a real directory" "$exposed/$command.err" \
+        "$command did not reject symlinked state alias $override"
+    done
   done
   assert_present "$(candidate_path "$target" "$id")" \
     "a read command renamed a record through the symlinked state override"
   assert_absent "$(candidate_path "$target" "$id" documented)" \
     "a read command corrected lifecycle state outside the selected private home"
-  pass "public read commands reject symlinked state overrides without mutation"
+  pass "public lifecycle commands reject symlinked trailing state aliases"
 }
 
 test_atomic_lifecycle_publication_and_content_authority() {
