@@ -47,7 +47,8 @@
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, a bounded unresolved learning-candidate
 #                       summary when present, and a cheap per-task
-#                       endpoint-liveness read: read-only, always runs.
+#                       endpoint-liveness read: always runs; lock-refused mode
+#                       passes the summary's non-mutating read-only option.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -841,7 +842,7 @@ fi
 # Candidate records deliberately outlive task state, but the startup surface is
 # only a bounded count and concise sample. The lifecycle command owns both the
 # record schema, path validation, and hard output cap. An absent store is silent
-# and is not created by this read-only path.
+# and is not created by this summary call.
 LEARNING_SUMMARY_ARGS=()
 [ "$READ_ONLY" -eq 0 ] || LEARNING_SUMMARY_ARGS=(--read-only)
 if LEARNING_SUMMARY=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
