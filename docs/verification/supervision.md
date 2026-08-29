@@ -539,19 +539,24 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
-On 2026-08-29, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 100 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
+On 2026-08-29, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 104 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
 The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
 The remote cases deliberately leave `origin/main` stale, advance the bare remote's `main`, and bind local `main` to `origin/release`, proving that inventory uses the `ls-remote` commit while preserving the explicitly named landing branch.
 The clean-evidence audit covered assume-unchanged and skip-worktree index flags, initialized and uninitialized submodules, merge, rebase, cherry-pick and sequencer state, stashes, and every Git command that contributes deletion evidence.
 Any assume-unchanged or skip-worktree entry blocks by exact path, even when its current content appears clean.
-Initialized submodules are inspected recursively with ignored files visible, while an absent or empty uninitialized submodule directory contains no local content that workspace deletion can lose.
-Populated unreadable submodule paths block instead of being treated as clean.
+Initialized submodules are inspected recursively with ignored files visible.
+Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixture proves both an exact stash and an exact unpushed commit remain visible and blocking after the submodule worktree is emptied.
+Populated or persisted unreadable submodule state blocks instead of being treated as clean.
 Merge, rebase, cherry-pick, revert, and sequencer markers block even when the index and worktree otherwise appear clean.
-Stashes do not apply as a workspace-deletion blocker because Git stores them in the repository's shared ref and object store rather than inside the disposable worktree, so Playbot worktree removal does not delete them.
+Top-level stashes do not apply as a workspace-deletion blocker because Git stores them in the repository's common ref and object store outside the disposable worktree.
+Submodule stashes do apply because linked worktrees keep those submodule repositories under the disposable worktree Git directory, so they are inspected and blocked.
 Every Git command that returns pathname or commit records for a deletion decision now uses NUL termination: status, index flags, staged gitlinks, ahead commits, and worktree registrations.
 The remaining Git outputs are single validated scalars or one explicitly requested ref rather than pathname record lists: branch and remote names are constrained by Git ref syntax, hashes are verified as commits, and the one `ls-remote` row must match the exact requested ref.
 The post-delete audit also covered a real two-root workspace whose first worktree was removed before the fake Playbot endpoint rejected the second removal.
 The MCP error, durable audit, later inventory, database counts, both directory checks, and both Git registration checks all agreed on the exact partial result, including the surviving registration whose real path contained a newline.
+Another real rejection fixture uses a valid standalone Git directory that was never registered in the project repository and proves the pre-action baseline prevents its already-absent registration from being mislabeled as destructive change.
+A real worktree-specific landing-branch remote binding gives two roots sharing one common Git directory different landing commits and proves both roots retain their own remote evidence.
+A malformed route file fixture survives successful workspace deletion while making the result and durable audit explicitly incomplete.
 The exact retirement-specific output was:
 
 ```text
@@ -566,9 +571,13 @@ ok - fm-playbot-lanes: tracked, untracked, and ignored work block by exact path
 ok - fm-playbot-lanes: assume-unchanged and skip-worktree paths block with exact index evidence
 ok - fm-playbot-lanes: commit subjects block retirement until current remote evidence proves them landed
 ok - fm-playbot-lanes: initialized submodules expose nested ignored work before retirement
+ok - fm-playbot-lanes: persisted removed-submodule storage exposes stash and unpushed commits
 ok - fm-playbot-lanes: clean-looking merge, cherry-pick, and rebase states block retirement
+ok - fm-playbot-lanes: every root resolves its own worktree-specific remote evidence
 ok - fm-playbot-lanes: immediate recheck returns exact thread and path blockers
+ok - fm-playbot-lanes: rejection distinguishes already-missing registration from removal
 ok - fm-playbot-lanes: rejected multi-root deletion reconciles and audits exact partial state
+ok - fm-playbot-lanes: malformed route state makes post-action cleanup incomplete
 ok - fm-playbot-lanes: confirmed retirement uses exact IPC and verifies audit, routes, database, directory, and Git removal
 ```
 

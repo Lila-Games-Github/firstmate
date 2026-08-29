@@ -425,6 +425,101 @@ function gitSubmodulePaths(root) {
   return [...new Set(paths)].sort();
 }
 
+function commitRecords(raw, label) {
+  const fields = raw.toString("utf8").split("\0");
+  if (fields.at(-1) === "") fields.pop();
+  if (fields.length % 2 !== 0) throw new Error(`Git returned unreadable ${label} evidence`);
+  const commits = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    commits.push({ commit: fields[index], subject: fields[index + 1] ?? "" });
+  }
+  return commits;
+}
+
+function persistedSubmoduleGitDirs(root) {
+  const gitDir = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-dir"]));
+  const modulesRoot = path.join(gitDir, "modules");
+  if (!pathPresence(modulesRoot)) return { repositories: [], unreadable: [] };
+  const repositories = [];
+  const unreadable = [];
+  const scan = (directory, logicalPrefix = "") => {
+    let entries;
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      unreadable.push({ path: logicalPrefix || ".", gitDir: directory, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      const logicalPath = prefixGitPath(logicalPrefix, gitPathIdentity(entry.name));
+      if (!entry.isDirectory()) {
+        unreadable.push({ path: logicalPath, gitDir: entryPath, error: "unexpected non-directory entry in persisted submodule storage" });
+        continue;
+      }
+      let isRepository;
+      try {
+        isRepository = pathPresence(path.join(entryPath, "HEAD"))
+          && pathPresence(path.join(entryPath, "config"))
+          && pathPresence(path.join(entryPath, "objects"));
+      } catch (error) {
+        unreadable.push({ path: logicalPath, gitDir: entryPath, error: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      if (!isRepository) {
+        scan(entryPath, logicalPath);
+        continue;
+      }
+      repositories.push({ path: logicalPath, gitDir: entryPath });
+      const nestedModules = path.join(entryPath, "modules");
+      try {
+        if (pathPresence(nestedModules)) scan(nestedModules, logicalPath);
+      } catch (error) {
+        unreadable.push({ path: logicalPath, gitDir: nestedModules, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  };
+  scan(modulesRoot);
+  return { repositories, unreadable };
+}
+
+function persistedSubmoduleState(root) {
+  const discovered = persistedSubmoduleGitDirs(root);
+  const repositories = [];
+  const unreadable = [...discovered.unreadable];
+  for (const repository of discovered.repositories) {
+    try {
+      const head = {
+        commit: stripTerminalLineEnding(git(repository.gitDir, ["rev-parse", "--verify", "HEAD^{commit}"])),
+        subject: stripTerminalLineEnding(git(repository.gitDir, ["show", "-s", "--format=%s", "HEAD"])),
+      };
+      const localOnlyCommits = commitRecords(
+        git(repository.gitDir, ["log", "-z", "--format=%H%x00%s", "--all", "--not", "--remotes"], { encoding: "buffer" }),
+        "persisted submodule history",
+      );
+      let stashCommit = null;
+      try {
+        stashCommit = stripTerminalLineEnding(git(repository.gitDir, ["rev-parse", "--verify", "refs/stash^{commit}"]));
+      } catch {
+        stashCommit = null;
+      }
+      const remoteContainingHead = String(git(repository.gitDir, [
+        "for-each-ref",
+        `--contains=${head.commit}`,
+        "--format=%(refname)",
+        "refs/remotes/",
+      ])).split(/\r?\n/).filter(Boolean);
+      if (remoteContainingHead.length === 0 && !localOnlyCommits.some((entry) => entry.commit === head.commit)) {
+        localOnlyCommits.unshift(head);
+      }
+      repositories.push({ ...repository, head, stashCommit, localOnlyCommits });
+    } catch (error) {
+      unreadable.push({ ...repository, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { repositories, unreadable };
+}
+
 function workspaceGitStatus(root, prefix = "", visited = new Set()) {
   const canonicalRoot = canonicalPath(root);
   if (visited.has(canonicalRoot)) throw new Error(`recursive submodule path resolves to an already inspected repository: ${canonicalRoot}`);
@@ -436,6 +531,7 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
   const operations = gitOperationState(root).map((entry) => ({ ...entry, repositoryPath: prefix || "." }));
   const submodules = [];
   const unreadableSubmodules = [];
+  const persistedSubmodules = persistedSubmoduleState(root);
   for (const relativePath of gitSubmodulePaths(root)) {
     const nestedPrefix = prefixGitPath(prefix, relativePath);
     const nestedRoot = path.resolve(root, relativePath);
@@ -472,7 +568,8 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
     indexFlags: indexFlags.sort((left, right) => left.path.localeCompare(right.path)),
     operations,
     submodules,
-    unreadableSubmodules,
+    persistedSubmodules: persistedSubmodules.repositories,
+    unreadableSubmodules: [...unreadableSubmodules, ...persistedSubmodules.unreadable],
   };
 }
 
@@ -544,17 +641,18 @@ function landingRemote(root, landingBranch) {
 
 function aheadCommits(root, landingCommit) {
   const raw = git(root, ["log", "-z", "--format=%H%x00%s", `${landingCommit}..HEAD`], { encoding: "buffer" });
-  const fields = raw.toString("utf8").split("\0");
-  if (fields.at(-1) === "") fields.pop();
-  if (fields.length % 2 !== 0) throw new Error("Git returned unreadable ahead-commit evidence");
-  const commits = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    commits.push({ commit: fields[index], subject: fields[index + 1] ?? "" });
-  }
-  return commits;
+  return commitRecords(raw, "ahead-commit");
 }
 
-function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache) {
+function gitWorktreePaths(projectRootPath) {
+  return git(projectRootPath, ["worktree", "list", "--porcelain", "-z"], { encoding: "buffer" })
+    .toString("utf8")
+    .split("\0")
+    .filter((field) => field.startsWith("worktree "))
+    .map((field) => canonicalPath(field.slice("worktree ".length)));
+}
+
+function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
   const rootPath = canonicalPath(workspaceRoot.path);
   const result = {
     projectRootId: workspaceRoot.projectRootId,
@@ -572,7 +670,8 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache
     untrackedPaths: [],
     indexFlags: [],
     operations: [],
-    submodules: { inspected: [], unreadable: [] },
+    submodules: { inspected: [], persisted: [], unreadable: [] },
+    gitRegistration: null,
     blockers: [],
   };
   let rootPresent;
@@ -586,11 +685,9 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache
     result.blockers.push({ code: "missing-root", message: `Workspace root is missing: ${workspaceRoot.path || "<empty>"}` });
     return result;
   }
-  let commonDir;
   try {
     const top = canonicalPath(stripTerminalLineEnding(git(rootPath, ["rev-parse", "--show-toplevel"])));
     if (top !== rootPath) throw new Error(`root resolves inside Git worktree ${top} instead of naming it exactly`);
-    commonDir = stripTerminalLineEnding(git(rootPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
     result.head = {
       commit: String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim(),
       subject: String(git(rootPath, ["show", "-s", "--format=%s", "HEAD"])).trim(),
@@ -603,15 +700,20 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache
     result.indexFlags = status.indexFlags;
     result.operations = status.operations;
     result.submodules.inspected = status.submodules;
+    result.submodules.persisted = status.persistedSubmodules;
     result.submodules.unreadable = status.unreadableSubmodules;
+    const projectRoot = project.roots.find((candidate) => candidate.id === workspaceRoot.projectRootId);
+    if (!projectRoot?.path) throw new Error(`project root ${workspaceRoot.projectRootId} is missing`);
+    result.gitRegistration = {
+      projectRootPath: canonicalPath(projectRoot.path),
+      registered: gitWorktreePaths(projectRoot.path).includes(rootPath),
+    };
   } catch (error) {
     result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
     return result;
   }
   try {
-    const cacheKey = `${canonicalPath(commonDir)}\n${landingBranch}`;
-    result.landing = remoteCache.get(cacheKey) ?? landingRemote(rootPath, landingBranch);
-    remoteCache.set(cacheKey, result.landing);
+    result.landing = landingRemote(rootPath, landingBranch);
     result.commitsAhead = aheadCommits(rootPath, result.landing.commit);
   } catch (error) {
     result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
@@ -652,6 +754,14 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache
       submodules: result.submodules.unreadable,
     });
   }
+  const submoduleLocalHistory = result.submodules.persisted.filter((entry) => entry.stashCommit || entry.localOnlyCommits.length > 0);
+  if (submoduleLocalHistory.length > 0) {
+    result.blockers.push({
+      code: "submodule-local-history",
+      message: `${submoduleLocalHistory.length} persisted submodule Git director${submoduleLocalHistory.length === 1 ? "y contains" : "ies contain"} stashed or unpushed history that workspace deletion would remove`,
+      submodules: submoduleLocalHistory,
+    });
+  }
   if (result.untrackedPaths.length > 0) {
     result.blockers.push({
       code: "untracked-files",
@@ -662,7 +772,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, remoteCache
   return result;
 }
 
-function inspectWorkspace(project, workspace, landingBranch, remoteCache = new Map()) {
+function inspectWorkspace(project, workspace, landingBranch) {
   const unarchivedThreads = threadRows()
     .filter((row) => row.workspace_id === workspace.id && !row.archived)
     .map((row) => ({ id: row.thread_id, title: row.title, status: row.agent_status, updatedAt: row.updated_at }));
@@ -694,7 +804,7 @@ function inspectWorkspace(project, workspace, landingBranch, remoteCache = new M
   if (workspace.roots.length === 0) {
     evidence.blockers.push({ code: "missing-root", message: "Workspace has no persisted workspace roots" });
   } else if (workspace.kind !== "local") {
-    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch, remoteCache));
+    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch));
     evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
   } else {
     evidence.roots = workspace.roots.map((root) => ({
@@ -730,24 +840,34 @@ function appendRetirementAudit(record) {
 function deactivateWorkspaceRoutes(workspaceId) {
   const affected = [];
   const problems = [];
-  let routes;
+  const routes = [];
   try {
-    routes = loadRoutes();
+    ensurePrivateDirs();
+    for (const name of fs.readdirSync(routesDir()).filter((entry) => entry.endsWith(".json")).sort()) {
+      const file = path.join(routesDir(), name);
+      try {
+        const route = JSON.parse(fs.readFileSync(file, "utf8"));
+        if (!route || typeof route !== "object" || Array.isArray(route)) throw new Error("route JSON is not an object");
+        routes.push({ file, name, route });
+      } catch (error) {
+        problems.push(`Lane route ${name} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   } catch (error) {
     return { affected, problems: [`Lane routes could not be read: ${error instanceof Error ? error.message : String(error)}`] };
   }
-  for (const route of routes.filter((item) => item.supervisor?.workspaceId === workspaceId || item.worker?.workspaceId === workspaceId)) {
+  for (const { file, name, route } of routes.filter((item) => item.route.supervisor?.workspaceId === workspaceId || item.route.worker?.workspaceId === workspaceId)) {
     const wasActive = route.active === true;
     route.active = false;
     route.updatedAt = nowIso();
     route.retiredWorkspace = workspaceId;
     route.retiredWorkspaceAt = route.updatedAt;
     try {
-      atomicWriteJson(routePath(route.id), route);
-      affected.push({ id: route.id, wasActive, deactivated: true });
+      atomicWriteJson(file, route);
+      affected.push({ id: route.id ?? null, file: name, wasActive, deactivated: true });
     } catch (error) {
-      affected.push({ id: route.id, wasActive, deactivated: false });
-      problems.push(`Lane ${route.id} could not be deactivated: ${error instanceof Error ? error.message : String(error)}`);
+      affected.push({ id: route.id ?? null, file: name, wasActive, deactivated: false });
+      problems.push(`Lane ${route.id ?? name} could not be deactivated: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return { affected, problems };
@@ -798,13 +918,15 @@ function verifyWorkspaceRetirement(project, inspection) {
       continue;
     }
     try {
-      const registered = git(projectRoot.path, ["worktree", "list", "--porcelain", "-z"], { encoding: "buffer" })
-        .toString("utf8")
-        .split("\0")
-        .filter((field) => field.startsWith("worktree "))
-        .map((field) => canonicalPath(field.slice("worktree ".length)));
+      if (typeof root.gitRegistration?.registered !== "boolean") throw new Error("pre-action Git registration evidence is missing");
+      const registered = gitWorktreePaths(projectRoot.path);
       const gone = !registered.includes(canonicalPath(root.path));
-      checks.gitRegistrationsGone.push({ path: root.path, gone });
+      checks.gitRegistrationsGone.push({
+        path: root.path,
+        beforeRegistered: root.gitRegistration.registered,
+        gone,
+        removed: root.gitRegistration.registered && gone,
+      });
       if (!gone) problems.push(`Git worktree registration still exists: ${root.path}`);
     } catch (error) {
       checks.gitRegistrationsGone.push({ path: root.path, gone: false, error: error instanceof Error ? error.message : String(error) });
@@ -821,13 +943,14 @@ function retirementReconciliation(verification) {
     workspaceRow: verification.checks.workspaceRowGone,
     workspaceRootRows: verification.checks.workspaceRootRowsGone,
     directories: directoryChecks.filter((entry) => entry.gone).map((entry) => entry.path),
-    gitRegistrations: registrationChecks.filter((entry) => entry.gone).map((entry) => entry.path),
+    gitRegistrations: registrationChecks.filter((entry) => entry.removed).map((entry) => entry.path),
   };
   const remaining = {
     workspaceRowCount: verification.checks.workspaceRowCount,
     workspaceRootRows: verification.checks.workspaceRootRows,
     directories: directoryChecks.filter((entry) => !entry.gone && !entry.error).map((entry) => entry.path),
     gitRegistrations: registrationChecks.filter((entry) => !entry.gone && !entry.error).map((entry) => entry.path),
+    alreadyMissingGitRegistrations: registrationChecks.filter((entry) => entry.gone && entry.beforeRegistered === false).map((entry) => entry.path),
   };
   const uncertain = [
     ...(verification.checks.workspaceRowCount === null ? ["workspace row"] : []),
@@ -839,7 +962,7 @@ function retirementReconciliation(verification) {
 }
 
 async function retireWorkspace(project, workspace, landingBranch) {
-  const inspection = inspectWorkspace(project, workspace, landingBranch, new Map());
+  const inspection = inspectWorkspace(project, workspace, landingBranch);
   if (!inspection.retirable) {
     const summary = inspection.blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
     throw Object.assign(new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck: ${summary}`), {
@@ -860,7 +983,7 @@ async function retireWorkspace(project, workspace, landingBranch) {
     const deletionObserved = verification.checks.workspaceRowGone
       || verification.checks.workspaceRootRowsGone
       || verification.checks.worktreeDirectoriesGone.some((entry) => entry.gone)
-      || verification.checks.gitRegistrationsGone.some((entry) => entry.gone);
+      || verification.checks.gitRegistrationsGone.some((entry) => entry.removed);
     const routes = verification.complete ? deactivateWorkspaceRoutes(workspace.id) : { affected: [], problems: [] };
     const retryWarning = "Do not retry workspace deletion blindly; inspect the workspace and this reconciliation evidence first.";
     const audit = {
@@ -3351,10 +3474,9 @@ async function handleTool(name, args = {}) {
   if (name === "list_retirable_workspaces") {
     const landingBranch = String(args.landingBranch ?? "").trim();
     if (!landingBranch) throw new Error("list_retirable_workspaces requires an explicit landingBranch");
-    const remoteCache = new Map();
     const workspaces = project.workspaces
       .filter((workspace) => workspace.archiveState === "active")
-      .map((workspace) => inspectWorkspace(project, workspace, landingBranch, remoteCache));
+      .map((workspace) => inspectWorkspace(project, workspace, landingBranch));
     return {
       project: { id: project.id, name: project.name },
       landingBranch,
