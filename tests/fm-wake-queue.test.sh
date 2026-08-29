@@ -757,10 +757,21 @@ test_lock_owner_preparation_failure_is_bounded() {
     fm_lock_acquire_wait "$2/.fixture.lock" || lock_rc=$?
     [ "$lock_rc" -eq 3 ] || exit 10
     [ ! -e "$2/.fixture.lock" ] && [ ! -L "$2/.fixture.lock" ] || exit 11
+    FM_LOCK_REQUIRE_IDENTITY=0
+    fm_lock_uses_directory_owner() { return 0; }
+    failed_pid="$2/.directory-owner.lock/pid"
+    cat() {
+      [ "${1:-}" != "$failed_pid" ] || return 1
+      command cat "$@"
+    }
+    lock_rc=0
+    fm_lock_acquire_wait "$2/.directory-owner.lock" || lock_rc=$?
+    [ "$lock_rc" -eq 3 ] || exit 12
+    [ ! -e "$2/.directory-owner.lock" ] && [ ! -L "$2/.directory-owner.lock" ] || exit 13
     fm_lock_try_create() { return 1; }
     lock_rc=0
     fm_lock_try_acquire "$2/.released-race.lock" || lock_rc=$?
-    [ "$lock_rc" -eq 1 ] || exit 12
+    [ "$lock_rc" -eq 1 ] || exit 14
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
   [ "$rc" -eq 0 ] || fail "a lock owner-preparation failure did not propagate promptly (rc=$rc)"
   pass "lock owner-preparation failure is terminal while an absent contention race remains retryable"

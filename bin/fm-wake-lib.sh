@@ -482,7 +482,7 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir mypid back
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir mypid back rc
   FM_LOCK_OWNER_DIR=
   if fm_lock_uses_directory_owner; then
     [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
@@ -502,14 +502,17 @@ fm_lock_try_create() {
     else
       back=
     fi
-    if [ "$back" = "$mypid" ] && fm_lock_points_to_owner "$lockdir" "$ownerdir" \
-      && ! fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
-      FM_LOCK_OWNER_DIR=$ownerdir
-      return 0
+    rc=$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS
+    if [ "$back" = "$mypid" ] && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+      rc=1
+      if ! fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+        FM_LOCK_OWNER_DIR=$ownerdir
+        return 0
+      fi
     fi
     fm_lock_remove_path "$lockdir" 2>/dev/null || true
     fm_lock_discard_owner "$ownerdir"
-    return 1
+    return "$rc"
   fi
   [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
