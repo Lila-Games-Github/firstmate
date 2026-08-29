@@ -38,7 +38,6 @@ FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=132847 faile
 ```
 
 Those runs cover required-field and stored-record validation, deterministic repeat capture, every routing class, incompatible route rejection, separate curator identity, substantive no-one-off-skill evidence, idempotent retries, every requested disposition, explicit deduplication, bounded list and summary output, session-start visibility, and survival through ordinary non-forced task cleanup.
-The summary scale case makes an undisplayed record malformed and still obtains the exact filename-derived unresolved count and bounded sample, proving startup parses no record beyond its display limit and depends on no index or repair path.
 The brief regression executes the absolute shell-quoted capture command from a foreign working directory with conflicting ambient home, state, and code-root values, and confirms ship and scout records land only in the intended private home.
 The same runs confirm routine success still requires no audit or state creation, the originating lane never waits for curator-held state, and the originating lane is not assigned asynchronous curation.
 

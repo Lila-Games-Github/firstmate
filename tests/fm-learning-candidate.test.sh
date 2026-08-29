@@ -132,51 +132,56 @@ test_repeat_capture_is_idempotent() {
   pass "exact repeat capture converges on one durable candidate"
 }
 
-test_atomic_lifecycle_publication_and_suffix_binding() {
-  local home id fakebin real_chmod rc listed path
+test_atomic_lifecycle_publication_and_content_authority() {
+  local home id fakebin real_mv call_file rc count summary listed json
   home=$(make_home atomic-lifecycle)
   id=$(capture_candidate "$home" atomic-transition FrogPile escaped-defect \
     "lifecycle publication must preserve the authoritative record")
   classify_feature "$home" "$id" curator-atomic >/dev/null
-  fakebin=$(fm_fakebin "$home/chmod-failure")
-  real_chmod=$(command -v chmod)
+  fakebin=$(fm_fakebin "$home/rename-interruption")
+  real_mv=$(command -v mv)
+  call_file="$home/mv-calls"
   printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'if [ "$1" = 600 ]; then exit 1; fi' \
-    'exec "$FM_TEST_REAL_CHMOD" "$@"' >"$fakebin/chmod"
-  chmod +x "$fakebin/chmod"
+    'count=0' \
+    '[ ! -f "$FM_TEST_MV_CALLS" ] || count=$(cat "$FM_TEST_MV_CALLS")' \
+    'count=$((count + 1))' \
+    'printf "%s\n" "$count" >"$FM_TEST_MV_CALLS"' \
+    '[ "$count" -ne 2 ] || exit 1' \
+    'exec "$FM_TEST_REAL_MV" "$@"' >"$fakebin/mv"
+  chmod +x "$fakebin/mv"
   set +e
-  PATH="$fakebin:$PATH" FM_TEST_REAL_CHMOD="$real_chmod" run_learning "$home" \
+  PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_MV_CALLS="$call_file" \
+    run_learning "$home" \
     disposition "$id" --curator curator-atomic --status documented \
     --note "The contract now documents the transition" --reference "docs/atomic.md" \
     >"$home/publish.out" 2>"$home/publish.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "lifecycle publication unexpectedly survived a failed record permission step"
+  [ "$rc" -ne 0 ] || fail "lifecycle fixture did not interrupt the suffix rename"
+  count=$(find "$home/state/learning-candidates" -type f -name "$id.*.json" | wc -l | tr -d ' ')
+  [ "$count" -eq 1 ] || fail "interrupted lifecycle cutover left $count candidate records"
   assert_present "$(candidate_path "$home" "$id")" \
-    "failed lifecycle publication removed the authoritative unresolved record"
+    "interrupted lifecycle cutover did not retain the sole current-path record"
   assert_absent "$(candidate_path "$home" "$id" documented)" \
-    "failed lifecycle publication exposed a mismatched documented record"
-  listed=$(run_learning "$home" list)
-  assert_contains "$listed" "$id" "failed lifecycle publication made the candidate unreadable"
-
-  run_learning "$home" disposition "$id" --curator curator-atomic --status documented \
-    --note "The contract now documents the transition" --reference "docs/atomic.md" >/dev/null
-  path=$(candidate_path "$home" "$id" documented)
-  mv "$path" "$(candidate_path "$home" "$id")"
-  set +e
-  run_learning "$home" get "$id" >"$home/suffix-get.out" 2>"$home/suffix-get.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "get accepted a record whose filename disagreed with its lifecycle"
-  assert_grep "invalid candidate record" "$home/suffix-get.err" \
-    "suffix disagreement did not fail record validation"
-  set +e
-  run_learning "$home" list --all >"$home/suffix-list.out" 2>"$home/suffix-list.err"
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail "list accepted a record whose filename disagreed with its lifecycle"
-  pass "lifecycle publication preserves authority and rejects suffix disagreement"
+    "interrupted lifecycle cutover published a second record"
+  [ "$(jq -r '.lifecycle_state' "$(candidate_path "$home" "$id")")" = documented ] \
+    || fail "interrupted lifecycle cutover did not publish updated content first"
+  summary=$(run_learning "$home" summary 2>"$home/summary.err") \
+    || fail "summary rejected a readable record with a stale lifecycle hint"
+  [ -z "$summary" ] || fail "summary counted terminal content under a stale unresolved hint"
+  [ ! -s "$home/summary.err" ] || fail "summary reported a stale derived lifecycle hint"
+  assert_absent "$(candidate_path "$home" "$id")" \
+    "summary did not correct the stale lifecycle hint in passing"
+  assert_present "$(candidate_path "$home" "$id" documented)" \
+    "summary did not preserve the sole record under its corrected hint"
+  listed=$(run_learning "$home" list --all)
+  assert_contains "$listed" "$id" "list omitted the interrupted candidate"
+  assert_contains "$listed" $'\tdocumented\t' "list trusted the filename hint over record content"
+  json=$(run_learning "$home" get "$id")
+  [ "$(printf '%s\n' "$json" | jq -r '.lifecycle_state')" = documented ] \
+    || fail "get did not return the content-authoritative lifecycle state"
+  pass "interrupted lifecycle cutover keeps one content-authoritative record"
 }
 
 test_routes_and_no_one_off_skill_gate() {
@@ -471,7 +476,7 @@ test_concise_outputs_strip_terminal_controls() {
 }
 
 test_bounded_summary_and_batch() {
-  local home empty_home i summary lines batch rc unparsed
+  local home empty_home i summary lines batch rc
   empty_home=$(make_home empty-summary)
   [ -z "$(run_learning "$empty_home" summary)" ] || fail "empty summary was not silent"
   assert_absent "$empty_home/state/learning-candidates" \
@@ -492,15 +497,6 @@ test_bounded_summary_and_batch() {
   batch=$(run_learning "$home" batch --limit 2) || fail "bounded batch failed"
   [ "$(printf '%s\n' "$batch" | jq 'length')" -eq 2 ] || fail "batch ignored its record limit"
 
-  unparsed=$(find "$home/state/learning-candidates" -maxdepth 1 \
-    -type f -name 'lc-*.unresolved.json' -print | LC_ALL=C sort | sed -n '9p')
-  [ -n "$unparsed" ] || fail "scale fixture did not produce an undisplayed record"
-  printf '%s\n' '{malformed beyond the display bound}' >"$unparsed"
-  summary=$(run_learning "$home" summary) || fail "summary parsed a record beyond its detail bound"
-  assert_contains "$summary" "LEARNING CANDIDATES: 9 unresolved" \
-    "filename-only summary count changed after an undisplayed record became unreadable"
-  assert_contains "$summary" "... 6 more" \
-    "bounded summary lost its remainder after an undisplayed record became unreadable"
   set +e
   run_learning "$home" summary --limit 6 >"$home/large-summary.out" 2>"$home/large-summary.err"
   rc=$?
@@ -614,7 +610,7 @@ EOF
 
 test_capture_validation_and_complete_record
 test_repeat_capture_is_idempotent
-test_atomic_lifecycle_publication_and_suffix_binding
+test_atomic_lifecycle_publication_and_content_authority
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry

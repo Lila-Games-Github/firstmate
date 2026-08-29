@@ -299,7 +299,7 @@ The originating worker performs bounded structured capture only after a qualifyi
 A separate curator reads a bounded batch, compares reusable causes and prevention, chooses exactly one feature, project, Firstmate, or named-tool owner, and records a recommendation or disposition without changing that destination.
 Project-skill recommendations carry explicit generality, multi-task or feature-agnostic benefit, repeatable procedure, load-trigger, and counterfactual evidence, which prevents feature-specific fixes from becoming one-off skills by default.
 `bin/fm-learning-candidate.sh` owns the durable schema and mechanical lifecycle, while the internal [`learning-candidate-lifecycle` skill](../.agents/skills/learning-candidate-lifecycle/SKILL.md) owns semantic intake, routing, and the no-one-off-skill judgment.
-The session-start fleet digest counts sorted unresolved record names and parses only the hard-bounded sample it displays, with no durable summary index or repair path.
+The session-start fleet digest streams sorted candidate records, trusts record content over its derived lifecycle suffix, and retains only the hard-bounded unresolved sample it displays, with no durable summary index or separate repair pass.
 
 ## Project memory belongs to projects
 

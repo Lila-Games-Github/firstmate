@@ -10,10 +10,12 @@
 #
 # Records live as versioned JSON files under
 # state/learning-candidates/<candidate-id>.<lifecycle-state>.json in the active
-# FM_HOME. The lifecycle suffix makes unresolved counting a filename-only read.
+# FM_HOME. Record content owns lifecycle state; the suffix is a derived hint.
 # The directory is outside task-scoped state, so fm-teardown.sh never removes it.
-# Every record replacement uses a temporary file and atomic rename. Capture makes
-# one non-waiting mutation-lock attempt; curator mutations may wait for the lock.
+# Every record replacement publishes at the current path by atomic temp-plus-rename,
+# then renames that sole record when its lifecycle hint changes. A read that finds
+# a stale hint trusts readable content and corrects the name in passing. Capture
+# makes one non-waiting mutation-lock attempt; curator mutations may wait for the lock.
 # Exact repeat capture is idempotent: the candidate id is the first 24 hex digits
 # of the SHA-256 digest of the canonical incident object, excluding timestamps.
 # A digest collision with different content is refused.
@@ -78,9 +80,10 @@
 #
 # `list` and `batch` default to unresolved candidates, oldest first. `list` is a
 # concise tab-separated surface; `batch` emits a JSON array with complete records
-# for independent curation. `summary` lists and sorts unresolved record names,
-# counts those names, and parses only the at-most-five records it will display.
-# It has no index, transaction, pending write, repair, or repair-on-read path.
+# for independent curation. `summary` streams sorted record names and content,
+# retains only the at-most-five unresolved records it will display, and trusts
+# record content for its count. It has no index, transaction, pending write,
+# repair pass, or repair command.
 # `summary` is silent when no candidate is unresolved and otherwise emits its
 # capped detail lines plus one remainder line. `get` emits one complete record.
 #
@@ -244,9 +247,9 @@ record_path() { # <candidate-id> <lifecycle-state>
   printf '%s/%s.%s.json\n' "$CANDIDATE_DIR" "$1" "$2"
 }
 
-validate_record_json() { # <json> [expected-id] [expected-state]
-  local json=$1 expected=${2:-} expected_state=${3:-}
-  printf '%s\n' "$json" | jq -e --arg expected "$expected" --arg expected_state "$expected_state" '
+validate_record_json() { # <json> [expected-id]
+  local json=$1 expected=${2:-}
+  printf '%s\n' "$json" | jq -e --arg expected "$expected" '
     .schema == 1
     and (.id | type == "string")
     and ($expected == "" or .id == $expected)
@@ -254,7 +257,6 @@ validate_record_json() { # <json> [expected-id] [expected-state]
     and .id == ("lc-" + .capture_digest[0:24])
     and (.captured_at | type == "string" and length > 0)
     and (.lifecycle_state | IN("unresolved", "dismissed", "documented", "promoted", "follow-up", "duplicate"))
-    and ($expected_state == "" or .lifecycle_state == $expected_state)
     and (.incident | type == "object")
     and ([.incident.origin_task, .incident.project, .incident.signal_type,
           .incident.user_visible_impact, .incident.root_cause,
@@ -311,7 +313,7 @@ validate_record_json() { # <json> [expected-id] [expected-state]
 }
 
 load_record() { # <candidate-id>; sets RECORD_JSON and RECORD_PATH
-  local id=$1 state path found='' found_state=''
+  local id=$1 state path found='' content_state corrected_path
   validate_candidate_id "$id"
   store_available_read_only || die "candidate not found: $id"
   for state in unresolved dismissed documented promoted follow-up duplicate; do
@@ -320,24 +322,28 @@ load_record() { # <candidate-id>; sets RECORD_JSON and RECORD_PATH
     [ -f "$path" ] && [ ! -L "$path" ] || die "candidate path must be a regular file: $path"
     [ -z "$found" ] || die "candidate has multiple lifecycle records: $id"
     found=$path
-    found_state=$state
   done
   [ -n "$found" ] || die "candidate not found: $id"
   RECORD_PATH=$found
   RECORD_JSON=$(cat "$RECORD_PATH")
-  validate_record_json "$RECORD_JSON" "$id" "$found_state"
+  validate_record_json "$RECORD_JSON" "$id"
+  content_state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
+  corrected_path=$(record_path "$id" "$content_state")
+  if [ "$corrected_path" != "$RECORD_PATH" ]; then
+    [ ! -e "$corrected_path" ] || die "candidate has multiple lifecycle records: $id"
+    mv -- "$RECORD_PATH" "$corrected_path"
+    RECORD_PATH=$corrected_path
+  fi
 }
 
 write_record() { # <path> <json>
-  local path=$1 json=$2 id state expected_suffix
+  local path=$1 json=$2 id hint candidate_path=false
   id=$(printf '%s\n' "$json" | jq -r '.id')
   validate_record_json "$json" "$id"
-  state=$(printf '%s\n' "$json" | jq -r '.lifecycle_state')
-  expected_suffix="/$id.$state.json"
-  case "$path" in
-    *"$expected_suffix") ;;
-    *) die "candidate destination does not match record lifecycle state: $id" ;;
-  esac
+  for hint in unresolved dismissed documented promoted follow-up duplicate; do
+    [ "$path" != "$(record_path "$id" "$hint")" ] || candidate_path=true
+  done
+  [ "$candidate_path" = true ] || die "candidate destination does not match record id: $id"
   TEMP_FILE=$(mktemp "$CANDIDATE_DIR/.candidate.XXXXXX") || die "could not create candidate temporary file"
   printf '%s\n' "$json" > "$TEMP_FILE"
   chmod 600 "$TEMP_FILE"
@@ -352,15 +358,13 @@ replace_record() { # <old-path> <json>
   new_path=$(record_path "$id" "$state")
   if [ "$new_path" != "$old_path" ]; then
     [ ! -e "$new_path" ] || die "candidate lifecycle destination already exists: $id"
-    write_record "$new_path" "$json"
-    rm -f -- "$old_path"
-    return 0
   fi
-  write_record "$new_path" "$json"
+  write_record "$old_path" "$json"
+  [ "$new_path" = "$old_path" ] || mv -- "$old_path" "$new_path"
 }
 
 records_stream() {
-  local path json id state base
+  local path id state base
   store_available_read_only || return 0
   for path in "$CANDIDATE_DIR"/lc-*.json; do
     [ -e "$path" ] || continue
@@ -371,9 +375,8 @@ records_stream() {
     state=${state%.json}
     validate_candidate_id "$id"
     validate_lifecycle_state "$state"
-    json=$(cat "$path")
-    validate_record_json "$json" "$id" "$state"
-    printf '%s\n' "$json" | jq -cS .
+    load_record "$id"
+    printf '%s\n' "$RECORD_JSON" | jq -cS .
   done
 }
 
@@ -502,7 +505,7 @@ batch_command() {
 }
 
 summary_command() {
-  local limit=3 count=0 sample_count=0 idx=0 name id impact project signal
+  local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
   local -a samples=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -515,20 +518,13 @@ summary_command() {
   store_available_read_only || return 0
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    count=$((count + 1))
-    if [ "$sample_count" -lt "$limit" ]; then
-      samples[sample_count]=${name#./}
-      sample_count=$((sample_count + 1))
-    fi
-  done < <(CDPATH='' cd -- "$CANDIDATE_DIR" && \
-    find . -maxdepth 1 -type f -name 'lc-*.unresolved.json' -print | LC_ALL=C sort)
-  [ "$count" -gt 0 ] || return 0
-
-  printf 'LEARNING CANDIDATES: %s unresolved\n' "$count"
-  while [ "$idx" -lt "$sample_count" ]; do
-    name=${samples[$idx]}
-    id=${name%.unresolved.json}
+    name=${name#./}
+    id=${name%%.*}
     load_record "$id"
+    state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
+    [ "$state" = unresolved ] || continue
+    count=$((count + 1))
+    [ "$sample_count" -lt "$limit" ] || continue
     project=$(printf '%s\n' "$RECORD_JSON" | jq -r '
       .incident.project |
       explode | map(if (. < 32 or (. >= 127 and . <= 159)) then 32 else . end) | implode')
@@ -537,7 +533,16 @@ summary_command() {
       .incident.user_visible_impact |
       explode | map(if (. < 32 or (. >= 127 and . <= 159)) then 32 else . end) | implode |
       if length > 120 then .[:117] + "..." else . end')
-    printf -- '- %s [%s/%s] %s\n' "$id" "$project" "$signal" "$impact"
+    printf -v line -- '- %s [%s/%s] %s' "$id" "$project" "$signal" "$impact"
+    samples[sample_count]=$line
+    sample_count=$((sample_count + 1))
+  done < <(CDPATH='' cd -- "$CANDIDATE_DIR" && \
+    find . -maxdepth 1 -type f -name 'lc-*.json' -print | LC_ALL=C sort)
+  [ "$count" -gt 0 ] || return 0
+
+  printf 'LEARNING CANDIDATES: %s unresolved\n' "$count"
+  while [ "$idx" -lt "$sample_count" ]; do
+    printf '%s\n' "${samples[$idx]}"
     idx=$((idx + 1))
   done
   if [ "$count" -gt "$limit" ]; then
