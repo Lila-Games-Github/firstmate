@@ -510,7 +510,7 @@ function withRoutesLock(action) {
   try {
     return action();
   } finally {
-    releaseRouteLock(owner);
+    withRouteLockAcquisition(Date.now() + 10_000, () => releaseRouteLock(owner));
   }
 }
 
@@ -953,22 +953,28 @@ function commitRecords(root, raw, label) {
   return commits.map((commit) => ({ commit, subject: exactCommitSubject(root, commit) }));
 }
 
-function commitPseudoRefRecords(root) {
-  const names = ["ORIG_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "BISECT_HEAD"];
+function repositoryPseudoObjectRecords(root) {
+  const gitDir = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-dir"]));
   const records = [];
-  for (const ref of names) {
-    const file = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-path", ref]));
-    if (!pathPresence(file)) continue;
-    const commits = fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean);
-    if (commits.length === 0 || commits.some((commit) => !/^[0-9a-f]{40,64}$/i.test(commit))) {
-      throw new Error(`Git returned unreadable persisted submodule ${ref} evidence`);
-    }
-    for (const candidate of commits) {
-      const commit = stripTerminalLineEnding(git(root, ["rev-parse", "--verify", `${candidate}^{commit}`]));
-      records.push({ ref, commit, subject: exactCommitSubject(root, commit) });
+  for (const entry of fs.readdirSync(gitDir, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isFile() || entry.name === "HEAD" || entry.name === "FETCH_HEAD") continue;
+    const raw = fs.readFileSync(path.join(gitDir, entry.name), "utf8");
+    const objects = raw.split(/\r?\n/).filter(Boolean);
+    if (objects.length === 0 || objects.some((object) => !/^[0-9a-f]{40,64}$/i.test(object))) continue;
+    for (const object of objects) {
+      const type = stripTerminalLineEnding(git(root, ["cat-file", "-t", object]));
+      if (!new Set(["blob", "commit", "tag", "tree"]).has(type)) {
+        throw new Error(`Git returned unreadable persisted submodule ${entry.name} object evidence`);
+      }
+      records.push({
+        ref: entry.name,
+        object,
+        type,
+        ...(type === "commit" ? { commit: object, subject: exactCommitSubject(root, object) } : {}),
+      });
     }
   }
-  const fetchHead = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"]));
+  const fetchHead = path.join(gitDir, "FETCH_HEAD");
   if (pathPresence(fetchHead)) {
     const rows = fs.readFileSync(fetchHead, "utf8").split(/\r?\n/);
     if (rows.at(-1) === "") rows.pop();
@@ -985,11 +991,11 @@ function commitPseudoRefRecords(root) {
         throw new Error("Git returned unreadable persisted submodule FETCH_HEAD evidence");
       }
       const commit = stripTerminalLineEnding(git(root, ["rev-parse", "--verify", `${candidate}^{commit}`]));
-      records.push({ ref: "FETCH_HEAD", commit, subject: exactCommitSubject(root, commit) });
+      records.push({ ref: "FETCH_HEAD", object: commit, type: "commit", commit, subject: exactCommitSubject(root, commit) });
     }
   }
-  return [...new Map(records.map((entry) => [`${entry.ref}\0${entry.commit}`, entry])).values()]
-    .sort((left, right) => left.ref.localeCompare(right.ref) || left.commit.localeCompare(right.commit));
+  return [...new Map(records.map((entry) => [`${entry.ref}\0${entry.object}`, entry])).values()]
+    .sort((left, right) => left.ref.localeCompare(right.ref) || left.object.localeCompare(right.object));
 }
 
 function persistedSubmoduleGitDirs(root) {
@@ -1124,6 +1130,18 @@ function commitPublished(root, commit, remoteTips) {
   return remaining === "";
 }
 
+function publishedRemoteObjects(root, remoteEvidence) {
+  const objects = new Set(remoteEvidence.flatMap((entry) => entry.refs.map((item) => item.object)));
+  const tips = [...new Set(remoteEvidence.flatMap((entry) => entry.commits))].sort();
+  if (tips.length === 0) return objects;
+  const raw = String(git(root, ["rev-list", "--objects", "--no-object-names", "--stdin"], { input: `${tips.join("\n")}\n` }));
+  for (const object of raw.split(/\r?\n/).filter(Boolean)) {
+    if (!/^[0-9a-f]{40,64}$/i.test(object)) throw new Error("Git returned unreadable remote object publication evidence");
+    objects.add(object);
+  }
+  return objects;
+}
+
 function persistedSubmoduleState(root) {
   const discovered = persistedSubmoduleGitDirs(root);
   const repositories = [];
@@ -1140,7 +1158,8 @@ function persistedSubmoduleState(root) {
         git(repository.gitDir, ["log", "-z", "--format=%H", "--all", "--reflog", "HEAD"], { encoding: "buffer" }),
         "persisted submodule history",
       );
-      const pseudoRefs = commitPseudoRefRecords(repository.gitDir);
+      const pseudoObjects = repositoryPseudoObjectRecords(repository.gitDir);
+      const pseudoRefs = pseudoObjects.filter((entry) => entry.type === "commit");
       const candidates = [...new Map(
         [...historyCandidates, ...pseudoRefs].map((entry) => [entry.commit, { commit: entry.commit, subject: entry.subject }]),
       ).values()];
@@ -1162,8 +1181,10 @@ function persistedSubmoduleState(root) {
         }
       }
       const remoteTips = [...new Set(remoteEvidence.flatMap((entry) => entry.commits))].sort();
+      const remoteObjects = publishedRemoteObjects(repository.gitDir, remoteEvidence);
       const localOnlyCommits = candidates.filter((entry) => !commitPublished(repository.gitDir, entry.commit, remoteTips));
       const localOnlyPseudoRefs = pseudoRefs.filter((entry) => !commitPublished(repository.gitDir, entry.commit, remoteTips));
+      const localOnlyPseudoObjects = pseudoObjects.filter((entry) => !remoteObjects.has(entry.object));
       const localRefs = localDisposableRefRows(repository.gitDir);
       const publishedRefs = new Set(remoteEvidence.flatMap((entry) => entry.refs.map((item) => `${item.ref}\0${item.object}`)));
       const localOnlyRefs = localRefs.filter((entry) => (
@@ -1178,6 +1199,7 @@ function persistedSubmoduleState(root) {
         stashCommit,
         localOnlyCommits,
         localOnlyPseudoRefs,
+        localOnlyPseudoObjects,
         localOnlyRefs,
         stagedPaths,
         indexFlags,
@@ -1187,6 +1209,7 @@ function persistedSubmoduleState(root) {
           excludedRefNamespaces: ["refs/remotes/"],
           localRefs,
           pseudoRefs,
+          pseudoObjects,
           remoteTips,
           remotes: remoteEvidence,
           problems: publicationProblems,
@@ -1443,6 +1466,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
   const submoduleLocalHistory = result.submodules.persisted.filter((entry) => (
     entry.stashCommit
       || entry.localOnlyCommits.length > 0
+      || entry.localOnlyPseudoObjects.length > 0
       || entry.localOnlyRefs.length > 0
       || entry.stagedPaths.length > 0
       || entry.indexFlags.length > 0
@@ -1451,7 +1475,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
   if (submoduleLocalHistory.length > 0) {
     result.blockers.push({
       code: "submodule-local-history",
-      message: `${submoduleLocalHistory.length} persisted submodule Git director${submoduleLocalHistory.length === 1 ? "y contains" : "ies contain"} stashed history, unpushed commits, unpublished refs, staged index state, index flags, or in-progress operations that workspace deletion would remove`,
+      message: `${submoduleLocalHistory.length} persisted submodule Git director${submoduleLocalHistory.length === 1 ? "y contains" : "ies contain"} stashed history, unpushed commits, unpublished refs or pseudoref objects, staged index state, index flags, or in-progress operations that workspace deletion would remove`,
       submodules: submoduleLocalHistory,
     });
   }

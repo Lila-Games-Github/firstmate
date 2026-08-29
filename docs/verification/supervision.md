@@ -539,7 +539,7 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
-On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 131 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
+On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 133 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
 The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
 The remote cases deliberately leave `origin/main` stale, advance the bare remote's `main`, and bind local `main` to `origin/release`, proving that inventory uses the `ls-remote` commit while preserving the explicitly named landing branch.
 The clean-evidence audit covered assume-unchanged and skip-worktree index flags, inherited repository and index overrides, initialized and uninitialized submodules, merge, rebase, cherry-pick and sequencer state, stashes, and every Git command that contributes deletion evidence.
@@ -551,7 +551,9 @@ The untracked and ignored inventory disables Git's untracked cache and filesyste
 An executable Git compatibility fixture models a stale cache result after warming the real untracked cache and restoring the directory mtime, proving the otherwise hidden file remains blocking by exact path.
 Initialized submodules are inspected recursively with ignored files visible.
 Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixtures prove an exact stash, a server-deleted commit hidden by a stale remote-tracking ref, reset commits reachable only through a reflog or `ORIG_HEAD`, a deleted remote commit reachable only through `FETCH_HEAD`, unpublished local branch, annotated-tag, custom, and symbolic refs, plus staged regular-file, nested-gitlink, and merge-operation state remain visible and blocking after the submodule worktree is emptied.
-Publication proof enumerates every ref-, reflog-, and commit-pseudoref-reachable candidate, parses each structured `FETCH_HEAD` row, fetches the objects behind a fresh configured-remote ref snapshot without updating local refs, rejects a snapshot that changes during inspection, and compares candidates against those authoritative remote tips rather than local `refs/remotes/*`.
+Publication proof enumerates every ref-, reflog-, and repository-pseudoref-reachable candidate, including every top-level hash-only commit, tree, blob, or tag record and every structured `FETCH_HEAD` row.
+The executable fixture leaves unpublished `MERGE_AUTOSTASH` commit and `AUTO_MERGE` tree objects outside refs and reflogs, proving both exact identities remain blocking after submodule deinitialization.
+The inspection fetches the objects behind a fresh configured-remote ref snapshot without updating local refs, rejects a snapshot that changes during inspection, and compares candidates against those authoritative remote tips and reachable objects rather than local `refs/remotes/*`.
 It separately compares every ordinary disposable local ref name plus direct object identity against those snapshots, excluding only the reconstructible `refs/remotes/` cache, and conservatively blocks symbolic refs whose target metadata is flattened by ordinary remote rows.
 Persisted index comparison forces submodule differences visible despite repository-level or per-submodule ignore configuration, with the executable fixture first proving the same nested gitlink is absent from an unoverridden cached diff.
 Every Git invocation contributing retirement evidence disables replacement objects, and a real `refs/replace` fixture proves the exact replacement ref blocks even after the workspace head is otherwise clean and landed.
@@ -577,8 +579,8 @@ A real worktree-specific landing-branch remote binding gives two roots sharing o
 A syntactically valid empty route object fixture survives successful workspace deletion while schema validation makes the result and durable audit explicitly incomplete.
 Every confirmed retirement captures database rows, directory presence, Git registration, and every strict route record before IPC, then includes the route baseline and post-action route reconciliation in both resolved and rejected IPC accounting.
 All durable route read-modify-write operations share one cross-process lock whose complete random generation token, PID, and timezone- and locale-independent process-start identity are atomically published with acquisition.
-Acquisition and recovery share a transactional SQLite gate, so an exact compare-and-delete of a dead gate owner completes before any reaper can inspect or replace the route-lock generation.
-Executable fixtures prove concurrent dead-owner reapers serialize, short owner-record writes complete before publication, dead-owner residue and a reused live PID are reclaimed, caller timezone and locale differences cannot impersonate PID reuse, a paused publisher cannot have its live generation reclaimed, and the deterministic paused Stop-hook race proves a live owner remains serialized, releases its own generation, and leaves the final route inactive with truthful post-action verification.
+Acquisition, recovery, and release share a transactional SQLite gate, so an exact compare-and-delete of a dead gate owner completes before any reaper can inspect or replace the route-lock generation.
+Executable fixtures prove concurrent dead-owner reapers serialize, a contender paused after observing the live lock cannot race its release, short owner-record writes complete before publication, dead-owner residue and a reused live PID are reclaimed, caller timezone and locale differences cannot impersonate PID reuse, a paused publisher cannot have its live generation reclaimed, and the deterministic paused Stop-hook race proves a live owner remains serialized, releases its own generation, and leaves the final route inactive with truthful post-action verification.
 The lock-lifecycle additions reported:
 
 ```text
@@ -586,6 +588,7 @@ ok - fm-playbot-lanes: dead route-lock owners recover without wedging mutations
 ok - fm-playbot-lanes: PID reuse cannot preserve another route-lock generation
 ok - fm-playbot-lanes: concurrent dead-owner reapers preserve one lock generation
 ok - fm-playbot-lanes: route-lock owner publication completes short writes
+ok - fm-playbot-lanes: route-lock release serializes with recovery
 ok - fm-playbot-lanes: route-lock release preserves another owner generation
 ok - fm-playbot-lanes: route-lock ownership publishes atomically before acquisition
 ok - fm-playbot-lanes: route-lock identity ignores caller timezone and locale
@@ -617,6 +620,7 @@ ok - fm-playbot-lanes: persisted removed-submodule storage exposes stash and unp
 ok - fm-playbot-lanes: fresh submodule remote evidence rejects stale tracking refs
 ok - fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits
 ok - fm-playbot-lanes: persisted submodule pseudorefs expose reset unpushed commits
+ok - fm-playbot-lanes: persisted irregular pseudoref objects block retirement
 ok - fm-playbot-lanes: persisted FETCH_HEAD exposes deleted remote commits
 ok - fm-playbot-lanes: persisted submodule unpublished and symbolic refs block
 ok - fm-playbot-lanes: persisted submodule operations and index state block

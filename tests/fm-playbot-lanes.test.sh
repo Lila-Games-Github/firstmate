@@ -443,6 +443,104 @@ NODE
 rm -f "$route_short_write_shim"
 pass "fm-playbot-lanes: route-lock owner publication completes short writes"
 
+route_release_race_shim="$FIXTURE_ROOT/route-lock-release-race.cjs"
+route_release_owner_ready="$FIXTURE_ROOT/route-lock-release-owner-ready"
+route_release_owner_go="$FIXTURE_ROOT/route-lock-release-owner-go"
+route_release_contender_ready="$FIXTURE_ROOT/route-lock-release-contender-ready"
+route_release_contender_go="$FIXTURE_ROOT/route-lock-release-contender-go"
+route_release_owner_out="$FIXTURE_ROOT/route-lock-release-owner.json"
+route_release_contender_out="$FIXTURE_ROOT/route-lock-release-contender.json"
+cat > "$route_release_race_shim" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const originalLstatSync = fs.lstatSync;
+const originalWriteFileSync = fs.writeFileSync;
+const wait = new Int32Array(new SharedArrayBuffer(4));
+let paused = false;
+fs.lstatSync = function pauseContenderAfterObservation(file, ...rest) {
+  const result = originalLstatSync.call(fs, file, ...rest);
+  if (!paused
+    && process.env.FM_TEST_LOCK_ROLE === 'contender'
+    && path.resolve(String(file)) === path.resolve(process.env.FM_TEST_ROUTE_LOCK)) {
+    paused = true;
+    originalWriteFileSync.call(fs, process.env.FM_TEST_LOCK_READY, 'ready\n');
+    while (!fs.existsSync(process.env.FM_TEST_LOCK_GO)) Atomics.wait(wait, 0, 0, 20);
+  }
+  return result;
+};
+fs.writeFileSync = function pauseOwnerMutation(file, ...rest) {
+  const resolved = path.resolve(String(file));
+  const route = path.resolve(process.env.FM_TEST_ROUTE_FILE);
+  if (!paused
+    && process.env.FM_TEST_LOCK_ROLE === 'owner'
+    && resolved.startsWith(`${route}.`)
+    && resolved.endsWith('.tmp')) {
+    paused = true;
+    const result = originalWriteFileSync.call(fs, file, ...rest);
+    originalWriteFileSync.call(fs, process.env.FM_TEST_LOCK_READY, 'ready\n');
+    while (!fs.existsSync(process.env.FM_TEST_LOCK_GO)) Atomics.wait(wait, 0, 0, 20);
+    return result;
+  }
+  return originalWriteFileSync.call(fs, file, ...rest);
+};
+NODE
+(
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+    | FM_TEST_LOCK_ROLE=owner \
+      FM_TEST_ROUTE_LOCK="$route_lock" \
+      FM_TEST_ROUTE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$lane_id.json" \
+      FM_TEST_LOCK_READY="$route_release_owner_ready" \
+      FM_TEST_LOCK_GO="$route_release_owner_go" \
+      NODE_OPTIONS="--require=$route_release_race_shim" \
+      node --no-warnings "$SCRIPT" serve > "$route_release_owner_out"
+) &
+route_release_owner_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$route_release_owner_ready" ] && break
+  sleep 0.02
+done
+[ -f "$route_release_owner_ready" ] || fail "the route-lock owner did not pause before release"
+(
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"close_lane\",\"arguments\":{\"laneId\":\"$lane_id\"}}}" \
+    | FM_TEST_LOCK_ROLE=contender \
+      FM_TEST_ROUTE_LOCK="$route_lock" \
+      FM_TEST_ROUTE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$lane_id.json" \
+      FM_TEST_LOCK_READY="$route_release_contender_ready" \
+      FM_TEST_LOCK_GO="$route_release_contender_go" \
+      NODE_OPTIONS="--require=$route_release_race_shim" \
+      node --no-warnings "$SCRIPT" serve > "$route_release_contender_out"
+) &
+route_release_contender_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$route_release_contender_ready" ] && break
+  sleep 0.02
+done
+[ -f "$route_release_contender_ready" ] || fail "the route-lock contender did not pause after observing the owner"
+touch "$route_release_owner_go"
+sleep 0.2
+[ ! -s "$route_release_owner_out" ] || fail "the route-lock owner released outside the shared acquisition boundary"
+touch "$route_release_contender_go"
+wait "$route_release_owner_pid" || fail "the route-lock owner failed during serialized release"
+wait "$route_release_contender_pid" || fail "the route-lock contender failed after owner release"
+OWNER_OUT="$route_release_owner_out" CONTENDER_OUT="$route_release_contender_out" node --no-warnings <<'NODE' \
+  || fail "route-lock release and recovery did not serialize both mutations"
+const fs = require('node:fs');
+for (const file of [process.env.OWNER_OUT, process.env.CONTENDER_OUT]) {
+  const value = JSON.parse(fs.readFileSync(file, 'utf8')).result?.structuredContent;
+  if (value?.lane?.active !== false) process.exit(1);
+}
+NODE
+[ ! -e "$route_lock" ] || fail "release-versus-recovery serialization left route-lock residue"
+rm -f \
+  "$route_release_race_shim" \
+  "$route_release_owner_ready" \
+  "$route_release_owner_go" \
+  "$route_release_contender_ready" \
+  "$route_release_contender_go" \
+  "$route_release_owner_out" \
+  "$route_release_contender_out"
+pass "fm-playbot-lanes: route-lock release serializes with recovery"
+
 route_lock_swap="$FIXTURE_ROOT/swap-route-lock-owner.cjs"
 cat > "$route_lock_swap" <<'NODE'
 const fs = require('node:fs');
@@ -4436,6 +4534,33 @@ if (residue.publicationEvidence.remoteTips.includes(process.env.ORIG_HEAD_COMMIT
 NODE
 rm -f "$submodule_git_dir/ORIG_HEAD"
 pass "fm-playbot-lanes: persisted submodule pseudorefs expose reset unpushed commits"
+
+submodule_autostash=$(printf '%s\n' 'MERGE_AUTOSTASH-only submodule work' \
+  | git --git-dir="$submodule_git_dir" commit-tree "$submodule_tree" -p "$submodule_base")
+submodule_auto_merge_blob=$(printf '%s\n' 'AUTO_MERGE-only submodule work' \
+  | git --git-dir="$submodule_git_dir" hash-object -w --stdin)
+submodule_auto_merge_tree=$(printf '100644 blob %s\trescue.txt\n' "$submodule_auto_merge_blob" \
+  | git --git-dir="$submodule_git_dir" mktree)
+printf '%s\n' "$submodule_autostash" > "$submodule_git_dir/MERGE_AUTOSTASH"
+printf '%s\n' "$submodule_auto_merge_tree" > "$submodule_git_dir/AUTO_MERGE"
+git --git-dir="$submodule_git_dir" reflog expire --expire=now --all
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" AUTOSTASH_COMMIT="$submodule_autostash" AUTO_MERGE_TREE="$submodule_auto_merge_tree" node --no-warnings <<'NODE' \
+  || fail "irregular persisted submodule pseudoref objects were allowed to read clean"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'submodule-local-history');
+const residue = blocker?.submodules.find(entry => entry.path === 'prototype-game/submodule');
+if (!residue?.localOnlyCommits.some(entry => entry.commit === process.env.AUTOSTASH_COMMIT && entry.subject === 'MERGE_AUTOSTASH-only submodule work')) process.exit(1);
+if (!residue.localOnlyPseudoObjects.some(entry => entry.ref === 'MERGE_AUTOSTASH'
+  && entry.object === process.env.AUTOSTASH_COMMIT && entry.type === 'commit')) process.exit(1);
+if (!residue.localOnlyPseudoObjects.some(entry => entry.ref === 'AUTO_MERGE'
+  && entry.object === process.env.AUTO_MERGE_TREE && entry.type === 'tree')) process.exit(1);
+if (!residue.publicationEvidence.pseudoObjects.some(entry => entry.ref === 'MERGE_AUTOSTASH')) process.exit(1);
+if (!residue.publicationEvidence.pseudoObjects.some(entry => entry.ref === 'AUTO_MERGE')) process.exit(1);
+NODE
+rm -f "$submodule_git_dir/MERGE_AUTOSTASH" "$submodule_git_dir/AUTO_MERGE"
+pass "fm-playbot-lanes: persisted irregular pseudoref objects block retirement"
 
 submodule_fetch_head_only=$(printf '%s\n' 'FETCH_HEAD-only submodule work' \
   | git --git-dir="$submodule_git_dir" commit-tree "$submodule_tree" -p "$submodule_base")
