@@ -539,6 +539,113 @@ ok - fm-playbot-lanes: existing-workspace selection is unchanged
 
 Those checks run against a hermetic fake DevTools endpoint inside the test whose `window.electronAPI.invoke` stub records every IPC call, so payload construction is enforced without a live Playbot.
 
+On 2026-08-30, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 134 checks after hardening guarded workspace retirement in `playbot_lanes@0.5.0`.
+The retirement fixture uses the executable MCP JSON-RPC interface, a real Git repository with a local bare remote and registered worktree, and the hermetic DevTools endpoint's `workspace:delete` implementation, so the safety and deletion verdicts are proved from observable responses and state rather than source-text assertions.
+The remote cases deliberately leave `origin/main` stale, advance the bare remote's `main`, and bind local `main` to `origin/release`, proving that inventory uses the `ls-remote` commit while preserving the explicitly named landing branch.
+The clean-evidence audit covered assume-unchanged and skip-worktree index flags, inherited repository and index overrides, initialized and uninitialized submodules, merge, rebase, cherry-pick and sequencer state, stashes, and every Git command that contributes deletion evidence.
+Any assume-unchanged or skip-worktree entry blocks by exact path, even when its current content appears clean.
+On POSIX, index executable modes are compared directly with filesystem owner-executable modes, so `core.fileMode=false` cannot hide a non-allowlisted mode change.
+Every stage-zero index object is also compared with the actual worktree representation using Git's clean filters for regular files, raw link-target bytes for symlinks, and checked-out heads for populated submodules.
+A same-length edit with restored mtime stays blocking when `core.trustctime=false` and `core.checkStat=minimal` make `git status` report no change, while a smudged worktree representation whose raw blob differs from its clean-filtered index blob remains correctly clean.
+The untracked and ignored inventory disables Git's untracked cache and filesystem monitor for its safety read, uses traditional ignored traversal with all untracked files, and returns the two classifications in distinct exact-path fields and blockers, including the exact nested file beneath an explicitly ignored directory instead of collapsing it to the directory.
+An executable Git compatibility fixture models a stale cache result after warming the real untracked cache and restoring the directory mtime, proving the otherwise hidden file remains blocking by exact path.
+Initialized submodules are inspected recursively with ignored files visible.
+Deinitialized and index-removed submodules are also inspected through the linked worktree's persisted `modules` Git directories, where the executable fixtures prove an exact stash, a server-deleted commit hidden by a stale remote-tracking ref, reset commits reachable only through a reflog or `ORIG_HEAD`, a deleted remote commit reachable only through `FETCH_HEAD`, unpublished local branch, annotated-tag, custom, and symbolic refs, plus staged regular-file, nested-gitlink, and merge-operation state remain visible and blocking after the submodule worktree is emptied.
+Publication proof enumerates every ref-, reflog-, and repository-pseudoref-reachable candidate, including every top-level hash-only commit, tree, blob, or tag record and every structured `FETCH_HEAD` row.
+The executable fixture leaves unpublished `MERGE_AUTOSTASH` commit and `AUTO_MERGE` tree objects outside refs and reflogs, proving both exact identities remain blocking after submodule deinitialization.
+It also corrupts `ORIG_HEAD` after an exact local-only commit row, proving mixed-validity pseudoref evidence makes the persisted repository unreadable instead of hiding the recoverable commit.
+The inspection fetches the objects behind a fresh configured-remote ref snapshot without updating local refs, rejects a snapshot that changes during inspection, and compares candidates against those authoritative remote tips and reachable objects rather than local `refs/remotes/*`.
+It separately compares every ordinary disposable local ref name plus direct object identity against those snapshots, excluding only the reconstructible `refs/remotes/` cache, and conservatively blocks symbolic refs whose target metadata is flattened by ordinary remote rows.
+Persisted index comparison forces submodule differences visible despite repository-level or per-submodule ignore configuration, with the executable fixture first proving the same nested gitlink is absent from an unoverridden cached diff.
+Every Git invocation contributing retirement evidence disables replacement objects, and a real `refs/replace` fixture proves the exact replacement ref blocks even after the workspace head is otherwise clean and landed.
+An executable `GIT_INDEX_FILE` fixture points the MCP process at a clean alternate index while the real linked-worktree index holds a staged-only change, proving inherited repository overrides are cleared before evidence collection.
+Repository and persisted-submodule `info/grafts` metadata blocks as unreadable evidence, with a real top-level graft fixture proving the exact metadata path is returned.
+Populated or persisted unreadable submodule state blocks instead of being treated as clean.
+Merge, rebase, cherry-pick, revert, and sequencer markers block even when the index and worktree otherwise appear clean.
+Top-level stashes do not apply as a workspace-deletion blocker because Git stores them in the repository's common ref and object store outside the disposable worktree.
+Submodule stashes do apply because linked worktrees keep those submodule repositories under the disposable worktree Git directory, so they are inspected and blocked.
+Every Git command that returns pathname or subject-bearing commit records for a deletion decision uses NUL termination: status, index flags, staged gitlinks, ahead commits, persisted submodule candidates, and worktree registrations.
+Commit history is enumerated as NUL-terminated object identities and Git transcodes each full message from its declared encoding before the exact first line is selected, preserving empty subjects and leading or trailing whitespace without pretty-format normalization.
+Fresh remote-ref snapshots use validated hash-tab-ref rows because Git ref syntax excludes record separators, while the remaining Git outputs are constrained names, validated hashes, or single scalars.
+The post-delete audit also covered a real two-root workspace whose first worktree was removed before the fake Playbot endpoint rejected the second removal.
+The MCP error, durable audit, later inventory, database counts, both directory checks, and both Git registration checks all agreed on the exact partial result, including the surviving registration whose real path contained a newline.
+Another two-root rejection removes only one exact `workspace_roots` row while leaving the workspace row, both directories, and both Git registrations intact, proving baseline row identity deltas still report and audit a partial action when the aggregate root-row count remains nonzero.
+The rejection result and durable audit also preserve the pre-action strict route baseline and reconcile the still-active route against the post-action inventory.
+Another executable fixture makes `workspace:delete` resolve successfully without removing its database rows, directory, or Git registration, and proves the MCP reports `deleted: false`, a partial action, full remaining evidence, the blind-retry warning, and an unchanged active route.
+That fixture forces the audit append's first write to be short, then observes a complete parseable JSONL record, file fsync, and parent-directory fsync before `appended: true` is returned.
+Two concurrent incomplete-success calls then pause one audit append after a short first write, proving the other cannot interleave and that an incomplete trailing record is rolled back before both complete JSONL records are appended.
+Destructive selection accepts only the exact active workspace id returned by inventory, with executable name, case-folded name, and path refusals proving no alias reaches Playbot IPC.
+Another real rejection fixture uses a valid standalone Git directory that was never registered in the project repository and proves the pre-action baseline prevents its already-absent registration from being mislabeled as destructive change.
+A real worktree-specific landing-branch remote binding gives two roots sharing one common Git directory different landing commits and proves both roots retain their own remote evidence.
+A syntactically valid empty route object fixture survives successful workspace deletion while schema validation makes the result and durable audit explicitly incomplete.
+Every confirmed retirement captures database rows, directory presence, Git registration, and every strict route record before IPC, then includes the route baseline and post-action route reconciliation in both resolved and rejected IPC accounting.
+All durable route read-modify-write operations share one cross-process lock whose complete random generation token, PID, and timezone- and locale-independent process-start identity are atomically published with acquisition.
+Acquisition, recovery, and release share a transactional SQLite gate, so an exact compare-and-delete of a dead gate owner completes before any reaper can inspect or replace the route-lock generation.
+Executable fixtures prove concurrent dead-owner reapers serialize, a contender paused after observing the live lock cannot race its release, short owner-record writes complete before publication, dead-owner residue and a reused live PID are reclaimed, caller timezone and locale differences cannot impersonate PID reuse, a paused publisher cannot have its live generation reclaimed, and the deterministic paused Stop-hook race proves a live owner remains serialized, releases its own generation, and leaves the final route inactive with truthful post-action verification.
+The lock-lifecycle additions reported:
+
+```text
+ok - fm-playbot-lanes: dead route-lock owners recover without wedging mutations
+ok - fm-playbot-lanes: PID reuse cannot preserve another route-lock generation
+ok - fm-playbot-lanes: concurrent dead-owner reapers preserve one lock generation
+ok - fm-playbot-lanes: route-lock owner publication completes short writes
+ok - fm-playbot-lanes: route-lock release serializes with recovery
+ok - fm-playbot-lanes: route-lock release preserves another owner generation
+ok - fm-playbot-lanes: route-lock ownership publishes atomically before acquisition
+ok - fm-playbot-lanes: route-lock identity ignores caller timezone and locale
+```
+
+The exact retirement-specific output was:
+
+```text
+ok - fm-playbot-lanes: retirement exposes inspection plus one confirmed exact-workspace call
+ok - fm-playbot-lanes: inventory is non-destructive and reports Local, thread, root, and Git refusals with evidence
+ok - fm-playbot-lanes: landing branches require current resolvable remote evidence
+ok - fm-playbot-lanes: explicit inputs, confirmation, Local, missing-root, and unreadable-Git refusals never reach IPC
+ok - fm-playbot-lanes: explicit landing names and encoded commit subjects remain exact
+ok - fm-playbot-lanes: all and only eight exact tracked Playbot churn paths are allowed
+ok - fm-playbot-lanes: POSIX backslashes remain literal blocking path characters
+ok - fm-playbot-lanes: tracked, untracked, and ignored work block by exact path
+ok - fm-playbot-lanes: untracked inventory bypasses Git cache shortcuts
+ok - fm-playbot-lanes: assume-unchanged and skip-worktree paths block with exact index evidence
+ok - fm-playbot-lanes: tracked content comparison bypasses Git stat-cache shortcuts
+ok - fm-playbot-lanes: tracked symlink targets compare against index blobs
+ok - fm-playbot-lanes: tracked content comparison honors Git clean filters
+ok - fm-playbot-lanes: executable mode changes block despite core.fileMode false
+ok - fm-playbot-lanes: inherited Git repository overrides cannot hide tracked work
+ok - fm-playbot-lanes: commit subjects block retirement until current remote evidence proves them landed
+ok - fm-playbot-lanes: replacement refs are explicit blocking evidence
+ok - fm-playbot-lanes: repository graft metadata blocks retirement evidence
+ok - fm-playbot-lanes: initialized submodules expose nested ignored work before retirement
+ok - fm-playbot-lanes: persisted removed-submodule storage exposes stash and unpushed commits
+ok - fm-playbot-lanes: fresh submodule remote evidence rejects stale tracking refs
+ok - fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits
+ok - fm-playbot-lanes: persisted submodule pseudorefs expose reset unpushed commits
+ok - fm-playbot-lanes: malformed persisted pseudorefs fail closed
+ok - fm-playbot-lanes: persisted irregular pseudoref objects block retirement
+ok - fm-playbot-lanes: persisted FETCH_HEAD exposes deleted remote commits
+ok - fm-playbot-lanes: persisted submodule unpublished and symbolic refs block
+ok - fm-playbot-lanes: persisted submodule operations and index state block
+ok - fm-playbot-lanes: clean-looking merge, cherry-pick, and rebase states block retirement
+ok - fm-playbot-lanes: every root resolves its own worktree-specific remote evidence
+ok - fm-playbot-lanes: missing and unknown thread states block retirement
+ok - fm-playbot-lanes: immediate recheck returns exact thread and path blockers
+ok - fm-playbot-lanes: rejection distinguishes already-missing registration from removal
+ok - fm-playbot-lanes: rejected multi-root deletion reconciles and audits exact partial state
+ok - fm-playbot-lanes: exact root-row deltas report partial deletion
+ok - fm-playbot-lanes: audit append completes short writes and syncs creation
+ok - fm-playbot-lanes: audit appends serialize and recover incomplete tails
+ok - fm-playbot-lanes: successful IPC cannot label incomplete removal deleted
+ok - fm-playbot-lanes: invalid route objects make post-action cleanup incomplete
+ok - fm-playbot-lanes: concurrent Stop notification cannot reactivate retired routes
+ok - fm-playbot-lanes: confirmed retirement uses exact IPC and verifies audit, routes, database, directory, and Git removal
+```
+
+The final check confirms the exact `{workspaceId, preserveWorktrees: false}` payload, then independently reads the Playbot database, filesystem, Git worktree inventory, durable route file, and mode-0600 JSONL audit record.
+The broader `bin/fm-test-run.sh --changed --base origin/main` run passed 36 of 37 selected scripts, with only `tests/fm-teardown.test.sh` failing because `lsof-absent-process-group-reap` returned exit 139 instead of 0.
+The isolated fixture was then run from this workspace-retirement tree and a detached worktree at exact base `d4d6398c92da7ac82f800e5ddc3c9b8923a5152d` under the same constrained environment; both returned exit 139 with byte-identical output whose SHA-256 was `10f6ac65180a19b3c37dce19ff7e6ae123cd0fe69e3a9737e88a88fec707afbf`.
+There is no branch/base diff in `bin/fm-teardown.sh`, `tests/fm-teardown.test.sh`, or `tests/lib.sh`, so that pre-existing failure is disconfirming evidence rather than a workspace-retirement regression.
+
 On 2026-08-24, Playbot 0.95.0 on Linux was verified to expose the question-card, snapshot, and pending-queue channels the card tools use, and to have kept the composer mounted while a card is displayed.
 `app:metadata` returned `{name: "Playbot", version: "0.95.0"}`, matching the extracted `resources/app.asar` `/package.json` and the crashpad `--annotation=_version=0.95.0`.
 The channel names and payload shapes were confirmed from the running app's extracted `.vite/build/main.js`, where `threads:respondToUserInput` takes `{threadId, requestId, response, composerContext?}` and resolves the pending Codex `item/tool/requestUserInput` request, `threads:getSnapshot` takes `{threadId}` and returns `userInputRequests`, `pendingMessages`, and `outboundMessages` among its fields, `threads:recallMessage` takes `{threadId, messageId}` and returns `{outcome, message?, snapshot}`, and `threads:send` returns that same thread snapshot.
@@ -629,8 +736,8 @@ playbot lane fm-live-probe: worker chat-7975fcb9-7add-4c6f-8add-1ddd6428a39d sto
 A poll for a thread id the database does not hold, and a poll given incomplete arguments, each printed their one loud line and exited 0 rather than failing silently, which matters because `bin/fm-watch.sh` discards a check's stderr and exit code and wakes on stdout alone.
 The generated check was then registered into a scratch home with the real `bin/fm-check-register.sh`, retargeted at that live application database, and executed through the watcher's own `fm_custom_check_snapshot_prepare` path: the trust binding validated, the working chat produced no output, and the idle chat produced the single line above.
 
-Not verified against a live Playbot: creating a real throwaway workspace and driving a real worker through it.
-Playbot exposes no supported workspace-retirement path on 0.94.0 or newer (see the `workspace:delete` evidence dated 2026-08-18, which was taken on 0.93.1), so a live dispatch would have left a workspace behind that only manual surgery could remove.
+That 2026-08-24 live run did not create a throwaway workspace because the lane MCP did not yet expose guarded retirement.
+The current one-at-a-time retirement surface is covered by the 2026-08-28 hermetic executable evidence above, while the live `workspace:delete` channel evidence remains the 0.93.1 run recorded on 2026-08-18.
 
 A parked worker is a standing condition and a delivered worker finishing is news exactly once, so the poll keeps firing while the worker is `pending_input` and fires only on the change into a stopped or unreadable state, after which it removes its own check, trust binding, and `state/<id>.lane-poll` record.
 A queued, sending, or recall-pending task advances only when that worker session's persisted rollout records the exact client message id after the current acceptance boundary, while a ledger turn binding, `not-recallable` outcome, or failed recall without that timestamp stays armed and promotable, and UI-side recall, cross-thread message ids, and bare queue disappearance remain armed.

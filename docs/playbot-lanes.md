@@ -66,6 +66,43 @@ When present, the workspace and the chat are created together in one launch on 0
 `newWorkspace` is mutually exclusive with `workspace`, and `dispatch` additionally rejects combining it with `thread`, because a just-created workspace has no existing chats.
 When `newWorkspace` is absent, existing workspace selection behavior is unchanged.
 
+### Workspace retirement
+
+`list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
+It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
+It reports the verified landing commit, each workspace root's exact head, every ahead commit and subject including an empty or non-UTF-8-encoded subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
+Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, any missing or unrecognized unarchived chat state, an ahead commit, a tracked modification outside Playbot's exact churn allowlist, a POSIX executable-mode change hidden by `core.fileMode=false`, assume-unchanged or skip-worktree index flags, replacement refs, and an in-progress merge, rebase, cherry-pick, revert, or sequencer are blocking evidence rather than a bare false verdict.
+Tracked-content inspection compares each index object with the actual regular file, symlink target, or populated submodule head using Git's clean filters, so stat-cache shortcuts cannot produce a clean verdict.
+Git evidence clears inherited repository, worktree, index, object-store, namespace, shallow-file, replacement-base, and command-line configuration overrides before inspecting the caller-selected root.
+Initialized submodules receive the same recursive tracked, untracked, ignored, index-flag, and operation-state inspection, and persisted per-worktree submodule Git directories are inspected even after the submodule is deinitialized or removed from the index.
+A populated submodule that cannot be inspected blocks retirement, as does a persisted submodule stash, staged index change, index flag, in-progress Git operation, or ref-, reflog-, or repository-pseudoref-reachable object not proven reachable from a stable fresh snapshot of the configured remotes.
+Repository pseudoref discovery enumerates every top-level hash-only object record plus every structured `FETCH_HEAD` row, so irregular commit and tree state such as `MERGE_AUTOSTASH` and `AUTO_MERGE` cannot disappear behind a fixed name list.
+Recognized head, autostash, and automatic-merge pseudorefs must parse completely; malformed mixed evidence makes the persisted repository unreadable and blocks retirement.
+Every ordinary local submodule ref outside the reconstructible `refs/remotes/` cache must also match the same ref name and object identity in at least one fresh remote snapshot, while every local symbolic ref blocks because a matching resolved object cannot prove its target metadata was published.
+Revision evidence disables replacement objects, and any `refs/replace/*` or repository graft metadata blocks inspection instead of being allowed to rewrite the ancestry used for a deletion verdict.
+Untracked and ignored files also block retirement and are returned in distinct exact-path fields and blockers, including every file beneath an explicitly ignored directory, because the tracked-churn allowlist never classifies them.
+The allowlist is eight literal repository-relative paths returned as `trackedChurnAllowlist`: seven files under `prototype-game/addons/playbot/` plus `prototype-game/project.godot` that Playbot's editor integration rewrites across unrelated worktrees.
+No directory, extension, basename, or broader pattern is treated as churn.
+Path matching preserves Git pathname identity, so a literal backslash in a POSIX filename cannot alias a slash in an allowlisted path.
+
+`retire_workspace` accepts only one exact active workspace id returned by inspection, the same explicit `landingBranch`, and `confirm: true`.
+There is no bulk destructive form.
+It repeats the complete inspection immediately before action and calls Playbot's own `workspace:delete` IPC with `preserveWorktrees: false`; it never deletes a folder or changes Playbot's database itself.
+A failed immediate recheck returns that complete structured inspection, including the blocking chat states and tracked, untracked, and ignored paths, without calling the destructive IPC.
+After Playbot reports success, the tool verifies that the `workspaces` row, every `workspace_roots` row, worktree directory, and Git worktree registration are gone, then deactivates every durable lane route naming the workspace and serializes a complete mode-0600 private audit record under the lane state directory.
+The audit append rolls back an incomplete trailing record, rejects an unreadable completed record, syncs the file, and syncs its directory entry on first creation before reporting success.
+Each root resolves remote evidence independently so worktree-specific Git configuration cannot borrow another root's remote or commit.
+The immediate inspection captures whether each Git worktree registration existed, and post-action reconciliation reports a registration as removed only when that captured registration changed from present to absent.
+Retirement enumerates every route file strictly and validates its version, filename-bound id, active flag, endpoint identities, workspace identities, and timestamps, so malformed or unreadable route state makes post-action cleanup incomplete instead of disappearing from the result and audit.
+Durable route mutations share one cross-process lock whose complete owner record is atomically published with acquisition and includes a timezone- and locale-independent process start identity.
+Its acquisition, dead-owner recovery, and ownership-checked release run through a transactional shared gate, so concurrent reapers cannot unlink a replacement generation, release cannot race a contender's observation, and short owner-record writes cannot publish an unreadable lock.
+The serialized mutation preserves a concurrent retirement deactivation and re-reads every matching route as inactive before post-action cleanup can be complete.
+That record names the time, project, workspace, workspace paths, exact root heads, explicit landing branch and remotely verified landing commits, affected lane routes, IPC outcome, and removal verification.
+If the IPC succeeds but database, directory, or Git-registration verification is incomplete, the tool returns `deleted: false`, `partialAction: true`, `postActionComplete: false`, the full reconciliation, and a warning against blind retry.
+That incomplete outcome preserves matching active routes because the workspace still exists or its removal is uncertain.
+If removal verification is complete but route cleanup or audit append fails, the tool returns `deleted: true` with `postActionComplete: false` and exact problems because the workspace deletion is verified even though post-action work remains incomplete.
+If Playbot rejects the deletion after removing anything, the tool compares every exact database root row with its pre-action baseline, reconciles every directory and NUL-parsed Git worktree registration, appends a partial-action audit, returns the exact removed, added, remaining, and uncertain evidence with the error, and warns against a blind retry.
+
 ## Lane lifecycle
 
 `dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x through 0.95.x.
@@ -161,7 +198,7 @@ A message that has already been delivered reports `not-recallable`, which is an 
 
 Private route and hook state defaults to `~/.playbot/mcp/project-chat`.
 The integration reads Playbot's application and Codex SQLite databases but never writes them directly.
-Chat creation, message delivery, and archive operations go through Playbot's Electron IPC handlers over the local DevTools socket.
+Chat creation, message delivery, archive, and guarded workspace retirement operations go through Playbot's Electron IPC handlers over the local DevTools socket.
 
 The current adapter targets Playbot 0.94.0 and Node.js 22.5 or newer, with a detected fallback to the pre-0.94 channels that were verified against Playbot 0.93.1 on Linux.
 The card, snapshot, queue, and forced-steering channels are verified against Playbot 0.95.x, and every version-sensitive result names the verified range or the exact internal mechanism, so a mismatch is visible rather than inferred.
