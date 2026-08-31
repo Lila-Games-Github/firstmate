@@ -9,6 +9,9 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+FM_LOCK_RECOVERY_MAX_DEPTH=8
+FM_LOCK_RECOVERY_REFUSED_STATUS=2
+FM_LOCK_OWNER_PREPARATION_FAILED_STATUS=3
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -25,6 +28,30 @@ fm_pid_alive() {
     ''|*[!0-9]*) return 1 ;;
   esac
   kill -0 "$pid" 2>/dev/null
+}
+
+fm_proc_cmdline_hex() {
+  local path=$1 arg encoded='' ordinal index saw_arg=0
+  local LC_ALL=C
+  [ -r "$path" ] || return 1
+  if command -v perl >/dev/null 2>&1; then
+    encoded=$(perl -0777 -ne 'print unpack("H*", $_)' "$path" 2>/dev/null) || return 1
+    [ -n "$encoded" ] || return 1
+    printf '%s\n' "$encoded"
+    return 0
+  fi
+  while IFS= read -r -d '' arg; do
+    saw_arg=1
+    index=0
+    while [ "$index" -lt "${#arg}" ]; do
+      printf -v ordinal '%d' "'${arg:index:1}"
+      printf -v encoded '%s%02x' "$encoded" "$((ordinal & 255))"
+      index=$((index + 1))
+    done
+    encoded="${encoded}00"
+  done < "$path"
+  [ "$saw_arg" -eq 1 ] || return 1
+  printf '%s\n' "$encoded"
 }
 
 fm_pid_identity() {
@@ -49,7 +76,11 @@ fm_pid_identity() {
     case "$starttime" in
       ''|*[!0-9]*) return 1 ;;
     esac
-    cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
+    if command -v od >/dev/null 2>&1; then
+      cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
+    else
+      cmdline_hex=$(fm_proc_cmdline_hex "$proc_root/$pid/cmdline") || return 1
+    fi
     [ -n "$cmdline_hex" ] || return 1
     identity_key=proc-starttime
     [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
@@ -451,14 +482,14 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir mypid back
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir mypid back rc
   FM_LOCK_OWNER_DIR=
   if fm_lock_uses_directory_owner; then
     [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
-    ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+    ownerdir=$(fm_lock_owner_dir "$lockdir") || return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
     if ! fm_lock_prepare_owner "$ownerdir"; then
       fm_lock_discard_owner "$ownerdir"
-      return 1
+      return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
     fi
     if ! mkdir "$lockdir" 2>/dev/null; then
       fm_lock_discard_owner "$ownerdir"
@@ -471,23 +502,23 @@ fm_lock_try_create() {
     else
       back=
     fi
-    if [ "$back" = "$mypid" ] && fm_lock_points_to_owner "$lockdir" "$ownerdir" \
-      && ! fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
-      FM_LOCK_OWNER_DIR=$ownerdir
-      return 0
+    rc=$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS
+    if [ "$back" = "$mypid" ] && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+      rc=1
+      if ! fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+        FM_LOCK_OWNER_DIR=$ownerdir
+        return 0
+      fi
     fi
     fm_lock_remove_path "$lockdir" 2>/dev/null || true
     fm_lock_discard_owner "$ownerdir"
-    return 1
+    return "$rc"
   fi
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
-  if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
-    fm_lock_discard_owner "$ownerdir"
-    return 1
-  fi
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+  ownerdir=$(fm_lock_owner_dir "$lockdir") || return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
   if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
-    return 1
+    return "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS"
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
@@ -801,13 +832,19 @@ fm_recovery_marker_arm_check() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 recovery_depth=${2:-0} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS" ] || return "$rc"
+  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    return 1
   fi
 
   # Compare against ${BASHPID:-$$} inline, never via a command substitution:
@@ -825,8 +862,11 @@ fm_lock_try_acquire() {
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
       return 0
+    else
+      rc=$?
     fi
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    [ "$rc" -ne "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS" ] || return "$rc"
     return 1
   fi
   if fm_lock_owner_alive "$lockdir" "$pid"; then
@@ -838,13 +878,23 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  if [ "$recovery_depth" -ge "$FM_LOCK_RECOVERY_MAX_DEPTH" ]; then
+    printf 'error: refusing stale lock recovery for %s: nested .steal lock depth reached %s; inspect and clear the persisted stale lock chain, then retry\n' \
+      "$lockdir" "$FM_LOCK_RECOVERY_MAX_DEPTH" >&2
+    return "$FM_LOCK_RECOVERY_REFUSED_STATUS"
+  fi
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if fm_lock_try_acquire "$steal" "$((recovery_depth + 1))"; then
+    steal_owner=${FM_LOCK_OWNER_DIR:-}
+  else
+    rc=$?
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    case "$rc" in
+      "$FM_LOCK_RECOVERY_REFUSED_STATUS"|"$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS") return "$rc" ;;
+    esac
     return 1
   fi
-  steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_lock_owner_alive "$lockdir" "$cur"; then
@@ -888,11 +938,12 @@ fm_lock_try_acquire() {
     return 1
   fi
   fm_lock_remove_path "$lockdir" || true
-  rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
+  else
+    rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
@@ -904,8 +955,16 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while true; do
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    case "$rc" in
+      "$FM_LOCK_RECOVERY_REFUSED_STATUS"|"$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS") return "$rc" ;;
+    esac
     sleep 0.1
   done
 }

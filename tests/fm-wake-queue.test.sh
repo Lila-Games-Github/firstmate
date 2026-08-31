@@ -743,6 +743,40 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+test_lock_owner_preparation_failure_is_bounded() {
+  local dir state rc
+  dir=$(make_case lock-owner-preparation-failure)
+  state="$dir/state"
+  rc=0
+  # shellcheck disable=SC2016 # Positional parameters expand in the inner bash.
+  FM_STATE_OVERRIDE="$state" timeout 2 bash -c '
+    . "$1"
+    fm_pid_identity() { return 1; }
+    FM_LOCK_REQUIRE_IDENTITY=1
+    lock_rc=0
+    fm_lock_acquire_wait "$2/.fixture.lock" || lock_rc=$?
+    [ "$lock_rc" -eq 3 ] || exit 10
+    [ ! -e "$2/.fixture.lock" ] && [ ! -L "$2/.fixture.lock" ] || exit 11
+    FM_LOCK_REQUIRE_IDENTITY=0
+    fm_lock_uses_directory_owner() { return 0; }
+    failed_pid="$2/.directory-owner.lock/pid"
+    cat() {
+      [ "${1:-}" != "$failed_pid" ] || return 1
+      command cat "$@"
+    }
+    lock_rc=0
+    fm_lock_acquire_wait "$2/.directory-owner.lock" || lock_rc=$?
+    [ "$lock_rc" -eq 3 ] || exit 12
+    [ ! -e "$2/.directory-owner.lock" ] && [ ! -L "$2/.directory-owner.lock" ] || exit 13
+    fm_lock_try_create() { return 1; }
+    lock_rc=0
+    fm_lock_try_acquire "$2/.released-race.lock" || lock_rc=$?
+    [ "$lock_rc" -eq 1 ] || exit 14
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a lock owner-preparation failure did not propagate promptly (rc=$rc)"
+  pass "lock owner-preparation failure is terminal while an absent contention race remains retryable"
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -793,6 +827,7 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_lock_owner_preparation_failure_is_bounded
 test_self_announced_append_guards
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
