@@ -6,8 +6,10 @@
 // caller without one is an external terminal that dispatches without a lane
 // and supervises by polling.
 //
-// This executable has seven entry points:
+// This executable has eight entry points:
 //   serve             Run the stdio MCP server.
+//   call              Invoke one MCP tool from a terminal and print the same
+//                     result object the stdio transport returns.
 //   install           Register the MCP server and inert global Playbot hooks.
 //   hook-pretool      Capture the exact Codex session invoking one MCP tool.
 //   hook-stop         Wake a routed controller after a worker turn completes.
@@ -565,7 +567,7 @@ function threadRows() {
       FROM workspace_threads t
       JOIN workspaces w ON w.id = t.workspace_id
       JOIN projects p ON p.id = w.project_id
-      ORDER BY t.updated_at DESC, t.position ASC
+      ORDER BY t.updated_at DESC, t.position ASC, t.id ASC
     `);
   } finally {
     db.close();
@@ -579,7 +581,7 @@ function topology() {
       SELECT id, name, default_working_root_id, deletion_state, created_at, updated_at
       FROM projects
       WHERE deletion_state = 'active'
-      ORDER BY updated_at DESC
+      ORDER BY updated_at DESC, id ASC
     `);
     const roots = queryAll(db, `
       SELECT
@@ -592,16 +594,17 @@ function topology() {
         r.default_branch
       FROM project_roots pr
       JOIN repositories r ON r.id = pr.repository_id
-      ORDER BY pr.position ASC
+      ORDER BY pr.position ASC, pr.id ASC
     `);
     const workspaces = queryAll(db, `
       SELECT id, project_id, name, kind, is_selected, archive_state, created_at, updated_at
       FROM workspaces
-      ORDER BY updated_at DESC
+      ORDER BY updated_at DESC, id ASC
     `);
     const workspaceRoots = queryAll(db, `
       SELECT workspace_id, project_root_id, path, branch
       FROM workspace_roots
+      ORDER BY workspace_id ASC, project_root_id ASC
     `);
     return projects.map((project) => ({
       id: project.id,
@@ -2139,6 +2142,17 @@ function threadsForProject(projectId = null, workspaceId = null, includeArchived
     && (!projectId || row.project_id === projectId)
     && (workspaceId ? row.workspace_id === workspaceId : row.archive_state === "active")
     && (includeArchived || !row.archived));
+}
+
+function threadWorkspaces(project, selector, includeArchived = false) {
+  const workspaces = selector
+    ? [resolveWorkspace(project, selector)]
+    : project.workspaces.filter((workspace) => workspace.archiveState === "active");
+  const rows = threadsForProject(project.id, null, includeArchived);
+  return workspaces.map((workspace) => ({
+    ...workspace,
+    threads: rows.filter((row) => row.workspace_id === workspace.id).map(publicThread),
+  }));
 }
 
 // The explicit wider scope threadsForProject's note points at, and the ONE place
@@ -4342,8 +4356,8 @@ function toolDefinitions() {
     },
     {
       name: "list_threads",
-      description: "List Playbot chats for one exact project id, root path, or unique project name. Duplicate project names are rejected.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), includeArchived: boolean("Include archived chats", false) }, ["project"]),
+      description: "List every active workspace and its Playbot chats for one exact project id, root path, or unique project name. Preserve each workspace's selected state as data; pass workspace only to narrow the result deliberately. Duplicate project names are rejected.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; every active workspace when omitted"), includeArchived: boolean("Include archived chats in the returned active workspaces", false) }, ["project"]),
       annotations: { readOnlyHint: true },
     },
     {
@@ -4469,14 +4483,14 @@ function toolDefinitions() {
   ];
 }
 
-async function handleTool(name, args = {}) {
+async function handleTool(name, args = {}, callerMode = "mcp") {
   if (name === "identify_current_thread") {
-    const row = identifyController(name);
+    const row = callerMode === "external-terminal" ? null : identifyController(name);
     return row
       ? { controller: "playbot-chat", thread: publicThread(row) }
       : { controller: "external-terminal", thread: null };
   }
-  const caller = controllerForTool(name);
+  const caller = callerMode === "external-terminal" ? null : controllerForTool(name);
   const projects = topology();
   if (name === "list_projects") return { projects };
   if (name === "list_lanes") return { lanes: loadRoutes().filter((route) => !args.activeOnly || route.active) };
@@ -4625,8 +4639,10 @@ async function handleTool(name, args = {}) {
   }
 
   if (name === "list_threads") {
-    const workspace = resolveWorkspace(project, args.workspace);
-    return { project: { id: project.id, name: project.name }, workspace, threads: threadsForProject(project.id, workspace.id, Boolean(args.includeArchived)).map(publicThread) };
+    return {
+      project: { id: project.id, name: project.name },
+      workspaces: threadWorkspaces(project, args.workspace, Boolean(args.includeArchived)),
+    };
   }
   const thread = resolveThreadInProject(project, args.workspace, args.thread, name === "archive_chat");
   if (name === "send_message") {
@@ -4844,6 +4860,41 @@ async function readStdinJson() {
   return JSON.parse(input);
 }
 
+function cliUsage() {
+  return [
+    "Usage:",
+    "  fm-playbot-lanes.mjs call <tool> [arguments-json]",
+    "  fm-playbot-lanes.mjs call <tool> -  # read arguments JSON from stdin",
+    "  fm-playbot-lanes.mjs serve",
+    "  fm-playbot-lanes.mjs setup|doctor|install",
+    "",
+    `MCP tools: ${toolDefinitions().map((tool) => tool.name).join(", ")}`,
+  ].join("\n");
+}
+
+async function callFromCli(argv) {
+  const [name, encodedArgs, ...extra] = argv;
+  if (!name || extra.length > 0) throw new Error(cliUsage());
+  if (!toolDefinitions().some((tool) => tool.name === name)) {
+    throw new Error(`Unknown MCP tool '${name}'.\n${cliUsage()}`);
+  }
+  let args = {};
+  if (encodedArgs === "-") {
+    args = await readStdinJson();
+  } else if (encodedArgs !== undefined) {
+    try {
+      args = JSON.parse(encodedArgs);
+    } catch (error) {
+      throw new Error(`arguments-json must be valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new Error("arguments-json must decode to a JSON object");
+  }
+  ensurePrivateDirs();
+  console.log(JSON.stringify(mcpResult(await handleTool(name, args, "external-terminal")), null, 2));
+}
+
 async function doctor() {
   const projects = topology();
   let renderer = false;
@@ -4944,7 +4995,9 @@ async function setup() {
 
 async function main() {
   const command = process.argv[2] ?? "serve";
+  if (command === "help" || command === "--help" || command === "-h") return console.log(cliUsage());
   if (command === "serve") return serve();
+  if (command === "call") return callFromCli(process.argv.slice(3));
   if (command === "install") return console.log(JSON.stringify(await install(), null, 2));
   if (command === "setup") {
     const result = await setup();

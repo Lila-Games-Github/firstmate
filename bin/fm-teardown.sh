@@ -2639,6 +2639,7 @@ if [ "$BACKEND" = herdr ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID" || exit $?
   remove_secondmate_registry_entry "$ID"
 fi
@@ -2648,7 +2649,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+if [ "$KIND" != secondmate ]; then
+  remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \

@@ -7,6 +7,8 @@ A normal-terminal controller has no Playbot chat to wake, so `dispatch` arms tha
 `bin/fm-playbot-lanes.mjs` is the single owner of the tool schemas, private state format, install command, hook behavior, and exact failure rules.
 Run its `doctor` command for bounded local diagnostics and its `install` command to register the server and hooks in Playbot's managed Codex home.
 Run its `setup` command to ensure the complete integration is ready in one fail-closed operation.
+A normal terminal can invoke any lane tool through `node --no-warnings bin/fm-playbot-lanes.mjs call <tool> '<arguments-json>'`; the command returns the same result object as the MCP `tools/call` path.
+Passing `-` instead of inline JSON reads the arguments object from standard input.
 
 ## Captain startup trigger
 
@@ -34,6 +36,12 @@ A `thread` selector identifies one chat on its own, so the workspace it lives in
 Supplying `workspace` narrows the search and still fails closed when the chat is not in it, and omitting `workspace` searches the whole project's active workspaces.
 An archived workspace is out of that default scope, exactly as it is out of an explicit `workspace` selector's, so its chats are neither addressable by default nor able to collide with an active chat's title.
 An ambiguous exact title or duplicate id is reported rather than resolved, and the not-found message names the scope that was searched.
+
+`list_threads` returns a `workspaces` array containing every active workspace in the requested project, including active workspaces with no chats.
+Each workspace retains its `selected` field and owns its own `threads` array, so UI selection remains visible without narrowing fleet supervision.
+The optional `workspace` selector deliberately narrows the result to one active workspace; omitting it remains the project-wide MCP call.
+Archived workspaces are always excluded, while `includeArchived` controls archived chats inside the active workspaces that remain in scope.
+Workspace and thread ordering is deterministic for identical persisted state.
 
 ## Chat-creation API detection
 

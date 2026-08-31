@@ -394,6 +394,7 @@ This repo therefore ships no composer-driving tool.
 **Use `bin/fm-playbot-lanes.mjs` instead** ([playbot-lanes.md](playbot-lanes.md)).
 It reaches the same renderer over the same DevTools socket, but calls Playbot's own IPC handlers, so every send, read, and card answer names its chat explicitly and cannot land on the visible one.
 It also reports whether Playbot delivered a message or is only holding it, which composer automation cannot observe at all.
+The same lane tools are available to maintainers from a normal terminal through its `call` command; [playbot-lanes.md](playbot-lanes.md) owns the supported invocation and result contract.
 
 **Caveats**
 - Requires a **project window open** in Playbot, because `electronAPI.invoke` lives in that renderer. The engine can be headless; the app window can be minimized but must not be closed.
@@ -470,8 +471,9 @@ curl -s http://127.0.0.1:<port>/            # -> ok
 # 5. Confirm engine tool present:
 #    listTools() includes "execute_engine_code"  (only when a project is open)
 
-# 6. Or drive the built-in agent (the ~/.playbot/bin/playbot CLI silently no-ops, §8):
-node bin/fm-playbot-lanes.mjs serve          # thread-addressed lane MCP, §8.1
+# 6. Or drive the built-in agent through Firstmate's supported lane adapter (§8):
+node bin/fm-playbot-lanes.mjs call list_threads '{"project":"<project-id>"}'
+node bin/fm-playbot-lanes.mjs serve          # stdio MCP transport, §8.1
 ```
 
 MCP endpoint: `POST http://127.0.0.1:<port>/mcp?roots=<json>&primaryRootId=<id>`
