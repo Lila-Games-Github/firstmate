@@ -743,6 +743,10 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+# Failure to prepare a lock owner is not lock contention. In particular, a
+# required pid identity can fail before any lock path exists. The stale-owner
+# path must return that failure promptly instead of recursively attempting
+# .steal locks until bash exhausts its stack.
 test_lock_owner_preparation_failure_is_bounded() {
   local dir state rc
   dir=$(make_case lock-owner-preparation-failure)

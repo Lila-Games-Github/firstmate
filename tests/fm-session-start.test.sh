@@ -21,6 +21,7 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
+#   - bounded unresolved learning-candidate visibility without dumping records
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -739,7 +740,7 @@ EOF
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
-  local rec root home fakebin holder_pid out status
+  local rec root home fakebin holder_pid out status candidate candidate_path
   rec=$(new_world lock-refusal)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -756,6 +757,26 @@ EOF
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
   git -C "$root" checkout -q -B fm/read-only-tangle
+
+  candidate=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_LEARNING_NOW=2026-08-28T12:00:00Z "$ROOT/bin/fm-learning-candidate.sh" capture \
+    --task read-only-summary --project FrogPile --signal escaped-defect \
+    --impact "terminal content must override a stale unresolved hint" \
+    --root-cause "summary lacked mutation authority" --escaped-contract "read-only startup" \
+    --missing-check "lock-refusal summary regression" --consumer captain \
+    --prevention "load candidate content without correcting hints" \
+    --evidence "a stale suffix was renamed during lock refusal" \
+    --proposed-owner Firstmate --counterfactual "non-mutating load would preserve shared state") \
+    || fail "could not seed the read-only summary candidate"
+  candidate_path="$home/state/learning-candidates/$candidate.unresolved.json"
+  jq '
+    .lifecycle_state="dismissed" |
+    .disposition={at:"2026-08-28T12:00:01Z",curator:"curator-read-only",
+      outcome:"dismissed",note:"terminal candidate",reference:null} |
+    .history += [{at:"2026-08-28T12:00:01Z",event:"disposed",
+      actor:"curator-read-only",detail:"dismissed"}]
+  ' "$candidate_path" >"$home/terminal-candidate.json"
+  mv "$home/terminal-candidate.json" "$candidate_path"
 
   sleep 300 &
   holder_pid=$!
@@ -780,6 +801,10 @@ EOF
   assert_not_contains "$out" "After draining queued wakes" "read-only guard printed a drain-then-rearm instruction"
   assert_not_contains "$out" "run bin/fm-watch-arm.sh" "read-only guard printed a mutating watcher-arm instruction"
   assert_not_contains "$out" "git -C $root checkout main" "read-only bootstrap printed a state-changing checkout remediation"
+  assert_not_contains "$out" "$candidate" "read-only summary trusted the stale unresolved hint over terminal content"
+  assert_present "$candidate_path" "lock-refused summary renamed a stale candidate hint"
+  assert_absent "$home/state/learning-candidates/$candidate.dismissed.json" \
+    "lock-refused summary mutated the candidate lifecycle hint"
 
   # Detect-only bootstrap diagnostics still ran (the fakebin's PATH excludes
   # tasks-axi, so bootstrap's own read-only tool-detection line fires
@@ -2201,6 +2226,116 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
+test_learning_candidate_summary_is_bounded() {
+  local rec root home fakebin out i details
+  rec=$(new_world learning-candidate-summary)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+
+  i=1
+  while [ "$i" -le 7 ]; do
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_LEARNING_NOW="2026-08-28T12:00:0${i}Z" \
+      "$ROOT/bin/fm-learning-candidate.sh" capture \
+      --task "startup-candidate-$i" --project FrogPile --signal escaped-defect \
+      --impact "startup candidate impact $i" --root-cause "cause $i" \
+      --escaped-contract "contract $i" --missing-check "check $i" \
+      --consumer "consumer $i" --prevention "prevention $i" \
+      --evidence "evidence $i" --proposed-owner "owner $i" \
+      --counterfactual "counterfactual $i" >/dev/null \
+      || fail "could not seed learning candidate $i"
+    i=$((i + 1))
+  done
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Unresolved learning candidates" \
+    "session start omitted the learning-candidate subsection"
+  assert_contains "$out" "LEARNING CANDIDATES: 7 unresolved" \
+    "session start omitted the exact unresolved count"
+  assert_contains "$out" "... 4 more; run bin/fm-learning-candidate.sh batch" \
+    "session start did not disclose the bounded remainder"
+  details=$(printf '%s\n' "$out" | grep -c '^- lc-')
+  [ "$details" -eq 3 ] || fail "session start emitted $details candidate details instead of three"
+  assert_contains "$out" "Load learning-candidate-lifecycle before curating a bounded batch." \
+    "session start omitted the asynchronous curation trigger"
+  pass "session start exposes a bounded learning-candidate count and sample"
+}
+
+test_learning_candidate_summary_error_is_terminal_safe() {
+  local rec root home fakebin out real_find
+  rec=$(new_world learning-candidate-summary-error)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+  mkdir -p "$home/state/learning-candidates"
+  real_find=$(command -v find)
+  cat >"$fakebin/find" <<'SH'
+#!/usr/bin/env bash
+if [ "$PWD" = "$FM_TEST_CANDIDATE_DIR" ]; then
+  printf 'candidate enumeration failed\e[2J\233\n' >&2
+  exit 9
+fi
+exec "$FM_TEST_REAL_FIND" "$@"
+SH
+  chmod +x "$fakebin/find"
+
+  out=$(FM_TEST_CANDIDATE_DIR="$home/state/learning-candidates" \
+    FM_TEST_REAL_FIND="$real_find" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
+    "session start treated a failed candidate enumeration as successful"
+  assert_not_contains "$out" $'\e' \
+    "session start exposed an ESC byte from the candidate summary diagnostic"
+  assert_not_contains "$out" $'\233' \
+    "session start exposed a C1 byte from the candidate summary diagnostic"
+  pass "session start terminal-sanitizes candidate summary diagnostics"
+}
+
+test_learning_candidate_summary_rejects_unsafe_entry() {
+  local rec root home fakebin out id
+  rec=$(new_world learning-candidate-unsafe-entry)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+  mkdir -p "$home/state/learning-candidates"
+  id=lc-000000000000000000000000
+  ln -s "$home/state" "$home/state/learning-candidates/$id.unresolved.json"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
+    "session start silently skipped an unsafe candidate entry"
+  assert_contains "$out" "candidate path must be a regular file" \
+    "session start did not surface shared candidate-path validation"
+  pass "session start reports unsafe candidate entries as unavailable"
+}
+
+test_learning_candidate_summary_rejects_dangling_store() {
+  local rec root home fakebin out
+  rec=$(new_world learning-candidate-dangling-store)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+  ln -s "$home/missing-store" "$home/state/learning-candidates"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
+    "session start treated a dangling candidate store as absent"
+  assert_contains "$out" "candidate store must be a real directory" \
+    "session start did not surface dangling candidate-store validation"
+  pass "session start reports a dangling candidate store as unavailable"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -2426,6 +2561,10 @@ test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_learning_candidate_summary_is_bounded
+test_learning_candidate_summary_error_is_terminal_safe
+test_learning_candidate_summary_rejects_unsafe_entry
+test_learning_candidate_summary_rejects_dangling_store
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_supervision_block_exactly_one_and_pi_diagnostic

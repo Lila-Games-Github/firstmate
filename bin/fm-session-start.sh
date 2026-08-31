@@ -45,8 +45,10 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       state/.afk, a bounded unresolved learning-candidate
+#                       summary when present, and a cheap per-task
+#                       endpoint-liveness read: always runs; lock-refused mode
+#                       passes the summary's non-mutating read-only option.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -760,8 +762,8 @@ section "READ-ONCE CONTRACT"
 cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
-data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+a bounded unresolved learning-candidate summary when present, data/projects.md,
+data/secondmates.md, data/captain.md, data/captain-shared.md, and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -835,6 +837,25 @@ if [ -e "$STATE/.afk" ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
 else
   printf 'absent\n'
+fi
+
+# Candidate records deliberately outlive task state, but the startup surface is
+# only a bounded count and concise sample. The lifecycle command owns both the
+# record schema, path validation, and hard output cap. An absent store is silent
+# and is not created by this summary call.
+LEARNING_SUMMARY_ARGS=()
+[ "$READ_ONLY" -eq 0 ] || LEARNING_SUMMARY_ARGS=(--read-only)
+if LEARNING_SUMMARY=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  "$SCRIPT_DIR/fm-learning-candidate.sh" summary "${LEARNING_SUMMARY_ARGS[@]}" 2>&1); then
+  if [ -n "$LEARNING_SUMMARY" ]; then
+    subsection "Unresolved learning candidates"
+    printf '%s\n' "$LEARNING_SUMMARY"
+    printf '\nLoad learning-candidate-lifecycle before curating a bounded batch.\n'
+  fi
+else
+  subsection "Unresolved learning candidates"
+  printf 'LEARNING CANDIDATES: summary unavailable - %s\n' \
+    "$(printf '%s\n' "$LEARNING_SUMMARY" | head -1 | LC_ALL=C tr '\000-\037\177-\237' ' ')"
 fi
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
