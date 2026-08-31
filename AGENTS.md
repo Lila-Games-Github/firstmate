@@ -540,6 +540,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
 - `learning-candidate-lifecycle` - load after a captain correction of supposedly finished work, a review rejection, a defect that escaped passing tests, a blocker exposing a reusable workflow gap, or a substantive no-mistakes correction, and before asynchronously curating unresolved candidates; routine success requires no audit.
+- `playbot-workspace-retirement` - load before inspecting whether a Playbot workspace can be retired or deleting one.
 
 ## 14. Relay
 
