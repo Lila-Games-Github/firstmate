@@ -843,9 +843,6 @@ fm_lock_try_acquire() {
     rc=$?
   fi
   [ "$rc" -ne "$FM_LOCK_OWNER_PREPARATION_FAILED_STATUS" ] || return "$rc"
-  if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
-    return 1
-  fi
   # A failed owner preparation is not contention: identity generation or an
   # owner-file write can fail before a lock path exists. Stale-owner recovery
   # is meaningful only for an observed lock. Treating an absent path as a stale
