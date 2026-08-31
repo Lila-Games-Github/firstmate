@@ -1193,9 +1193,12 @@ sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
 touch "$TMP_ROOT/handoff.release"
 wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
-if ! wait "$teardown_pid"; then
+if wait "$teardown_pid"; then
+  :
+else
+  teardown_rc=$?
   printf 'serialized retirement output:\n%s\n' "$(cat "$TMP_ROOT/teardown-serialized.out")" >&2
-  fail "safe remote retirement failed after handoff serialization"
+  fail "safe remote retirement failed after handoff serialization (rc=$teardown_rc)"
 fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"

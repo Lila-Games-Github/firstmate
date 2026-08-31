@@ -65,6 +65,13 @@ app.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
 app.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
   .run('ws-worker-alt', 'root-worker', path.join(root, 'worker', '.worktrees', 'alt'), 'alt');
 
+// An active workspace with no chats must still be visible to fleet supervision;
+// otherwise an empty workspace and an omitted workspace are indistinguishable.
+app.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-worker-empty', 'project-worker', 'empty', 'worktree', 0, 'active', now, now);
+app.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+  .run('ws-worker-empty', 'root-worker', path.join(root, 'worker', '.worktrees', 'empty'), 'empty');
+
 // An ARCHIVED workspace in the same project holding a chat whose title is
 // identical to an active one. Nothing may resolve to it without an explicit
 // workspace, and it must not make the active chat's title ambiguous.
@@ -116,6 +123,86 @@ const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.projects.length !== 3) process.exit(1);
 NODE
 pass "fm-playbot-lanes: global project discovery is project-id and path aware"
+
+# This is the end-to-end reproduction for the fleet-visibility defect. The
+# public MCP call used to resolve an omitted workspace through Playbot's UI
+# selection and silently return only that workspace, even though the same
+# project held a working chat in another active workspace.
+list_request='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_threads","arguments":{"project":"project-worker"}}}'
+out=$(rpc "$list_request")
+OUT="$out" node --no-warnings <<'NODE' || fail "list_threads omitted an active selected, unselected, or empty workspace"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const result = value.result.structuredContent;
+if (result.project.id !== 'project-worker') process.exit(1);
+const ids = result.workspaces.map((workspace) => workspace.id);
+if (JSON.stringify(ids) !== JSON.stringify(['ws-worker', 'ws-worker-alt', 'ws-worker-empty'])) process.exit(1);
+const selected = result.workspaces.find((workspace) => workspace.id === 'ws-worker');
+const unselected = result.workspaces.find((workspace) => workspace.id === 'ws-worker-alt');
+const empty = result.workspaces.find((workspace) => workspace.id === 'ws-worker-empty');
+if (selected.selected !== true || unselected.selected !== false || empty.selected !== false) process.exit(1);
+if (selected.threads.length !== 1 || selected.threads[0].id !== 'chat-worker') process.exit(1);
+if (unselected.threads.length !== 1 || unselected.threads[0].id !== 'chat-worker-alt') process.exit(1);
+if (!Array.isArray(empty.threads) || empty.threads.length !== 0) process.exit(1);
+if (result.workspaces.some((workspace) => workspace.id === 'ws-worker-archived')) process.exit(1);
+if (result.workspaces.flatMap((workspace) => workspace.threads).some((thread) => thread.archived)) process.exit(1);
+NODE
+repeat=$(rpc "$list_request")
+[ "$out" = "$repeat" ] || fail "identical list_threads calls returned a different order or payload"
+pass "fm-playbot-lanes: list_threads groups every active workspace deterministically without filtering on selected"
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_threads","arguments":{"project":"project-worker","workspace":"ws-worker-alt"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "an explicit workspace did not narrow list_threads to that workspace"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const workspaces = value.result.structuredContent.workspaces;
+if (workspaces.length !== 1 || workspaces[0].id !== 'ws-worker-alt') process.exit(1);
+if (workspaces[0].selected !== false || workspaces[0].threads[0]?.id !== 'chat-worker-alt') process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_threads","arguments":{"project":"project-worker","workspace":"ws-worker","includeArchived":true}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "includeArchived widened list_threads beyond the requested active workspace"
+const value = JSON.parse(process.env.OUT);
+if (value.error) process.exit(1);
+const workspaces = value.result.structuredContent.workspaces;
+if (workspaces.length !== 1 || workspaces[0].id !== 'ws-worker') process.exit(1);
+const ids = workspaces[0].threads.map((thread) => thread.id);
+if (!ids.includes('chat-worker') || !ids.includes('chat-worker-archived-parked')) process.exit(1);
+if (ids.includes('chat-worker-archived')) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_threads","arguments":{"project":"project-worker","workspace":"missing-workspace"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "an invalid list_threads workspace did not fail closed"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !value.error.message.includes('Workspace not found in project-worker: missing-workspace')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: list_threads workspace filtering is explicit, archived-safe, and fail-closed"
+
+out=$(rpc "$list_request")
+cli=$(node --no-warnings "$SCRIPT" call list_threads '{"project":"project-worker"}')
+MCP="$out" CLI="$cli" node --no-warnings <<'NODE' || fail "the terminal call path diverged from the MCP result"
+const mcp = JSON.parse(process.env.MCP).result;
+const cli = JSON.parse(process.env.CLI);
+if (JSON.stringify(cli) !== JSON.stringify(mcp)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: terminal call returns the same result object as MCP"
+
+# A terminal call is transport-identified, so a fresh marker written for a
+# concurrent Playbot chat cannot make that terminal impersonate the chat or
+# consume the marker before the matching MCP request arrives.
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__identify_current_thread"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+cli=$(node --no-warnings "$SCRIPT" call identify_current_thread '{}')
+CLI="$cli" node --no-warnings <<'NODE' || fail "a terminal call borrowed a concurrent Playbot caller marker"
+const value = JSON.parse(process.env.CLI).structuredContent;
+if (value.controller !== 'external-terminal' || value.thread !== null) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"identify_current_thread","arguments":{}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "the terminal call consumed a Playbot caller marker"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.controller !== 'playbot-chat' || value.thread.id !== 'chat-controller') process.exit(1);
+NODE
+pass "fm-playbot-lanes: terminal calls stay external without consuming Playbot caller identity"
 
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"identify_current_thread","arguments":{}}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller was not identified without a Playbot controller project"
@@ -552,13 +639,13 @@ async function electronInvoke(channel, payload) {
       };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.4.0\n');
+      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.5.0\n');
       return [{
         name: 'playbot_lanes',
         enabled: true,
         error: null,
         toolCount: 18,
-        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.4.0') },
+        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.5.0') },
       }];
     }
     if (channel === 'threads:launch') {
@@ -780,8 +867,8 @@ const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
 if (!value.checks.hooks.ready || value.checks.toolCount !== 18) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.5.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.5.0' || value.checks.expectedSchemaVersion !== '0.5.0') process.exit(1);
 if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
 NODE
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
@@ -801,8 +888,8 @@ const value = JSON.parse(process.env.OUT);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 const mcpCalls = calls.filter(call => call.channel.startsWith('codex:mcpServers:'));
 if (value.ready !== true || value.changed !== true) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.4.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.4.0' || value.checks.expectedSchemaVersion !== '0.4.0') process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.5.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.5.0' || value.checks.expectedSchemaVersion !== '0.5.0') process.exit(1);
 if (!value.installation.reload.startsWith('reloaded ')) process.exit(1);
 if (mcpCalls.filter(call => call.channel === 'codex:mcpServers:reload').length !== 1) process.exit(1);
 if (mcpCalls.some(call => !['codex:mcpServers:list', 'codex:mcpServers:reload'].includes(call.channel))) process.exit(1);

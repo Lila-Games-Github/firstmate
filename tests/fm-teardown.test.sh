@@ -1208,6 +1208,38 @@ test_stale_index_lock_cleared_and_teardown_succeeds() {
   pass "provably-stale worktree index.lock (old, no live holder) is cleared and teardown succeeds"
 }
 
+test_persisted_steal_chain_refuses_at_depth_limit() {
+  local case_dir lock rc depth
+  case_dir=$(make_case persisted-steal-chain)
+  write_meta "$case_dir" no-mistakes ship
+  lock="$case_dir/state/.meta-task-x1.lock"
+  depth=0
+  while [ "$depth" -le 10 ]; do
+    mkdir "$lock"
+    printf '%s\n' 2147483647 > "$lock/pid"
+    lock="$lock.steal"
+    depth=$((depth + 1))
+  done
+
+  rc=0
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:$PATH" \
+    timeout 5 "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ "$rc" -ne 124 ] || fail "persisted-steal-chain: teardown hung waiting on the metadata lock"
+  [ "$rc" -ne 139 ] || fail "persisted-steal-chain: teardown exited with SIGSEGV status 139"
+  expect_code 2 "$rc" "persisted-steal-chain: teardown should propagate the terminal recovery refusal"
+  assert_grep "nested .steal lock depth reached 8" "$case_dir/stderr" \
+    "persisted-steal-chain: teardown did not report the recovery depth limit"
+  assert_grep "inspect and clear the persisted stale lock chain, then retry" "$case_dir/stderr" \
+    "persisted-steal-chain: teardown did not provide actionable recovery guidance"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "persisted-steal-chain: teardown changed task state after refusing the metadata lock"
+  pass "a persisted stale metadata-lock .steal chain refuses promptly at the recovery depth limit"
+}
+
 test_live_index_lock_is_never_removed_and_teardown_refuses() {
   local case_dir rc lock
   case_dir=$(make_case live-index-lock)
@@ -2925,6 +2957,7 @@ test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
+test_persisted_steal_chain_refuses_at_depth_limit
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
 test_lsof_error_never_clears_index_lock
