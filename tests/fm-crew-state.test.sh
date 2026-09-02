@@ -796,6 +796,24 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
+test_unavailable_run_rejects_older_checks_green_status() {
+  reset_fakes
+  local d; d=$(new_case unavailable-run-stale-green)
+  make_repo_on_branch "$d/wt" fm/feat-unavailable-run
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unavailable-run.meta" "window=fm:fm-feat-unavailable-run" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/5 checks green\n' > "$d/state/feat-unavailable-run.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-unavailable-run
+  local out; out=$(run_crew_state "$d" feat-unavailable-run)
+  assert_contains "$out" "state: unknown" "unavailable run lookup leaves an older checks-green event unverified"
+  assert_contains "$out" "source: none" "unavailable run lookup has no current success source"
+  assert_not_contains "$out" "state: done" "unavailable run lookup must not accept an older checks-green event"
+  pass "unavailable run lookup rejects an older checks-green event"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -1445,6 +1463,7 @@ test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_accept_unverified_ready_status
 test_other_branch_run_ignored
+test_unavailable_run_rejects_older_checks_green_status
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback

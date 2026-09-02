@@ -355,6 +355,18 @@ nm_ci_checks_state() {
     *) printf 'unknown' ;;
   esac
 }
+
+status_log_ci_ready_is_verified() {
+  log_reports_ci_ready || return 1
+  [ "${HAVE_RUN:-0}" = 1 ] || return 1
+  [ "${RUN_SOURCE:-}" = full ] || return 1
+  [ "${RUN_STATUS:-}" != fixing ] || return 1
+  [ -n "${CI_STEP_STATUS:-}" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
+  [ "$CI_STEP_STATUS" = running ] || return 1
+  [ -n "${CI_LOG_STATE:-}" ] || CI_LOG_STATE=$(nm_ci_checks_state)
+  [ "$CI_LOG_STATE" = green ]
+}
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -547,18 +559,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ] && log_reports_ci_ready; then
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" = green ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
+  if [ "$RUN_STATE" = working ] && status_log_ci_ready_is_verified; then
+    emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
@@ -612,9 +614,11 @@ fi
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
-  LOG_STATE=$(map_log_state "$LOG_LINE")
-  if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+  if ! log_reports_ci_ready || status_log_ci_ready_is_verified; then
+    LOG_STATE=$(map_log_state "$LOG_LINE")
+    if [ "$LOG_STATE" != unknown ]; then
+      emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    fi
   fi
 fi
 
