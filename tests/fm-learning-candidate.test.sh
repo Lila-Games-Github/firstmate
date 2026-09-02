@@ -389,7 +389,7 @@ test_legacy_names_are_read_and_corrected() {
 }
 
 test_enumeration_skips_invalid_records() {
-  local home valid corrupt corrupt_path command output errors
+  local home valid corrupt corrupt_path nul_record nul_path nul_canonical command output errors
   home=$(make_home skipped-invalid-record)
   valid=$(capture_candidate "$home" valid-neighbor FrogPile escaped-defect \
     "a valid neighboring incident must remain visible")
@@ -398,6 +398,12 @@ test_enumeration_skips_invalid_records() {
   corrupt_path=$(candidate_path "$home" "$corrupt")
   jq '.incident.signal_type="routine-success"' "$corrupt_path" >"$home/corrupt.json"
   mv "$home/corrupt.json" "$corrupt_path"
+  nul_record=$(capture_candidate "$home" nul-neighbor FrogPile escaped-defect \
+    "a raw-invalid incident must be isolated from valid neighbors")
+  nul_canonical=$(candidate_path "$home" "$nul_record")
+  nul_path="$home/state/learning-candidates/$nul_record.legacy.json"
+  mv "$nul_canonical" "$nul_path"
+  printf '\0' >>"$nul_path"
 
   for command in list batch summary; do
     case "$command" in
@@ -409,10 +415,18 @@ test_enumeration_skips_invalid_records() {
       || fail "$command aborted on one invalid candidate record"
     errors=$(cat "$home/$command.err")
     assert_contains "$output" "$valid" "$command omitted the valid neighboring record"
+    assert_not_contains "$output" "$nul_record" \
+      "$command returned a raw-invalid candidate record"
     assert_contains "$errors" "skipped candidate entry: $corrupt_path" \
       "$command did not report the skipped record path"
     assert_contains "$errors" "invalid candidate record: $corrupt" \
       "$command did not report the skipped record reason"
+    assert_contains "$errors" "skipped candidate entry: $nul_path" \
+      "$command did not report the raw-invalid record path"
+    assert_contains "$errors" "invalid candidate record: $nul_record" \
+      "$command did not report the raw-invalid record reason"
+    assert_present "$nul_path" "$command renamed the raw-invalid record"
+    assert_absent "$nul_canonical" "$command published a name for the raw-invalid record"
   done
   pass "enumeration reports invalid records without hiding valid neighbors"
 }
@@ -446,7 +460,7 @@ test_enumeration_groups_lifecycle_siblings() {
 }
 
 test_concurrent_suffix_rename_reresolves() {
-  local home id source destination fakebin real_cat real_mv json rc count
+  local home id source destination fakebin real_jq real_mv json rc count
   home=$(make_home concurrent-read)
   id=$(capture_candidate "$home" concurrent-reader FrogPile escaped-defect \
     "a reader must tolerate an overlapping lifecycle rename")
@@ -458,18 +472,20 @@ test_concurrent_suffix_rename_reresolves() {
   destination=$(candidate_path "$home" "$id" documented)
   mv "$destination" "$source"
   fakebin=$(fm_fakebin "$home/concurrent-rename")
-  real_cat=$(command -v cat)
+  real_jq=$(command -v jq)
   real_mv=$(command -v mv)
   # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'if [ "$1" = "$FM_TEST_RACE_SOURCE" ] && [ ! -e "$FM_TEST_RACE_DONE" ]; then' \
+    'for arg in "$@"; do' \
+    'if [ "$arg" = "$FM_TEST_RACE_SOURCE" ] && [ ! -e "$FM_TEST_RACE_DONE" ]; then' \
     '  : >"$FM_TEST_RACE_DONE"' \
     '  "$FM_TEST_REAL_MV" "$FM_TEST_RACE_SOURCE" "$FM_TEST_RACE_DESTINATION"' \
     'fi' \
-    'exec "$FM_TEST_REAL_CAT" "$@"' >"$fakebin/cat"
-  chmod +x "$fakebin/cat"
-  json=$(PATH="$fakebin:$PATH" FM_TEST_REAL_CAT="$real_cat" FM_TEST_REAL_MV="$real_mv" \
+    'done' \
+    'exec "$FM_TEST_REAL_JQ" "$@"' >"$fakebin/jq"
+  chmod +x "$fakebin/jq"
+  json=$(PATH="$fakebin:$PATH" FM_TEST_REAL_JQ="$real_jq" FM_TEST_REAL_MV="$real_mv" \
     FM_TEST_RACE_SOURCE="$source" FM_TEST_RACE_DESTINATION="$destination" \
     FM_TEST_RACE_DONE="$home/race-done" run_learning "$home" get "$id") \
     || fail "get rejected one record renamed after discovery"
@@ -527,7 +543,7 @@ test_cutover_accepts_concurrent_read_correction() {
 
 test_list_resolves_ids_after_suffix_rename() {
   local home first second trigger target trigger_path source destination fakebin
-  local real_cat real_mv listed lines
+  local real_jq real_mv listed lines
   home=$(make_home list-rename)
   first=$(capture_candidate "$home" list-first FrogPile escaped-defect \
     "first candidate drives concurrent list timing")
@@ -549,20 +565,22 @@ test_list_resolves_ids_after_suffix_rename() {
   destination=$(candidate_path "$home" "$target" documented)
   mv "$destination" "$source"
   fakebin=$(fm_fakebin "$home/list-reader")
-  real_cat=$(command -v cat)
+  real_jq=$(command -v jq)
   real_mv=$(command -v mv)
   # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'if [ "$1" = "$FM_TEST_TRIGGER_PATH" ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
+    'for arg in "$@"; do' \
+    'if [ "$arg" = "$FM_TEST_TRIGGER_PATH" ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
     '  : >"$FM_TEST_RENAME_DONE"' \
     '  "$FM_TEST_REAL_MV" "$FM_TEST_RENAME_SOURCE" "$FM_TEST_RENAME_DESTINATION"' \
     'fi' \
-    'exec "$FM_TEST_REAL_CAT" "$@"' >"$fakebin/cat"
-  chmod +x "$fakebin/cat"
+    'done' \
+    'exec "$FM_TEST_REAL_JQ" "$@"' >"$fakebin/jq"
+  chmod +x "$fakebin/jq"
   listed=$(PATH="$fakebin:$PATH" FM_TEST_TRIGGER_PATH="$trigger_path" \
     FM_TEST_RENAME_SOURCE="$source" FM_TEST_RENAME_DESTINATION="$destination" \
-    FM_TEST_RENAME_DONE="$home/rename-done" FM_TEST_REAL_CAT="$real_cat" \
+    FM_TEST_RENAME_DONE="$home/rename-done" FM_TEST_REAL_JQ="$real_jq" \
     FM_TEST_REAL_MV="$real_mv" run_learning "$home" list --all) \
     || fail "list failed while a later candidate suffix was renamed"
   lines=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
@@ -575,27 +593,29 @@ test_list_resolves_ids_after_suffix_rename() {
 }
 
 test_read_only_summary_reresolves_after_suffix_rename() {
-  local home id source destination fakebin real_cat real_mv summary
+  local home id source destination fakebin real_jq real_mv summary
   home=$(make_home read-only-summary-rename)
   id=$(capture_candidate "$home" summary-rename FrogPile escaped-defect \
     "read-only summary must retain a record renamed after resolution")
   source=$(candidate_path "$home" "$id")
   destination=$(candidate_path "$home" "$id" documented)
   fakebin=$(fm_fakebin "$home/summary-reader")
-  real_cat=$(command -v cat)
+  real_jq=$(command -v jq)
   real_mv=$(command -v mv)
   # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
     '#!/usr/bin/env bash' \
-    'if [ "$1" = "$FM_TEST_RENAME_SOURCE" ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
+    'for arg in "$@"; do' \
+    'if [ "$arg" = "$FM_TEST_RENAME_SOURCE" ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
     '  : >"$FM_TEST_RENAME_DONE"' \
     '  "$FM_TEST_REAL_MV" "$FM_TEST_RENAME_SOURCE" "$FM_TEST_RENAME_DESTINATION"' \
     'fi' \
-    'exec "$FM_TEST_REAL_CAT" "$@"' >"$fakebin/cat"
-  chmod +x "$fakebin/cat"
+    'done' \
+    'exec "$FM_TEST_REAL_JQ" "$@"' >"$fakebin/jq"
+  chmod +x "$fakebin/jq"
   summary=$(PATH="$fakebin:$PATH" FM_TEST_RENAME_SOURCE="$source" \
     FM_TEST_RENAME_DESTINATION="$destination" FM_TEST_RENAME_DONE="$home/rename-done" \
-    FM_TEST_REAL_CAT="$real_cat" FM_TEST_REAL_MV="$real_mv" \
+    FM_TEST_REAL_JQ="$real_jq" FM_TEST_REAL_MV="$real_mv" \
     run_learning "$home" summary --read-only 2>"$home/summary.err") \
     || fail "read-only summary failed during a concurrent lifecycle rename"
   assert_contains "$summary" "$id" \
@@ -604,6 +624,35 @@ test_read_only_summary_reresolves_after_suffix_rename() {
     || fail "read-only summary reported a re-resolvable renamed record as skipped"
   assert_present "$destination" "read-only summary lost the concurrently renamed record"
   pass "read-only summary re-resolves a record renamed after resolution"
+}
+
+test_read_only_summary_prefers_canonical_duplicate() {
+  local home id canonical legacy before after summary occurrences errors
+  home=$(make_home read-only-summary-duplicate)
+  id=$(capture_candidate "$home" summary-duplicate FrogPile escaped-defect \
+    "read-only summary must count one candidate id once")
+  canonical=$(candidate_path "$home" "$id")
+  legacy="$home/state/learning-candidates/$id.json"
+  mv "$canonical" "$legacy"
+  [ "$(capture_candidate "$home" summary-duplicate FrogPile escaped-defect \
+    "read-only summary must count one candidate id once")" = "$id" ] \
+    || fail "repeat capture changed the duplicate fixture identity"
+  before=$(LC_ALL=C find "$home/state/learning-candidates" -maxdepth 1 -print | sort)
+  summary=$(run_learning "$home" summary --read-only 2>"$home/summary.err") \
+    || fail "read-only summary rejected a canonical and legacy duplicate"
+  after=$(LC_ALL=C find "$home/state/learning-candidates" -maxdepth 1 -print | sort)
+  errors=$(cat "$home/summary.err")
+  occurrences=$(printf '%s\n' "$summary" | awk -v id="$id" 'index($0, id) {count++} END {print count+0}')
+  [ "$occurrences" -eq 1 ] \
+    || fail "read-only summary returned duplicate id $id $occurrences times: $summary"
+  assert_contains "$summary" "LEARNING CANDIDATES: 1 unresolved" \
+    "read-only summary counted a duplicate candidate id twice"
+  assert_contains "$errors" "duplicate candidate id: $id" \
+    "read-only summary did not report the skipped legacy duplicate"
+  [ "$before" = "$after" ] || fail "read-only summary mutated the duplicate store"
+  assert_present "$legacy" "read-only summary removed the legacy duplicate"
+  assert_present "$canonical" "read-only summary removed the canonical record"
+  pass "read-only summary prefers the canonical slot for duplicate ids"
 }
 
 test_routes_and_no_one_off_skill_gate() {
@@ -899,12 +948,15 @@ test_concise_outputs_strip_terminal_controls() {
 }
 
 test_skipped_entry_paths_are_terminal_safe() {
-  local home id path errors
+  local home id path unsafe_id unsafe_path errors
   home=$(make_home terminal-safe-skipped-entry)
   id=lc-000000000000000000000000
   path="$home/state/learning-candidates/$id.invalid"$'\e[2J\u009b'".json"
   mkdir -p "$home/state/learning-candidates"
   ln -s "$home/missing-record" "$path"
+  unsafe_id="lc-"$'\e[2J\u009b'
+  unsafe_path="$home/state/learning-candidates/$unsafe_id.invalid.json"
+  ln -s "$home/missing-record" "$unsafe_path"
   run_learning "$home" summary >"$home/summary.out" 2>"$home/summary.err" \
     || fail "summary aborted while reporting a terminal-control path"
   errors=$(cat "$home/summary.err")
@@ -1264,6 +1316,7 @@ test_concurrent_suffix_rename_reresolves
 test_cutover_accepts_concurrent_read_correction
 test_list_resolves_ids_after_suffix_rename
 test_read_only_summary_reresolves_after_suffix_rename
+test_read_only_summary_prefers_canonical_duplicate
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry

@@ -382,10 +382,12 @@ acquire_read_correction_lock() {
   LOCK_HELD=1
 }
 
-record_json_is_valid() { # <json> [expected-id]
-  local json=$1 expected=${2:-}
-  printf '%s\n' "$json" | jq -se --arg expected "$expected" '
-    length == 1 and (.[0] |
+read_valid_record() { # <expected-id> [path]
+  local expected=${1:-} source=${2:-/dev/stdin}
+  jq -cneS --arg expected "$expected" --rawfile raw "$source" '
+    if ($raw | contains("\u0000")) then error("invalid candidate record")
+    else ($raw | fromjson) end |
+    if (
     .schema == 1
     and (.id | type == "string")
     and ($expected == "" or .id == $expected)
@@ -445,7 +447,13 @@ record_json_is_valid() { # <json> [expected-id]
       and (.at | type == "string" and length > 0)
       and (.event | type == "string" and length > 0)
       and (.actor | type == "string" and length > 0))))
-  ' >/dev/null
+    then . else error("invalid candidate record") end
+  '
+}
+
+record_json_is_valid() { # <json> [expected-id]
+  local json=$1 expected=${2:-}
+  printf '%s\n' "$json" | read_valid_record "$expected" >/dev/null 2>&1
 }
 
 validate_record_json() { # <json> [expected-id]
@@ -473,12 +481,17 @@ resolve_enumerated_entry() { # <path>
     || { ENUMERATED_ERROR="candidate path is outside the candidate store"; return 1; }
   case "$base" in lc-*.json) ;; *) ENUMERATED_ERROR="invalid candidate record name"; return 1 ;; esac
   id=${base%%.*}
-  candidate_id_is_valid "$id" \
-    || { ENUMERATED_ERROR="invalid candidate id: $id"; return 1; }
+  if ! candidate_id_is_valid "$id"; then
+    printf -v ENUMERATED_ERROR 'invalid candidate id: %q' "$id"
+    return 1
+  fi
   case "$base" in
     "$id.json") hint= ;;
     "$id."*.json) hint=${base#"$id."}; hint=${hint%.json} ;;
-    *) ENUMERATED_ERROR="invalid candidate record name: $base"; return 1 ;;
+    *)
+      printf -v ENUMERATED_ERROR 'invalid candidate record name: %q' "$base"
+      return 1
+      ;;
   esac
   if [ -L "$path" ]; then
     ENUMERATED_ERROR="candidate path must be a regular file"
@@ -540,8 +553,7 @@ correct_enumerated_name() { # <path> <candidate-id> <lifecycle-state>
     return 0
   fi
   if [ ! -e "$path" ] && [ ! -L "$destination" ] && [ -f "$destination" ]; then
-    json=$(cat "$destination" 2>/dev/null || true)
-    if record_json_is_valid "$json" "$id" \
+    if json=$(read_valid_record "$id" "$destination" 2>/dev/null) \
       && printf '%s\n%s\n' "$json" "$RECORD_JSON" | jq -en \
         'input as $actual | input as $expected | $actual == $expected' >/dev/null; then
       RECORD_PATH=$destination
@@ -577,21 +589,34 @@ load_enumerated_record() { # <path> <correct-hint>; sets RECORD_JSON and RECORD_
     path=$ENUMERATED_PATH
     id=$ENUMERATED_ID
     hint=$ENUMERATED_HINT
-    if RECORD_JSON=$(cat "$path" 2>/dev/null); then
+    if ! exec 4< "$path"; then
+      attempt=$((attempt + 1))
+      if [ "$attempt" -lt 2 ] && find_enumerated_replacement "$id"; then
+        requested=$ENUMERATED_PATH
+        continue
+      fi
+      report_skipped_entry "$path" "candidate record is unreadable"
+      return 1
+    fi
+    exec 4<&-
+    if RECORD_JSON=$(read_valid_record "$id" "$path" 2>/dev/null); then
       break
     fi
-    attempt=$((attempt + 1))
-    if [ "$attempt" -lt 2 ] && find_enumerated_replacement "$id"; then
-      requested=$ENUMERATED_PATH
-      continue
+    if ! resolve_enumerated_entry "$path"; then
+      if [ "$ENUMERATED_ERROR" = "candidate record not found" ]; then
+        attempt=$((attempt + 1))
+        if [ "$attempt" -lt 2 ] && find_enumerated_replacement "$id"; then
+          requested=$ENUMERATED_PATH
+          continue
+        fi
+      else
+        report_skipped_entry "$path" "$ENUMERATED_ERROR"
+        return 1
+      fi
     fi
-    report_skipped_entry "$path" "candidate record is unreadable"
-    return 1
-  done
-  if ! record_json_is_valid "$RECORD_JSON" "$id"; then
     report_skipped_entry "$path" "invalid candidate record: $id"
     return 1
-  fi
+  done
   state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
   RECORD_PATH=$path
   if [ "$hint" = "$state" ] && lifecycle_state_is_valid "$hint"; then
@@ -611,11 +636,19 @@ load_record() { # <candidate-id> [correct-hint]; sets RECORD_JSON and RECORD_PAT
   while [ "$attempt" -lt 2 ]; do
     resolve_candidate_path record "$id"
     RECORD_PATH=$RESOLVED_PATH
-    if ! RECORD_JSON=$(cat "$RECORD_PATH" 2>/dev/null); then
+    if ! exec 4< "$RECORD_PATH"; then
       attempt=$((attempt + 1))
       continue
     fi
-    validate_record_json "$RECORD_JSON" "$id"
+    exec 4<&-
+    if ! RECORD_JSON=$(read_valid_record "$id" "$RECORD_PATH" 2>/dev/null); then
+      resolve_candidate_path entry "$RECORD_PATH" allow-missing
+      if [ "$RESOLVED_EXISTS" -eq 0 ]; then
+        attempt=$((attempt + 1))
+        continue
+      fi
+      die "invalid candidate record: $id"
+    fi
     content_state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
     resolve_candidate_path slot "$id" "$content_state" allow-missing
     corrected_path=$RESOLVED_PATH
@@ -817,7 +850,7 @@ batch_command() {
 
 summary_command() {
   local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
-  local producer_pid correct_hint=1
+  local producer_pid correct_hint=1 previous='' canonical
   local -a samples=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -841,6 +874,17 @@ summary_command() {
     load_enumerated_record "$name" "$correct_hint" || continue
     id=$(printf '%s\n' "$RECORD_JSON" | jq -r '.id')
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
+    canonical="$CANDIDATE_DIR/$id.$state.json"
+    if [ "$correct_hint" -eq 0 ] && [ "$RECORD_PATH" != "$canonical" ] \
+      && { [ -e "$canonical" ] || [ -L "$canonical" ]; }; then
+      report_skipped_entry "$RECORD_PATH" "duplicate candidate id: $id"
+      continue
+    fi
+    if [ "$id" = "$previous" ]; then
+      report_skipped_entry "$RECORD_PATH" "duplicate candidate id: $id"
+      continue
+    fi
+    previous=$id
     [ "$state" = unresolved ] || continue
     count=$((count + 1))
     [ "$sample_count" -lt "$limit" ] || continue
