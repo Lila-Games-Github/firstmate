@@ -1,0 +1,10 @@
+REGRESSION REPRODUCTION: base commit versus target commit
+fixture_record: lc-e25e2b0aa7cdf196bb2dd001.json (content lifecycle_state=unresolved)
+base_exit_code: 2
+base_stderr:
+fm-learning-candidate: invalid lifecycle state: json
+target_exit_code: 0
+target_stdout:
+LEARNING CANDIDATES: 1 unresolved
+- lc-e25e2b0aa7cdf196bb2dd001 [firstmate/escaped-defect] one legacy filename must not abort summary
+target_read_only_preserved_original_name: yes

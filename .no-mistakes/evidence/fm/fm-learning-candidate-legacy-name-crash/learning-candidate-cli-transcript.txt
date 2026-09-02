@@ -1,0 +1,31 @@
+SCENARIO: lifecycle-less record through public CLI
+candidate_id: lc-3cd205929690cfab6ca5d3f6
+record_before_read_only: lc-3cd205929690cfab6ca5d3f6.json
+summary_read_only_output:
+LEARNING CANDIDATES: 1 unresolved
+- lc-3cd205929690cfab6ca5d3f6 [firstmate/escaped-defect] a malformed record name could abort every read surface
+read_only_store_unchanged: yes
+list_all_output:
+lc-3cd205929690cfab6ca5d3f6	unresolved	firstmate	escaped-defect	a malformed record name could abort every read surface
+record_after_mutating_read: lc-3cd205929690cfab6ca5d3f6.unresolved.json
+get_after_correction:
+{
+  "id": "lc-3cd205929690cfab6ca5d3f6",
+  "lifecycle_state": "unresolved",
+  "task": "evidence-demo",
+  "signal_type": "escaped-defect"
+}
+batch_after_correction:
+[
+  {
+    "id": "lc-3cd205929690cfab6ca5d3f6",
+    "lifecycle_state": "unresolved"
+  }
+]
+same_id_invalid_sibling_check:
+exit_code: 0
+matching_valid_output:
+lc-3cd205929690cfab6ca5d3f6	unresolved	firstmate	escaped-defect	a malformed record name could abort every read surface
+reported_invalid_sibling:
+fm-learning-candidate: skipped candidate entry: <TEMP_HOME>/state/learning-candidates/lc-3cd205929690cfab6ca5d3f6.dismissed.json: invalid candidate record: lc-3cd205929690cfab6ca5d3f6
+valid_record_still_present: yes
