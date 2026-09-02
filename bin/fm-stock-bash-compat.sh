@@ -49,6 +49,7 @@ run_consumer() {
 }
 
 shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
+# shellcheck disable=SC2016 # Variables expand in the child stock Bash.
 run_consumer "shell parse sweep" "$PARSE_TIMEOUT" 0 "$STOCK_BASH" -c '
   root=$1
   stock_bash=$2
