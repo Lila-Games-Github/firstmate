@@ -1,0 +1,12 @@
+skip: node or npm not found for Pi calm home-resolution test
+ok - Pi calm compatibility evidence never rejects a Pi version for being newer than 0.82.0, and still fails closed on a missing or malformed version
+skip: node or npm not found for Pi calm degraded-adapter test
+skip: node not found for Pi calm missing-adapter-export test
+skip: node or npm not found for Pi calm gate test
+skip: node or npm not found for Pi calm activation test
+skip: node or npm not found for Pi calm renderer test
+skip: node or npm not found for Pi calm mid-turn renderer test
+skip: pi or tmux not found for Pi operational follow-up E2E
+skip: pi or tmux not found for Pi Calm hidden-block geometry E2E
+skip: node or npm not found for Pi Calm working-ship test
+skip: pi or tmux not found for Pi calm interactive E2E

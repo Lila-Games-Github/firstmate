@@ -1,0 +1,6 @@
+suite=fm-calm-pi-extension exit=1
+not ok - fm-calm-pi-extension requires Node 22.5 or newer, and the runtime named by FM_TEST_NODE ('/definitely/missing/node') is not an executable file; point FM_TEST_NODE at a usable runtime, or unset it to search PATH and the known install roots
+suite=fm-sessionstart-nudge exit=1
+not ok - fm-sessionstart-nudge requires Node 22.5 or newer, and the runtime named by FM_TEST_NODE ('/definitely/missing/node') is not an executable file; point FM_TEST_NODE at a usable runtime, or unset it to search PATH and the known install roots
+suite=fm-cursor-harness exit=1
+not ok - fm-cursor-harness requires Node 22.5 or newer, and the runtime named by FM_TEST_NODE ('/definitely/missing/node') is not an executable file; point FM_TEST_NODE at a usable runtime, or unset it to search PATH and the known install roots
