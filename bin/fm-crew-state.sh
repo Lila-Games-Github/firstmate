@@ -23,9 +23,10 @@
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
 #      live on that host, so the local worktree and pane reads are skipped and
 #      the remote host is asked for the endpoint's recovery-grade state
-#      (fm-on.sh + fm-remote-secondmate-control.sh state). alive falls through
-#      to the routed status log; dead/missing report the remote verdict; an
-#      unreachable or unreadable remote reports unknown-remote, never a false
+#      (fm-on.sh + fm-remote-secondmate-control.sh state). alive normally falls
+#      through to the routed status log, but a checks-green event must pass the
+#      shared current-CI verifier below; dead/missing report the remote verdict;
+#      an unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`

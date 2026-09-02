@@ -45,8 +45,9 @@ Any direct or remaining historical annotation prints every status line unread at
 The script header owns the exact run-head ancestry rules.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
-A missing-check marker also remains working because only an explicit checks-passed marker can produce a green verdict.
-Remote secondmate checks-green events remain awaiting verification because there is no current attributable remote CI verdict source.
+A checks-green status event reports done only through the shared verifier when a current full run is attributable to the crew's branch and code, its CI step is running, and its latest readable recognized CI marker is an explicit success.
+A cancelled, missing, empty, unreadable, unknown, or unattributable current verdict cannot be promoted by an older checks-green event; it remains failed, working, or unknown according to the current evidence.
+Remote secondmate checks-green events, including events from genuinely green tasks, remain awaiting verification because there is no current attributable remote CI verdict source.
 Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to a status-log event whose verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
