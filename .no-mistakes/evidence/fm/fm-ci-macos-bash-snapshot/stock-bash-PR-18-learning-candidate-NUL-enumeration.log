@@ -1,0 +1,30 @@
+ok - help remains available without private state access
+ok - learning candidates validate qualifying signals and preserve every required incident field
+ok - maximum-size escaped capture and repeat avoid argv limits
+ok - exact repeat capture converges on one durable candidate
+ok - state aliases normalize before public lifecycle path validation
+ok - interrupted lifecycle cutover keeps one content-authoritative record
+ok - legacy record names remain readable and converge on content-derived lifecycle hints
+ok - enumeration reports invalid records without hiding valid neighbors
+ok - content-state filtering retains every matching valid sibling
+ok - concurrent suffix renames re-resolve without hiding genuine duplicates
+ok - cutover accepts a sole record already corrected by a reader
+ok - list resolves enumerated candidate ids after suffix renames
+ok - read-only summary re-resolves a record renamed after resolution
+ok - read-only summary counts canonical records renamed after stale reads
+ok - read-only summary reports same-state siblings without a winner
+ok - invalid canonical siblings do not hide valid stale records
+ok - invalid siblings do not block validated concurrent re-resolution
+ok - classification routes feature, project, Firstmate, and named-tool incidents and enforces the skill gate
+ok - candidates can be dismissed, documented, promoted, linked to follow-up, or deduplicated
+ok - dedupe interruption converges and exact retries survive canonical disposition
+ok - concise views strip terminal controls while complete views preserve evidence
+ok - skipped-entry diagnostics encode terminal-control path bytes
+ok - summary and batch output remain bounded as the unresolved inbox grows
+ok - summary propagates enumeration failures before rendering
+ok - summary skips unsafe exact entries while strict record discovery rejects them
+ok - canonical path boundary rejects unsafe state, store, record, capture, and mutation forms
+ok - public read commands reject a dangling candidate store
+ok - origin capture remains bounded while asynchronous curation owns the mutation lock
+ok - task cleanup survival skipped because tasks-axi is unavailable
+# fm-learning-candidate.test.sh: all assertions passed

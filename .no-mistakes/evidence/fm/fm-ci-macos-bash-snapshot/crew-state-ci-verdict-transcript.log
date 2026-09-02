@@ -1,0 +1,8 @@
+CASE: current attributable explicit success
+state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)
+CASE: unknown current verdict plus older checks-green event
+state: working · source: run-step · validating (running)
+CASE: unavailable run lookup plus older checks-green event
+state: unknown · source: none · no current-state source available
+CASE: remote checks-green event without attributable verdict source
+state: unknown · source: remote-endpoint · alive on remote-mac; checks-green event awaiting current attributable CI verification

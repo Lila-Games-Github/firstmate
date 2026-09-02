@@ -1,0 +1,6 @@
+ok - recorded non-default landing branch is merged and the default branch is untouched
+ok - absent landing_branch keeps default-branch fast-forward behavior
+ok - unresolved recorded landing branch refuses without default fallback
+ok - branch and clean-tree guards apply to the resolved landing target
+ok - diverged task branch still refuses against the resolved landing target
+all fm-merge-local tests passed

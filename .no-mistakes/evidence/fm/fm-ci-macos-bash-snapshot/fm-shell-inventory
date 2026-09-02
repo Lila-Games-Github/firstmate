@@ -1,0 +1,5 @@
+bin/fm-crew-state.sh
+bin/fm-stock-bash-compat.sh
+bin/fm-test-run.sh
+tests/fm-crew-state.test.sh
+tests/fm-stock-bash-compat.test.sh

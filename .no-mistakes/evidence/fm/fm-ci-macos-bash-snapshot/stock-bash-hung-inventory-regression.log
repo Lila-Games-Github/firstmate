@@ -1,0 +1,117 @@
++ set -u
+++ dirname tests/fm-stock-bash-compat.test.sh
++ . tests/lib.sh
+++ '[' -n '' ']'
+++ FM_TEST_LIB_SOURCED=1
+++ export FM_GATE_REFUSE_BYPASS=1
+++ FM_GATE_REFUSE_BYPASS=1
+++++ dirname tests/lib.sh
++++ cd tests/..
++++ pwd
+++ ROOT=/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1HAE2670QWGDE66K3JA8RXW
+++ FM_TEST_NODE_MIN=22.5
+++ FM_TEST_NODE_REJECTION=
+++ FM_TEST_CLEANUP_DIRS=()
++++ mktemp /tmp/.fm-test-cleanup.2275760.XXXXXX
+++ FM_TEST_CLEANUP_REGISTRY=/tmp/.fm-test-cleanup.2275760.fXUL9j
++++ fm_test_pid_identity 2275760
++++ local pid=2275760
++++ FM_STATE_OVERRIDE=/tmp
++++ bash -c '. "$1"; fm_pid_identity "$2"' _ /home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1HAE2670QWGDE66K3JA8RXW/bin/fm-wake-lib.sh 2275760
+++ FM_TEST_OWNER_IDENTITY='linux-starttime=272616 cmdline-hex=62617368002d780074657374732f666d2d73746f636b2d626173682d636f6d7061742e746573742e736800'
+++ trap fm_test_cleanup EXIT
+++ trap 'fm_test_cleanup; exit 130' INT
+++ trap 'fm_test_cleanup; exit 143' TERM
+++ FM_TEST_ORPHAN_MAX_AGE_SECONDS=3600
+++ fm_test_reap_orphans
+++ local marker dir mtime now owner_pid owner_identity current_identity
++++ date +%s
+++ now=1788363316
+++ for marker in "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture
+++ '[' -e /tmp/fm-control-auth.R0rDYC/.fm-test-fixture ']'
++++ sed -n 1p /tmp/fm-control-auth.R0rDYC/.fm-test-fixture
+++ owner_pid=1128375
++++ sed -n '2,$p' /tmp/fm-control-auth.R0rDYC/.fm-test-fixture
+++ owner_identity='linux-starttime=168242 cmdline-hex=626173680074657374732f666d2d636f6e74726f6c2d72656c61756e63682e746573742e736800'
+++ case "$owner_pid" in
++++ fm_test_pid_identity 1128375
+++ current_identity=
+++ current_identity=
+++ '[' -n 'linux-starttime=168242 cmdline-hex=626173680074657374732f666d2d636f6e74726f6c2d72656c61756e63682e746573742e736800' ']'
+++ '[' '' = 'linux-starttime=168242 cmdline-hex=626173680074657374732f666d2d636f6e74726f6c2d72656c61756e63682e746573742e736800' ']'
++++ stat -c %Y /tmp/fm-control-auth.R0rDYC/.fm-test-fixture
+++ mtime=1788362281
+++ '[' 1035 -ge 3600 ']'
+++ continue
+++ for marker in "${TMPDIR:-/tmp}"/fm-*/.fm-test-fixture
+++ '[' -e /tmp/fm-remote-secondmate-e2e.MV4crc/.fm-test-fixture ']'
++++ sed -n 1p /tmp/fm-remote-secondmate-e2e.MV4crc/.fm-test-fixture
+++ owner_pid=2176251
++++ sed -n '2,$p' /tmp/fm-remote-secondmate-e2e.MV4crc/.fm-test-fixture
+++ owner_identity='linux-starttime=263502 cmdline-hex=626173680074657374732f666d2d72656d6f74652d7365636f6e646d6174652d6c6966656379636c652d6532652e746573742e736800'
+++ case "$owner_pid" in
++++ fm_test_pid_identity 2176251
+++ current_identity='linux-starttime=263502 cmdline-hex=626173680074657374732f666d2d72656d6f74652d7365636f6e646d6174652d6c6966656379636c652d6532652e746573742e736800'
+++ '[' -n 'linux-starttime=263502 cmdline-hex=626173680074657374732f666d2d72656d6f74652d7365636f6e646d6174652d6c6966656379636c652d6532652e746573742e736800' ']'
+++ '[' 'linux-starttime=263502 cmdline-hex=626173680074657374732f666d2d72656d6f74652d7365636f6e646d6174652d6c6966656379636c652d6532652e746573742e736800' = 'linux-starttime=263502 cmdline-hex=626173680074657374732f666d2d72656d6f74652d7365636f6e646d6174652d6c6966656379636c652d6532652e746573742e736800' ']'
+++ continue
++ COMPAT=/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1HAE2670QWGDE66K3JA8RXW/bin/fm-stock-bash-compat.sh
++ TIMEOUT_LIB=/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1HAE2670QWGDE66K3JA8RXW/bin/fm-timeout-lib.sh
++ test_hung_inventory_is_named_and_later_consumers_run
++ local tmp out rc file
+++ fm_test_tmproot fm-stock-bash-compat
+++ local prefix=fm-stock-bash-compat root
++++ mktemp -d /tmp/fm-stock-bash-compat.XXXXXX
+++ root=/tmp/fm-stock-bash-compat.FX55pz
+++ printf '%s\n%s\n' 2275760 'linux-starttime=272616 cmdline-hex=62617368002d780074657374732f666d2d73746f636b2d626173682d636f6d7061742e746573742e736800'
+++ printf '%s\n' /tmp/fm-stock-bash-compat.FX55pz
+++ printf '%s\n' /tmp/fm-stock-bash-compat.FX55pz
++ tmp=/tmp/fm-stock-bash-compat.FX55pz
++ mkdir -p /tmp/fm-stock-bash-compat.FX55pz/bin /tmp/fm-stock-bash-compat.FX55pz/tests /tmp/fm-stock-bash-compat.FX55pz/runner
++ cp /home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1HAE2670QWGDE66K3JA8RXW/bin/fm-stock-bash-compat.sh /tmp/fm-stock-bash-compat.FX55pz/bin/fm-stock-bash-compat.sh
++ cp /home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1HAE2670QWGDE66K3JA8RXW/bin/fm-timeout-lib.sh /tmp/fm-stock-bash-compat.FX55pz/bin/fm-timeout-lib.sh
++ cat
++ chmod +x /tmp/fm-stock-bash-compat.FX55pz/bin/fm-lint.sh
++ cat
++ for file in fm-fleet-snapshot-view.test.sh fm-bearings-snapshot.test.sh fm-learning-candidate.test.sh fm-merge-local.test.sh
++ cp /tmp/fm-stock-bash-compat.FX55pz/tests/consumer.sh /tmp/fm-stock-bash-compat.FX55pz/tests/fm-fleet-snapshot-view.test.sh
++ for file in fm-fleet-snapshot-view.test.sh fm-bearings-snapshot.test.sh fm-learning-candidate.test.sh fm-merge-local.test.sh
++ cp /tmp/fm-stock-bash-compat.FX55pz/tests/consumer.sh /tmp/fm-stock-bash-compat.FX55pz/tests/fm-bearings-snapshot.test.sh
++ for file in fm-fleet-snapshot-view.test.sh fm-bearings-snapshot.test.sh fm-learning-candidate.test.sh fm-merge-local.test.sh
++ cp /tmp/fm-stock-bash-compat.FX55pz/tests/consumer.sh /tmp/fm-stock-bash-compat.FX55pz/tests/fm-learning-candidate.test.sh
++ for file in fm-fleet-snapshot-view.test.sh fm-bearings-snapshot.test.sh fm-learning-candidate.test.sh fm-merge-local.test.sh
++ cp /tmp/fm-stock-bash-compat.FX55pz/tests/consumer.sh /tmp/fm-stock-bash-compat.FX55pz/tests/fm-merge-local.test.sh
++ rc=0
+++ cd /tmp/fm-stock-bash-compat.FX55pz
+++ RUNNER_TEMP=/tmp/fm-stock-bash-compat.FX55pz/runner
+++ FM_STOCK_BASH_PARSE_TIMEOUT=1
+++ /bin/bash bin/fm-stock-bash-compat.sh
++ out=$'stock Bash timeout mechanism: timeout\n::group::shell parse sweep\n::endgroup::\n::error title=Stock Bash consumer timed out::shell parse sweep exceeded 1s\n::group::fleet snapshot and view\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::Bearings snapshot\nok - fixture assertion 42\nok - fixture assertion 41\nok - fixture assertion 40\nok - fixture assertion 39\nok - fixture assertion 38\nok - fixture assertion 37\nok - fixture assertion 36\nok - fixture assertion 35\nok - fixture assertion 34\nok - fixture assertion 33\nok - fixture assertion 32\nok - fixture assertion 31\nok - fixture assertion 30\nok - fixture assertion 29\nok - fixture assertion 28\nok - fixture assertion 27\nok - fixture assertion 26\nok - fixture assertion 25\nok - fixture assertion 24\nok - fixture assertion 23\nok - fixture assertion 22\nok - fixture assertion 21\nok - fixture assertion 20\nok - fixture assertion 19\nok - fixture assertion 18\nok - fixture assertion 17\nok - fixture assertion 16\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::PR 18 learning-candidate NUL enumeration\nok - fixture assertion 29\nok - fixture assertion 28\nok - fixture assertion 27\nok - fixture assertion 26\nok - fixture assertion 25\nok - fixture assertion 24\nok - fixture assertion 23\nok - fixture assertion 22\nok - fixture assertion 21\nok - fixture assertion 20\nok - fixture assertion 19\nok - fixture assertion 18\nok - fixture assertion 17\nok - fixture assertion 16\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::PR 19 local-merge branch resolution\nlater consumer reached\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::error::one or more stock macOS Bash consumers failed or did not return a verdict'
++ rc=1
++ expect_code 1 1 'hung inventory produces an aggregate compatibility failure'
++ local expected=1 actual=1 'label=hung inventory produces an aggregate compatibility failure'
++ '[' 1 = 1 ']'
++ assert_contains $'stock Bash timeout mechanism: timeout\n::group::shell parse sweep\n::endgroup::\n::error title=Stock Bash consumer timed out::shell parse sweep exceeded 1s\n::group::fleet snapshot and view\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::Bearings snapshot\nok - fixture assertion 42\nok - fixture assertion 41\nok - fixture assertion 40\nok - fixture assertion 39\nok - fixture assertion 38\nok - fixture assertion 37\nok - fixture assertion 36\nok - fixture assertion 35\nok - fixture assertion 34\nok - fixture assertion 33\nok - fixture assertion 32\nok - fixture assertion 31\nok - fixture assertion 30\nok - fixture assertion 29\nok - fixture assertion 28\nok - fixture assertion 27\nok - fixture assertion 26\nok - fixture assertion 25\nok - fixture assertion 24\nok - fixture assertion 23\nok - fixture assertion 22\nok - fixture assertion 21\nok - fixture assertion 20\nok - fixture assertion 19\nok - fixture assertion 18\nok - fixture assertion 17\nok - fixture assertion 16\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::PR 18 learning-candidate NUL enumeration\nok - fixture assertion 29\nok - fixture assertion 28\nok - fixture assertion 27\nok - fixture assertion 26\nok - fixture assertion 25\nok - fixture assertion 24\nok - fixture assertion 23\nok - fixture assertion 22\nok - fixture assertion 21\nok - fixture assertion 20\nok - fixture assertion 19\nok - fixture assertion 18\nok - fixture assertion 17\nok - fixture assertion 16\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::PR 19 local-merge branch resolution\nlater consumer reached\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::error::one or more stock macOS Bash consumers failed or did not return a verdict' 'Stock Bash consumer timed out::shell parse sweep exceeded 1s' 'hung inventory failure is attributed to the shell parse consumer'
++ case "$1" in
++ :
++ assert_contains $'stock Bash timeout mechanism: timeout\n::group::shell parse sweep\n::endgroup::\n::error title=Stock Bash consumer timed out::shell parse sweep exceeded 1s\n::group::fleet snapshot and view\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::Bearings snapshot\nok - fixture assertion 42\nok - fixture assertion 41\nok - fixture assertion 40\nok - fixture assertion 39\nok - fixture assertion 38\nok - fixture assertion 37\nok - fixture assertion 36\nok - fixture assertion 35\nok - fixture assertion 34\nok - fixture assertion 33\nok - fixture assertion 32\nok - fixture assertion 31\nok - fixture assertion 30\nok - fixture assertion 29\nok - fixture assertion 28\nok - fixture assertion 27\nok - fixture assertion 26\nok - fixture assertion 25\nok - fixture assertion 24\nok - fixture assertion 23\nok - fixture assertion 22\nok - fixture assertion 21\nok - fixture assertion 20\nok - fixture assertion 19\nok - fixture assertion 18\nok - fixture assertion 17\nok - fixture assertion 16\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::PR 18 learning-candidate NUL enumeration\nok - fixture assertion 29\nok - fixture assertion 28\nok - fixture assertion 27\nok - fixture assertion 26\nok - fixture assertion 25\nok - fixture assertion 24\nok - fixture assertion 23\nok - fixture assertion 22\nok - fixture assertion 21\nok - fixture assertion 20\nok - fixture assertion 19\nok - fixture assertion 18\nok - fixture assertion 17\nok - fixture assertion 16\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::PR 19 local-merge branch resolution\nlater consumer reached\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::error::one or more stock macOS Bash consumers failed or did not return a verdict' 'later consumer reached' 'hung inventory does not suppress the later PR 19 consumer'
++ case "$1" in
++ :
++ assert_contains $'stock Bash timeout mechanism: timeout\n::group::shell parse sweep\n::endgroup::\n::error title=Stock Bash consumer timed out::shell parse sweep exceeded 1s\n::group::fleet snapshot and view\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::Bearings snapshot\nok - fixture assertion 42\nok - fixture assertion 41\nok - fixture assertion 40\nok - fixture assertion 39\nok - fixture assertion 38\nok - fixture assertion 37\nok - fixture assertion 36\nok - fixture assertion 35\nok - fixture assertion 34\nok - fixture assertion 33\nok - fixture assertion 32\nok - fixture assertion 31\nok - fixture assertion 30\nok - fixture assertion 29\nok - fixture assertion 28\nok - fixture assertion 27\nok - fixture assertion 26\nok - fixture assertion 25\nok - fixture assertion 24\nok - fixture assertion 23\nok - fixture assertion 22\nok - fixture assertion 21\nok - fixture assertion 20\nok - fixture assertion 19\nok - fixture assertion 18\nok - fixture assertion 17\nok - fixture assertion 16\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::PR 18 learning-candidate NUL enumeration\nok - fixture assertion 29\nok - fixture assertion 28\nok - fixture assertion 27\nok - fixture assertion 26\nok - fixture assertion 25\nok - fixture assertion 24\nok - fixture assertion 23\nok - fixture assertion 22\nok - fixture assertion 21\nok - fixture assertion 20\nok - fixture assertion 19\nok - fixture assertion 18\nok - fixture assertion 17\nok - fixture assertion 16\nok - fixture assertion 15\nok - fixture assertion 14\nok - fixture assertion 13\nok - fixture assertion 12\nok - fixture assertion 11\nok - fixture assertion 10\nok - fixture assertion 9\nok - fixture assertion 8\nok - fixture assertion 7\nok - fixture assertion 6\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::group::PR 19 local-merge branch resolution\nlater consumer reached\nok - fixture assertion 5\nok - fixture assertion 4\nok - fixture assertion 3\nok - fixture assertion 2\nok - fixture assertion 1\n::endgroup::\n::error::one or more stock macOS Bash consumers failed or did not return a verdict' 'one or more stock macOS Bash consumers failed' 'hung inventory produces the final compatibility verdict'
++ case "$1" in
++ :
++ pass 'stock Bash compatibility: hung inventory is named and later consumers run'
++ printf 'ok - %s\n' 'stock Bash compatibility: hung inventory is named and later consumers run'
+ok - stock Bash compatibility: hung inventory is named and later consumers run
++ fm_test_cleanup
++ local d
++ for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"
++ '[' -n '' ']'
++ '[' -f /tmp/.fm-test-cleanup.2275760.fXUL9j ']'
++ IFS=
++ read -r d
++ '[' -n /tmp/fm-stock-bash-compat.FX55pz ']'
++ rm -rf /tmp/fm-stock-bash-compat.FX55pz
++ IFS=
++ read -r d
++ rm -f /tmp/.fm-test-cleanup.2275760.fXUL9j
