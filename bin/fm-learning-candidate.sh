@@ -17,6 +17,8 @@
 # validates each exact entry independently and returns every schema-valid record
 # to every read surface matched by its content-owned state. Invalid entries are
 # reported separately, and valid siblings are reported without selecting a winner.
+# Record reads accept at most 1,048,576 bytes; enumerators report and skip an
+# oversized entry, while strict get and mutation paths fail on it.
 # Every record replacement publishes at the current path by atomic temp-plus-rename,
 # then renames that sole record when its lifecycle hint changes. A read that finds
 # a stale or missing hint trusts readable content and corrects the name under the
