@@ -3203,6 +3203,31 @@ function supervisionTaskIdValid(value) {
     && /^[A-Za-z0-9._-]+$/.test(value);
 }
 
+function supervisionTaskIdentityRetired(state, taskId) {
+  const metaPath = path.join(state, `${taskId}.meta`);
+  if (!fs.existsSync(metaPath)) return true;
+  let meta;
+  try {
+    meta = fs.readFileSync(metaPath, "utf8");
+  } catch {
+    return false;
+  }
+  let kind = "";
+  let remoteHost = "";
+  for (const line of meta.split("\n")) {
+    if (line.startsWith("kind=")) kind = line.slice("kind=".length);
+    if (line.startsWith("remote_host=")) remoteHost = line.slice("remote_host=".length);
+  }
+  if (kind !== "secondmate" || !remoteHost) return false;
+  let registry;
+  try {
+    registry = fs.readFileSync(path.join(path.dirname(state), "data", "secondmates.md"), "utf8");
+  } catch {
+    return true;
+  }
+  return !registry.split("\n").some((line) => line === `- ${taskId}` || line.startsWith(`- ${taskId} `));
+}
+
 function supervisionRefuse(message) {
   throw new Error(message);
 }
@@ -3748,7 +3773,7 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
       state: supervisionPath(state, "the controller's state directory"),
     });
     const bound = await supervisionWithCheckLock(state, taskId, () => {
-      if (requestedTaskId && !fs.existsSync(path.join(state, `${taskId}.meta`))) {
+      if (requestedTaskId && supervisionTaskIdentityRetired(state, taskId)) {
         supervisionRefuse(`firstmate task '${taskId}' is retired or unavailable, so no task-keyed watcher poll was armed`);
       }
       const target = path.join(state, `${taskId}.check.sh`);

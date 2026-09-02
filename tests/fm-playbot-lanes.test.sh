@@ -4050,6 +4050,56 @@ assert_absent "$retired_meta" "remote teardown left retired task metadata"
 assert_no_grep "- $retired_task_id " "$retired_registry" "remote teardown left the retired registry route"
 pass "fm-playbot-lanes: remote teardown retires identity before a blocked task publisher can publish"
 
+partial_task_id=fm-autoarm-partial-remote
+partial_meta="$FM_HOME_FIXTURE/state/$partial_task_id.meta"
+cat > "$partial_meta" <<EOF
+window=remote:$partial_task_id
+kind=secondmate
+remote_host=remote-test
+remote_root=$ROOT
+home=$retired_home
+EOF
+printf '%s\n' "- $partial_task_id - Partial remote fixture (host: remote-test; root: $ROOT; home: $retired_home; scope: test; projects: none; added 2026-09-02)" \
+  > "$retired_registry"
+printf 'old check\n' > "$FM_HOME_FIXTURE/state/$partial_task_id.check.sh"
+printf 'old trust\n' > "$FM_HOME_FIXTURE/state/$partial_task_id.check-trust"
+printf 'old lane\n' > "$FM_HOME_FIXTURE/state/$partial_task_id.lane-poll"
+printf 'malformed\n' > "$FM_HOME_FIXTURE/state/.status-presentation-cursor"
+rm -f "$retire_entered" "$retire_release" "$FIXTURE_ROOT/partial-publisher.out"
+env -u NO_MISTAKES_GATE FM_HOME="$FM_HOME_FIXTURE" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_SSH_BIN="$retire_bin/ssh" FM_TEST_RETIRE_REGISTRY="$retired_registry" \
+  FM_TEST_RETIRE_ENTERED="$retire_entered" FM_TEST_RETIRE_RELEASE="$retire_release" \
+  FM_TEST_REAL_MV="$real_mv" PATH="$retire_bin:$PATH" \
+  "$ROOT/bin/fm-teardown.sh" "$partial_task_id" > "$FIXTURE_ROOT/partial-teardown.out" 2>&1 &
+partial_teardown_pid=$!
+wait_for_file "$retire_entered" || fail "partial remote teardown never reached registry retirement under the publication lock"
+FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch \
+  "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$partial_task_id\"},\"title\":\"Partial retirement publisher\",\"message\":\"Do not republish this task\",\"taskId\":\"$partial_task_id\"}" \
+  > "$FIXTURE_ROOT/partial-publisher.out" &
+partial_publisher_pid=$!
+sleep 0.5
+kill -0 "$partial_publisher_pid" 2>/dev/null \
+  || fail "task-keyed publisher did not wait for partial remote teardown's publication lock"
+: > "$retire_release"
+if wait "$partial_teardown_pid"; then
+  fail "remote teardown ignored malformed presentation state after retiring its route"
+fi
+assert_present "$partial_meta" "partial remote teardown removed metadata after presentation cleanup failed"
+assert_no_grep "- $partial_task_id " "$retired_registry" "partial remote teardown retained its retired registry route"
+wait "$partial_publisher_pid" || fail "publisher blocked behind partial teardown failed to return its refusal"
+OUT=$(cat "$FIXTURE_ROOT/partial-publisher.out") node --no-warnings <<'NODE' \
+  || fail "publisher accepted route-absent remote secondmate metadata"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== false) process.exit(1);
+if (!value.supervision.problem.includes('retired or unavailable')) process.exit(1);
+NODE
+for leftover in "$partial_task_id.check.sh" "$partial_task_id.check-trust" "$partial_task_id.lane-poll"; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "route-absent task publisher recreated $leftover after partial teardown"
+done
+rm -f "$FM_HOME_FIXTURE/state/.status-presentation-cursor"
+pass "fm-playbot-lanes: route-absent remote metadata cannot republish after partial teardown"
+
 # A Playbot-chat caller has routed wakes already, so it must get none of this -
 # and the result must say which path it took rather than leaving the caller to
 # infer it from an absent field.
