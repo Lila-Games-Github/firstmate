@@ -25,6 +25,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_test_require_node "fm-cursor-harness"
+pass "fm-cursor-harness: node $("$FM_TEST_NODE_BIN" -p 'process.versions.node') resolved at $FM_TEST_NODE_BIN"
+
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$ROOT/bin/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -71,15 +74,13 @@ test_identity_accepts_cursor_shapes_rejects_lookalikes() {
   impostor_dir="$TMP_ROOT/impostor"; mkdir -p "$impostor_dir"
   printf '#!/bin/sh\nsleep 30\n' > "$impostor_dir/agent"; chmod +x "$impostor_dir/agent"
   "$impostor_dir/agent" & local impostor_pid=$!
-  if command -v node >/dev/null 2>&1; then
-    node -e 'setTimeout(function(){}, 30000)' & real_node_pid=$!
-    out=$(LC_ALL=C ps -p "$real_node_pid" -o comm= 2>/dev/null || true)
-    if [ -n "$out" ]; then
-      ! fm_cursor_process_matches "$out" '' "$out" \
-        || fail "a REAL unrelated node process must not identify as cursor (comm='$out')"
-    fi
-    kill "$real_node_pid" 2>/dev/null || true
+  node -e 'setTimeout(function(){}, 30000)' & real_node_pid=$!
+  out=$(LC_ALL=C ps -p "$real_node_pid" -o comm= 2>/dev/null || true)
+  if [ -n "$out" ]; then
+    ! fm_cursor_process_matches "$out" '' "$out" \
+      || fail "a REAL unrelated node process must not identify as cursor (comm='$out')"
   fi
+  kill "$real_node_pid" 2>/dev/null || true
   out=$(LC_ALL=C ps -p "$impostor_pid" -o comm= 2>/dev/null || true)
   if [ -n "$out" ]; then
     ! fm_cursor_process_matches "$out" '' "$out" \
@@ -197,7 +198,6 @@ test_cursor_marker_outranks_inherited_claudecode() {
 }
 
 test_harness_ancestry_rejects_cursor_named_node_script() {
-  command -v node >/dev/null 2>&1 || return 0
   local helper="$TMP_ROOT/cursor-agent-helper.js" out
   cat > "$helper" <<'JS'
 const { spawnSync } = require('child_process');

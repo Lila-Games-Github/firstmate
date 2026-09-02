@@ -26,6 +26,9 @@ fi
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_test_require_node "fm-sessionstart-nudge"
+pass "fm-sessionstart-nudge: node $("$FM_TEST_NODE_BIN" -p 'process.versions.node') resolved at $FM_TEST_NODE_BIN"
+
 unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
@@ -345,10 +348,6 @@ test_run_clear_rejects_previous_owner_completion() {
 
 test_pi_startup_classifies_cli_continuations() {
   local fixture out expected actual status=0
-  command -v node >/dev/null 2>&1 || {
-    echo "skip: node not found for Pi continuation classification test"
-    return 0
-  }
   fixture="$TMP_ROOT/pi-continuation-source"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
@@ -428,10 +427,6 @@ JS
 
 test_pi_large_sessionstart_digest_is_delivered_loudly() {
   local fixture out status=0
-  command -v node >/dev/null 2>&1 || {
-    echo "skip: node not found for Pi large session-start delivery test"
-    return 0
-  }
   fixture="$TMP_ROOT/pi-large-digest"
   mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/data" "$fixture/config"
   git init -q -b main "$fixture"
