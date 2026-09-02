@@ -1972,6 +1972,11 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+if [ "${FM_BEARINGS_TEST_ONLY:-}" = oversized-parsed-backlog ]; then
+  test_oversized_parsed_backlog_survives_all_public_snapshot_routes
+  exit $?
+fi
+
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
 test_parent_activity_evidence_is_bounded_and_disclosed
@@ -1986,7 +1991,9 @@ test_nonprogressing_child_states_are_explicit
 test_registry_unavailability_and_bounds_are_explicit
 test_current_landed_baseline_is_repeatable_and_prior_report_independent
 test_default_is_bounded_and_local_only
-test_oversized_parsed_backlog_survives_all_public_snapshot_routes
+if [ "${FM_BEARINGS_TEST_SKIP_OVERSIZED:-0}" != 1 ]; then
+  test_oversized_parsed_backlog_survives_all_public_snapshot_routes
+fi
 test_toon_json_parity
 test_landed_includes_secondmate_home_merges
 test_landed_default_balances_dominant_and_sparse_homes

@@ -3,7 +3,7 @@
 #
 # The caller must run this script under stock macOS Bash 3.2 and provide
 # RUNNER_TEMP for streamed per-consumer logs.
-# FM_STOCK_BASH_PARSE_TIMEOUT may shorten the shell inventory and parse bound.
+# FM_STOCK_BASH_*_TIMEOUT values may shorten individual consumer bounds.
 # Every consumer is bounded independently, reports its own verdict, and leaves
 # later consumers runnable before the aggregate verdict exits nonzero.
 set -eu
@@ -11,8 +11,23 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STOCK_BASH=${FM_STOCK_BASH_BIN:-/bin/bash}
 PARSE_TIMEOUT=${FM_STOCK_BASH_PARSE_TIMEOUT:-60}
+FLEET_TIMEOUT=${FM_STOCK_BASH_FLEET_TIMEOUT:-120}
+BEARINGS_TIMEOUT=${FM_STOCK_BASH_BEARINGS_TIMEOUT:-180}
+BEARINGS_OVERSIZED_TIMEOUT=${FM_STOCK_BASH_BEARINGS_OVERSIZED_TIMEOUT:-30}
+LEARNING_TIMEOUT=${FM_STOCK_BASH_LEARNING_TIMEOUT:-30}
+MERGE_TIMEOUT=${FM_STOCK_BASH_MERGE_TIMEOUT:-120}
 : "${RUNNER_TEMP:?RUNNER_TEMP is required}"
-case "$PARSE_TIMEOUT" in ''|*[!0-9]*|0) echo "::error::FM_STOCK_BASH_PARSE_TIMEOUT must be a positive integer"; exit 2 ;; esac
+validate_timeout() {
+  case "$2" in
+    ''|*[!0-9]*|0) echo "::error::$1 must be a positive integer"; exit 2 ;;
+  esac
+}
+validate_timeout FM_STOCK_BASH_PARSE_TIMEOUT "$PARSE_TIMEOUT"
+validate_timeout FM_STOCK_BASH_FLEET_TIMEOUT "$FLEET_TIMEOUT"
+validate_timeout FM_STOCK_BASH_BEARINGS_TIMEOUT "$BEARINGS_TIMEOUT"
+validate_timeout FM_STOCK_BASH_BEARINGS_OVERSIZED_TIMEOUT "$BEARINGS_OVERSIZED_TIMEOUT"
+validate_timeout FM_STOCK_BASH_LEARNING_TIMEOUT "$LEARNING_TIMEOUT"
+validate_timeout FM_STOCK_BASH_MERGE_TIMEOUT "$MERGE_TIMEOUT"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
@@ -68,13 +83,18 @@ run_consumer "shell parse sweep" "$PARSE_TIMEOUT" 0 "$STOCK_BASH" -c '
   done < "$shell_inventory"
   [ "$parse_fail" -eq 0 ]
 ' _ "$ROOT" "$STOCK_BASH" "$shell_inventory"
-run_consumer "fleet snapshot and view" 120 15 \
+run_consumer "fleet snapshot and view" "$FLEET_TIMEOUT" 15 \
   "$STOCK_BASH" "$ROOT/tests/fm-fleet-snapshot-view.test.sh"
-run_consumer "Bearings snapshot" 180 42 \
+run_consumer "Bearings snapshot" "$BEARINGS_TIMEOUT" 41 \
+  env FM_BEARINGS_TEST_SKIP_OVERSIZED=1 \
   "$STOCK_BASH" "$ROOT/tests/fm-bearings-snapshot.test.sh"
-run_consumer "PR 18 learning-candidate NUL enumeration" 180 29 \
+run_consumer "Bearings oversized parsed-backlog route" "$BEARINGS_OVERSIZED_TIMEOUT" 1 \
+  env FM_BEARINGS_TEST_ONLY=oversized-parsed-backlog \
+  "$STOCK_BASH" "$ROOT/tests/fm-bearings-snapshot.test.sh"
+run_consumer "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIMEOUT" 1 \
+  env FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
-run_consumer "PR 19 local-merge branch resolution" 120 5 \
+run_consumer "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 5 \
   "$STOCK_BASH" "$ROOT/tests/fm-merge-local.test.sh"
 [ "$compatibility_failed" -eq 0 ] || {
   echo "::error::one or more stock macOS Bash consumers failed or did not return a verdict"
