@@ -498,7 +498,7 @@ resolve_enumerated_entry() { # <path>
 }
 
 report_skipped_entry() { # <path> <reason>
-  printf 'fm-learning-candidate: skipped candidate entry: %s: %s\n' "$1" "$2" >&2
+  printf 'fm-learning-candidate: skipped candidate entry: %q: %s\n' "$1" "$2" >&2
 }
 
 find_enumerated_replacement() { # <candidate-id>
@@ -553,33 +553,41 @@ correct_enumerated_name() { # <path> <candidate-id> <lifecycle-state>
 }
 
 load_enumerated_record() { # <path> <correct-hint>; sets RECORD_JSON and RECORD_PATH
-  local requested=$1 correct_hint=$2 path id hint state
-  if ! resolve_enumerated_entry "$requested"; then
-    if [ "$ENUMERATED_ERROR" = "candidate record not found" ]; then
-      id=${requested##*/}
-      id=${id%%.*}
-      if candidate_id_is_valid "$id" && find_enumerated_replacement "$id"; then
-        requested=$ENUMERATED_PATH
-        resolve_enumerated_entry "$requested" || {
+  local requested=$1 correct_hint=$2 path id hint state attempt=0
+  while [ "$attempt" -lt 2 ]; do
+    if ! resolve_enumerated_entry "$requested"; then
+      if [ "$ENUMERATED_ERROR" = "candidate record not found" ]; then
+        id=${requested##*/}
+        id=${id%%.*}
+        if candidate_id_is_valid "$id" && find_enumerated_replacement "$id"; then
+          requested=$ENUMERATED_PATH
+          resolve_enumerated_entry "$requested" || {
+            report_skipped_entry "$requested" "$ENUMERATED_ERROR"
+            return 1
+          }
+        else
           report_skipped_entry "$requested" "$ENUMERATED_ERROR"
           return 1
-        }
+        fi
       else
         report_skipped_entry "$requested" "$ENUMERATED_ERROR"
         return 1
       fi
-    else
-      report_skipped_entry "$requested" "$ENUMERATED_ERROR"
-      return 1
     fi
-  fi
-  path=$ENUMERATED_PATH
-  id=$ENUMERATED_ID
-  hint=$ENUMERATED_HINT
-  if ! RECORD_JSON=$(cat "$path" 2>/dev/null); then
+    path=$ENUMERATED_PATH
+    id=$ENUMERATED_ID
+    hint=$ENUMERATED_HINT
+    if RECORD_JSON=$(cat "$path" 2>/dev/null); then
+      break
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -lt 2 ] && find_enumerated_replacement "$id"; then
+      requested=$ENUMERATED_PATH
+      continue
+    fi
     report_skipped_entry "$path" "candidate record is unreadable"
     return 1
-  fi
+  done
   if ! record_json_is_valid "$RECORD_JSON" "$id"; then
     report_skipped_entry "$path" "invalid candidate record: $id"
     return 1
@@ -826,11 +834,10 @@ summary_command() {
   fi
   exec 3< <(
     CDPATH='' cd -- "$CANDIDATE_DIR" && \
-      find . -maxdepth 1 -name 'lc-*.json' -print | LC_ALL=C sort
+      find . -maxdepth 1 -name 'lc-*.json' -print0 | LC_ALL=C sort -z
   )
   producer_pid=$!
-  while IFS= read -r name; do
-    [ -n "$name" ] || continue
+  while IFS= read -r -d '' name; do
     load_enumerated_record "$name" "$correct_hint" || continue
     id=$(printf '%s\n' "$RECORD_JSON" | jq -r '.id')
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')

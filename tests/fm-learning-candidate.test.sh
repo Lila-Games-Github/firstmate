@@ -307,7 +307,7 @@ test_atomic_lifecycle_publication_and_content_authority() {
 }
 
 test_legacy_names_are_read_and_corrected() {
-  local home id canonical legacy invalid_hint before after checksum summary listed batch json rc
+  local home id canonical legacy invalid_hint newline_hint before after checksum summary listed batch json rc
   home=$(make_home legacy-record-name)
   id=$(capture_candidate "$home" legacy-name FrogPile escaped-defect \
     "a legacy record name must not hide the learning-candidate store")
@@ -374,6 +374,17 @@ test_legacy_names_are_read_and_corrected() {
   assert_contains "$listed" "$id" "list omitted a record carrying an invalid lifecycle hint"
   assert_absent "$invalid_hint" "list left an invalid lifecycle hint in place"
   assert_present "$canonical" "list did not replace an invalid hint with content-derived lifecycle state"
+
+  newline_hint="$home/state/learning-candidates/$id.legacy"$'\n'"hint.json"
+  mv "$canonical" "$newline_hint"
+  summary=$(run_learning "$home" summary 2>"$home/newline-hint.err") \
+    || fail "summary rejected a newline-bearing invalid lifecycle hint"
+  [ "$(printf '%s\n' "$summary" | awk -v id="$id" 'index($0, id) {count++} END {print count+0}')" -eq 1 ] \
+    || fail "summary did not return a newline-bearing invalid hint as one record: $summary"
+  [ ! -s "$home/newline-hint.err" ] \
+    || fail "summary reported a newline-bearing invalid hint as skipped"
+  assert_absent "$newline_hint" "summary left a newline-bearing invalid hint in place"
+  assert_present "$canonical" "summary did not correct a newline-bearing invalid hint"
   pass "legacy record names remain readable and converge on content-derived lifecycle hints"
 }
 
@@ -561,6 +572,38 @@ test_list_resolves_ids_after_suffix_rename() {
   assert_contains "$listed" $'\tdocumented\t' \
     "list did not resolve the renamed candidate through content"
   pass "list resolves enumerated candidate ids after suffix renames"
+}
+
+test_read_only_summary_reresolves_after_suffix_rename() {
+  local home id source destination fakebin real_cat real_mv summary
+  home=$(make_home read-only-summary-rename)
+  id=$(capture_candidate "$home" summary-rename FrogPile escaped-defect \
+    "read-only summary must retain a record renamed after resolution")
+  source=$(candidate_path "$home" "$id")
+  destination=$(candidate_path "$home" "$id" documented)
+  fakebin=$(fm_fakebin "$home/summary-reader")
+  real_cat=$(command -v cat)
+  real_mv=$(command -v mv)
+  # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "$1" = "$FM_TEST_RENAME_SOURCE" ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
+    '  : >"$FM_TEST_RENAME_DONE"' \
+    '  "$FM_TEST_REAL_MV" "$FM_TEST_RENAME_SOURCE" "$FM_TEST_RENAME_DESTINATION"' \
+    'fi' \
+    'exec "$FM_TEST_REAL_CAT" "$@"' >"$fakebin/cat"
+  chmod +x "$fakebin/cat"
+  summary=$(PATH="$fakebin:$PATH" FM_TEST_RENAME_SOURCE="$source" \
+    FM_TEST_RENAME_DESTINATION="$destination" FM_TEST_RENAME_DONE="$home/rename-done" \
+    FM_TEST_REAL_CAT="$real_cat" FM_TEST_REAL_MV="$real_mv" \
+    run_learning "$home" summary --read-only 2>"$home/summary.err") \
+    || fail "read-only summary failed during a concurrent lifecycle rename"
+  assert_contains "$summary" "$id" \
+    "read-only summary omitted a record renamed between resolution and read"
+  [ ! -s "$home/summary.err" ] \
+    || fail "read-only summary reported a re-resolvable renamed record as skipped"
+  assert_present "$destination" "read-only summary lost the concurrently renamed record"
+  pass "read-only summary re-resolves a record renamed after resolution"
 }
 
 test_routes_and_no_one_off_skill_gate() {
@@ -853,6 +896,27 @@ test_concise_outputs_strip_terminal_controls() {
     '.[0].incident.project == $project and .[0].incident.user_visible_impact == $impact' >/dev/null \
     || fail "batch did not preserve complete terminal-control evidence"
   pass "concise views strip terminal controls while complete views preserve evidence"
+}
+
+test_skipped_entry_paths_are_terminal_safe() {
+  local home id path errors
+  home=$(make_home terminal-safe-skipped-entry)
+  id=lc-000000000000000000000000
+  path="$home/state/learning-candidates/$id.invalid"$'\e[2J\u009b'".json"
+  mkdir -p "$home/state/learning-candidates"
+  ln -s "$home/missing-record" "$path"
+  run_learning "$home" summary >"$home/summary.out" 2>"$home/summary.err" \
+    || fail "summary aborted while reporting a terminal-control path"
+  errors=$(cat "$home/summary.err")
+  assert_contains "$errors" "skipped candidate entry" \
+    "summary omitted the skipped-entry diagnostic"
+  assert_not_contains "$errors" $'\e' \
+    "skipped-entry diagnostic preserved an escape control from its path"
+  assert_not_contains "$errors" $'\u009b' \
+    "skipped-entry diagnostic preserved a C1 control from its path"
+  assert_contains "$errors" "$id" \
+    "skipped-entry diagnostic no longer identifies the candidate path"
+  pass "skipped-entry diagnostics encode terminal-control path bytes"
 }
 
 test_bounded_summary_and_batch() {
@@ -1199,10 +1263,12 @@ test_enumeration_groups_lifecycle_siblings
 test_concurrent_suffix_rename_reresolves
 test_cutover_accepts_concurrent_read_correction
 test_list_resolves_ids_after_suffix_rename
+test_read_only_summary_reresolves_after_suffix_rename
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry
 test_concise_outputs_strip_terminal_controls
+test_skipped_entry_paths_are_terminal_safe
 test_bounded_summary_and_batch
 test_summary_producer_failure_propagates
 test_summary_skips_unsafe_entries
