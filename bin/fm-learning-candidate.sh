@@ -14,8 +14,9 @@
 # The directory is outside task-scoped state, so fm-teardown.sh never removes it.
 # The strict path resolver normalizes the selected state alias and validates the
 # store, every lifecycle sibling, and every mutation destination. Enumeration
-# validates each exact entry independently, reports unreadable or invalid records
-# as skipped, and continues so one damaged record cannot hide the rest of the store.
+# validates each exact entry independently and returns every schema-valid record
+# to every read surface matched by its content-owned state. Invalid entries are
+# reported separately, and valid siblings are reported without selecting a winner.
 # Every record replacement publishes at the current path by atomic temp-plus-rename,
 # then renames that sole record when its lifecycle hint changes. A read that finds
 # a stale or missing hint trusts readable content and corrects the name under the
@@ -518,17 +519,30 @@ report_skipped_entry() { # <path> <reason>
   printf 'fm-learning-candidate: skipped candidate entry: %q: %s\n' "$1" "$2" >&2
 }
 
+report_sibling_inconsistency() { # <candidate-id> <path>...
+  local id=$1 path escaped paths=''
+  shift
+  for path in "$@"; do
+    printf -v escaped '%q' "$path"
+    paths="${paths}${paths:+ }$escaped"
+  done
+  printf 'fm-learning-candidate: inconsistent candidate siblings: %s: %s\n' \
+    "$id" "$paths" >&2
+}
+
 find_enumerated_replacement() { # <candidate-id>
   local id=$1 path found='' count=0 state
   for state in unresolved dismissed documented promoted follow-up duplicate; do
     path="$CANDIDATE_DIR/$id.$state.json"
-    if [ -e "$path" ] || [ -L "$path" ]; then
+    if [ ! -L "$path" ] && [ -f "$path" ] \
+      && read_valid_record "$id" "$path" >/dev/null 2>&1; then
       found=$path
       count=$((count + 1))
     fi
   done
   path="$CANDIDATE_DIR/$id.json"
-  if [ -e "$path" ] || [ -L "$path" ]; then
+  if [ ! -L "$path" ] && [ -f "$path" ] \
+    && read_valid_record "$id" "$path" >/dev/null 2>&1; then
     found=$path
     count=$((count + 1))
   fi
@@ -544,19 +558,9 @@ correct_enumerated_name() { # <path> <candidate-id> <lifecycle-state>
     RECORD_PATH=$path
     return 0
   fi
-  if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
     printf -v ENUMERATED_ERROR \
-      'candidate lifecycle correction blocked from %q to %q: destination is not a regular record' \
-      "$path" "$destination"
-    return 2
-  fi
-  if [ -e "$destination" ]; then
-    if read_valid_record "$id" "$destination" >/dev/null 2>&1; then
-      ENUMERATED_ERROR="candidate lifecycle destination already exists"
-      return 1
-    fi
-    printf -v ENUMERATED_ERROR \
-      'candidate lifecycle correction blocked from %q to %q: destination is invalid' \
+      'candidate lifecycle correction blocked from %q to %q: destination already exists' \
       "$path" "$destination"
     return 2
   fi
@@ -733,6 +737,7 @@ replace_record() { # <old-path> <json>
 
 records_stream() {
   local path id previous=''
+  local -a sibling_paths=()
   store_available_read_only || return 0
   for path in "$CANDIDATE_DIR"/lc-*.json; do
     if [ "$path" = "$CANDIDATE_DIR/lc-*.json" ] && [ ! -e "$path" ] && [ ! -L "$path" ]; then
@@ -740,11 +745,13 @@ records_stream() {
     fi
     load_enumerated_record "$path" 1 || continue
     id=$(printf '%s\n' "$RECORD_JSON" | jq -r '.id')
-    if [ "$id" = "$previous" ]; then
-      report_skipped_entry "$path" "duplicate candidate id: $id"
-      continue
+    if [ "$id" != "$previous" ]; then
+      previous=$id
+      sibling_paths=("$RECORD_PATH")
+    else
+      sibling_paths+=("$RECORD_PATH")
+      report_sibling_inconsistency "$id" "${sibling_paths[@]}"
     fi
-    previous=$id
     printf '%s\n' "$RECORD_JSON" | jq -cS .
   done
 }
@@ -879,8 +886,8 @@ batch_command() {
 
 summary_command() {
   local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
-  local producer_pid correct_hint=1 previous='' canonical canonical_json canonical_state
-  local -a samples=()
+  local producer_pid correct_hint=1 previous=''
+  local -a samples=() sibling_paths=()
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -903,25 +910,13 @@ summary_command() {
     load_enumerated_record "$name" "$correct_hint" || continue
     id=$(printf '%s\n' "$RECORD_JSON" | jq -r '.id')
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
-    canonical="$CANDIDATE_DIR/$id.$state.json"
-    if [ "$correct_hint" -eq 0 ] && [ "$RECORD_PATH" != "$canonical" ] \
-      && [ ! -L "$canonical" ] && [ -f "$canonical" ]; then
-      canonical_json=
-      canonical_state=
-      if canonical_json=$(read_valid_record "$id" "$canonical" 2>/dev/null); then
-        canonical_state=$(printf '%s\n' "$canonical_json" | jq -r '.lifecycle_state')
-      fi
-      if [ "$canonical_state" = "$state" ]; then
-        report_skipped_entry "$RECORD_PATH" "duplicate candidate id: $id"
-        RECORD_JSON=$canonical_json
-        RECORD_PATH=$canonical
-      fi
+    if [ "$id" != "$previous" ]; then
+      previous=$id
+      sibling_paths=("$RECORD_PATH")
+    else
+      sibling_paths+=("$RECORD_PATH")
+      report_sibling_inconsistency "$id" "${sibling_paths[@]}"
     fi
-    if [ "$id" = "$previous" ]; then
-      report_skipped_entry "$RECORD_PATH" "duplicate candidate id: $id"
-      continue
-    fi
-    previous=$id
     [ "$state" = unresolved ] || continue
     count=$((count + 1))
     [ "$sample_count" -lt "$limit" ] || continue

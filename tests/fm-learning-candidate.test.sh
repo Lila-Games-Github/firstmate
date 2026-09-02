@@ -465,7 +465,7 @@ test_enumeration_skips_invalid_records() {
 }
 
 test_enumeration_groups_lifecycle_siblings() {
-  local home id path sibling other listed occurrences errors
+  local home id path sibling other output errors command occurrences
   home=$(make_home grouped-lifecycle-siblings)
   id=$(capture_candidate "$home" grouped-sibling FrogPile escaped-defect \
     "same-id lifecycle siblings must remain adjacent during enumeration")
@@ -481,15 +481,53 @@ test_enumeration_groups_lifecycle_siblings() {
   other=$(capture_candidate "$home" grouped-neighbor FrogPile escaped-defect \
     "a neighboring id must not split same-id lifecycle siblings")
 
-  listed=$(run_learning "$home" list --all 2>"$home/grouped.err") \
-    || fail "list aborted on same-id lifecycle siblings"
-  errors=$(cat "$home/grouped.err")
-  occurrences=$(printf '%s\n' "$listed" | awk -F '\t' -v id="$id" '$1 == id {count++} END {print count+0}')
-  [ "$occurrences" -eq 1 ] || fail "list emitted same-id lifecycle siblings $occurrences times"
-  assert_contains "$listed" "$other" "same-id lifecycle siblings hid a neighboring candidate"
-  assert_contains "$errors" "duplicate candidate id: $id" \
-    "list did not report the adjacent duplicate lifecycle sibling"
-  pass "sorted enumeration keeps lifecycle siblings adjacent and emits one record per id"
+  for command in list-unresolved list-dismissed batch summary summary-read-only; do
+    case "$command" in
+      list-unresolved) set -- list --status unresolved ;;
+      list-dismissed) set -- list --status dismissed ;;
+      batch) set -- batch ;;
+      summary) set -- summary ;;
+      summary-read-only) set -- summary --read-only ;;
+    esac
+    output=$(run_learning "$home" "$@" 2>"$home/$command.err") \
+      || fail "$command aborted on valid same-id lifecycle siblings"
+    errors=$(cat "$home/$command.err")
+    assert_contains "$errors" "inconsistent candidate siblings: $id" \
+      "$command did not report the valid sibling inconsistency"
+    assert_contains "$errors" "$path" "$command did not name the unresolved sibling"
+    assert_contains "$errors" "$sibling" "$command did not name the dismissed sibling"
+    case "$command" in
+      list-unresolved)
+        occurrences=$(printf '%s\n' "$output" | awk -F '\t' -v id="$id" \
+          '$1 == id && $2 == "unresolved" {count++} END {print count+0}')
+        [ "$occurrences" -eq 1 ] \
+          || fail "list --status unresolved hid matching valid content: $output"
+        ;;
+      list-dismissed)
+        occurrences=$(printf '%s\n' "$output" | awk -F '\t' -v id="$id" \
+          '$1 == id && $2 == "dismissed" {count++} END {print count+0}')
+        [ "$occurrences" -eq 1 ] \
+          || fail "list --status dismissed hid matching valid content: $output"
+        ;;
+      batch)
+        [ "$(printf '%s\n' "$output" | jq --arg id "$id" \
+          '[.[] | select(.id == $id and .lifecycle_state == "unresolved")] | length')" -eq 1 ] \
+          || fail "batch hid valid unresolved sibling content: $output"
+        ;;
+      summary|summary-read-only)
+        assert_contains "$output" "$id" "$command hid valid unresolved sibling content"
+        assert_contains "$output" "LEARNING CANDIDATES: 2 unresolved" \
+          "$command did not retain matching valid neighboring content"
+        ;;
+    esac
+  done
+  output=$(run_learning "$home" list --all 2>"$home/list-all.err") \
+    || fail "list --all aborted on valid same-id lifecycle siblings"
+  occurrences=$(printf '%s\n' "$output" | awk -F '\t' -v id="$id" \
+    '$1 == id {count++} END {print count+0}')
+  [ "$occurrences" -eq 2 ] || fail "list --all selected a winner between valid siblings"
+  assert_contains "$output" "$other" "same-id lifecycle siblings hid a neighboring candidate"
+  pass "content-state filtering retains every matching valid sibling"
 }
 
 test_concurrent_suffix_rename_reresolves() {
@@ -686,14 +724,14 @@ test_read_only_summary_counts_canonical_renamed_after_stale_read() {
     || fail "read-only summary failed when a stale record was renamed after validation"
   assert_contains "$summary" "$id" \
     "read-only summary omitted the validated canonical record absent from its snapshot"
-  assert_contains "$(cat "$home/summary.err")" "duplicate candidate id: $id" \
-    "read-only summary did not report selection of the validated canonical record"
+  [ ! -s "$home/summary.err" ] \
+    || fail "read-only summary treated one renamed record as inconsistent siblings"
   assert_absent "$source" "concurrent fixture left the stale record name in place"
   assert_present "$destination" "concurrent fixture did not publish the canonical record name"
   pass "read-only summary counts canonical records renamed after stale reads"
 }
 
-test_read_only_summary_prefers_canonical_duplicate() {
+test_read_only_summary_reports_same_state_siblings_without_winner() {
   local home id canonical legacy before after summary occurrences errors
   home=$(make_home read-only-summary-duplicate)
   id=$(capture_candidate "$home" summary-duplicate FrogPile escaped-defect \
@@ -710,16 +748,20 @@ test_read_only_summary_prefers_canonical_duplicate() {
   after=$(LC_ALL=C find "$home/state/learning-candidates" -maxdepth 1 -print | sort)
   errors=$(cat "$home/summary.err")
   occurrences=$(printf '%s\n' "$summary" | awk -v id="$id" 'index($0, id) {count++} END {print count+0}')
-  [ "$occurrences" -eq 1 ] \
-    || fail "read-only summary returned duplicate id $id $occurrences times: $summary"
-  assert_contains "$summary" "LEARNING CANDIDATES: 1 unresolved" \
-    "read-only summary counted a duplicate candidate id twice"
-  assert_contains "$errors" "duplicate candidate id: $id" \
-    "read-only summary did not report the skipped legacy duplicate"
+  [ "$occurrences" -eq 2 ] \
+    || fail "read-only summary selected a winner between valid siblings: $summary"
+  assert_contains "$summary" "LEARNING CANDIDATES: 2 unresolved" \
+    "read-only summary omitted matching same-state sibling content"
+  assert_contains "$errors" "inconsistent candidate siblings: $id" \
+    "read-only summary did not report the valid sibling inconsistency"
+  assert_contains "$errors" "$legacy" \
+    "read-only summary did not name the legacy sibling"
+  assert_contains "$errors" "$canonical" \
+    "read-only summary did not name the canonical sibling"
   [ "$before" = "$after" ] || fail "read-only summary mutated the duplicate store"
   assert_present "$legacy" "read-only summary removed the legacy duplicate"
   assert_present "$canonical" "read-only summary removed the canonical record"
-  pass "read-only summary prefers the canonical slot for duplicate ids"
+  pass "read-only summary reports same-state siblings without a winner"
 }
 
 test_invalid_canonical_does_not_hide_valid_stale_record() {
@@ -734,10 +776,10 @@ test_invalid_canonical_does_not_hide_valid_stale_record() {
     || fail "could not checksum candidate record: $legacy"
   printf '{}\n' >"$canonical"
 
-  for command in summary-read-only list batch summary; do
+  for command in summary-read-only list-status batch summary; do
     case "$command" in
       summary-read-only) set -- summary --read-only ;;
-      list) set -- list --all ;;
+      list-status) set -- list --status unresolved ;;
       batch) set -- batch ;;
       summary) set -- summary ;;
     esac
@@ -765,6 +807,56 @@ test_invalid_canonical_does_not_hide_valid_stale_record() {
     [ "$(cat "$canonical")" = '{}' ] || fail "$command changed the invalid canonical sibling"
   done
   pass "invalid canonical siblings do not hide valid stale records"
+}
+
+test_invalid_sibling_does_not_block_valid_reresolution() {
+  local mode home id invalid source destination fakebin real_head real_mv output errors
+  for mode in list-status batch summary summary-read-only; do
+    home=$(make_home "invalid-sibling-reresolution-$mode")
+    id=$(capture_candidate "$home" "invalid-reresolution-$mode" FrogPile escaped-defect \
+      "a validated rename destination must survive an invalid sibling")
+    invalid="$home/state/learning-candidates/$id.json"
+    source="$home/state/learning-candidates/$id.legacy.json"
+    destination=$(candidate_path "$home" "$id")
+    mv "$destination" "$source"
+    printf '{}\n' >"$invalid"
+    fakebin=$(fm_fakebin "$home/reresolution-reader")
+    real_head=$(command -v head)
+    real_mv=$(command -v mv)
+    # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
+    printf '%s\n' \
+      '#!/usr/bin/env bash' \
+      'for arg in "$@"; do' \
+      'if [ "$arg" = "$FM_TEST_RENAME_SOURCE" ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
+      '  : >"$FM_TEST_RENAME_DONE"' \
+      '  "$FM_TEST_REAL_MV" "$FM_TEST_RENAME_SOURCE" "$FM_TEST_RENAME_DESTINATION"' \
+      'fi' \
+      'done' \
+      'exec "$FM_TEST_REAL_HEAD" "$@"' >"$fakebin/head"
+    chmod +x "$fakebin/head"
+    case "$mode" in
+      list-status) set -- list --status unresolved ;;
+      batch) set -- batch ;;
+      summary) set -- summary ;;
+      summary-read-only) set -- summary --read-only ;;
+    esac
+    output=$(PATH="$fakebin:$PATH" FM_TEST_RENAME_SOURCE="$source" \
+      FM_TEST_RENAME_DESTINATION="$destination" FM_TEST_RENAME_DONE="$home/rename-done" \
+      FM_TEST_REAL_HEAD="$real_head" FM_TEST_REAL_MV="$real_mv" \
+      run_learning "$home" "$@" 2>"$home/$mode.err") \
+      || fail "$mode aborted while resolving a valid rename destination"
+    errors=$(cat "$home/$mode.err")
+    assert_contains "$output" "$id" \
+      "$mode omitted valid content re-resolved beside an invalid sibling"
+    assert_contains "$errors" "skipped candidate entry: $invalid" \
+      "$mode did not separately report the invalid sibling"
+    assert_contains "$errors" "invalid candidate record: $id" \
+      "$mode did not report the invalid sibling reason"
+    assert_absent "$source" "$mode restored the stale source after concurrent correction"
+    assert_present "$destination" "$mode lost the validated rename destination"
+    [ "$(cat "$invalid")" = '{}' ] || fail "$mode changed the invalid sibling"
+  done
+  pass "invalid siblings do not block validated concurrent re-resolution"
 }
 
 test_routes_and_no_one_off_skill_gate() {
@@ -1429,8 +1521,9 @@ test_cutover_accepts_concurrent_read_correction
 test_list_resolves_ids_after_suffix_rename
 test_read_only_summary_reresolves_after_suffix_rename
 test_read_only_summary_counts_canonical_renamed_after_stale_read
-test_read_only_summary_prefers_canonical_duplicate
+test_read_only_summary_reports_same_state_siblings_without_winner
 test_invalid_canonical_does_not_hide_valid_stale_record
+test_invalid_sibling_does_not_block_valid_reresolution
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry
