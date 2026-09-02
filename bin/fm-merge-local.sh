@@ -7,8 +7,10 @@
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
 # rule #1 "never run state-changing git in projects/", and it is narrow: it only
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
-# auto-approves), and only as a clean fast-forward - it refuses a diverged branch
-# and tells you to have the crewmate rebase. See AGENTS.md prime directives,
+# auto-approves), and only when the main checkout is clean and already on the
+# resolved target. A recorded target must resolve as a local branch; the script
+# refuses instead of falling back when it does not. The merge is fast-forward
+# only, so a diverged task branch is refused. See AGENTS.md prime directives,
 # project management, and task lifecycle.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
