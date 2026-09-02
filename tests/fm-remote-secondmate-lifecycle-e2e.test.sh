@@ -233,6 +233,22 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     touch "$FM_FAKE_LAUNCH_ENTERED"
     while [ ! -f "$FM_FAKE_LAUNCH_RELEASE" ]; do sleep 0.02; done
     ;;
+  teardown-unknown:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = retire ] || exit 93
+    exit 255
+    ;;
+  teardown-change-recovery:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = retire ] || exit 93
+    mv "$FM_FAKE_PARENT_HOME/data/handoff" "$FM_FAKE_PARENT_HOME/data/handoff.changed"
+    exit 0
+    ;;
+  teardown-incomplete-reply:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = retire ] || exit 93
+    mkdir -p "$FM_FAKE_PARENT_HOME/state/procevent-inbox"
+    printf 'adapter\n' > "$FM_FAKE_PARENT_HOME/state/procevent-inbox/remote-reply-ios.900.adapter"
+    printf 'result\n' > "$FM_FAKE_PARENT_HOME/state/procevent-inbox/remote-reply-ios.900.result"
+    exit 0
+    ;;
 esac
 case "${FM_FAKE_SSH_MODE:-normal}" in
   unreachable) exit 255 ;;
@@ -266,6 +282,7 @@ remote_env() {
   FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/remote-jobs" \
   FM_FAKE_SSH_MODE="${FM_FAKE_SSH_MODE:-normal}" \
   FM_FAKE_REMOTE_CWD="$TMP_ROOT" \
+  FM_FAKE_PARENT_HOME="$PARENT" \
   FM_FAKE_SEED_ENTERED="$TMP_ROOT/seed.entered" \
   FM_FAKE_SEED_RELEASE="$TMP_ROOT/seed.release" \
   FM_FAKE_DOCTOR_LOG="$DOCTOR_LOG" \
@@ -1149,6 +1166,66 @@ assert_present "$REMOTE_HOME" "unsafe pending-replies retirement removed the rem
 assert_present "$TMP_ROOT/external-pending/escape" "unsafe retirement removed an external pending reply"
 rm -f "$PARENT/state/pending-replies"
 mv "$PARENT/state/pending-replies.safe" "$PARENT/state/pending-replies"
+
+# Remote teardown must preserve its local route and every shared poll artifact
+# until remote completion and all reply/recovery refusal gates are conclusive.
+printf 'check\n' > "$PARENT/state/ios.check.sh"
+printf 'poll\n' > "$PARENT/state/ios.pr-poll"
+printf 'registration\n' > "$PARENT/state/ios.pr-poll-registration"
+printf 'trust\n' > "$PARENT/state/ios.check-trust"
+printf 'lane\n' > "$PARENT/state/ios.lane-poll"
+mkdir -p "$PARENT/state/.pr-check-quarantine"
+chmod 0700 "$PARENT/state/.pr-check-quarantine"
+printf 'legacy\n' > "$PARENT/state/.pr-check-quarantine/ios.check.abc123"
+chmod 0600 "$PARENT/state/.pr-check-quarantine/ios.check.abc123"
+
+assert_remote_refusal_preserved_route() {
+  local label=$1
+  assert_present "$PARENT/state/ios.meta" "$label removed parent metadata"
+  assert_grep '- ios ' "$PARENT/data/secondmates.md" "$label removed the registry route"
+  assert_present "$PARENT/state/ios.check.sh" "$label removed the runnable poll check"
+  assert_present "$PARENT/state/ios.pr-poll" "$label removed the PR poll sidecar"
+  assert_present "$PARENT/state/ios.pr-poll-registration" "$label removed the PR poll registration"
+  assert_present "$PARENT/state/ios.check-trust" "$label removed the poll trust record"
+  assert_present "$PARENT/state/ios.lane-poll" "$label removed the lane sidecar"
+  assert_present "$PARENT/state/.pr-check-quarantine/ios.check.abc123" \
+    "$label removed the quarantine entry"
+}
+
+if FM_FAKE_SSH_MODE=teardown-unknown remote_env "$ROOT/bin/fm-teardown.sh" ios \
+  > "$TMP_ROOT/teardown-unknown.out" 2>&1; then
+  fail "remote retirement accepted unknown remote completion"
+fi
+assert_grep 'remote retirement completion is unknown' "$TMP_ROOT/teardown-unknown.out" \
+  "unknown completion did not report its reconciliation refusal"
+assert_remote_refusal_preserved_route "unknown remote completion"
+remote_env "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
+  || fail "bootstrap failed while repairing the reply source after unknown retirement"
+
+if FM_FAKE_SSH_MODE=teardown-change-recovery remote_env "$ROOT/bin/fm-teardown.sh" ios \
+  > "$TMP_ROOT/teardown-change-recovery.out" 2>&1; then
+  fail "remote retirement accepted changed local recovery paths"
+fi
+assert_grep 'local recovery paths changed' "$TMP_ROOT/teardown-change-recovery.out" \
+  "changed recovery paths did not report their retry refusal"
+assert_remote_refusal_preserved_route "changed recovery paths"
+mv "$PARENT/data/handoff.changed" "$PARENT/data/handoff"
+remote_env "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
+  || fail "bootstrap failed while repairing the reply source after changed recovery paths"
+
+if FM_FAKE_SSH_MODE=teardown-incomplete-reply remote_env "$ROOT/bin/fm-teardown.sh" ios \
+  > "$TMP_ROOT/teardown-incomplete-reply.out" 2>&1; then
+  fail "remote retirement accepted incomplete reply-source cleanup"
+fi
+assert_grep 'reply-source cleanup is incomplete' "$TMP_ROOT/teardown-incomplete-reply.out" \
+  "incomplete reply-source cleanup did not report its retry refusal"
+assert_remote_refusal_preserved_route "incomplete reply-source cleanup"
+rm -f "$PARENT/state/procevent-inbox/remote-reply-ios.900.adapter" \
+  "$PARENT/state/procevent-inbox/remote-reply-ios.900.result"
+remote_env "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
+  || fail "bootstrap failed while repairing the reply source after incomplete cleanup"
+pass "remote retirement refusals preserve route metadata and shared poll artifacts"
+
 handoff_lock="$PARENT/state/.backlog-handoff-ios.lock"
 FM_HOME="$PARENT" /bin/bash -c '
   . "$1"
@@ -1191,8 +1268,44 @@ if ! wait "$spawn_retirement_pid"; then
 fi
 sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
+
+poll_lock="$PARENT/state/.ios.check-publish.lock"
+FM_HOME="$PARENT" /bin/bash -c '
+  . "$1"
+  fm_lock_acquire_wait "$2"
+  touch "$3"
+  while [ ! -f "$4" ]; do sleep 0.02; done
+  fm_lock_release "$2"
+' _ "$ROOT/bin/fm-wake-lib.sh" "$poll_lock" "$TMP_ROOT/poll.entered" \
+  "$TMP_ROOT/poll.release" &
+poll_holder_pid=$!
+poll_wait=0
+while [ ! -f "$TMP_ROOT/poll.entered" ]; do
+  kill -0 "$poll_holder_pid" 2>/dev/null || fail "poll lock holder exited before acquiring the publication lock"
+  poll_wait=$((poll_wait + 1))
+  [ "$poll_wait" -le 250 ] || fail "poll lock holder never acquired the publication lock"
+  sleep 0.02
+done
+
 touch "$TMP_ROOT/handoff.release"
 wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
+remote_retire_wait=0
+while [ -e "$REMOTE_HOME" ]; do
+  kill -0 "$teardown_pid" 2>/dev/null || fail "remote teardown exited before retiring its remote home"
+  remote_retire_wait=$((remote_retire_wait + 1))
+  [ "$remote_retire_wait" -le 150 ] || fail "remote teardown never reached shared poll cleanup"
+  sleep 0.02
+done
+kill -0 "$teardown_pid" 2>/dev/null \
+  || fail "remote teardown crossed an in-flight poll publication lock"
+assert_present "$PARENT/state/ios.meta" \
+  "remote teardown removed metadata before acquiring the poll publication lock"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" \
+  "remote teardown removed the registry route before acquiring the poll publication lock"
+assert_present "$PARENT/state/ios.check.sh" \
+  "remote teardown removed poll artifacts without the publication lock"
+touch "$TMP_ROOT/poll.release"
+wait "$poll_holder_pid" || fail "poll lock holder failed to release"
 if wait "$teardown_pid"; then
   :
 else
@@ -1203,6 +1316,13 @@ fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
+assert_absent "$PARENT/state/ios.check.sh" "remote retirement left the runnable poll check"
+assert_absent "$PARENT/state/ios.pr-poll" "remote retirement left the PR poll sidecar"
+assert_absent "$PARENT/state/ios.pr-poll-registration" "remote retirement left the PR poll registration"
+assert_absent "$PARENT/state/ios.check-trust" "remote retirement left the poll trust record"
+assert_absent "$PARENT/state/ios.lane-poll" "remote retirement left the lane sidecar"
+assert_absent "$PARENT/state/.pr-check-quarantine/ios.check.abc123" \
+  "remote retirement left the quarantine entry"
 jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   any(.workspaces[]; .workspace_id == $workspace and .label == "2ndmate-macos")
   and any(.tabs[]; .workspace_id == $workspace and .pane_id == $pane)
