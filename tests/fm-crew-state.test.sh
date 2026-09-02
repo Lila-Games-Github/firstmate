@@ -499,7 +499,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+test_ci_monitoring_no_checks_terminal_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -508,9 +508,10 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_contains "$out" "state: working" "terminal no-checks ci-monitor run -> working"
+  assert_not_contains "$out" "state: done" "terminal no-checks ci-monitor run must not read as done"
+  assert_not_contains "$out" "checks green" "terminal no-checks ci-monitor run must not read as checks green"
+  pass "an absent CI verdict is not rendered as a passing one"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -1417,7 +1418,7 @@ test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_terminal_stays_working
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working

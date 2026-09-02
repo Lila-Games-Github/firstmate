@@ -329,15 +329,14 @@ nm_effective_ci_step_status() {
 # reports every check green - it only reaches outcome=passed once the PR is
 # actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
 # never distinguishes "still waiting on checks" from "checks green, waiting on
-# merge": both read as plain `ci,running,...`. The only place that transition is
-# recorded is the ci step's own log text, e.g. "all CI checks passed - still
-# monitoring until merged or closed" or "no CI checks reported - still
-# monitoring until merged or closed" (verified against 360+ real run logs under
-# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
-# for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+# merge": both read as plain `ci,running,...`.
+# The only place that transition is recorded is the ci step's own log text.
+# One example is "all CI checks passed - still monitoring until merged or closed".
+# This was verified against 360+ real run logs under ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the actual PR #252 run.
+# A terminal "no CI checks reported" marker is an absent verdict, not a green one.
+# This function reads the ci step's log tail via `axi logs` and scans it for the most recent recognized marker.
+# The log is append-only and chronological, so the last match is current.
+# Only an explicit checks-passed marker with nothing red or absent after it means CI is green right now.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -348,8 +347,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
 }
