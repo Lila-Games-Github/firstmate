@@ -913,7 +913,8 @@ summary_command() {
       fi
       if [ "$canonical_state" = "$state" ]; then
         report_skipped_entry "$RECORD_PATH" "duplicate candidate id: $id"
-        continue
+        RECORD_JSON=$canonical_json
+        RECORD_PATH=$canonical
       fi
     fi
     if [ "$id" = "$previous" ]; then

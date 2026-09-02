@@ -11,6 +11,13 @@ TMP_ROOT=$(fm_test_tmproot fm-learning-candidate)
 trap fm_test_cleanup EXIT
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+if command -v shasum >/dev/null 2>&1; then
+  CANDIDATE_HASHER=shasum
+elif command -v sha256sum >/dev/null 2>&1; then
+  CANDIDATE_HASHER=sha256sum
+else
+  fail "shasum or sha256sum is required for checksum assertions"
+fi
 
 make_home() { # <name>
   local home="$TMP_ROOT/$1"
@@ -27,6 +34,16 @@ run_learning() { # <home> <args...>
 
 candidate_path() { # <home> <candidate-id> [lifecycle-state]
   printf '%s/state/learning-candidates/%s.%s.json\n' "$1" "$2" "${3:-unresolved}"
+}
+
+candidate_checksum() {
+  local path=$1 checksum
+  case "$CANDIDATE_HASHER" in
+    shasum) checksum=$(shasum -a 256 < "$path" | awk '{print $1}') || return 1 ;;
+    sha256sum) checksum=$(sha256sum < "$path" | awk '{print $1}') || return 1 ;;
+  esac
+  [ -n "$checksum" ] || return 1
+  printf '%s\n' "$checksum"
 }
 
 capture_candidate() { # <home> <task> <project> <signal> <impact> [evidence]
@@ -313,7 +330,8 @@ test_legacy_names_are_read_and_corrected() {
     "a legacy record name must not hide the learning-candidate store")
   canonical=$(candidate_path "$home" "$id")
   legacy="$home/state/learning-candidates/$id.json"
-  checksum=$(sha256sum "$canonical" | awk '{print $1}')
+  checksum=$(candidate_checksum "$canonical") \
+    || fail "could not checksum candidate record: $canonical"
   mv "$canonical" "$legacy"
 
   before=$(LC_ALL=C find "$home/state/learning-candidates" -maxdepth 1 -print | sort)
@@ -347,7 +365,7 @@ test_legacy_names_are_read_and_corrected() {
   [ ! -s "$home/list.err" ] || fail "list --all reported a valid legacy record as skipped"
   assert_absent "$legacy" "list --all left the legacy record name in place"
   assert_present "$canonical" "list --all did not publish the content-derived lifecycle name"
-  [ "$(sha256sum "$canonical" | awk '{print $1}')" = "$checksum" ] \
+  [ "$(candidate_checksum "$canonical")" = "$checksum" ] \
     || fail "legacy name correction changed record content"
   json=$(run_learning "$home" get "$id") || fail "get rejected the corrected legacy record"
   [ "$(printf '%s\n' "$json" | jq -r '.lifecycle_state')" = unresolved ] \
@@ -365,7 +383,7 @@ test_legacy_names_are_read_and_corrected() {
   summary=$(run_learning "$home" summary) || fail "summary rejected a valid legacy record name"
   assert_contains "$summary" "$id" "summary omitted the legacy record"
   assert_present "$canonical" "summary did not correct the legacy record name"
-  [ "$(sha256sum "$canonical" | awk '{print $1}')" = "$checksum" ] \
+  [ "$(candidate_checksum "$canonical")" = "$checksum" ] \
     || fail "summary name correction changed record content"
   invalid_hint="$home/state/learning-candidates/$id.legacy.json"
   mv "$canonical" "$invalid_hint"
@@ -641,6 +659,40 @@ test_read_only_summary_reresolves_after_suffix_rename() {
   pass "read-only summary re-resolves a record renamed after resolution"
 }
 
+test_read_only_summary_counts_canonical_renamed_after_stale_read() {
+  local home id source destination fakebin real_jq real_mv summary
+  home=$(make_home read-only-summary-post-read-rename)
+  id=$(capture_candidate "$home" summary-post-read-rename FrogPile escaped-defect \
+    "read-only summary must count a canonical record absent from its snapshot")
+  source="$home/state/learning-candidates/$id.json"
+  destination=$(candidate_path "$home" "$id")
+  mv "$destination" "$source"
+  fakebin=$(fm_fakebin "$home/summary-post-read-reader")
+  real_jq=$(command -v jq)
+  real_mv=$(command -v mv)
+  # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = -r ] && [ "${2:-}" = .lifecycle_state ] && [ ! -e "$FM_TEST_RENAME_DONE" ]; then' \
+    '  : >"$FM_TEST_RENAME_DONE"' \
+    '  "$FM_TEST_REAL_MV" "$FM_TEST_RENAME_SOURCE" "$FM_TEST_RENAME_DESTINATION"' \
+    'fi' \
+    'exec "$FM_TEST_REAL_JQ" "$@"' >"$fakebin/jq"
+  chmod +x "$fakebin/jq"
+  summary=$(PATH="$fakebin:$PATH" FM_TEST_RENAME_SOURCE="$source" \
+    FM_TEST_RENAME_DESTINATION="$destination" FM_TEST_RENAME_DONE="$home/rename-done" \
+    FM_TEST_REAL_JQ="$real_jq" FM_TEST_REAL_MV="$real_mv" \
+    run_learning "$home" summary --read-only 2>"$home/summary.err") \
+    || fail "read-only summary failed when a stale record was renamed after validation"
+  assert_contains "$summary" "$id" \
+    "read-only summary omitted the validated canonical record absent from its snapshot"
+  assert_contains "$(cat "$home/summary.err")" "duplicate candidate id: $id" \
+    "read-only summary did not report selection of the validated canonical record"
+  assert_absent "$source" "concurrent fixture left the stale record name in place"
+  assert_present "$destination" "concurrent fixture did not publish the canonical record name"
+  pass "read-only summary counts canonical records renamed after stale reads"
+}
+
 test_read_only_summary_prefers_canonical_duplicate() {
   local home id canonical legacy before after summary occurrences errors
   home=$(make_home read-only-summary-duplicate)
@@ -678,7 +730,8 @@ test_invalid_canonical_does_not_hide_valid_stale_record() {
   canonical=$(candidate_path "$home" "$id")
   legacy="$home/state/learning-candidates/$id.json"
   mv "$canonical" "$legacy"
-  checksum=$(sha256sum "$legacy" | awk '{print $1}')
+  checksum=$(candidate_checksum "$legacy") \
+    || fail "could not checksum candidate record: $legacy"
   printf '{}\n' >"$canonical"
 
   for command in summary-read-only list batch summary; do
@@ -707,7 +760,7 @@ test_invalid_canonical_does_not_hide_valid_stale_record() {
         "$command did not report the blocked correction"
     fi
     [ "$before" = "$after" ] || fail "$command mutated the blocked sibling pair"
-    [ "$(sha256sum "$legacy" | awk '{print $1}')" = "$checksum" ] \
+    [ "$(candidate_checksum "$legacy")" = "$checksum" ] \
       || fail "$command changed the valid stale record"
     [ "$(cat "$canonical")" = '{}' ] || fail "$command changed the invalid canonical sibling"
   done
@@ -1375,6 +1428,7 @@ test_concurrent_suffix_rename_reresolves
 test_cutover_accepts_concurrent_read_correction
 test_list_resolves_ids_after_suffix_rename
 test_read_only_summary_reresolves_after_suffix_rename
+test_read_only_summary_counts_canonical_renamed_after_stale_read
 test_read_only_summary_prefers_canonical_duplicate
 test_invalid_canonical_does_not_hide_valid_stale_record
 test_routes_and_no_one_off_skill_gate
