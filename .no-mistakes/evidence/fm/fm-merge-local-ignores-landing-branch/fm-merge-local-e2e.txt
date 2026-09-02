@@ -1,0 +1,32 @@
+fm-merge-local end-to-end safety evidence
+=========================================
+
+Scenario 1: recorded non-default landing_branch=proto/dev
+Before: main=52a8ef7511f53671734e42a9e81088c97e48744a
+Before: proto/dev=52a8ef7511f53671734e42a9e81088c97e48744a
+Task:   fm/task-x1=88a7b25252b1fe8aec80ea8a116c7cec5557b2fb
+merged fm/task-x1 into local proto/dev (52a8ef7 -> 88a7b25) in /tmp/fm-merge-evidence.Ot83bs/recorded/project
+After:  main=52a8ef7511f53671734e42a9e81088c97e48744a
+After:  proto/dev=88a7b25252b1fe8aec80ea8a116c7cec5557b2fb
+Observed: main unchanged = yes
+Observed: proto/dev reached task tip = yes
+
+Scenario 2: landing_branch absent (legacy default resolution)
+merged fm/task-x1 into local main (52a8ef7 -> ab227a6) in /tmp/fm-merge-evidence.Ot83bs/fallback/project
+After:  main=ab227a6433e0bf48dc0ee1a14c52b2d67532447d
+Observed: main reached task tip = yes
+
+Scenario 3: recorded landing branch does not resolve
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+error: recorded landing branch proto/missing does not exist in /tmp/fm-merge-evidence.Ot83bs/unresolved/project; refusing to fall back to the default branch
+Exit code: 1
+Before: main=52a8ef7511f53671734e42a9e81088c97e48744a
+After:  main=52a8ef7511f53671734e42a9e81088c97e48744a
+Observed: invocation refused = yes
+Observed: main unchanged after refusal = yes
