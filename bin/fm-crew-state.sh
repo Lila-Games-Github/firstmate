@@ -148,45 +148,6 @@ map_log_state() {  # <line>
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
-# --- remote secondmate: the true source is the remote endpoint ---------------
-# A remote mate's recorded worktree and backend target live on its own host, so
-# the local worktree probe above and the local pane reads below would misreport
-# a healthy remote mate as gone or dead. Ask the remote host for the endpoint's
-# recovery-grade state over the same fm-on.sh transport fm-send uses, then read
-# current activity from the routed status log exactly as for a local
-# secondmate (an idle endpoint is healthy for a secondmate either way). An
-# unreachable host or unreadable endpoint is reported as unknown-remote -
-# explicitly NOT proof of death - so a transport blip never reads as a torn
-# down or dead mate; only the remote host's own dead/missing verdict may say
-# the endpoint is actually gone.
-if [ -n "$REMOTE_HOST" ]; then
-  if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$ID" \
-    fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
-    REMOTE_STATE=
-  fi
-  REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
-  case "$REMOTE_STATE" in
-    alive)
-      if [ -n "$LOG_VERB" ]; then
-        LOG_STATE=$(map_log_state "$LOG_LINE")
-        if [ "$LOG_STATE" != unknown ]; then
-          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
-        fi
-      fi
-      emit unknown remote-endpoint "alive on $REMOTE_HOST (an idle secondmate is healthy)"
-      ;;
-    dead|missing)
-      emit unknown remote-endpoint "remote endpoint $REMOTE_STATE on $REMOTE_HOST"
-      ;;
-    '')
-      emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)"
-      ;;
-    *)
-      emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
-      ;;
-  esac
-fi
-
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
 # shell - so a finished crew whose endpoint has closed still reports its run-step
@@ -366,6 +327,48 @@ status_log_ci_ready_is_verified() {
   [ -n "${CI_LOG_STATE:-}" ] || CI_LOG_STATE=$(nm_ci_checks_state)
   [ "$CI_LOG_STATE" = green ]
 }
+
+# --- remote secondmate: the true source is the remote endpoint ---------------
+# A remote mate's recorded worktree and backend target live on its own host, so
+# the local worktree probe above and the local pane reads below would misreport
+# a healthy remote mate as gone or dead. Ask the remote host for the endpoint's
+# recovery-grade state over the same fm-on.sh transport fm-send uses, then read
+# current activity from the routed status log exactly as for a local
+# secondmate (an idle endpoint is healthy for a secondmate either way). An
+# unreachable host or unreadable endpoint is reported as unknown-remote -
+# explicitly NOT proof of death - so a transport blip never reads as a torn
+# down or dead mate; only the remote host's own dead/missing verdict may say
+# the endpoint is actually gone.
+if [ -n "$REMOTE_HOST" ]; then
+  if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$ID" \
+    fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
+    REMOTE_STATE=
+  fi
+  REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
+  case "$REMOTE_STATE" in
+    alive)
+      if [ -n "$LOG_VERB" ] && { ! log_reports_ci_ready || status_log_ci_ready_is_verified; }; then
+        LOG_STATE=$(map_log_state "$LOG_LINE")
+        if [ "$LOG_STATE" != unknown ]; then
+          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
+        fi
+      fi
+      if log_reports_ci_ready; then
+        emit unknown remote-endpoint "alive on $REMOTE_HOST; checks-green event awaiting current attributable CI verification"
+      fi
+      emit unknown remote-endpoint "alive on $REMOTE_HOST (an idle secondmate is healthy)"
+      ;;
+    dead|missing)
+      emit unknown remote-endpoint "remote endpoint $REMOTE_STATE on $REMOTE_HOST"
+      ;;
+    '')
+      emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)"
+      ;;
+    *)
+      emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
+      ;;
+  esac
+fi
 
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one

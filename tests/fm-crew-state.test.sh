@@ -1253,6 +1253,21 @@ test_remote_alive_idle_is_healthy_not_gone() {
   pass "fm-crew-state remote: an idle alive endpoint reads alive, never gone or dead"
 }
 
+test_remote_alive_checks_green_awaits_current_verification() {
+  reset_fakes
+  local d out rc
+  d=$(setup_remote_case remote-alive-checks-green)
+  make_fakebin "$d" >/dev/null
+  printf 'done: PR https://github.com/o/r/pull/8 checks green\n' > "$d/state/rsm.status"
+  out=$(FM_FAKE_REMOTE_STATE_OUT=alive FM_FAKE_SSH_RC=0 run_remote_crew_state "$d" rsm); rc=$?
+  expect_code 0 "$rc" "remote alive checks-green exits 0"
+  assert_contains "$out" "state: unknown" "unattributable remote checks-green remains unknown"
+  assert_contains "$out" "source: remote-endpoint" "remote endpoint remains the current source"
+  assert_contains "$out" "awaiting current attributable CI verification" "remote checks-green names the missing verification"
+  assert_not_contains "$out" "state: done" "remote checks-green must not bypass current verification"
+  pass "fm-crew-state remote: checks-green awaits current attributable verification"
+}
+
 test_remote_unreachable_is_unknown_remote_not_dead() {
   reset_fakes
   local d out rc
@@ -1483,6 +1498,7 @@ test_scout_skips_run_lookup
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone
+test_remote_alive_checks_green_awaits_current_verification
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
