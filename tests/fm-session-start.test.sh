@@ -2296,7 +2296,7 @@ SH
   pass "session start terminal-sanitizes candidate summary diagnostics"
 }
 
-test_learning_candidate_summary_rejects_unsafe_entry() {
+test_learning_candidate_summary_skips_unsafe_entry() {
   local rec root home fakebin out id
   rec=$(new_world learning-candidate-unsafe-entry)
   IFS='|' read -r root home fakebin <<EOF
@@ -2310,11 +2310,13 @@ EOF
   ln -s "$home/state" "$home/state/learning-candidates/$id.unresolved.json"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
-    "session start silently skipped an unsafe candidate entry"
+  assert_not_contains "$out" "LEARNING CANDIDATES: summary unavailable" \
+    "session start treated one unsafe candidate entry as a store-wide failure"
+  assert_contains "$out" "skipped candidate entry" \
+    "session start did not report the skipped unsafe candidate entry"
   assert_contains "$out" "candidate path must be a regular file" \
     "session start did not surface shared candidate-path validation"
-  pass "session start reports unsafe candidate entries as unavailable"
+  pass "session start reports and skips unsafe candidate entries"
 }
 
 test_learning_candidate_summary_rejects_dangling_store() {
@@ -2563,7 +2565,7 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_learning_candidate_summary_is_bounded
 test_learning_candidate_summary_error_is_terminal_safe
-test_learning_candidate_summary_rejects_unsafe_entry
+test_learning_candidate_summary_skips_unsafe_entry
 test_learning_candidate_summary_rejects_dangling_store
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon

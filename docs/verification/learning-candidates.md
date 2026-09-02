@@ -47,22 +47,19 @@ The canonical path-boundary regression was refreshed on 2026-08-30 with:
 bash tests/fm-learning-candidate.test.sh && bash tests/fm-session-start.test.sh
 ```
 
-The relevant output was:
+The relevant unchanged path-boundary output was:
 
 ```text
 ok - state aliases normalize before public lifecycle path validation
-ok - summary and record discovery reject unsafe exact entries
 ok - canonical path boundary rejects unsafe state, store, record, capture, and mutation forms
 ok - public read commands reject a dangling candidate store
-# fm-learning-candidate.test.sh: all assertions passed
-ok - session start reports unsafe candidate entries as unavailable
 ok - session start reports a dangling candidate store as unavailable
-# fm-session-start.test.sh: all assertions passed
 ```
 
 The exercised forms are a real state path with a trailing slash, a real state path with trailing slash-dot, both aliases on a symlinked state path, a dangling lifecycle sibling, a candidate symlink to a directory, a candidate symlink to a regular file outside the store, a candidate-store symlink to a directory, a dangling candidate-store symlink, a directory in a record slot, and a regular file in the store slot.
 Capture, get, list, batch, summary, session startup, and lifecycle disposition exercise those forms through their public interfaces, including the deterministic capture sibling and lifecycle destination paths.
 All named path forms are applicable and exercised; none are marked non-applicable.
+The 2026-09-02 focused run below refreshes the changed summary and session-start behavior for unsafe exact entries.
 
 The relevant broader contract family and portable-lane coverage check used:
 
@@ -81,6 +78,41 @@ FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=33 duration_ms=313116 fai
 
 The two gate skips were pre-existing optional local Pi tool checks, while every executed contract test passed.
 
+## Malformed-name resilience refresh
+
+The enumeration and session-start regressions were refreshed on 2026-09-02 with GNU Bash 5.3.15, jq 1.8.1, and Linux.
+The focused run used:
+
+```sh
+bin/fm-test-run.sh tests/fm-learning-candidate.test.sh tests/fm-session-start.test.sh
+```
+
+The result was:
+
+```text
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=149485
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=15377 failed=0
+FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=134024 failed=0
+```
+
+The public-interface fixtures cover lifecycle-less and invalid lifecycle hints, content-preserving name correction, strict candidate-id lookup, read-only directory-listing stability, all enumeration surfaces, schema-invalid record isolation, regular-file enforcement, and session-start reporting.
+[jq advisory GHSA-cfh2-vwfq-qfmm](https://github.com/jqlang/jq/security/advisories/GHSA-cfh2-vwfq-qfmm) affects jq through 1.8.1 when `--rawfile` reads 2,147,483,649 bytes: 2,147,483,648 bytes reaches `String too long` and ends cleanly, while one additional byte causes the next 4,096-byte read-loop iteration to append to invalid state, aborting assertion builds or causing a heap-buffer overflow in assertion-disabled builds.
+The candidate reader accepts at most 1,048,576 bytes and supplies at most 1,048,577 bytes to `--rawfile` while classifying an oversize entry, so this store cannot reach the advisory trigger; this containment does not claim that the jq advisory itself is resolved.
+The lint run used:
+
+```sh
+bash bin/fm-lint.sh
+git diff --check
+```
+
+The result was:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+```
+
 Documentation, shell, workflow, and patch hygiene used:
 
 ```sh
@@ -92,7 +124,7 @@ git diff --check
 The commands returned zero, with `git diff --check` silent, and reported:
 
 ```text
-fm-doc-audience-check: ok surfaces=73 local_links=264
+fm-doc-audience-check: ok surfaces=74 local_links=266
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
 fm-lint-workflows.sh: 3 workflow files valid
