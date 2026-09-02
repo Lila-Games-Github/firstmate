@@ -97,6 +97,10 @@ git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
 git -C "$REMOTE_ROOT" add .
 git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
+# This suite exercises the remote trace carrier, not Git's loose-object local
+# clone optimization. Pack the immutable fixture before the worker can clone it
+# so runner filesystem timing cannot make that setup path lose an object fanout.
+git -C "$REMOTE_ROOT" gc --quiet --prune=now
 
 cat > "$FAKEBIN/fake-ssh" <<'SH'
 #!/usr/bin/env bash
