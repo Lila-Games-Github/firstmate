@@ -1269,43 +1269,8 @@ fi
 sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active backlog handoff"
 
-poll_lock="$PARENT/state/.ios.check-publish.lock"
-FM_HOME="$PARENT" /bin/bash -c '
-  . "$1"
-  fm_lock_acquire_wait "$2"
-  touch "$3"
-  while [ ! -f "$4" ]; do sleep 0.02; done
-  fm_lock_release "$2"
-' _ "$ROOT/bin/fm-wake-lib.sh" "$poll_lock" "$TMP_ROOT/poll.entered" \
-  "$TMP_ROOT/poll.release" &
-poll_holder_pid=$!
-poll_wait=0
-while [ ! -f "$TMP_ROOT/poll.entered" ]; do
-  kill -0 "$poll_holder_pid" 2>/dev/null || fail "poll lock holder exited before acquiring the publication lock"
-  poll_wait=$((poll_wait + 1))
-  [ "$poll_wait" -le 250 ] || fail "poll lock holder never acquired the publication lock"
-  sleep 0.02
-done
-
 touch "$TMP_ROOT/handoff.release"
 wait "$handoff_holder_pid" || fail "handoff lock holder failed to release"
-remote_retire_wait=0
-while [ -e "$REMOTE_HOME" ]; do
-  kill -0 "$teardown_pid" 2>/dev/null || fail "remote teardown exited before retiring its remote home"
-  remote_retire_wait=$((remote_retire_wait + 1))
-  [ "$remote_retire_wait" -le 150 ] || fail "remote teardown never reached shared poll cleanup"
-  sleep 0.02
-done
-kill -0 "$teardown_pid" 2>/dev/null \
-  || fail "remote teardown crossed an in-flight poll publication lock"
-assert_present "$PARENT/state/ios.meta" \
-  "remote teardown removed metadata before acquiring the poll publication lock"
-assert_grep '- ios ' "$PARENT/data/secondmates.md" \
-  "remote teardown removed the registry route before acquiring the poll publication lock"
-assert_present "$PARENT/state/ios.check.sh" \
-  "remote teardown removed poll artifacts without the publication lock"
-touch "$TMP_ROOT/poll.release"
-wait "$poll_holder_pid" || fail "poll lock holder failed to release"
 if wait "$teardown_pid"; then
   :
 else

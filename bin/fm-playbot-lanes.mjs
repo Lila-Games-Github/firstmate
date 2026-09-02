@@ -3748,6 +3748,9 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
       state: supervisionPath(state, "the controller's state directory"),
     });
     const bound = await supervisionWithCheckLock(state, taskId, () => {
+      if (requestedTaskId && !fs.existsSync(path.join(state, `${taskId}.meta`))) {
+        supervisionRefuse(`firstmate task '${taskId}' is retired or unavailable, so no task-keyed watcher poll was armed`);
+      }
       const target = path.join(state, `${taskId}.check.sh`);
       let previous = null;
       let existed = false;

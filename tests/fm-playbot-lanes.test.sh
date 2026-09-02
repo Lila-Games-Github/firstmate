@@ -2569,6 +2569,12 @@ chmod 0600 "$FM_HOME_FIXTURE/state/.pr-check-migration-scan-v1" "$FM_HOME_FIXTUR
 # the tracked code root, so this fixture deliberately keeps them apart: the
 # fixture home holds no bin/ at all, which is the secondmate-home shape.
 home_dispatch() {  # <arguments-json>
+  local task_id
+  task_id=$(printf '%s\n' "$1" | sed -n 's/.*"taskId":"\([A-Za-z0-9._-]*\)".*/\1/p')
+  if [ -n "$task_id" ] && [ "${FM_TEST_PRESERVE_TASK_IDENTITY:-0}" != 1 ] \
+    && [ ! -e "$FM_HOME_FIXTURE/state/$task_id.meta" ]; then
+    printf 'kind=ship\n' > "$FM_HOME_FIXTURE/state/$task_id.meta"
+  fi
   PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" \
     rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":$1}}"
 }
@@ -3145,6 +3151,7 @@ restore_rpc() {
     node --no-warnings "$restore_bin/fm-playbot-lanes.mjs" serve
 }
 rm -f "$FIXTURE_ROOT/register-count" "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'kind=ship\n' > "$FM_HOME_FIXTURE/state/fm-autoarm-restore.meta"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" restore_rpc \
   "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-restore\"},\"title\":\"Restore binding\",\"message\":\"Do the restore work\",\"taskId\":\"fm-autoarm-restore\"}}}")
 restore_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
@@ -3970,6 +3977,78 @@ FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-pr-check.sh" "$dead_pr_id" \
   || fail "PR publication did not recover a verifiably dead lock: $(cat "$FIXTURE_ROOT/dead-pr.out")"
 pr_poll_is_valid "$dead_pr_id" || fail "dead-lock recovery did not publish a valid PR poll"
 pass "fm-playbot-lanes: concurrent owners serialize and dead or PID-reused publication locks recover"
+
+retired_task_id=fm-autoarm-retired-remote
+retired_meta="$FM_HOME_FIXTURE/state/$retired_task_id.meta"
+retired_registry="$FM_HOME_FIXTURE/data/secondmates.md"
+retired_home="$FIXTURE_ROOT/retired-remote-home"
+cat > "$retired_meta" <<EOF
+window=remote:$retired_task_id
+kind=secondmate
+remote_host=remote-test
+remote_root=$ROOT
+home=$retired_home
+EOF
+printf '%s\n' "- $retired_task_id - Retired remote fixture (host: remote-test; root: $ROOT; home: $retired_home; scope: test; projects: none; added 2026-09-02)" \
+  > "$retired_registry"
+printf 'old check\n' > "$FM_HOME_FIXTURE/state/$retired_task_id.check.sh"
+printf 'old trust\n' > "$FM_HOME_FIXTURE/state/$retired_task_id.check-trust"
+printf 'old lane\n' > "$FM_HOME_FIXTURE/state/$retired_task_id.lane-poll"
+retire_bin="$FIXTURE_ROOT/retire-bin"
+mkdir -p "$retire_bin"
+real_mv=$(command -v mv)
+cat > "$retire_bin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=${@: -1}
+if [ "$destination" = "$FM_TEST_RETIRE_REGISTRY" ]; then
+  : > "$FM_TEST_RETIRE_ENTERED"
+  while [ ! -e "$FM_TEST_RETIRE_RELEASE" ]; do sleep 0.05; done
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod 0700 "$retire_bin/mv"
+cat > "$retire_bin/ssh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod 0700 "$retire_bin/ssh"
+retire_entered="$FIXTURE_ROOT/retire-entered"
+retire_release="$FIXTURE_ROOT/retire-release"
+rm -f "$retire_entered" "$retire_release" "$FIXTURE_ROOT/retired-publisher.out"
+env -u NO_MISTAKES_GATE FM_HOME="$FM_HOME_FIXTURE" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_SSH_BIN="$retire_bin/ssh" FM_TEST_RETIRE_REGISTRY="$retired_registry" \
+  FM_TEST_RETIRE_ENTERED="$retire_entered" FM_TEST_RETIRE_RELEASE="$retire_release" \
+  FM_TEST_REAL_MV="$real_mv" PATH="$retire_bin:$PATH" \
+  "$ROOT/bin/fm-teardown.sh" "$retired_task_id" > "$FIXTURE_ROOT/retired-teardown.out" 2>&1 &
+retired_teardown_pid=$!
+wait_for_file "$retire_entered" || fail "remote teardown never reached registry retirement under the publication lock"
+FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch \
+  "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$retired_task_id\"},\"title\":\"Retired publisher\",\"message\":\"Do not republish this task\",\"taskId\":\"$retired_task_id\"}" \
+  > "$FIXTURE_ROOT/retired-publisher.out" &
+retired_publisher_pid=$!
+sleep 0.5
+kill -0 "$retired_publisher_pid" 2>/dev/null \
+  || fail "task-keyed publisher did not wait for remote teardown's publication lock"
+assert_absent "$FM_HOME_FIXTURE/state/$retired_task_id.check.sh" \
+  "remote teardown retained the old runnable check inside its publication boundary"
+: > "$retire_release"
+wait "$retired_teardown_pid" \
+  || fail "remote teardown failed while retiring the publication identity: $(cat "$FIXTURE_ROOT/retired-teardown.out")"
+wait "$retired_publisher_pid" || fail "blocked task-keyed publisher failed to return its refusal"
+OUT=$(cat "$FIXTURE_ROOT/retired-publisher.out") node --no-warnings <<'NODE' \
+  || fail "publisher did not refuse the task identity retired ahead of its lock acquisition"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== false) process.exit(1);
+if (!value.supervision.problem.includes('retired or unavailable')) process.exit(1);
+NODE
+for leftover in "$retired_task_id.check.sh" "$retired_task_id.check-trust" "$retired_task_id.lane-poll"; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "retired task publisher recreated $leftover after teardown"
+done
+assert_absent "$retired_meta" "remote teardown left retired task metadata"
+assert_no_grep "- $retired_task_id " "$retired_registry" "remote teardown left the retired registry route"
+pass "fm-playbot-lanes: remote teardown retires identity before a blocked task publisher can publish"
 
 # A Playbot-chat caller has routed wakes already, so it must get none of this -
 # and the result must say which path it took rather than leaving the caller to
