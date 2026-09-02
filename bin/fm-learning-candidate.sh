@@ -12,13 +12,15 @@
 # state/learning-candidates/<candidate-id>.<lifecycle-state>.json in the active
 # FM_HOME. Record content owns lifecycle state; the suffix is a derived hint.
 # The directory is outside task-scoped state, so fm-teardown.sh never removes it.
-# One path resolver normalizes the selected state alias and validates the store,
-# every enumerated entry, every lifecycle sibling, and every mutation destination.
+# The strict path resolver normalizes the selected state alias and validates the
+# store, every lifecycle sibling, and every mutation destination. Enumeration
+# validates each exact entry independently, reports unreadable or invalid records
+# as skipped, and continues so one damaged record cannot hide the rest of the store.
 # Every record replacement publishes at the current path by atomic temp-plus-rename,
 # then renames that sole record when its lifecycle hint changes. A read that finds
-# a stale hint trusts readable content and corrects the name in passing unless
-# summary --read-only disables that mutation. Capture makes one non-waiting
-# mutation-lock attempt; curator mutations may wait for the lock.
+# a stale or missing hint trusts readable content and corrects the name under the
+# mutation lock unless summary --read-only disables that mutation. Capture makes
+# one non-waiting mutation-lock attempt; curator mutations may wait for the lock.
 # Exact repeat capture is idempotent: the candidate id is the first 24 hex digits
 # of the SHA-256 digest of the canonical incident object, excluding timestamps.
 # A digest collision with different content is refused.
@@ -263,12 +265,16 @@ validate_slug() { # <label> <value>
   esac
 }
 
-validate_candidate_id() { # <value>
+candidate_id_is_valid() { # <value>
   local value=$1 suffix
-  case "$value" in lc-*) ;; *) die "invalid candidate id: $value" ;; esac
+  case "$value" in lc-*) ;; *) return 1 ;; esac
   suffix=${value#lc-}
-  [ "${#suffix}" -eq 24 ] || die "invalid candidate id: $value"
-  case "$suffix" in *[!0-9a-f]*) die "invalid candidate id: $value" ;; esac
+  [ "${#suffix}" -eq 24 ] || return 1
+  case "$suffix" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+validate_candidate_id() { # <value>
+  candidate_id_is_valid "$1" || die "invalid candidate id: $1"
 }
 
 validate_text() { # <label> <value> [max-bytes]
@@ -293,11 +299,15 @@ validate_signal() {
   esac
 }
 
-validate_lifecycle_state() {
+lifecycle_state_is_valid() {
   case "$1" in
     unresolved|dismissed|documented|promoted|follow-up|duplicate) ;;
-    *) die "invalid lifecycle state: $1" ;;
+    *) return 1 ;;
   esac
+}
+
+validate_lifecycle_state() {
+  lifecycle_state_is_valid "$1" || die "invalid lifecycle state: $1"
 }
 
 validate_positive_limit() { # <value> <max>
@@ -366,7 +376,13 @@ acquire_capture_lock() {
   LOCK_HELD=1
 }
 
-validate_record_json() { # <json> [expected-id]
+acquire_read_correction_lock() {
+  store_available_read_only || return 1
+  fm_lock_acquire_wait "$MUTATION_LOCK" || die "could not acquire candidate mutation lock"
+  LOCK_HELD=1
+}
+
+record_json_is_valid() { # <json> [expected-id]
   local json=$1 expected=${2:-}
   printf '%s\n' "$json" | jq -se --arg expected "$expected" '
     length == 1 and (.[0] |
@@ -429,7 +445,155 @@ validate_record_json() { # <json> [expected-id]
       and (.at | type == "string" and length > 0)
       and (.event | type == "string" and length > 0)
       and (.actor | type == "string" and length > 0))))
-  ' >/dev/null || die "invalid candidate record${expected:+: $expected}"
+  ' >/dev/null
+}
+
+validate_record_json() { # <json> [expected-id]
+  record_json_is_valid "$1" "${2:-}" \
+    || die "invalid candidate record${2:+: $2}"
+}
+
+ENUMERATED_PATH=
+ENUMERATED_ID=
+ENUMERATED_HINT=
+ENUMERATED_ERROR=
+resolve_enumerated_entry() { # <path>
+  local path=$1 base id hint
+  ENUMERATED_PATH=
+  ENUMERATED_ID=
+  ENUMERATED_HINT=
+  ENUMERATED_ERROR=
+  case "$path" in
+    ./*) path="$CANDIDATE_DIR/${path#./}" ;;
+    "$CANDIDATE_DIR"/*) ;;
+    *) ENUMERATED_ERROR="candidate path is outside the candidate store"; return 1 ;;
+  esac
+  base=${path##*/}
+  [ "$path" = "$CANDIDATE_DIR/$base" ] \
+    || { ENUMERATED_ERROR="candidate path is outside the candidate store"; return 1; }
+  case "$base" in lc-*.json) ;; *) ENUMERATED_ERROR="invalid candidate record name"; return 1 ;; esac
+  id=${base%%.*}
+  candidate_id_is_valid "$id" \
+    || { ENUMERATED_ERROR="invalid candidate id: $id"; return 1; }
+  case "$base" in
+    "$id.json") hint= ;;
+    "$id."*.json) hint=${base#"$id."}; hint=${hint%.json} ;;
+    *) ENUMERATED_ERROR="invalid candidate record name: $base"; return 1 ;;
+  esac
+  if [ -L "$path" ]; then
+    ENUMERATED_ERROR="candidate path must be a regular file"
+    return 1
+  fi
+  if [ ! -e "$path" ]; then
+    ENUMERATED_ERROR="candidate record not found"
+    return 1
+  fi
+  if [ ! -f "$path" ]; then
+    ENUMERATED_ERROR="candidate path must be a regular file"
+    return 1
+  fi
+  ENUMERATED_PATH=$path
+  ENUMERATED_ID=$id
+  ENUMERATED_HINT=$hint
+}
+
+report_skipped_entry() { # <path> <reason>
+  printf 'fm-learning-candidate: skipped candidate entry: %s: %s\n' "$1" "$2" >&2
+}
+
+find_enumerated_replacement() { # <candidate-id>
+  local id=$1 path found='' count=0 state
+  for state in unresolved dismissed documented promoted follow-up duplicate; do
+    path="$CANDIDATE_DIR/$id.$state.json"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      found=$path
+      count=$((count + 1))
+    fi
+  done
+  path="$CANDIDATE_DIR/$id.json"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    found=$path
+    count=$((count + 1))
+  fi
+  [ "$count" -eq 1 ] || return 1
+  ENUMERATED_PATH=$found
+}
+
+correct_enumerated_name() { # <path> <candidate-id> <lifecycle-state>
+  local path=$1 id=$2 state=$3 destination json
+  [ "$LOCK_HELD" -eq 1 ] || die "candidate name correction requires the mutation lock"
+  destination="$CANDIDATE_DIR/$id.$state.json"
+  if [ "$path" = "$destination" ]; then
+    RECORD_PATH=$path
+    return 0
+  fi
+  if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
+    ENUMERATED_ERROR="candidate lifecycle destination must be a regular file"
+    return 1
+  fi
+  if [ -e "$destination" ]; then
+    ENUMERATED_ERROR="candidate lifecycle destination already exists"
+    return 1
+  fi
+  if mv -- "$path" "$destination" 2>/dev/null; then
+    RECORD_PATH=$destination
+    return 0
+  fi
+  if [ ! -e "$path" ] && [ ! -L "$destination" ] && [ -f "$destination" ]; then
+    json=$(cat "$destination" 2>/dev/null || true)
+    if record_json_is_valid "$json" "$id" \
+      && printf '%s\n%s\n' "$json" "$RECORD_JSON" | jq -en \
+        'input as $actual | input as $expected | $actual == $expected' >/dev/null; then
+      RECORD_PATH=$destination
+      return 0
+    fi
+  fi
+  ENUMERATED_ERROR="could not correct candidate lifecycle hint"
+  return 1
+}
+
+load_enumerated_record() { # <path> <correct-hint>; sets RECORD_JSON and RECORD_PATH
+  local requested=$1 correct_hint=$2 path id hint state
+  if ! resolve_enumerated_entry "$requested"; then
+    if [ "$ENUMERATED_ERROR" = "candidate record not found" ]; then
+      id=${requested##*/}
+      id=${id%%.*}
+      if candidate_id_is_valid "$id" && find_enumerated_replacement "$id"; then
+        requested=$ENUMERATED_PATH
+        resolve_enumerated_entry "$requested" || {
+          report_skipped_entry "$requested" "$ENUMERATED_ERROR"
+          return 1
+        }
+      else
+        report_skipped_entry "$requested" "$ENUMERATED_ERROR"
+        return 1
+      fi
+    else
+      report_skipped_entry "$requested" "$ENUMERATED_ERROR"
+      return 1
+    fi
+  fi
+  path=$ENUMERATED_PATH
+  id=$ENUMERATED_ID
+  hint=$ENUMERATED_HINT
+  if ! RECORD_JSON=$(cat "$path" 2>/dev/null); then
+    report_skipped_entry "$path" "candidate record is unreadable"
+    return 1
+  fi
+  if ! record_json_is_valid "$RECORD_JSON" "$id"; then
+    report_skipped_entry "$path" "invalid candidate record: $id"
+    return 1
+  fi
+  state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
+  RECORD_PATH=$path
+  if [ "$hint" = "$state" ] && lifecycle_state_is_valid "$hint"; then
+    return 0
+  fi
+  [ "$correct_hint" -eq 1 ] || return 0
+  if ! correct_enumerated_name "$path" "$id" "$state"; then
+    report_skipped_entry "$path" "$ENUMERATED_ERROR"
+    return 1
+  fi
 }
 
 load_record() { # <candidate-id> [correct-hint]; sets RECORD_JSON and RECORD_PATH
@@ -501,12 +665,16 @@ records_stream() {
   local path id previous=''
   store_available_read_only || return 0
   for path in "$CANDIDATE_DIR"/lc-*.json; do
-    resolve_candidate_path entry "$path" allow-missing
-    id=$RESOLVED_ID
-    [ -n "$id" ] || continue
-    [ "$id" != "$previous" ] || continue
+    if [ "$path" = "$CANDIDATE_DIR/lc-*.json" ] && [ ! -e "$path" ] && [ ! -L "$path" ]; then
+      continue
+    fi
+    load_enumerated_record "$path" 1 || continue
+    id=$(printf '%s\n' "$RECORD_JSON" | jq -r '.id')
+    if [ "$id" = "$previous" ]; then
+      report_skipped_entry "$path" "duplicate candidate id: $id"
+      continue
+    fi
     previous=$id
-    load_record "$id"
     printf '%s\n' "$RECORD_JSON" | jq -cS .
   done
 }
@@ -612,6 +780,7 @@ list_command() {
   done
   [ "$filter" = all ] || validate_lifecycle_state "$filter"
   validate_positive_limit "$limit" 500
+  acquire_read_correction_lock || true
   array=$(records_array)
   printf '%s\n' "$array" | jq -r --arg filter "$filter" --argjson limit "$limit" '
     def terminal_safe:
@@ -633,6 +802,7 @@ batch_command() {
     esac
   done
   validate_positive_limit "$limit" 100
+  acquire_read_correction_lock || true
   array=$(records_array)
   printf '%s\n' "$array" | jq --argjson limit "$limit" '[.[] | select(.lifecycle_state == "unresolved")][: $limit]'
 }
@@ -651,6 +821,9 @@ summary_command() {
   done
   validate_summary_limit "$limit"
   store_available_read_only || return 0
+  if [ "$correct_hint" -eq 1 ]; then
+    acquire_read_correction_lock || true
+  fi
   exec 3< <(
     CDPATH='' cd -- "$CANDIDATE_DIR" && \
       find . -maxdepth 1 -name 'lc-*.json' -print | LC_ALL=C sort
@@ -658,9 +831,8 @@ summary_command() {
   producer_pid=$!
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    resolve_candidate_path entry "$name" allow-missing
-    id=$RESOLVED_ID
-    load_record "$id" "$correct_hint"
+    load_enumerated_record "$name" "$correct_hint" || continue
+    id=$(printf '%s\n' "$RECORD_JSON" | jq -r '.id')
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
     [ "$state" = unresolved ] || continue
     count=$((count + 1))

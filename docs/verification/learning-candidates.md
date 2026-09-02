@@ -81,6 +81,39 @@ FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=33 duration_ms=313116 fai
 
 The two gate skips were pre-existing optional local Pi tool checks, while every executed contract test passed.
 
+## Malformed-name resilience refresh
+
+The enumeration and session-start regressions were refreshed on 2026-09-02 with GNU Bash 5.3.15, jq 1.8.1, and Linux.
+The focused run used:
+
+```sh
+bin/fm-test-run.sh tests/fm-learning-candidate.test.sh tests/fm-session-start.test.sh
+```
+
+The result was:
+
+```text
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=149485
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=15377 failed=0
+FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=134024 failed=0
+```
+
+The public-interface fixtures cover lifecycle-less and invalid lifecycle hints, content-preserving name correction, strict candidate-id lookup, read-only directory-listing stability, all enumeration surfaces, schema-invalid record isolation, regular-file enforcement, and session-start reporting.
+The lint run used:
+
+```sh
+bash bin/fm-lint.sh
+git diff --check
+```
+
+The result was:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+```
+
 Documentation, shell, workflow, and patch hygiene used:
 
 ```sh

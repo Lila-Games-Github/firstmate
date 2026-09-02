@@ -306,6 +306,134 @@ test_atomic_lifecycle_publication_and_content_authority() {
   pass "interrupted lifecycle cutover keeps one content-authoritative record"
 }
 
+test_legacy_names_are_read_and_corrected() {
+  local home id canonical legacy invalid_hint before after checksum summary listed batch json rc
+  home=$(make_home legacy-record-name)
+  id=$(capture_candidate "$home" legacy-name FrogPile escaped-defect \
+    "a legacy record name must not hide the learning-candidate store")
+  canonical=$(candidate_path "$home" "$id")
+  legacy="$home/state/learning-candidates/$id.json"
+  checksum=$(sha256sum "$canonical" | awk '{print $1}')
+  mv "$canonical" "$legacy"
+
+  before=$(LC_ALL=C find "$home/state/learning-candidates" -maxdepth 1 -print | sort)
+  summary=$(run_learning "$home" summary --read-only 2>"$home/read-only.err") \
+    || fail "read-only summary rejected a valid legacy record name"
+  after=$(LC_ALL=C find "$home/state/learning-candidates" -maxdepth 1 -print | sort)
+  [ "$before" = "$after" ] || fail "read-only summary changed the legacy store listing"
+  assert_contains "$summary" "$id" "read-only summary omitted the legacy record content"
+  [ ! -s "$home/read-only.err" ] || fail "read-only summary reported a valid legacy record as skipped"
+  assert_present "$legacy" "read-only summary renamed the legacy record"
+
+  set +e
+  run_learning "$home" get "$id" >"$home/strict-get.out" 2>"$home/strict-get.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "strict get resolved a record without a lifecycle slot"
+  assert_grep "candidate not found" "$home/strict-get.err" \
+    "strict get did not retain candidate-id lookup semantics"
+  set +e
+  classify_feature "$home" "$id" curator-strict \
+    >"$home/strict-mutation.out" 2>"$home/strict-mutation.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a strict mutation resolved a record without a lifecycle slot"
+  assert_grep "candidate not found" "$home/strict-mutation.err" \
+    "a strict mutation did not retain candidate-id lookup semantics"
+
+  listed=$(run_learning "$home" list --all 2>"$home/list.err") \
+    || fail "list --all rejected a valid legacy record name"
+  assert_contains "$listed" "$id" "list --all omitted the legacy record"
+  [ ! -s "$home/list.err" ] || fail "list --all reported a valid legacy record as skipped"
+  assert_absent "$legacy" "list --all left the legacy record name in place"
+  assert_present "$canonical" "list --all did not publish the content-derived lifecycle name"
+  [ "$(sha256sum "$canonical" | awk '{print $1}')" = "$checksum" ] \
+    || fail "legacy name correction changed record content"
+  json=$(run_learning "$home" get "$id") || fail "get rejected the corrected legacy record"
+  [ "$(printf '%s\n' "$json" | jq -r '.lifecycle_state')" = unresolved ] \
+    || fail "get returned the wrong corrected lifecycle state"
+
+  mv "$canonical" "$legacy"
+  listed=$(run_learning "$home" list --status unresolved) \
+    || fail "list --status rejected a valid legacy record name"
+  assert_contains "$listed" "$id" "list --status omitted the legacy record"
+  mv "$canonical" "$legacy"
+  batch=$(run_learning "$home" batch) || fail "batch rejected a valid legacy record name"
+  [ "$(printf '%s\n' "$batch" | jq -r '.[0].id')" = "$id" ] \
+    || fail "batch omitted the legacy record"
+  mv "$canonical" "$legacy"
+  summary=$(run_learning "$home" summary) || fail "summary rejected a valid legacy record name"
+  assert_contains "$summary" "$id" "summary omitted the legacy record"
+  assert_present "$canonical" "summary did not correct the legacy record name"
+  [ "$(sha256sum "$canonical" | awk '{print $1}')" = "$checksum" ] \
+    || fail "summary name correction changed record content"
+  invalid_hint="$home/state/learning-candidates/$id.legacy.json"
+  mv "$canonical" "$invalid_hint"
+  listed=$(run_learning "$home" list --all) \
+    || fail "list rejected a valid record carrying an invalid lifecycle hint"
+  assert_contains "$listed" "$id" "list omitted a record carrying an invalid lifecycle hint"
+  assert_absent "$invalid_hint" "list left an invalid lifecycle hint in place"
+  assert_present "$canonical" "list did not replace an invalid hint with content-derived lifecycle state"
+  pass "legacy record names remain readable and converge on content-derived lifecycle hints"
+}
+
+test_enumeration_skips_invalid_records() {
+  local home valid corrupt corrupt_path command output errors
+  home=$(make_home skipped-invalid-record)
+  valid=$(capture_candidate "$home" valid-neighbor FrogPile escaped-defect \
+    "a valid neighboring incident must remain visible")
+  corrupt=$(capture_candidate "$home" corrupt-neighbor FrogPile escaped-defect \
+    "a corrupt incident must be isolated from valid neighbors")
+  corrupt_path=$(candidate_path "$home" "$corrupt")
+  jq '.incident.signal_type="routine-success"' "$corrupt_path" >"$home/corrupt.json"
+  mv "$home/corrupt.json" "$corrupt_path"
+
+  for command in list batch summary; do
+    case "$command" in
+      list) set -- list --all ;;
+      batch) set -- batch ;;
+      summary) set -- summary ;;
+    esac
+    output=$(run_learning "$home" "$@" 2>"$home/$command.err") \
+      || fail "$command aborted on one invalid candidate record"
+    errors=$(cat "$home/$command.err")
+    assert_contains "$output" "$valid" "$command omitted the valid neighboring record"
+    assert_contains "$errors" "skipped candidate entry: $corrupt_path" \
+      "$command did not report the skipped record path"
+    assert_contains "$errors" "invalid candidate record: $corrupt" \
+      "$command did not report the skipped record reason"
+  done
+  pass "enumeration reports invalid records without hiding valid neighbors"
+}
+
+test_enumeration_groups_lifecycle_siblings() {
+  local home id path sibling other listed occurrences errors
+  home=$(make_home grouped-lifecycle-siblings)
+  id=$(capture_candidate "$home" grouped-sibling FrogPile escaped-defect \
+    "same-id lifecycle siblings must remain adjacent during enumeration")
+  path=$(candidate_path "$home" "$id")
+  sibling=$(candidate_path "$home" "$id" dismissed)
+  jq '
+    .lifecycle_state="dismissed" |
+    .disposition={at:"2026-08-28T12:00:01Z",curator:"curator-grouped",
+      outcome:"dismissed",note:"duplicate lifecycle fixture",reference:null} |
+    .history += [{at:"2026-08-28T12:00:01Z",event:"disposed",
+      actor:"curator-grouped",detail:"dismissed"}]
+  ' "$path" >"$sibling"
+  other=$(capture_candidate "$home" grouped-neighbor FrogPile escaped-defect \
+    "a neighboring id must not split same-id lifecycle siblings")
+
+  listed=$(run_learning "$home" list --all 2>"$home/grouped.err") \
+    || fail "list aborted on same-id lifecycle siblings"
+  errors=$(cat "$home/grouped.err")
+  occurrences=$(printf '%s\n' "$listed" | awk -F '\t' -v id="$id" '$1 == id {count++} END {print count+0}')
+  [ "$occurrences" -eq 1 ] || fail "list emitted same-id lifecycle siblings $occurrences times"
+  assert_contains "$listed" "$other" "same-id lifecycle siblings hid a neighboring candidate"
+  assert_contains "$errors" "duplicate candidate id: $id" \
+    "list did not report the adjacent duplicate lifecycle sibling"
+  pass "sorted enumeration keeps lifecycle siblings adjacent and emits one record per id"
+}
+
 test_concurrent_suffix_rename_reresolves() {
   local home id source destination fakebin real_cat real_mv json rc count
   home=$(make_home concurrent-read)
@@ -427,7 +555,8 @@ test_list_resolves_ids_after_suffix_rename() {
     FM_TEST_REAL_MV="$real_mv" run_learning "$home" list --all) \
     || fail "list failed while a later candidate suffix was renamed"
   lines=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
-  [ "$lines" -eq 2 ] || fail "list omitted a candidate renamed after path enumeration"
+  [ "$lines" -eq 2 ] \
+    || fail "list returned $lines rows after a candidate rename: $listed"
   assert_contains "$listed" "$target" "list omitted the concurrently renamed candidate id"
   assert_contains "$listed" $'\tdocumented\t' \
     "list did not resolve the renamed candidate through content"
@@ -786,7 +915,7 @@ SH
   pass "summary propagates enumeration failures before rendering"
 }
 
-test_summary_rejects_unsafe_entries() {
+test_summary_skips_unsafe_entries() {
   local home extra_home dangling_home id valid rc
   home=$(make_home unsafe-summary-entry)
   id=lc-000000000000000000000000
@@ -797,9 +926,11 @@ test_summary_rejects_unsafe_entries() {
   run_learning "$home" summary >"$home/unsafe.out" 2>"$home/unsafe.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "summary silently skipped an unsafe candidate entry"
+  [ "$rc" -eq 0 ] || fail "summary aborted on an unsafe candidate entry"
+  assert_grep "skipped candidate entry" "$home/unsafe.err" \
+    "summary did not report the unsafe candidate entry"
   assert_grep "candidate path must be a regular file" "$home/unsafe.err" \
-    "summary did not route an unsafe entry through record-path validation"
+    "summary did not preserve regular-file validation"
   [ ! -s "$home/unsafe.out" ] || fail "summary rendered output after finding an unsafe entry"
 
   extra_home=$(make_home extra-summary-entry)
@@ -811,9 +942,11 @@ test_summary_rejects_unsafe_entries() {
   run_learning "$extra_home" summary >"$extra_home/extra.out" 2>"$extra_home/extra.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "summary reloaded a valid record for an invalid extra entry"
-  assert_grep "invalid lifecycle state: backup" "$extra_home/extra.err" \
-    "summary did not validate the exact enumerated lifecycle suffix"
+  [ "$rc" -eq 0 ] || fail "summary aborted on an unsafe extra entry"
+  assert_grep "skipped candidate entry" "$extra_home/extra.err" \
+    "summary did not report the unsafe extra entry"
+  assert_grep "candidate path must be a regular file" "$extra_home/extra.err" \
+    "summary followed an unsafe extra entry"
 
   dangling_home=$(make_home dangling-record-entry)
   valid=$(capture_candidate "$dangling_home" dangling-record FrogPile escaped-defect \
@@ -827,7 +960,7 @@ test_summary_rejects_unsafe_entries() {
   [ "$rc" -ne 0 ] || fail "record discovery skipped a dangling symlink sibling"
   assert_grep "candidate path must be a regular file" "$dangling_home/dangling.err" \
     "record discovery did not reject the dangling symlink sibling"
-  pass "summary and record discovery reject unsafe exact entries"
+  pass "summary skips unsafe exact entries while strict record discovery rejects them"
 }
 
 test_canonical_path_boundary_forms() {
@@ -861,9 +994,11 @@ test_canonical_path_boundary_forms() {
   run_learning "$escape_home" summary >"$escape_home/summary.out" 2>"$escape_home/summary.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "summary followed a candidate symlink outside the store"
+  [ "$rc" -eq 0 ] || fail "summary aborted on a candidate symlink outside the store"
+  assert_grep "skipped candidate entry" "$escape_home/summary.err" \
+    "summary did not report the store-escaping candidate symlink"
   assert_grep "candidate path must be a regular file" "$escape_home/summary.err" \
-    "summary did not reject the store-escaping candidate symlink"
+    "summary did not refuse the store-escaping candidate symlink"
 
   nonregular_home=$(make_home nonregular-record-entry)
   id=lc-000000000000000000000002
@@ -873,9 +1008,11 @@ test_canonical_path_boundary_forms() {
     >"$nonregular_home/summary.out" 2>"$nonregular_home/summary.err"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "summary accepted a non-regular candidate entry"
+  [ "$rc" -eq 0 ] || fail "summary aborted on a non-regular candidate entry"
+  assert_grep "skipped candidate entry" "$nonregular_home/summary.err" \
+    "summary did not report the non-regular candidate entry"
   assert_grep "candidate path must be a regular file" "$nonregular_home/summary.err" \
-    "summary did not reject a non-regular candidate entry"
+    "summary did not refuse the non-regular candidate entry"
 
   store_target=$(make_home candidate-store-target)
   mkdir -p "$store_target/external-candidates"
@@ -1056,6 +1193,9 @@ test_large_escaped_capture_avoids_argv_limits
 test_repeat_capture_is_idempotent
 test_read_commands_reject_symlinked_state
 test_atomic_lifecycle_publication_and_content_authority
+test_legacy_names_are_read_and_corrected
+test_enumeration_skips_invalid_records
+test_enumeration_groups_lifecycle_siblings
 test_concurrent_suffix_rename_reresolves
 test_cutover_accepts_concurrent_read_correction
 test_list_resolves_ids_after_suffix_rename
@@ -1065,7 +1205,7 @@ test_dedupe_interruption_and_terminal_retry
 test_concise_outputs_strip_terminal_controls
 test_bounded_summary_and_batch
 test_summary_producer_failure_propagates
-test_summary_rejects_unsafe_entries
+test_summary_skips_unsafe_entries
 test_canonical_path_boundary_forms
 test_read_commands_reject_dangling_store
 test_capture_does_not_wait_for_curation
