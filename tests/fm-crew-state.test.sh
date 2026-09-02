@@ -71,7 +71,8 @@ case "${1:-}" in
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
-        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+        printf '%s\n' "${FM_FAKE_CI_LOGS:-}"
+        exit "${FM_FAKE_CI_LOGS_RC:-0}" ;;
     esac
     ;;
   runs)
@@ -170,8 +171,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_CI_LOGS_RC=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_CI_LOGS_RC
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -441,22 +443,6 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
-  reset_fakes
-  local d; d=$(new_case ci-ready)
-  make_repo_on_branch "$d/wt" fm/feat-ci
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
-  local out; out=$(run_crew_state "$d" feat-ci)
-  assert_contains "$out" "state: done" "ci-ready status log -> done"
-  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
-  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
-  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
-}
-
 # Regression for the PR #252 incident: the crew's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
 # but the ci step's log tail shows CI is actually green and only waiting on
@@ -512,6 +498,32 @@ test_ci_monitoring_no_checks_terminal_stays_working() {
   assert_not_contains "$out" "state: done" "terminal no-checks ci-monitor run must not read as done"
   assert_not_contains "$out" "checks green" "terminal no-checks ci-monitor run must not read as checks green"
   pass "an absent CI verdict is not rendered as a passing one"
+}
+
+test_ci_ready_done_log_requires_current_green_verdict() {
+  local scenario d out
+  for scenario in unknown empty unreadable; do
+    reset_fakes
+    d=$(new_case "ci-ready-$scenario")
+    make_repo_on_branch "$d/wt" "fm/feat-ci-ready-$scenario"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-ci-ready-$scenario.meta" "window=fm:fm-feat-ci-ready-$scenario" "worktree=$d/wt" "kind=ship"
+    printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci-ready-$scenario.status"
+    FM_FAKE_AXI_STATUS="$(run_ci_monitoring "fm/feat-ci-ready-$scenario")"
+    case "$scenario" in
+      unknown) FM_FAKE_CI_LOGS="CI monitor output unavailable" ;;
+      empty) FM_FAKE_CI_LOGS="" ;;
+      unreadable)
+        FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+        FM_FAKE_CI_LOGS_RC=1
+        ;;
+    esac
+    out=$(run_crew_state "$d" "feat-ci-ready-$scenario")
+    assert_contains "$out" "state: working" "$scenario current CI verdict keeps an older ready event working"
+    assert_contains "$out" "source: run-step" "$scenario current CI verdict remains run-step sourced"
+    assert_not_contains "$out" "state: done" "$scenario current CI verdict must not accept an older ready event"
+  done
+  pass "an older checks-green event requires a current green verdict"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -739,7 +751,7 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
+test_coarse_run_does_not_accept_unverified_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
   make_repo_on_branch "$d/wt" fm/feat-coarseready
@@ -755,10 +767,10 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "state: working" "coarse run without a current verdict stays working"
+  assert_contains "$out" "source: run-step" "coarse run remains run-step sourced"
+  assert_not_contains "$out" "state: done" "coarse run must not accept an unverified ready event"
+  pass "coarse run does not accept an unverified ready status"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -1415,10 +1427,10 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_stays_working
+test_ci_ready_done_log_requires_current_green_verdict
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1431,7 +1443,7 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_coarse_run_does_not_accept_unverified_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
