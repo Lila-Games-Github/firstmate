@@ -99,6 +99,8 @@ FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=134024 faile
 ```
 
 The public-interface fixtures cover lifecycle-less and invalid lifecycle hints, content-preserving name correction, strict candidate-id lookup, read-only directory-listing stability, all enumeration surfaces, schema-invalid record isolation, regular-file enforcement, and session-start reporting.
+[jq advisory GHSA-cfh2-vwfq-qfmm](https://github.com/jqlang/jq/security/advisories/GHSA-cfh2-vwfq-qfmm) affects jq through 1.8.1 when `--rawfile` reads 2,147,483,649 bytes: 2,147,483,648 bytes reaches `String too long` and ends cleanly, while one additional byte causes the next 4,096-byte read-loop iteration to append to invalid state, aborting assertion builds or causing a heap-buffer overflow in assertion-disabled builds.
+The candidate reader accepts at most 1,048,576 bytes and supplies at most 1,048,577 bytes to `--rawfile` while classifying an oversize entry, so this store cannot reach the advisory trigger; this containment does not claim that the jq advisory itself is resolved.
 The lint run used:
 
 ```sh

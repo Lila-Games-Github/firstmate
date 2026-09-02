@@ -118,6 +118,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 MAX_TEXT_BYTES=8192
+MAX_RECORD_BYTES=1048576
 
 die() {
   printf 'fm-learning-candidate: %s\n' "$*" >&2
@@ -384,8 +385,11 @@ acquire_read_correction_lock() {
 
 read_valid_record() { # <expected-id> [path]
   local expected=${1:-} source=${2:-/dev/stdin}
-  jq -cneS --arg expected "$expected" --rawfile raw "$source" '
-    if ($raw | contains("\u0000")) then error("invalid candidate record")
+  LC_ALL=C head -c "$((MAX_RECORD_BYTES + 1))" -- "$source" \
+    | jq -cneS --arg expected "$expected" --argjson max "$MAX_RECORD_BYTES" \
+      --rawfile raw /dev/stdin '
+    if ($raw | utf8bytelength) > $max then null | halt_error(3)
+    elif ($raw | contains("\u0000")) then error("invalid candidate record")
     else ($raw | fromjson) end |
     if (
     .schema == 1
@@ -541,12 +545,20 @@ correct_enumerated_name() { # <path> <candidate-id> <lifecycle-state>
     return 0
   fi
   if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
-    ENUMERATED_ERROR="candidate lifecycle destination must be a regular file"
-    return 1
+    printf -v ENUMERATED_ERROR \
+      'candidate lifecycle correction blocked from %q to %q: destination is not a regular record' \
+      "$path" "$destination"
+    return 2
   fi
   if [ -e "$destination" ]; then
-    ENUMERATED_ERROR="candidate lifecycle destination already exists"
-    return 1
+    if read_valid_record "$id" "$destination" >/dev/null 2>&1; then
+      ENUMERATED_ERROR="candidate lifecycle destination already exists"
+      return 1
+    fi
+    printf -v ENUMERATED_ERROR \
+      'candidate lifecycle correction blocked from %q to %q: destination is invalid' \
+      "$path" "$destination"
+    return 2
   fi
   if mv -- "$path" "$destination" 2>/dev/null; then
     RECORD_PATH=$destination
@@ -565,7 +577,7 @@ correct_enumerated_name() { # <path> <candidate-id> <lifecycle-state>
 }
 
 load_enumerated_record() { # <path> <correct-hint>; sets RECORD_JSON and RECORD_PATH
-  local requested=$1 correct_hint=$2 path id hint state attempt=0
+  local requested=$1 correct_hint=$2 path id hint state attempt=0 read_rc correction_rc
   while [ "$attempt" -lt 2 ]; do
     if ! resolve_enumerated_entry "$requested"; then
       if [ "$ENUMERATED_ERROR" = "candidate record not found" ]; then
@@ -601,6 +613,12 @@ load_enumerated_record() { # <path> <correct-hint>; sets RECORD_JSON and RECORD_
     exec 4<&-
     if RECORD_JSON=$(read_valid_record "$id" "$path" 2>/dev/null); then
       break
+    else
+      read_rc=$?
+    fi
+    if [ "$read_rc" -eq 3 ]; then
+      report_skipped_entry "$path" "candidate record exceeds $MAX_RECORD_BYTES-byte limit"
+      return 1
     fi
     if ! resolve_enumerated_entry "$path"; then
       if [ "$ENUMERATED_ERROR" = "candidate record not found" ]; then
@@ -623,14 +641,18 @@ load_enumerated_record() { # <path> <correct-hint>; sets RECORD_JSON and RECORD_
     return 0
   fi
   [ "$correct_hint" -eq 1 ] || return 0
-  if ! correct_enumerated_name "$path" "$id" "$state"; then
-    report_skipped_entry "$path" "$ENUMERATED_ERROR"
-    return 1
+  if correct_enumerated_name "$path" "$id" "$state"; then
+    return 0
+  else
+    correction_rc=$?
   fi
+  report_skipped_entry "$path" "$ENUMERATED_ERROR"
+  [ "$correction_rc" -eq 2 ] && return 0
+  return 1
 }
 
 load_record() { # <candidate-id> [correct-hint]; sets RECORD_JSON and RECORD_PATH
-  local id=$1 correct_hint=${2:-1} content_state corrected_path corrected_exists attempt=0
+  local id=$1 correct_hint=${2:-1} content_state corrected_path corrected_exists attempt=0 read_rc
   validate_candidate_id "$id"
   store_available_read_only || die "candidate not found: $id"
   while [ "$attempt" -lt 2 ]; do
@@ -641,12 +663,19 @@ load_record() { # <candidate-id> [correct-hint]; sets RECORD_JSON and RECORD_PAT
       continue
     fi
     exec 4<&-
-    if ! RECORD_JSON=$(read_valid_record "$id" "$RECORD_PATH" 2>/dev/null); then
+    if RECORD_JSON=$(read_valid_record "$id" "$RECORD_PATH" 2>/dev/null); then
+      read_rc=0
+    else
+      read_rc=$?
+    fi
+    if [ "$read_rc" -ne 0 ]; then
       resolve_candidate_path entry "$RECORD_PATH" allow-missing
       if [ "$RESOLVED_EXISTS" -eq 0 ]; then
         attempt=$((attempt + 1))
         continue
       fi
+      [ "$read_rc" -ne 3 ] \
+        || die "candidate record exceeds $MAX_RECORD_BYTES-byte limit: $id"
       die "invalid candidate record: $id"
     fi
     content_state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
@@ -850,7 +879,7 @@ batch_command() {
 
 summary_command() {
   local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
-  local producer_pid correct_hint=1 previous='' canonical
+  local producer_pid correct_hint=1 previous='' canonical canonical_json canonical_state
   local -a samples=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -876,9 +905,16 @@ summary_command() {
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
     canonical="$CANDIDATE_DIR/$id.$state.json"
     if [ "$correct_hint" -eq 0 ] && [ "$RECORD_PATH" != "$canonical" ] \
-      && { [ -e "$canonical" ] || [ -L "$canonical" ]; }; then
-      report_skipped_entry "$RECORD_PATH" "duplicate candidate id: $id"
-      continue
+      && [ ! -L "$canonical" ] && [ -f "$canonical" ]; then
+      canonical_json=
+      canonical_state=
+      if canonical_json=$(read_valid_record "$id" "$canonical" 2>/dev/null); then
+        canonical_state=$(printf '%s\n' "$canonical_json" | jq -r '.lifecycle_state')
+      fi
+      if [ "$canonical_state" = "$state" ]; then
+        report_skipped_entry "$RECORD_PATH" "duplicate candidate id: $id"
+        continue
+      fi
     fi
     if [ "$id" = "$previous" ]; then
       report_skipped_entry "$RECORD_PATH" "duplicate candidate id: $id"

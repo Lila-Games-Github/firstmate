@@ -389,7 +389,8 @@ test_legacy_names_are_read_and_corrected() {
 }
 
 test_enumeration_skips_invalid_records() {
-  local home valid corrupt corrupt_path nul_record nul_path nul_canonical command output errors
+  local home valid corrupt corrupt_path nul_record nul_path nul_canonical
+  local oversize_record oversize_path oversize_canonical command output errors
   home=$(make_home skipped-invalid-record)
   valid=$(capture_candidate "$home" valid-neighbor FrogPile escaped-defect \
     "a valid neighboring incident must remain visible")
@@ -404,6 +405,12 @@ test_enumeration_skips_invalid_records() {
   nul_path="$home/state/learning-candidates/$nul_record.legacy.json"
   mv "$nul_canonical" "$nul_path"
   printf '\0' >>"$nul_path"
+  oversize_record=$(capture_candidate "$home" oversize-neighbor FrogPile escaped-defect \
+    "an oversized incident must be isolated from valid neighbors")
+  oversize_canonical=$(candidate_path "$home" "$oversize_record")
+  oversize_path="$home/state/learning-candidates/$oversize_record.legacy.json"
+  mv "$oversize_canonical" "$oversize_path"
+  truncate -s 1048577 "$oversize_path"
 
   for command in list batch summary; do
     case "$command" in
@@ -427,6 +434,14 @@ test_enumeration_skips_invalid_records() {
       "$command did not report the raw-invalid record reason"
     assert_present "$nul_path" "$command renamed the raw-invalid record"
     assert_absent "$nul_canonical" "$command published a name for the raw-invalid record"
+    assert_not_contains "$output" "$oversize_record" \
+      "$command returned an oversized candidate record"
+    assert_contains "$errors" "skipped candidate entry: $oversize_path" \
+      "$command did not report the oversized record path"
+    assert_contains "$errors" "candidate record exceeds 1048576-byte limit" \
+      "$command did not report the oversized record reason"
+    assert_present "$oversize_path" "$command renamed the oversized record"
+    assert_absent "$oversize_canonical" "$command published a name for the oversized record"
   done
   pass "enumeration reports invalid records without hiding valid neighbors"
 }
@@ -460,7 +475,7 @@ test_enumeration_groups_lifecycle_siblings() {
 }
 
 test_concurrent_suffix_rename_reresolves() {
-  local home id source destination fakebin real_jq real_mv json rc count
+  local home id source destination fakebin real_head real_mv json rc count
   home=$(make_home concurrent-read)
   id=$(capture_candidate "$home" concurrent-reader FrogPile escaped-defect \
     "a reader must tolerate an overlapping lifecycle rename")
@@ -472,7 +487,7 @@ test_concurrent_suffix_rename_reresolves() {
   destination=$(candidate_path "$home" "$id" documented)
   mv "$destination" "$source"
   fakebin=$(fm_fakebin "$home/concurrent-rename")
-  real_jq=$(command -v jq)
+  real_head=$(command -v head)
   real_mv=$(command -v mv)
   # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
@@ -483,9 +498,9 @@ test_concurrent_suffix_rename_reresolves() {
     '  "$FM_TEST_REAL_MV" "$FM_TEST_RACE_SOURCE" "$FM_TEST_RACE_DESTINATION"' \
     'fi' \
     'done' \
-    'exec "$FM_TEST_REAL_JQ" "$@"' >"$fakebin/jq"
-  chmod +x "$fakebin/jq"
-  json=$(PATH="$fakebin:$PATH" FM_TEST_REAL_JQ="$real_jq" FM_TEST_REAL_MV="$real_mv" \
+    'exec "$FM_TEST_REAL_HEAD" "$@"' >"$fakebin/head"
+  chmod +x "$fakebin/head"
+  json=$(PATH="$fakebin:$PATH" FM_TEST_REAL_HEAD="$real_head" FM_TEST_REAL_MV="$real_mv" \
     FM_TEST_RACE_SOURCE="$source" FM_TEST_RACE_DESTINATION="$destination" \
     FM_TEST_RACE_DONE="$home/race-done" run_learning "$home" get "$id") \
     || fail "get rejected one record renamed after discovery"
@@ -543,7 +558,7 @@ test_cutover_accepts_concurrent_read_correction() {
 
 test_list_resolves_ids_after_suffix_rename() {
   local home first second trigger target trigger_path source destination fakebin
-  local real_jq real_mv listed lines
+  local real_head real_mv listed lines
   home=$(make_home list-rename)
   first=$(capture_candidate "$home" list-first FrogPile escaped-defect \
     "first candidate drives concurrent list timing")
@@ -565,7 +580,7 @@ test_list_resolves_ids_after_suffix_rename() {
   destination=$(candidate_path "$home" "$target" documented)
   mv "$destination" "$source"
   fakebin=$(fm_fakebin "$home/list-reader")
-  real_jq=$(command -v jq)
+  real_head=$(command -v head)
   real_mv=$(command -v mv)
   # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
@@ -576,11 +591,11 @@ test_list_resolves_ids_after_suffix_rename() {
     '  "$FM_TEST_REAL_MV" "$FM_TEST_RENAME_SOURCE" "$FM_TEST_RENAME_DESTINATION"' \
     'fi' \
     'done' \
-    'exec "$FM_TEST_REAL_JQ" "$@"' >"$fakebin/jq"
-  chmod +x "$fakebin/jq"
+    'exec "$FM_TEST_REAL_HEAD" "$@"' >"$fakebin/head"
+  chmod +x "$fakebin/head"
   listed=$(PATH="$fakebin:$PATH" FM_TEST_TRIGGER_PATH="$trigger_path" \
     FM_TEST_RENAME_SOURCE="$source" FM_TEST_RENAME_DESTINATION="$destination" \
-    FM_TEST_RENAME_DONE="$home/rename-done" FM_TEST_REAL_JQ="$real_jq" \
+    FM_TEST_RENAME_DONE="$home/rename-done" FM_TEST_REAL_HEAD="$real_head" \
     FM_TEST_REAL_MV="$real_mv" run_learning "$home" list --all) \
     || fail "list failed while a later candidate suffix was renamed"
   lines=$(printf '%s\n' "$listed" | wc -l | tr -d ' ')
@@ -593,14 +608,14 @@ test_list_resolves_ids_after_suffix_rename() {
 }
 
 test_read_only_summary_reresolves_after_suffix_rename() {
-  local home id source destination fakebin real_jq real_mv summary
+  local home id source destination fakebin real_head real_mv summary
   home=$(make_home read-only-summary-rename)
   id=$(capture_candidate "$home" summary-rename FrogPile escaped-defect \
     "read-only summary must retain a record renamed after resolution")
   source=$(candidate_path "$home" "$id")
   destination=$(candidate_path "$home" "$id" documented)
   fakebin=$(fm_fakebin "$home/summary-reader")
-  real_jq=$(command -v jq)
+  real_head=$(command -v head)
   real_mv=$(command -v mv)
   # shellcheck disable=SC2016 # Single-quoted fields are generated script source.
   printf '%s\n' \
@@ -611,11 +626,11 @@ test_read_only_summary_reresolves_after_suffix_rename() {
     '  "$FM_TEST_REAL_MV" "$FM_TEST_RENAME_SOURCE" "$FM_TEST_RENAME_DESTINATION"' \
     'fi' \
     'done' \
-    'exec "$FM_TEST_REAL_JQ" "$@"' >"$fakebin/jq"
-  chmod +x "$fakebin/jq"
+    'exec "$FM_TEST_REAL_HEAD" "$@"' >"$fakebin/head"
+  chmod +x "$fakebin/head"
   summary=$(PATH="$fakebin:$PATH" FM_TEST_RENAME_SOURCE="$source" \
     FM_TEST_RENAME_DESTINATION="$destination" FM_TEST_RENAME_DONE="$home/rename-done" \
-    FM_TEST_REAL_JQ="$real_jq" FM_TEST_REAL_MV="$real_mv" \
+    FM_TEST_REAL_HEAD="$real_head" FM_TEST_REAL_MV="$real_mv" \
     run_learning "$home" summary --read-only 2>"$home/summary.err") \
     || fail "read-only summary failed during a concurrent lifecycle rename"
   assert_contains "$summary" "$id" \
@@ -653,6 +668,50 @@ test_read_only_summary_prefers_canonical_duplicate() {
   assert_present "$legacy" "read-only summary removed the legacy duplicate"
   assert_present "$canonical" "read-only summary removed the canonical record"
   pass "read-only summary prefers the canonical slot for duplicate ids"
+}
+
+test_invalid_canonical_does_not_hide_valid_stale_record() {
+  local home id canonical legacy checksum command output errors before after
+  home=$(make_home invalid-canonical-sibling)
+  id=$(capture_candidate "$home" invalid-canonical FrogPile escaped-defect \
+    "an invalid canonical sibling must not hide valid stale content")
+  canonical=$(candidate_path "$home" "$id")
+  legacy="$home/state/learning-candidates/$id.json"
+  mv "$canonical" "$legacy"
+  checksum=$(sha256sum "$legacy" | awk '{print $1}')
+  printf '{}\n' >"$canonical"
+
+  for command in summary-read-only list batch summary; do
+    case "$command" in
+      summary-read-only) set -- summary --read-only ;;
+      list) set -- list --all ;;
+      batch) set -- batch ;;
+      summary) set -- summary ;;
+    esac
+    before=$(LC_ALL=C find "$home/state/learning-candidates" -maxdepth 1 -print | sort)
+    output=$(run_learning "$home" "$@" 2>"$home/$command.err") \
+      || fail "$command aborted on an invalid canonical sibling"
+    after=$(LC_ALL=C find "$home/state/learning-candidates" -maxdepth 1 -print | sort)
+    errors=$(cat "$home/$command.err")
+    assert_contains "$output" "$id" "$command hid the valid stale record"
+    assert_contains "$errors" "skipped candidate entry: $canonical" \
+      "$command did not report the invalid canonical sibling"
+    assert_contains "$errors" "invalid candidate record: $id" \
+      "$command did not report the invalid canonical sibling reason"
+    if [ "$command" != summary-read-only ]; then
+      assert_contains "$errors" "$legacy" \
+        "$command did not name the source of the blocked correction"
+      assert_contains "$errors" "$canonical" \
+        "$command did not name the destination of the blocked correction"
+      assert_contains "$errors" "candidate lifecycle correction blocked" \
+        "$command did not report the blocked correction"
+    fi
+    [ "$before" = "$after" ] || fail "$command mutated the blocked sibling pair"
+    [ "$(sha256sum "$legacy" | awk '{print $1}')" = "$checksum" ] \
+      || fail "$command changed the valid stale record"
+    [ "$(cat "$canonical")" = '{}' ] || fail "$command changed the invalid canonical sibling"
+  done
+  pass "invalid canonical siblings do not hide valid stale records"
 }
 
 test_routes_and_no_one_off_skill_gate() {
@@ -1317,6 +1376,7 @@ test_cutover_accepts_concurrent_read_correction
 test_list_resolves_ids_after_suffix_rename
 test_read_only_summary_reresolves_after_suffix_rename
 test_read_only_summary_prefers_canonical_duplicate
+test_invalid_canonical_does_not_hide_valid_stale_record
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry
