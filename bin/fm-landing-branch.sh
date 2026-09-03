@@ -3,6 +3,9 @@
 # landing_branch= marks the project branch a ship task's work is expected to
 # land on instead of the default branch; bin/fm-spawn.sh's header owns the
 # field's contract and bin/fm-teardown.sh consumes it in the landed-work test.
+# Recording it here moves only the landing target: the task worktree base was
+# chosen at spawn time (a fresh --landing-branch spawn starts at that branch's
+# tip; see bin/fm-spawn.sh's header) and is never re-based afterwards.
 # This helper exists for the task that only learns its landing branch after
 # spawn (or was spawned before the field existed): it records or corrects the
 # field on an EXISTING task without hand-editing state/<id>.meta.
