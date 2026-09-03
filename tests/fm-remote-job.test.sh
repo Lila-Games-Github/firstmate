@@ -19,6 +19,7 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 TENTATIVE_PROCESS_PID=
+TENTATIVE_REPLACEMENT_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -26,6 +27,10 @@ mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  if [ -n "$TENTATIVE_REPLACEMENT_PID" ]; then
+    fm_remote_job_stop_worker_tree "$TENTATIVE_REPLACEMENT_PID" || true
+    wait "$TENTATIVE_REPLACEMENT_PID" 2>/dev/null || true
+  fi
   [ -z "$TENTATIVE_PROCESS_PID" ] || kill "$TENTATIVE_PROCESS_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
@@ -344,12 +349,34 @@ chmod 600 "$TENTATIVE_STATE/worker.lock/pid" "$TENTATIVE_STATE/worker.lock/start
   "$TENTATIVE_RUNNING_JOB/state" "$TENTATIVE_RUNNING_JOB/.claim"/* \
   "$TENTATIVE_RUNNING_JOB/stdout" "$TENTATIVE_RUNNING_JOB/stderr"
 touch -t 200001010000 "$TENTATIVE_STATE/worker.lock"
-set +e
+TENTATIVE_REPLACEMENT_OUTCOME=timeout
+set -m
 HOME="$TENTATIVE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$TENTATIVE_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
-  > "$TMP_ROOT/tentative-refused.out" 2> "$TMP_ROOT/tentative-refused.err"
+  > "$TMP_ROOT/tentative-refused.out" 2> "$TMP_ROOT/tentative-refused.err" &
+TENTATIVE_REPLACEMENT_PID=$!
+set +m
+for _ in $(seq 1 100); do
+  if [ -f "$TENTATIVE_SIDE_EFFECT" ]; then
+    TENTATIVE_REPLACEMENT_OUTCOME=executed
+    break
+  fi
+  if ! kill -0 "$TENTATIVE_REPLACEMENT_PID" 2>/dev/null; then
+    TENTATIVE_REPLACEMENT_OUTCOME=exited
+    break
+  fi
+  sleep 0.05
+done
+fm_remote_job_stop_worker_tree "$TENTATIVE_REPLACEMENT_PID" || true
+set +e
+wait "$TENTATIVE_REPLACEMENT_PID" 2>/dev/null
 TENTATIVE_REFUSED_RC=$?
 set -e
+TENTATIVE_REPLACEMENT_PID=
+case "$TENTATIVE_REPLACEMENT_OUTCOME" in
+  executed) fail "a replacement executed queued work while prior execution was alive" ;;
+  timeout) fail "tentative quarantine replacement did not exit within five seconds" ;;
+esac
 [ "$TENTATIVE_REFUSED_RC" -ne 0 ] \
   || fail "tentative quarantine recovery ignored a recorded live process"
 assert_present "$TENTATIVE_STATE/worker.lock/quarantine" \
