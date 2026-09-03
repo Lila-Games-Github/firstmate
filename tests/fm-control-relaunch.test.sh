@@ -297,6 +297,35 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+test_relaunch_reuses_recorded_landing_branch_without_rebasing() {
+  local dir out rc head_before
+  dir=$(new_case landing-branch rl41)
+  add_ship_task "$dir" rl41 claude
+  # The recorded landing branch is the task's base axis; a relaunch must carry
+  # it forward as a record-owned field and re-enter the worktree exactly where
+  # the previous agent left it, never re-basing it onto the default branch.
+  git -C "$dir/proj" branch --quiet proto/lane HEAD
+  printf 'landing_branch=proto/lane\n' >> "$dir/home/state/rl41.meta"
+  printf 'unlanded lane work\n' > "$dir/wt/lane.txt"
+  git -C "$dir/wt" add lane.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm lane-work
+  printf 'uncommitted lane work\n' > "$dir/wt/wip.txt"
+  head_before=$(git -C "$dir/wt" rev-parse HEAD)
+
+  out=$(run_control "$dir" rl41 relaunch --note "resuming lane work"); rc=$?
+  expect_code 0 "$rc" "a relaunch with a recorded landing branch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl41 landing_branch)" = proto/lane ] \
+    || fail "the recorded landing branch must survive the relaunch"
+  [ "$(grep -c '^landing_branch=' "$dir/home/state/rl41.meta")" = 1 ] \
+    || fail "the relaunch must record the landing branch exactly once"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head_before" ] \
+    || fail "a relaunch must re-enter the worktree at the work's own head, not re-base it"
+  assert_grep 'uncommitted lane work' "$dir/wt/wip.txt" "a relaunch must keep uncommitted work in the worktree"
+  [ "$(meta_field "$dir" rl41 worktree)" = "$dir/wt" ] \
+    || fail "the worktree must be reused, not reallocated"
+  pass "fm-control relaunch: the recorded landing branch is reused as the task's base axis without re-basing the worktree"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare ready exported release
   dir=$(new_case metadata-race rl28)
@@ -1314,6 +1343,7 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_reuses_recorded_landing_branch_without_rebasing
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
