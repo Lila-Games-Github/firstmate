@@ -164,7 +164,8 @@ worker_acquire_lock() {
     fi
     [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
     rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
-    worker_remove_lock_temps "$WORKER_LOCK" || return 1
+    worker_recover_lock_temps "$WORKER_LOCK" || return 1
+    if [ -e "$WORKER_LOCK/quarantine" ] || [ -L "$WORKER_LOCK/quarantine" ]; then continue; fi
     rmdir "$WORKER_LOCK" || return 1
   done
   return 1
@@ -184,17 +185,26 @@ worker_clear_quarantine() {
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
-# Remove the temp files a worker renames into place while publishing lock
-# ownership or a quarantine marker. A worker killed between mktemp and mv
-# leaves one behind, and rmdir refuses a lock directory that still holds it.
-# Only regular, non-symlink files matching the worker's own temp names are
-# removed; anything else keeps the directory in place.
-worker_remove_lock_temps() { # <lock-dir>
+# Recover the temp files a worker renames into place while publishing lock
+# ownership or a quarantine marker. Only regular, non-symlink files matching
+# the worker's own temp names are accepted; anything else keeps the directory
+# in place. A tentative quarantine is promoted so execution must be proven
+# stopped before ownership can be reclaimed.
+worker_recover_lock_temps() { # <lock-dir>
   local lock=$1 file
-  for file in "$lock"/.pid.* "$lock"/.start.* "$lock"/.command.* "$lock"/.quarantine.*; do
+  for file in "$lock"/.pid.* "$lock"/.start.* "$lock"/.command.*; do
     [ -e "$file" ] || [ -L "$file" ] || continue
     [ -f "$file" ] && [ ! -L "$file" ] || return 1
     rm -f -- "$file" || return 1
+  done
+  for file in "$lock"/.quarantine.*; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    if [ -e "$lock/quarantine" ] || [ -L "$lock/quarantine" ]; then
+      rm -f -- "$file" || return 1
+    else
+      mv -f -- "$file" "$lock/quarantine" || return 1
+    fi
   done
 }
 
@@ -205,7 +215,7 @@ worker_cleanup() {
   if [ -z "$owner_pid" ]; then
     [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] &&
       rm -f -- "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
-    worker_remove_lock_temps "$WORKER_LOCK" 2>/dev/null || true
+    worker_recover_lock_temps "$WORKER_LOCK" 2>/dev/null || true
     rmdir "$WORKER_LOCK" 2>/dev/null || true
     WORKER_LOCK_HELD=0
     return 0
@@ -218,7 +228,7 @@ worker_cleanup() {
   [ ! -L "$ready" ] && rm -f -- "$ready" 2>/dev/null || true
   [ ! -L "$identity" ] && rm -f -- "$identity" 2>/dev/null || true
   rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
-  worker_remove_lock_temps "$WORKER_LOCK" 2>/dev/null || true
+  worker_recover_lock_temps "$WORKER_LOCK" 2>/dev/null || true
   rmdir "$WORKER_LOCK" 2>/dev/null || true
   WORKER_LOCK_HELD=0
 }
@@ -744,7 +754,7 @@ worker_supervisor_cleanup_dead_child() { # <account-home> <pid>
   [ ! -L "$identity" ] && rm -f -- "$identity" || return 1
   [ ! -L "$lock/start" ] && [ ! -L "$lock/command" ] || return 1
   rm -f -- "$lock/pid" "$lock/start" "$lock/command" || return 1
-  worker_remove_lock_temps "$lock" || return 1
+  worker_recover_lock_temps "$lock" || return 1
   rmdir "$lock"
 }
 
