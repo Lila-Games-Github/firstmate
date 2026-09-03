@@ -162,7 +162,7 @@ git -C "$FIXTURE_ROOT/controller" remote add origin "$FIXTURE_ROOT/controller-re
 git -C "$FIXTURE_ROOT/controller" push -u origin main >/dev/null
 
 freshness_repo="$FIXTURE_ROOT/freshness"
-freshness_remote="$FIXTURE_ROOT/freshness-remote.git"
+freshness_remote="$FIXTURE_ROOT/user:freshness-secret-token@freshness-remote.git"
 mkdir -p "$freshness_repo"
 git -C "$freshness_repo" init --initial-branch=main >/dev/null
 git -C "$freshness_repo" config user.name "Firstmate tests"
@@ -177,6 +177,7 @@ freshness_behind="$freshness_repo/.worktrees/behind"
 freshness_diverged="$freshness_repo/.worktrees/diverged"
 freshness_clean="$freshness_repo/.worktrees/clean"
 freshness_ahead="$freshness_repo/.worktrees/ahead"
+freshness_race="$freshness_repo/.worktrees/race"
 freshness_shallow="$FIXTURE_ROOT/freshness-shallow"
 git -C "$freshness_repo" worktree add -b freshness-behind "$freshness_behind" main >/dev/null
 git -C "$freshness_repo" worktree add -b freshness-diverged "$freshness_diverged" main >/dev/null
@@ -189,9 +190,20 @@ git -C "$freshness_repo" worktree add -b freshness-clean "$freshness_clean" main
 git -C "$freshness_repo" worktree add -b freshness-ahead "$freshness_ahead" main >/dev/null
 printf 'ahead\n' >> "$freshness_ahead/freshness.txt"
 git -C "$freshness_ahead" commit -am "ahead lane work" >/dev/null
+git -C "$freshness_repo" worktree add -b freshness-race "$freshness_race" main >/dev/null
+printf 'original\n' > "$freshness_race/race.txt"
+git -C "$freshness_race" add race.txt
+git -C "$freshness_race" commit -m "race original head" >/dev/null
+freshness_race_head=$(git -C "$freshness_race" rev-parse HEAD)
+git -C "$freshness_race" switch --detach main >/dev/null
+printf 'moved\n' > "$freshness_race/race.txt"
+git -C "$freshness_race" add race.txt
+git -C "$freshness_race" commit -m "race moved head" >/dev/null
+freshness_race_next=$(git -C "$freshness_race" rev-parse HEAD)
+git -C "$freshness_race" switch freshness-race >/dev/null
 git clone --depth=1 --branch main "file://$freshness_remote" "$freshness_shallow" >/dev/null
 
-FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" FRESHNESS_SHALLOW="$freshness_shallow" node --no-warnings <<'NODE'
+FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" FRESHNESS_RACE="$freshness_race" FRESHNESS_SHALLOW="$freshness_shallow" node --no-warnings <<'NODE'
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
@@ -206,6 +218,7 @@ for (const [id, name, rootPath, branch] of [
   ['ws-fresh-ahead', 'fresh-ahead', process.env.FRESHNESS_AHEAD, 'freshness-ahead'],
   ['ws-fresh-behind', 'fresh-behind', process.env.FRESHNESS_BEHIND, 'freshness-behind'],
   ['ws-fresh-diverged', 'fresh-diverged', process.env.FRESHNESS_DIVERGED, 'freshness-diverged'],
+  ['ws-fresh-race', 'fresh-race', process.env.FRESHNESS_RACE, 'freshness-race'],
   ['ws-fresh-shallow', 'fresh-shallow', process.env.FRESHNESS_SHALLOW, 'main'],
   ['ws-fresh-unreadable', 'fresh-unreadable', path.join(process.env.FRESHNESS_REPO, '.worktrees', 'missing'), 'freshness-missing'],
 ]) {
@@ -251,9 +264,11 @@ if (value('DIVERGED').current || root('DIVERGED').commitsAhead !== 1 || root('DI
 if (root('DIVERGED').headIsCleanFastForwardOfLandingTip || root('DIVERGED').unlandedCommits[0]?.subject !== 'diverged lane work') process.exit(1);
 for (const name of ['CLEAN', 'AHEAD', 'BEHIND', 'DIVERGED']) {
   if (!root(name).worktreePath || !root(name).head.commit || !root(name).landingBranchTip.commit) process.exit(1);
+  if (Object.hasOwn(root(name).landingBranchTip, 'remoteUrl')) process.exit(1);
+  if (JSON.stringify(value(name)).includes('freshness-secret-token')) process.exit(1);
 }
 NODE
-pass "fm-playbot-lanes: workspace freshness reports real ahead, behind, diverged, and clean Git evidence"
+pass "fm-playbot-lanes: workspace freshness reports Git evidence without remote URLs"
 
 if out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness '{"project":"project-freshness","landingBranch":"main"}' 2>&1); then
   fail "workspace freshness accepted an omitted workspace selector through the executable call interface"
@@ -279,6 +294,46 @@ const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('freshness is unreadable') || !value.error.message.includes('repository is shallow')) process.exit(1);
 NODE
 pass "fm-playbot-lanes: workspace freshness requires explicit selectors and complete readable Git state"
+
+freshness_race_bin="$FIXTURE_ROOT/freshness-race-bin"
+freshness_race_marker="$FIXTURE_ROOT/freshness-race-moved"
+real_git=$(command -v git)
+mkdir -p "$freshness_race_bin"
+cat > "$freshness_race_bin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ ! -e "$FM_TEST_FRESHNESS_RACE_MARKER" ] \
+  && [ "${1:-}" = "-C" ] \
+  && [ "${2:-}" = "$FM_TEST_FRESHNESS_RACE_ROOT" ] \
+  && [ "${3:-}" = "rev-parse" ] \
+  && [ "${4:-}" = "--verify" ] \
+  && [ "${5:-}" = "HEAD^{commit}" ]; then
+  output=$("$FM_TEST_REAL_GIT" "$@") || exit $?
+  : > "$FM_TEST_FRESHNESS_RACE_MARKER"
+  "$FM_TEST_REAL_GIT" -C "$FM_TEST_FRESHNESS_RACE_ROOT" reset --hard "$FM_TEST_FRESHNESS_RACE_NEXT" >/dev/null || exit $?
+  printf '%s\n' "$output"
+  exit 0
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod 0700 "$freshness_race_bin/git"
+out=$(FM_TEST_REAL_GIT="$real_git" \
+  FM_TEST_FRESHNESS_RACE_MARKER="$freshness_race_marker" \
+  FM_TEST_FRESHNESS_RACE_ROOT="$freshness_race" \
+  FM_TEST_FRESHNESS_RACE_NEXT="$freshness_race_next" \
+  PATH="$freshness_race_bin:$PATH" \
+  rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness","landingBranch":"missing-landing"}}}')
+OUT="$out" EXPECTED_HEAD="$freshness_race_head" node --no-warnings <<'NODE' \
+  || fail "retirement fallback combined a captured head with another commit's subject"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-race');
+const root = workspace.roots[0];
+if (root.head.commit !== process.env.EXPECTED_HEAD || root.head.subject !== 'race original head') process.exit(1);
+if (!root.blockers.some(blocker => blocker.code === 'landing-branch-unresolvable')) process.exit(1);
+NODE
+[ "$(git -C "$freshness_race" rev-parse HEAD)" = "$freshness_race_next" ] \
+  || fail "retirement head-race fixture did not move HEAD"
+pass "fm-playbot-lanes: retirement fallback keeps head subjects snapshot-consistent"
 
 # This is the end-to-end reproduction for the fleet-visibility defect. The
 # public MCP call used to resolve an omitted workspace through Playbot's UI
@@ -4984,13 +5039,13 @@ db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
 db.close();
 NODE
 retirement_list main > "$retirement_inventory"
-OUT_FILE="$retirement_inventory" DEFAULT_REMOTE="$FIXTURE_ROOT/worker-remote.git" WORKTREE_REMOTE="$worktree_remote" DEFAULT_HEAD="$operation_base" node --no-warnings <<'NODE' \
+OUT_FILE="$retirement_inventory" DEFAULT_HEAD="$operation_base" node --no-warnings <<'NODE' \
   || fail "worktree-specific remote evidence was reused across roots"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const ordinary = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt').roots[0];
 const specific = value.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-remote-specific').roots[0];
-if (ordinary.landing.remoteUrl !== process.env.DEFAULT_REMOTE || ordinary.landing.commit !== process.env.DEFAULT_HEAD) process.exit(1);
-if (specific.landing.remote !== 'retirement-specific' || specific.landing.remoteUrl !== process.env.WORKTREE_REMOTE || specific.landing.commit === ordinary.landing.commit) process.exit(1);
+if (Object.hasOwn(ordinary.landing, 'remoteUrl') || ordinary.landing.commit !== process.env.DEFAULT_HEAD) process.exit(1);
+if (specific.landing.remote !== 'retirement-specific' || Object.hasOwn(specific.landing, 'remoteUrl') || specific.landing.commit === ordinary.landing.commit) process.exit(1);
 if (specific.commitsAhead.length === 0 || !specific.blockers.some(blocker => blocker.code === 'unlanded-commits')) process.exit(1);
 NODE
 git -C "$worktree_remote_root" config --worktree --unset-all branch.main.remote

@@ -1345,7 +1345,6 @@ function landingRemote(root, landingBranch) {
   return {
     requested,
     remote,
-    remoteUrl: String(git(root, ["remote", "get-url", remote])).trim(),
     branch,
     remoteRef,
     commit,
@@ -1480,9 +1479,10 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
   try {
     const top = canonicalPath(stripTerminalLineEnding(git(rootPath, ["rev-parse", "--show-toplevel"])));
     if (top !== rootPath) throw new Error(`root resolves inside Git worktree ${top} instead of naming it exactly`);
+    const headCommit = String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
     result.head = {
-      commit: String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim(),
-      subject: exactCommitSubject(rootPath, "HEAD"),
+      commit: headCommit,
+      subject: exactCommitSubject(rootPath, headCommit),
     };
   } catch (error) {
     result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
