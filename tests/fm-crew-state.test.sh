@@ -71,7 +71,8 @@ case "${1:-}" in
         if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
         else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
-        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+        printf '%s\n' "${FM_FAKE_CI_LOGS:-}"
+        exit "${FM_FAKE_CI_LOGS_RC:-0}" ;;
     esac
     ;;
   runs)
@@ -170,8 +171,9 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_CI_LOGS_RC=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS FM_FAKE_CI_LOGS_RC
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -441,22 +443,6 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
-  reset_fakes
-  local d; d=$(new_case ci-ready)
-  make_repo_on_branch "$d/wt" fm/feat-ci
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ci.meta" "window=fm:fm-feat-ci" "worktree=$d/wt" "kind=ship"
-  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
-  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
-  local out; out=$(run_crew_state "$d" feat-ci)
-  assert_contains "$out" "state: done" "ci-ready status log -> done"
-  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
-  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
-  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
-}
-
 # Regression for the PR #252 incident: the crew's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
 # but the ci step's log tail shows CI is actually green and only waiting on
@@ -499,7 +485,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   pass "top-level ci status uses ci log green marker"
 }
 
-test_ci_monitoring_no_checks_terminal_surfaces_done() {
+test_ci_monitoring_no_checks_terminal_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-nochecks)
   make_repo_on_branch "$d/wt" fm/feat-cinochecks
@@ -508,9 +494,36 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  assert_contains "$out" "state: working" "terminal no-checks ci-monitor run -> working"
+  assert_not_contains "$out" "state: done" "terminal no-checks ci-monitor run must not read as done"
+  assert_not_contains "$out" "checks green" "terminal no-checks ci-monitor run must not read as checks green"
+  pass "an absent CI verdict is not rendered as a passing one"
+}
+
+test_ci_ready_done_log_requires_current_green_verdict() {
+  local scenario d out
+  for scenario in unknown empty unreadable; do
+    reset_fakes
+    d=$(new_case "ci-ready-$scenario")
+    make_repo_on_branch "$d/wt" "fm/feat-ci-ready-$scenario"
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-ci-ready-$scenario.meta" "window=fm:fm-feat-ci-ready-$scenario" "worktree=$d/wt" "kind=ship"
+    printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci-ready-$scenario.status"
+    FM_FAKE_AXI_STATUS="$(run_ci_monitoring "fm/feat-ci-ready-$scenario")"
+    case "$scenario" in
+      unknown) FM_FAKE_CI_LOGS="CI monitor output unavailable" ;;
+      empty) FM_FAKE_CI_LOGS="" ;;
+      unreadable)
+        FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+        FM_FAKE_CI_LOGS_RC=1
+        ;;
+    esac
+    out=$(run_crew_state "$d" "feat-ci-ready-$scenario")
+    assert_contains "$out" "state: working" "$scenario current CI verdict keeps an older ready event working"
+    assert_contains "$out" "source: run-step" "$scenario current CI verdict remains run-step sourced"
+    assert_not_contains "$out" "state: done" "$scenario current CI verdict must not accept an older ready event"
+  done
+  pass "an older checks-green event requires a current green verdict"
 }
 
 test_ci_monitoring_green_then_rearm_stays_working() {
@@ -738,7 +751,7 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status() {
+test_coarse_run_does_not_accept_unverified_ready_status() {
   reset_fakes
   local d short; d=$(new_case coarse-ready-other-log)
   make_repo_on_branch "$d/wt" fm/feat-coarseready
@@ -754,10 +767,10 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
-  pass "coarse run does not probe another branch's ci log"
+  assert_contains "$out" "state: working" "coarse run without a current verdict stays working"
+  assert_contains "$out" "source: run-step" "coarse run remains run-step sourced"
+  assert_not_contains "$out" "state: done" "coarse run must not accept an unverified ready event"
+  pass "coarse run does not accept an unverified ready status"
 }
 
 # A different-branch run with NO matching runs-list row must NOT be
@@ -781,6 +794,24 @@ EOF
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
   assert_contains "$out" "state: done" "falls back to the log verb"
   pass "another branch's run is ignored, falls back"
+}
+
+test_unavailable_run_rejects_older_checks_green_status() {
+  reset_fakes
+  local d; d=$(new_case unavailable-run-stale-green)
+  make_repo_on_branch "$d/wt" fm/feat-unavailable-run
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unavailable-run.meta" "window=fm:fm-feat-unavailable-run" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/5 checks green\n' > "$d/state/feat-unavailable-run.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-unavailable-run
+  local out; out=$(run_crew_state "$d" feat-unavailable-run)
+  assert_contains "$out" "state: unknown" "unavailable run lookup leaves an older checks-green event unverified"
+  assert_contains "$out" "source: none" "unavailable run lookup has no current success source"
+  assert_not_contains "$out" "state: done" "unavailable run lookup must not accept an older checks-green event"
+  pass "unavailable run lookup rejects an older checks-green event"
 }
 
 # (f) no run for this crew + a busy pane -> working via pane
@@ -1222,6 +1253,21 @@ test_remote_alive_idle_is_healthy_not_gone() {
   pass "fm-crew-state remote: an idle alive endpoint reads alive, never gone or dead"
 }
 
+test_remote_alive_checks_green_awaits_current_verification() {
+  reset_fakes
+  local d out rc
+  d=$(setup_remote_case remote-alive-checks-green)
+  make_fakebin "$d" >/dev/null
+  printf 'done: PR https://github.com/o/r/pull/8 checks green\n' > "$d/state/rsm.status"
+  out=$(FM_FAKE_REMOTE_STATE_OUT=alive FM_FAKE_SSH_RC=0 run_remote_crew_state "$d" rsm); rc=$?
+  expect_code 0 "$rc" "remote alive checks-green exits 0"
+  assert_contains "$out" "state: unknown" "unattributable remote checks-green remains unknown"
+  assert_contains "$out" "source: remote-endpoint" "remote endpoint remains the current source"
+  assert_contains "$out" "awaiting current attributable CI verification" "remote checks-green names the missing verification"
+  assert_not_contains "$out" "state: done" "remote checks-green must not bypass current verification"
+  pass "fm-crew-state remote: checks-green awaits current attributable verification"
+}
+
 test_remote_unreachable_is_unknown_remote_not_dead() {
   reset_fakes
   local d out rc
@@ -1414,10 +1460,10 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
-test_ci_monitoring_no_checks_terminal_surfaces_done
+test_ci_monitoring_no_checks_terminal_stays_working
+test_ci_ready_done_log_requires_current_green_verdict
 test_ci_monitoring_green_then_rearm_stays_working
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
@@ -1430,8 +1476,9 @@ test_terminal_passed
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
-test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
+test_coarse_run_does_not_accept_unverified_ready_status
 test_other_branch_run_ignored
+test_unavailable_run_rejects_older_checks_green_status
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
@@ -1451,6 +1498,7 @@ test_scout_skips_run_lookup
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
 test_remote_alive_idle_is_healthy_not_gone
+test_remote_alive_checks_green_awaits_current_verification
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta

@@ -23,9 +23,10 @@
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
 #      live on that host, so the local worktree and pane reads are skipped and
 #      the remote host is asked for the endpoint's recovery-grade state
-#      (fm-on.sh + fm-remote-secondmate-control.sh state). alive falls through
-#      to the routed status log; dead/missing report the remote verdict; an
-#      unreachable or unreadable remote reports unknown-remote, never a false
+#      (fm-on.sh + fm-remote-secondmate-control.sh state). alive normally falls
+#      through to the routed status log, but a checks-green event must pass the
+#      shared current-CI verifier below; dead/missing report the remote verdict;
+#      an unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
 #   2. Matching no-mistakes run for this crew's branch AND current code identity,
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
@@ -147,45 +148,6 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
-
-# --- remote secondmate: the true source is the remote endpoint ---------------
-# A remote mate's recorded worktree and backend target live on its own host, so
-# the local worktree probe above and the local pane reads below would misreport
-# a healthy remote mate as gone or dead. Ask the remote host for the endpoint's
-# recovery-grade state over the same fm-on.sh transport fm-send uses, then read
-# current activity from the routed status log exactly as for a local
-# secondmate (an idle endpoint is healthy for a secondmate either way). An
-# unreachable host or unreadable endpoint is reported as unknown-remote -
-# explicitly NOT proof of death - so a transport blip never reads as a torn
-# down or dead mate; only the remote host's own dead/missing verdict may say
-# the endpoint is actually gone.
-if [ -n "$REMOTE_HOST" ]; then
-  if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$ID" \
-    fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
-    REMOTE_STATE=
-  fi
-  REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
-  case "$REMOTE_STATE" in
-    alive)
-      if [ -n "$LOG_VERB" ]; then
-        LOG_STATE=$(map_log_state "$LOG_LINE")
-        if [ "$LOG_STATE" != unknown ]; then
-          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
-        fi
-      fi
-      emit unknown remote-endpoint "alive on $REMOTE_HOST (an idle secondmate is healthy)"
-      ;;
-    dead|missing)
-      emit unknown remote-endpoint "remote endpoint $REMOTE_STATE on $REMOTE_HOST"
-      ;;
-    '')
-      emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)"
-      ;;
-    *)
-      emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
-      ;;
-  esac
-fi
 
 # pane_readable is consulted ONLY in the no-run fallback below. The run-step path
 # stays authoritative regardless of pane liveness - judge by the run-step, not the
@@ -329,30 +291,86 @@ nm_effective_ci_step_status() {
 # reports every check green - it only reaches outcome=passed once the PR is
 # actually merged (or failed/cancelled if closed). `axi status`'s steps[] table
 # never distinguishes "still waiting on checks" from "checks green, waiting on
-# merge": both read as plain `ci,running,...`. The only place that transition is
-# recorded is the ci step's own log text, e.g. "all CI checks passed - still
-# monitoring until merged or closed" or "no CI checks reported - still
-# monitoring until merged or closed" (verified against 360+ real run logs under
-# ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
-# actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
-# for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+# merge": both read as plain `ci,running,...`.
+# The only place that transition is recorded is the ci step's own log text.
+# One example is "all CI checks passed - still monitoring until merged or closed".
+# This was verified against 360+ real run logs under ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the actual PR #252 run.
+# A terminal "no CI checks reported" marker is an absent verdict, not a green one.
+# This function reads the ci step's log tail via `axi logs` and scans it for the most recent recognized marker.
+# The log is append-only and chronological, so the last match is current.
+# Only an explicit checks-passed marker with nothing red or absent after it means CI is green right now.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
   [ -n "$run_id" ] || { printf 'unknown'; return; }
-  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  if ! log_tail=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi logs --step ci --run "$run_id"); then
+    printf 'unknown'
+    return
+  fi
   [ -n "$log_tail" ] || { printf 'unknown'; return; }
   marker=$(printf '%s\n' "$log_tail" \
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
-    *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
 }
+
+status_log_ci_ready_is_verified() {
+  log_reports_ci_ready || return 1
+  [ "${HAVE_RUN:-0}" = 1 ] || return 1
+  [ "${RUN_SOURCE:-}" = full ] || return 1
+  [ "${RUN_STATUS:-}" != fixing ] || return 1
+  [ -n "${CI_STEP_STATUS:-}" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
+  [ "$CI_STEP_STATUS" = running ] || return 1
+  [ -n "${CI_LOG_STATE:-}" ] || CI_LOG_STATE=$(nm_ci_checks_state)
+  [ "$CI_LOG_STATE" = green ]
+}
+
+# --- remote secondmate: the true source is the remote endpoint ---------------
+# A remote mate's recorded worktree and backend target live on its own host, so
+# the local worktree probe above and the local pane reads below would misreport
+# a healthy remote mate as gone or dead. Ask the remote host for the endpoint's
+# recovery-grade state over the same fm-on.sh transport fm-send uses, then read
+# current activity from the routed status log exactly as for a local
+# secondmate (an idle endpoint is healthy for a secondmate either way). An
+# unreachable host or unreadable endpoint is reported as unknown-remote -
+# explicitly NOT proof of death - so a transport blip never reads as a torn
+# down or dead mate; only the remote host's own dead/missing verdict may say
+# the endpoint is actually gone.
+if [ -n "$REMOTE_HOST" ]; then
+  if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$ID" \
+    fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
+    REMOTE_STATE=
+  fi
+  REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
+  case "$REMOTE_STATE" in
+    alive)
+      if [ -n "$LOG_VERB" ] && { ! log_reports_ci_ready || status_log_ci_ready_is_verified; }; then
+        LOG_STATE=$(map_log_state "$LOG_LINE")
+        if [ "$LOG_STATE" != unknown ]; then
+          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
+        fi
+      fi
+      if log_reports_ci_ready; then
+        emit unknown remote-endpoint "alive on $REMOTE_HOST; checks-green event awaiting current attributable CI verification"
+      fi
+      emit unknown remote-endpoint "alive on $REMOTE_HOST (an idle secondmate is healthy)"
+      ;;
+    dead|missing)
+      emit unknown remote-endpoint "remote endpoint $REMOTE_STATE on $REMOTE_HOST"
+      ;;
+    '')
+      emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)"
+      ;;
+    *)
+      emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
+      ;;
+  esac
+fi
+
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
 # reports the active-or-most-recent run for the CURRENT branch when one
 # exists, else falls back to some other branch's run purely as informational
@@ -545,21 +563,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
+  if [ "$RUN_STATE" = working ] && status_log_ci_ready_is_verified; then
+    emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
@@ -613,9 +618,11 @@ fi
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
-  LOG_STATE=$(map_log_state "$LOG_LINE")
-  if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+  if ! log_reports_ci_ready || status_log_ci_ready_is_verified; then
+    LOG_STATE=$(map_log_state "$LOG_LINE")
+    if [ "$LOG_STATE" != unknown ]; then
+      emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    fi
   fi
 fi
 

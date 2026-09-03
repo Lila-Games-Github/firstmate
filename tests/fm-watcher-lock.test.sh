@@ -269,28 +269,62 @@ test_lock_steals_dead_pid_lock() {
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker i pids pid wins
+  local dir state lockdir dead marker ready start attempted release i pids pid count wins
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  ready="$dir/ready"
+  start="$dir/start"
+  attempted="$dir/attempted"
+  release="$dir/release"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
+  mkdir "$ready" "$attempted"
   pids=
   i=1
   while [ "$i" -le 40 ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
+      self=${BASHPID:-$$}
       . "$1"
+      : > "$4/$self"
+      while [ ! -e "$5" ]; do sleep 0.05; done
       if fm_lock_try_acquire "$2"; then
-        printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
+        printf "%s\n" "$self" >> "$3"
+        : > "$6/$self"
+        while [ ! -e "$7" ]; do sleep 0.05; done
+      else
+        : > "$6/$self"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$ready" "$start" "$attempted" "$release" &
     pids="$pids $!"
     i=$((i + 1))
   done
+  # Release every fully initialized contender together, then keep the winner
+  # alive until every loser has observed its live lock.
+  # This tests the lock race without assuming independent shells start within a one-second window.
+  i=0
+  count=0
+  while [ "$i" -lt 200 ]; do
+    count=$(find "$ready" -type f | wc -l | tr -d '[:space:]')
+    [ "$count" -eq 40 ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$count" -eq 40 ] || fail "only $count stale-lock contenders became ready"
+  : > "$start"
+  i=0
+  count=0
+  while [ "$i" -lt 200 ]; do
+    count=$(find "$attempted" -type f | wc -l | tr -d '[:space:]')
+    [ "$count" -eq 40 ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$count" -eq 40 ] || fail "only $count stale-lock contenders completed their attempt"
+  : > "$release"
   for pid in $pids; do
     wait "$pid" 2>/dev/null || true
   done

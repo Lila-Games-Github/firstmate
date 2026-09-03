@@ -323,6 +323,16 @@ test_atomic_lifecycle_publication_and_content_authority() {
   pass "interrupted lifecycle cutover keeps one content-authoritative record"
 }
 
+test_stock_bash_summary_enumeration() {
+  local home
+  home=$(make_home stock-bash-summary-enumeration)
+  capture_candidate "$home" stock-bash-summary firstmate workflow-gap-blocker \
+    "an absent compatibility verdict can hide shipped shell failures" >/dev/null \
+    || fail "could not seed the stock Bash summary fixture"
+  run_learning "$home" summary --read-only || return $?
+  pass "learning-candidate summary consumes NUL-delimited enumeration"
+}
+
 test_legacy_names_are_read_and_corrected() {
   local home id canonical legacy invalid_hint newline_hint before after checksum summary listed batch json rc
   home=$(make_home legacy-record-name)
@@ -1506,6 +1516,11 @@ EOF
     || fail "task cleanup changed the unresolved candidate"
   pass "ordinary task cleanup neither waits for classification nor removes the captured candidate"
 }
+
+if [ "${FM_LEARNING_TEST_ONLY:-}" = stock-bash-summary-enumeration ]; then
+  test_stock_bash_summary_enumeration
+  exit $?
+fi
 
 test_help_avoids_private_state_access
 test_capture_validation_and_complete_record
