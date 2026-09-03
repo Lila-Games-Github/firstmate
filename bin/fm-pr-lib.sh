@@ -117,6 +117,28 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
+fm_task_identity_retired() {
+  local state=$1 id=$2 meta kind remote_host lib_dir registry
+  fm_pr_task_id_valid "$id" || return 0
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 0
+  if ! declare -F fm_meta_get >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-backend.sh
+    . "$lib_dir/fm-backend.sh" || return 0
+  fi
+  kind=$(fm_meta_get "$meta" kind)
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  [ "$kind" = secondmate ] && [ -n "$remote_host" ] || return 1
+  if ! declare -F secondmate_registry_line_for_id >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-secondmate-registry-lib.sh
+    . "$lib_dir/fm-secondmate-registry-lib.sh" || return 0
+  fi
+  registry="$(dirname "$state")/data/secondmates.md"
+  secondmate_registry_line_for_id "$registry" "$id" >/dev/null 2>&1 || return 0
+  return 1
+}
+
 # GitLab serves self-hosted instances, so the host is part of the identity
 # rather than a constant. It is accepted only as a lowercase DNS name with no
 # userinfo, port, or trailing dot, which keeps one canonical spelling per MR.
@@ -634,6 +656,9 @@ fm_pr_poll_prepare() {
 fm_pr_poll_publish_prepared_locked() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
+  if fm_task_identity_retired "${FM_PR_POLL_CHECK_DEST%/*}" "$FM_PR_POLL_EXPECT_ID"; then
+    return 1
+  fi
   fm_pr_poll_destination_unclaimed "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_EXPECT_ID" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_REG_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1

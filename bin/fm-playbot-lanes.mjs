@@ -3203,31 +3203,6 @@ function supervisionTaskIdValid(value) {
     && /^[A-Za-z0-9._-]+$/.test(value);
 }
 
-function supervisionTaskIdentityRetired(state, taskId) {
-  const metaPath = path.join(state, `${taskId}.meta`);
-  if (!fs.existsSync(metaPath)) return true;
-  let meta;
-  try {
-    meta = fs.readFileSync(metaPath, "utf8");
-  } catch {
-    return false;
-  }
-  let kind = "";
-  let remoteHost = "";
-  for (const line of meta.split("\n")) {
-    if (line.startsWith("kind=")) kind = line.slice("kind=".length);
-    if (line.startsWith("remote_host=")) remoteHost = line.slice("remote_host=".length);
-  }
-  if (kind !== "secondmate" || !remoteHost) return false;
-  let registry;
-  try {
-    registry = fs.readFileSync(path.join(path.dirname(state), "data", "secondmates.md"), "utf8");
-  } catch {
-    return true;
-  }
-  return !registry.split("\n").some((line) => line === `- ${taskId}` || line.startsWith(`- ${taskId} `));
-}
-
 function supervisionRefuse(message) {
   throw new Error(message);
 }
@@ -3759,8 +3734,9 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
     const script = supervisionSelfScript();
     const register = path.join(path.dirname(script), "fm-check-register.sh");
     const lockHelper = path.join(path.dirname(script), "fm-check-publish-lock.sh");
-    if (!fs.existsSync(register) || !fs.existsSync(lockHelper)) {
-      supervisionRefuse(`the watcher's registration or publication-lock helper is missing beside ${script}, so no poll was armed`);
+    const identityHelper = path.join(path.dirname(script), "fm-pr-lib.sh");
+    if (!fs.existsSync(register) || !fs.existsSync(lockHelper) || !fs.existsSync(identityHelper)) {
+      supervisionRefuse(`the watcher's registration, publication-lock, or task-identity helper is missing beside ${script}, so no poll was armed`);
     }
     const generation = crypto.randomBytes(16).toString("hex");
     const desired = supervisionCheckScript({
@@ -3773,8 +3749,21 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
       state: supervisionPath(state, "the controller's state directory"),
     });
     const bound = await supervisionWithCheckLock(state, taskId, () => {
-      if (requestedTaskId && supervisionTaskIdentityRetired(state, taskId)) {
-        supervisionRefuse(`firstmate task '${taskId}' is retired or unavailable, so no task-keyed watcher poll was armed`);
+      if (requestedTaskId) {
+        const identity = spawnSync("bash", [
+          "-c",
+          '. "$1"; declare -F fm_task_identity_retired >/dev/null || exit 2; fm_task_identity_retired "$2" "$3"',
+          "fm-playbot-task-identity",
+          identityHelper,
+          state,
+          taskId,
+        ], { encoding: "utf8", timeout: 5_000, windowsHide: true });
+        if (identity.error || identity.signal || identity.status === null || identity.status > 1) {
+          supervisionRefuse(`firstmate task '${taskId}' identity could not be validated, so no task-keyed watcher poll was armed`);
+        }
+        if (identity.status === 0) {
+          supervisionRefuse(`firstmate task '${taskId}' is retired or unavailable, so no task-keyed watcher poll was armed`);
+        }
       }
       const target = path.join(state, `${taskId}.check.sh`);
       let previous = null;
