@@ -1541,7 +1541,44 @@ function workspaceFreshnessReading(project, workspace, landingBranch, roots) {
   };
 }
 
+function workspaceRootCoverage(project, workspace) {
+  const expected = new Set(project.roots.map((root) => root.id));
+  const counts = new Map();
+  for (const root of workspace.roots) {
+    counts.set(root.projectRootId, (counts.get(root.projectRootId) ?? 0) + 1);
+  }
+  const missingProjectRootIds = [...expected].filter((id) => !counts.has(id)).sort();
+  const extraProjectRootIds = [...counts.keys()].filter((id) => !expected.has(id)).sort();
+  const duplicateProjectRootIds = [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([id]) => id)
+    .sort();
+  const problems = [];
+  if (missingProjectRootIds.length > 0) problems.push(`missing project root id(s): ${missingProjectRootIds.join(", ")}`);
+  if (extraProjectRootIds.length > 0) problems.push(`extra project root id(s): ${extraProjectRootIds.join(", ")}`);
+  if (duplicateProjectRootIds.length > 0) problems.push(`duplicate project root id(s): ${duplicateProjectRootIds.join(", ")}`);
+  return {
+    complete: problems.length === 0,
+    missingProjectRootIds,
+    extraProjectRootIds,
+    duplicateProjectRootIds,
+    message: problems.length === 0 ? null : `workspace ${workspace.id} root coverage mismatch: ${problems.join("; ")}`,
+  };
+}
+
+function workspaceRootCoverageBlocker(coverage) {
+  return {
+    code: "workspace-root-mismatch",
+    message: coverage.message,
+    missingProjectRootIds: coverage.missingProjectRootIds,
+    extraProjectRootIds: coverage.extraProjectRootIds,
+    duplicateProjectRootIds: coverage.duplicateProjectRootIds,
+  };
+}
+
 function workspaceFreshness(project, workspace, landingBranch) {
+  const coverage = workspaceRootCoverage(project, workspace);
+  if (!coverage.complete) throw new Error(coverage.message);
   if (workspace.roots.length === 0) throw new Error(`workspace ${workspace.id} has no persisted workspace roots`);
   const roots = workspace.roots.map((root) => {
     try {
@@ -1561,7 +1598,7 @@ function gitWorktreePaths(projectRootPath) {
     .map((field) => canonicalPath(field.slice("worktree ".length)));
 }
 
-function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
+function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshness = true) {
   let rootPath = canonicalPath(workspaceRoot.path);
   let projectRoot = null;
   const result = {
@@ -1609,23 +1646,25 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
     return result;
   }
-  try {
-    result.freshness = {
-      projectRootId: workspaceRoot.projectRootId,
-      ...rootFreshnessAtPath(rootPath, landingBranch),
-    };
-    result.head = result.freshness.head;
-    result.landing = result.freshness.landingBranchTip;
-    result.commitsAhead = result.freshness.unlandedCommits;
-    result.commitsBehind = result.freshness.commitsBehind;
-    if (!result.freshness.distanceKnown) {
-      result.blockers.push({
-        code: "landing-tip-not-present-locally",
-        message: `Landing branch ${landingBranch} tip ${result.landing.commit} is not present locally, so its exact distance from the workspace head is unknown`,
-      });
+  if (readFreshness) {
+    try {
+      result.freshness = {
+        projectRootId: workspaceRoot.projectRootId,
+        ...rootFreshnessAtPath(rootPath, landingBranch),
+      };
+      result.head = result.freshness.head;
+      result.landing = result.freshness.landingBranchTip;
+      result.commitsAhead = result.freshness.unlandedCommits;
+      result.commitsBehind = result.freshness.commitsBehind;
+      if (!result.freshness.distanceKnown) {
+        result.blockers.push({
+          code: "landing-tip-not-present-locally",
+          message: `Landing branch ${landingBranch} tip ${result.landing.commit} is not present locally, so its exact distance from the workspace head is unknown`,
+        });
+      }
+    } catch (error) {
+      result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
     }
-  } catch (error) {
-    result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
   }
   try {
     const status = workspaceGitStatus(rootPath);
@@ -1763,10 +1802,15 @@ function localWorkspaceRetirementEvidence(project, workspace, landingBranch) {
     ...retirementThreadBlockers(blockingThreads, uncertainThreads),
   ];
   let freshness = null;
-  try {
-    freshness = workspaceFreshness(project, workspace, landingBranch);
-  } catch (error) {
-    blockers.push({ code: "freshness-unreadable", message: error instanceof Error ? error.message : String(error) });
+  const coverage = workspaceRootCoverage(project, workspace);
+  if (!coverage.complete) {
+    blockers.push(workspaceRootCoverageBlocker(coverage));
+  } else {
+    try {
+      freshness = workspaceFreshness(project, workspace, landingBranch);
+    } catch (error) {
+      blockers.push({ code: "freshness-unreadable", message: error instanceof Error ? error.message : String(error) });
+    }
   }
   return {
     workspace: retirementWorkspaceRecord(project, workspace),
@@ -1787,6 +1831,7 @@ function localWorkspaceRetirementEvidence(project, workspace, landingBranch) {
 
 function inspectWorkspace(project, workspace, landingBranch) {
   const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace);
+  const coverage = workspaceRootCoverage(project, workspace);
   const evidence = {
     workspace: retirementWorkspaceRecord(project, workspace),
     landingBranch: String(landingBranch ?? ""),
@@ -1794,18 +1839,21 @@ function inspectWorkspace(project, workspace, landingBranch) {
     roots: [],
     blockers: retirementThreadBlockers(blockingThreads, uncertainThreads),
   };
+  if (!coverage.complete) evidence.blockers.push(workspaceRootCoverageBlocker(coverage));
   if (workspace.roots.length === 0) {
     evidence.blockers.push({ code: "missing-root", message: "Workspace has no persisted workspace roots" });
   } else {
-    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch));
+    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch, coverage.complete));
     evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
   }
-  evidence.freshness = workspaceFreshnessReading(
-    project,
-    workspace,
-    landingBranch,
-    evidence.roots.map((root) => root.freshness),
-  );
+  evidence.freshness = coverage.complete
+    ? workspaceFreshnessReading(
+      project,
+      workspace,
+      landingBranch,
+      evidence.roots.map((root) => root.freshness),
+    )
+    : null;
   evidence.retirable = evidence.blockers.length === 0;
   evidence.verdict = evidence.retirable ? "retirable" : "blocked";
   return evidence;

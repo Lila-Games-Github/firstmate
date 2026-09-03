@@ -78,7 +78,7 @@ When the remotely observed tip is not present locally, `landingBranchTip.present
 `current` and `headIsCleanFastForwardOfLandingTip` are true when the landing tip is an ancestor of the workspace head, including when the workspace has legitimate commits ahead.
 They are false when the workspace is behind or diverged.
 The aggregate workspace `current` is true only when every root is current.
-Missing roots, paths that do not name an exact Git worktree, repositories whose common Git directory does not match the persisted project root, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
+Workspace root rows must cover every project root exactly once; missing, extra, or duplicate project-root IDs, paths that do not name an exact Git worktree, repositories whose common Git directory does not match the persisted project root, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
 Freshness reads the remote tip with bounded `git ls-remote` and performs zero writes to the workspace repository, including when that tip is absent locally.
 
 `get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.

@@ -230,12 +230,17 @@ const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
 const now = new Date().toISOString();
 db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness', 'freshness-fixture', 'root-freshness', 'active', now, now);
+db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness-shallow', 'freshness-shallow', 'root-freshness-shallow', 'active', now, now);
+db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness-partial', 'freshness-partial', 'root-freshness-partial', 'active', now, now);
+db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness-incomplete', 'freshness-incomplete', 'root-freshness-incomplete-one', 'active', now, now);
 db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness', 'freshness-fixture', process.env.FRESHNESS_REPO, 'main');
 db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness-shallow', 'freshness-shallow', process.env.FRESHNESS_SHALLOW, 'main');
 db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness-partial', 'freshness-partial', process.env.FRESHNESS_PARTIAL, 'main');
 db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness', 'project-freshness', 'repo-freshness', 0);
-db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-shallow', 'project-freshness', 'repo-freshness-shallow', 1);
-db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-partial', 'project-freshness', 'repo-freshness-partial', 2);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-shallow', 'project-freshness-shallow', 'repo-freshness-shallow', 0);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-partial', 'project-freshness-partial', 'repo-freshness-partial', 0);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-incomplete-one', 'project-freshness-incomplete', 'repo-freshness', 0);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-incomplete-two', 'project-freshness-incomplete', 'repo-project-controller', 1);
 const workspace = db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 const root = db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)');
 for (const [id, name, rootPath, branch] of [
@@ -250,10 +255,12 @@ for (const [id, name, rootPath, branch] of [
   workspace.run(id, 'project-freshness', name, 'worktree', 0, 'active', now, now);
   root.run(id, 'root-freshness', rootPath, branch);
 }
-workspace.run('ws-fresh-shallow', 'project-freshness', 'fresh-shallow', 'worktree', 0, 'active', now, now);
+workspace.run('ws-fresh-shallow', 'project-freshness-shallow', 'fresh-shallow', 'worktree', 0, 'active', now, now);
 root.run('ws-fresh-shallow', 'root-freshness-shallow', process.env.FRESHNESS_SHALLOW, 'main');
-workspace.run('ws-fresh-partial', 'project-freshness', 'fresh-partial', 'worktree', 0, 'active', now, now);
+workspace.run('ws-fresh-partial', 'project-freshness-partial', 'fresh-partial', 'worktree', 0, 'active', now, now);
 root.run('ws-fresh-partial', 'root-freshness-partial', process.env.FRESHNESS_PARTIAL, 'main');
+workspace.run('ws-fresh-incomplete', 'project-freshness-incomplete', 'fresh-incomplete', 'worktree', 0, 'active', now, now);
+root.run('ws-fresh-incomplete', 'root-freshness-incomplete-one', process.env.FRESHNESS_CLEAN, 'freshness-clean');
 db.close();
 NODE
 
@@ -267,7 +274,7 @@ rpc() {
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "list_projects did not return all fixture projects"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
-if (value.projects.length !== 4) process.exit(1);
+if (value.projects.length !== 7) process.exit(1);
 NODE
 pass "fm-playbot-lanes: global project discovery is project-id and path aware"
 
@@ -319,7 +326,8 @@ pass "fm-playbot-lanes: landing upstream lookup matches the exact local branch"
 if GIT_NO_LAZY_FETCH=1 git -C "$freshness_partial" cat-file -e "$freshness_partial_tip^{commit}" 2>/dev/null; then
   fail "partial-clone fixture already contained the remote-only landing tip"
 fi
-out=$(freshness_call ws-fresh-partial)
+out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness \
+  '{"project":"project-freshness-partial","workspace":"ws-fresh-partial","landingBranch":"main"}')
 OUT="$out" REMOTE_HEAD="$freshness_partial_tip" node --no-warnings <<'NODE' \
   || fail "partial-clone freshness did not return unknown distance without lazy fetching"
 const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
@@ -333,6 +341,28 @@ fi
 env -u GIT_NO_LAZY_FETCH git -C "$freshness_partial" cat-file -e "$freshness_partial_tip^{commit}" \
   || fail "partial-clone fixture could not demonstrate Git's default lazy fetch"
 pass "fm-playbot-lanes: partial-clone freshness disables lazy object fetching"
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness-incomplete","workspace":"ws-fresh-incomplete","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "workspace freshness returned a verdict for an incomplete multi-root workspace"
+const value = JSON.parse(process.env.OUT);
+const message = value.error?.message ?? '';
+if (!message.includes('workspace ws-fresh-incomplete root coverage mismatch')) process.exit(1);
+if (!message.includes('missing project root id(s): root-freshness-incomplete-two')) process.exit(1);
+if (message.includes('root-freshness-incomplete-one,')) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness-incomplete","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "retirement omitted the incomplete multi-root workspace blocker"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-incomplete');
+const blocker = workspace?.blockers.find(candidate => candidate.code === 'workspace-root-mismatch');
+if (!blocker || blocker.message !== 'workspace ws-fresh-incomplete root coverage mismatch: missing project root id(s): root-freshness-incomplete-two') process.exit(1);
+if (JSON.stringify(blocker.missingProjectRootIds) !== '["root-freshness-incomplete-two"]') process.exit(1);
+if (blocker.extraProjectRootIds.length !== 0 || blocker.duplicateProjectRootIds.length !== 0) process.exit(1);
+if (workspace.freshness !== null || workspace.retirable) process.exit(1);
+NODE
+pass "fm-playbot-lanes: freshness rejects incomplete multi-root workspace coverage"
 
 if out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness '{"project":"project-freshness","landingBranch":"main"}' 2>&1); then
   fail "workspace freshness accepted an omitted workspace selector through the executable call interface"
@@ -352,7 +382,7 @@ OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness guessed thro
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('freshness is unreadable') || !value.error.message.includes('workspace root is missing')) process.exit(1);
 NODE
-out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-shallow","landingBranch":"main"}}}')
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness-shallow","workspace":"ws-fresh-shallow","landingBranch":"main"}}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness accepted incomplete ancestry from a shallow repository"
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('freshness is unreadable') || !value.error.message.includes('repository is shallow')) process.exit(1);
@@ -5648,6 +5678,16 @@ const expectedRemoved = audit.baseline.database.workspaceRootRows.find((row) => 
 if (JSON.stringify(audit.reconciliation.removed.workspaceRootRows[0]) !== JSON.stringify(expectedRemoved)) process.exit(1);
 NODE
 pass "fm-playbot-lanes: exact root-row deltas report partial deletion"
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare("UPDATE workspaces SET archive_state = 'archived' WHERE id IN (?, ?)")
+  .run('ws-retire-partial', 'ws-retire-root-row');
+db.prepare('DELETE FROM project_roots WHERE id = ?').run('root-partial-two');
+db.close();
+NODE
 
 incomplete_success_root="$FIXTURE_ROOT/worker/.worktrees/incomplete-success"
 git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-incomplete-success "$incomplete_success_root" "$operation_base" >/dev/null \
