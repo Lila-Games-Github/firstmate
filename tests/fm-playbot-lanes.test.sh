@@ -4122,6 +4122,40 @@ exec "$FM_TEST_REAL_LN" "$@"
 SH
 chmod 0700 "$retired_writer_bin/ln"
 
+reuse_task_id=fm-autoarm-reused-task
+reuse_meta="$FM_HOME_FIXTURE/state/$reuse_task_id.meta"
+printf '%s\n' 'kind=ship' 'spawn_gen=spawn-old' > "$reuse_meta"
+chmod 0600 "$reuse_meta"
+reuse_publish_entered="$FIXTURE_ROOT/reuse-publish-entered"
+reuse_publish_release="$FIXTURE_ROOT/reuse-publish-release"
+rm -f "$reuse_publish_entered" "$reuse_publish_release"
+FM_TEST_PRESERVE_TASK_IDENTITY=1 FM_TEST_REAL_LN="$real_ln" \
+  FM_TEST_BLOCK_PUBLICATION_LOCK="$FM_HOME_FIXTURE/state/.$reuse_task_id.check-publish.lock" \
+  FM_TEST_BLOCKED_PUBLISH_ENTERED="$reuse_publish_entered" \
+  FM_TEST_BLOCKED_PUBLISH_RELEASE="$reuse_publish_release" \
+  PATH="$retired_writer_bin:$PATH" home_dispatch \
+  "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$reuse_task_id\"},\"title\":\"Reused task publisher\",\"message\":\"Do not bind this old worker to a replacement task\",\"taskId\":\"$reuse_task_id\"}" \
+  > "$FIXTURE_ROOT/reuse-publisher.out" &
+reuse_publisher_pid=$!
+wait_for_file "$reuse_publish_entered" \
+  || fail "task reuse publisher did not block after capturing its incarnation"
+rm -f "$reuse_meta"
+printf '%s\n' 'kind=ship' 'spawn_gen=spawn-new' > "$reuse_meta"
+chmod 0600 "$reuse_meta"
+: > "$reuse_publish_release"
+wait "$reuse_publisher_pid" || fail "task reuse publisher did not return its refusal"
+OUT=$(cat "$FIXTURE_ROOT/reuse-publisher.out") node --no-warnings <<'NODE' \
+  || fail "old blocked publisher armed against a replacement task incarnation"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== false) process.exit(1);
+if (!value.supervision.problem.includes('retired or unavailable')) process.exit(1);
+NODE
+for leftover in "$reuse_task_id.check.sh" "$reuse_task_id.check-trust" "$reuse_task_id.lane-poll"; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "old blocked publisher created $leftover for a replacement task incarnation"
+done
+pass "fm-playbot-lanes: blocked publishers reject replacement task incarnations"
+
 retired_migration_task_id=fm-autoarm-retired-remote-migration
 retired_migration_meta="$FM_HOME_FIXTURE/state/$retired_migration_task_id.meta"
 cat > "$retired_migration_meta" <<EOF
@@ -4254,6 +4288,87 @@ rm -f "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.check.sh" \
   "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.pr-poll" \
   "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.pr-poll-registration"
 pass "fm-playbot-lanes: failed retirement receipt validation rolls publication back"
+
+migration_failure_home="$FIXTURE_ROOT/migration-failure-home"
+migration_failure_state="$migration_failure_home/state"
+mkdir -p "$migration_failure_state" "$migration_failure_home/data"
+migration_failure_task_id=fm-autoarm-migration-prepare-failure
+migration_failure_meta="$migration_failure_state/$migration_failure_task_id.meta"
+cat > "$migration_failure_meta" <<EOF
+window=firstmate:fm-$migration_failure_task_id
+worktree=$FIXTURE_ROOT/missing-migration-failure-worktree
+project=$FIXTURE_ROOT/worker
+kind=ship
+mode=local-only
+spawn_gen=migration-failure-generation
+pr=https://github.com/o/r/pull/59
+EOF
+chmod 0600 "$migration_failure_meta"
+printf 'legacy migration check\n' > "$migration_failure_state/$migration_failure_task_id.check.sh"
+migration_failure_bin="$FIXTURE_ROOT/migration-failure-bin"
+mkdir -p "$migration_failure_bin"
+real_cp=$(command -v cp)
+cat > "$migration_failure_bin/cp" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=${@: -1}
+case "$destination" in
+  "$FM_TEST_PREPARE_CHECK_PREFIX"*) exit 1 ;;
+esac
+exec "$FM_TEST_REAL_CP" "$@"
+SH
+chmod 0700 "$migration_failure_bin/cp"
+cat > "$migration_failure_bin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=${@: -1}
+if [ "$destination" = "$FM_TEST_FAILURE_DIAGNOSTIC" ]; then
+  : > "$FM_TEST_FAILURE_PUBLISH_ENTERED"
+  while [ ! -e "$FM_TEST_FAILURE_PUBLISH_RELEASE" ]; do sleep 0.05; done
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+chmod 0700 "$migration_failure_bin/mv"
+migration_failure_entered="$FIXTURE_ROOT/migration-failure-entered"
+migration_failure_release="$FIXTURE_ROOT/migration-failure-release"
+rm -f "$migration_failure_entered" "$migration_failure_release"
+FM_HOME="$migration_failure_home" FM_TEST_REAL_CP="$real_cp" FM_TEST_REAL_MV="$real_mv" \
+  FM_TEST_PREPARE_CHECK_PREFIX="$migration_failure_state/.fm-pr-poll-check." \
+  FM_TEST_FAILURE_DIAGNOSTIC="$migration_failure_state/.pr-check-quarantine/$migration_failure_task_id.diagnostic.failure-canonical" \
+  FM_TEST_FAILURE_PUBLISH_ENTERED="$migration_failure_entered" \
+  FM_TEST_FAILURE_PUBLISH_RELEASE="$migration_failure_release" \
+  PATH="$migration_failure_bin:$PATH" "$ROOT/bin/fm-pr-check-migrate.sh" \
+  > "$FIXTURE_ROOT/migration-failure.out" 2>&1 &
+migration_failure_pid=$!
+wait_for_file "$migration_failure_entered" \
+  || fail "migration preparation failure did not reach failure publication"
+migration_failure_teardown_bin="$FIXTURE_ROOT/migration-failure-teardown-bin"
+mkdir -p "$migration_failure_teardown_bin"
+cat > "$migration_failure_teardown_bin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod 0700 "$migration_failure_teardown_bin/tmux"
+env -u NO_MISTAKES_GATE FM_HOME="$migration_failure_home" FM_ROOT_OVERRIDE="$ROOT" \
+  PATH="$migration_failure_teardown_bin:$PATH" \
+  "$ROOT/bin/fm-teardown.sh" "$migration_failure_task_id" --force \
+  > "$FIXTURE_ROOT/migration-failure-teardown.out" 2>&1 &
+migration_failure_teardown_pid=$!
+sleep 1
+kill -0 "$migration_failure_teardown_pid" 2>/dev/null \
+  || fail "migration preparation failure released its publication lock before failure publication"
+: > "$migration_failure_release"
+if wait "$migration_failure_pid"; then
+  fail "migration with a forced poll preparation failure reported success"
+fi
+wait "$migration_failure_teardown_pid" \
+  || fail "teardown failed after migration failure publication: $(cat "$FIXTURE_ROOT/migration-failure-teardown.out")"
+assert_absent "$migration_failure_meta" "teardown left migration failure task metadata"
+for leftover in "$migration_failure_state/.pr-check-quarantine/$migration_failure_task_id."*; do
+  [ ! -e "$leftover" ] && [ ! -L "$leftover" ] \
+    || fail "migration preparation failure recreated ${leftover##*/} after teardown"
+done
+pass "fm-playbot-lanes: migration failure publication retains its task lock"
 
 local_race_task_id=fm-autoarm-retired-local-pr
 local_race_meta="$FM_HOME_FIXTURE/state/$local_race_task_id.meta"

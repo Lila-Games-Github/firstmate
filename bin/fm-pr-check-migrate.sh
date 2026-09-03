@@ -794,10 +794,12 @@ record_ambiguous_failure() {
 }
 
 migration_task_transaction() {
-  local id=$1 identity_observed=$2 operation=$3 status=0
-  shift 3
+  local id=$1 identity_observed=$2 expected_spawn_gen=$3 operation=$4 status=0
+  shift 4
   fm_pr_poll_lock_acquire "$STATE" "$id" || return 1
-  if [ "$identity_observed" -eq 1 ] && fm_task_identity_retired "$STATE" "$id"; then
+  if { [ "$identity_observed" -eq 1 ] \
+      || [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; } \
+    && fm_task_identity_retired "$STATE" "$id" "$expected_spawn_gen"; then
     fm_pr_poll_cleanup
     return "$MIGRATION_TASK_RETIRED_STATUS"
   fi
@@ -824,7 +826,7 @@ canonical_repair_from_pending() {
   quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
   [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
-  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" || return 1
+  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" retain || return 1
   fm_pr_poll_publish_prepared_locked || return 1
   canonical_terminal_success "$id"
 }
@@ -949,7 +951,7 @@ recover_pending_outcome_locked() {
 }
 
 recover_pending_outcomes() {
-  local obligation basename prefix kind identity_observed status
+  local obligation basename prefix kind identity_observed expected_spawn_gen status
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   quarantine_tree_repair_and_validate || return 1
   for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
@@ -966,7 +968,8 @@ recover_pending_outcomes() {
     fi
     identity_observed=0
     [ -f "$STATE/$prefix.meta" ] && [ ! -L "$STATE/$prefix.meta" ] && identity_observed=1
-    if migration_task_transaction "$prefix" "$identity_observed" \
+    expected_spawn_gen=$(fm_task_spawn_gen_capture "$STATE" "$prefix") || return 1
+    if migration_task_transaction "$prefix" "$identity_observed" "$expected_spawn_gen" \
       recover_pending_outcome_locked "$prefix" "$kind"; then
       continue
     else
@@ -1070,7 +1073,7 @@ migrate_task_check_locked() {
     if quarantine_artifact "$check" "$id" check \
       && quarantine_artifact "$data" "$id" data \
       && quarantine_artifact "$registration" "$id" registration \
-      && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" \
+      && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" retain \
       && fm_pr_poll_publish_prepared_locked \
       && complete_canonical_outcome "$id"; then
       return 0
@@ -1127,7 +1130,11 @@ if migration_needed; then
     if fm_pr_task_id_valid "$id"; then
       identity_observed=0
       [ -f "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] && identity_observed=1
-      migration_task_transaction "$id" "$identity_observed" migrate_task_check_locked "$check" "$id" \
+      expected_spawn_gen=$(fm_task_spawn_gen_capture "$STATE" "$id") || {
+        migration_failed=1
+        continue
+      }
+      migration_task_transaction "$id" "$identity_observed" "$expected_spawn_gen" migrate_task_check_locked "$check" "$id" \
         || migration_failed=1
     else
       message='noncanonical task artifact: migration outcome tracking started before legacy poll handling'

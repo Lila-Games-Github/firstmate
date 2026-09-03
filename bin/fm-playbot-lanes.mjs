@@ -3748,21 +3748,37 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
       desktop: supervisionPath(desktopDir(), "the Playbot desktop directory"),
       state: supervisionPath(state, "the controller's state directory"),
     });
+    const identityEnv = {
+      ...process.env,
+      FM_HOME: controllerRoot(),
+      FM_STATE_OVERRIDE: state,
+      FM_DATA_OVERRIDE: process.env.FM_DATA_OVERRIDE || path.join(controllerRoot(), "data"),
+    };
+    let expectedSpawnGen = null;
+    if (requestedTaskId) {
+      const captured = spawnSync("bash", [
+        "-c",
+        '. "$1"; declare -F fm_task_spawn_gen_capture >/dev/null || exit 2; fm_task_spawn_gen_capture "$2" "$3"',
+        "fm-playbot-task-incarnation",
+        identityHelper,
+        state,
+        taskId,
+      ], { env: identityEnv, encoding: "utf8", timeout: 5_000, windowsHide: true });
+      if (captured.error || captured.signal || captured.status !== 0 || /[\r\n]/.test(captured.stdout ?? "") || !captured.stdout) {
+        supervisionRefuse(`firstmate task '${taskId}' incarnation could not be captured, so no task-keyed watcher poll was armed`);
+      }
+      expectedSpawnGen = captured.stdout;
+    }
     const bound = await supervisionWithCheckLock(state, taskId, () => {
       if (requestedTaskId) {
-        const identityEnv = {
-          ...process.env,
-          FM_HOME: controllerRoot(),
-          FM_STATE_OVERRIDE: state,
-          FM_DATA_OVERRIDE: process.env.FM_DATA_OVERRIDE || path.join(controllerRoot(), "data"),
-        };
         const identity = spawnSync("bash", [
           "-c",
-          '. "$1"; declare -F fm_task_identity_retired >/dev/null || exit 2; fm_task_identity_retired "$2" "$3"',
+          '. "$1"; declare -F fm_task_identity_retired >/dev/null || exit 2; fm_task_identity_retired "$2" "$3" "$4"',
           "fm-playbot-task-identity",
           identityHelper,
           state,
           taskId,
+          expectedSpawnGen,
         ], { env: identityEnv, encoding: "utf8", timeout: 5_000, windowsHide: true });
         if (identity.error || identity.signal || identity.status === null || identity.status > 1) {
           supervisionRefuse(`firstmate task '${taskId}' identity could not be validated, so no task-keyed watcher poll was armed`);
