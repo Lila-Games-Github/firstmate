@@ -4255,6 +4255,115 @@ rm -f "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.check.sh" \
   "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.pr-poll-registration"
 pass "fm-playbot-lanes: failed retirement receipt validation rolls publication back"
 
+local_race_task_id=fm-autoarm-retired-local-pr
+local_race_meta="$FM_HOME_FIXTURE/state/$local_race_task_id.meta"
+cat > "$local_race_meta" <<EOF
+window=firstmate:fm-$local_race_task_id
+worktree=$FIXTURE_ROOT/missing-local-race-worktree
+project=$FIXTURE_ROOT/worker
+kind=ship
+mode=local-only
+EOF
+chmod 0600 "$local_race_meta"
+local_race_publish_entered="$FIXTURE_ROOT/local-race-publish-entered"
+local_race_publish_release="$FIXTURE_ROOT/local-race-publish-release"
+rm -f "$local_race_publish_entered" "$local_race_publish_release"
+FM_HOME="$FM_HOME_FIXTURE" FM_TEST_REAL_LN="$real_ln" \
+  FM_TEST_BLOCK_PUBLICATION_LOCK="$FM_HOME_FIXTURE/state/.$local_race_task_id.check-publish.lock" \
+  FM_TEST_BLOCKED_PUBLISH_ENTERED="$local_race_publish_entered" \
+  FM_TEST_BLOCKED_PUBLISH_RELEASE="$local_race_publish_release" \
+  PATH="$retired_writer_bin:$PATH" "$ROOT/bin/fm-pr-check.sh" "$local_race_task_id" \
+  https://github.com/o/r/pull/57 > "$FIXTURE_ROOT/local-race-publisher.out" 2>&1 &
+local_race_publisher_pid=$!
+wait_for_file "$local_race_publish_entered" \
+  || fail "local PR publisher did not prepare its poll before publication"
+local_race_bin="$FIXTURE_ROOT/local-race-bin"
+mkdir -p "$local_race_bin"
+real_rm=$(command -v rm)
+cat > "$local_race_bin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for target in "$@"; do
+  if [ "$target" = "$FM_TEST_LOCAL_META" ]; then
+    : > "$FM_TEST_LOCAL_RETIRE_ENTERED"
+    while [ ! -e "$FM_TEST_LOCAL_RETIRE_RELEASE" ]; do sleep 0.05; done
+    break
+  fi
+done
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+chmod 0700 "$local_race_bin/rm"
+cat > "$local_race_bin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod 0700 "$local_race_bin/tmux"
+local_race_retire_entered="$FIXTURE_ROOT/local-race-retire-entered"
+local_race_retire_release="$FIXTURE_ROOT/local-race-retire-release"
+rm -f "$local_race_retire_entered" "$local_race_retire_release"
+env -u NO_MISTAKES_GATE FM_HOME="$FM_HOME_FIXTURE" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_TEST_LOCAL_META="$local_race_meta" \
+  FM_TEST_LOCAL_RETIRE_ENTERED="$local_race_retire_entered" \
+  FM_TEST_LOCAL_RETIRE_RELEASE="$local_race_retire_release" FM_TEST_REAL_RM="$real_rm" \
+  PATH="$local_race_bin:$PATH" "$ROOT/bin/fm-teardown.sh" "$local_race_task_id" --force \
+  > "$FIXTURE_ROOT/local-race-teardown.out" 2>&1 &
+local_race_teardown_pid=$!
+wait_for_file "$local_race_retire_entered" \
+  || fail "local teardown never reached metadata retirement under the publication lock: $(cat "$FIXTURE_ROOT/local-race-teardown.out")"
+: > "$local_race_publish_release"
+sleep 0.5
+kill -0 "$local_race_publisher_pid" 2>/dev/null \
+  || fail "prepared PR publisher did not wait through local metadata retirement"
+: > "$local_race_retire_release"
+wait "$local_race_teardown_pid" \
+  || fail "local teardown failed while retiring publication identity: $(cat "$FIXTURE_ROOT/local-race-teardown.out")"
+if wait "$local_race_publisher_pid"; then
+  fail "prepared PR publisher accepted a locally retired task identity"
+fi
+for leftover in "$local_race_task_id.check.sh" "$local_race_task_id.check-trust" \
+  "$local_race_task_id.pr-poll" "$local_race_task_id.pr-poll-registration" \
+  "$local_race_task_id.pr-poll-retirement" "$local_race_task_id.lane-poll"; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "prepared PR publisher recreated $leftover after local teardown"
+done
+for leftover in "$FM_HOME_FIXTURE/state/.pr-check-quarantine/$local_race_task_id."*; do
+  [ ! -e "$leftover" ] && [ ! -L "$leftover" ] \
+    || fail "local teardown left quarantine entry ${leftover##*/}"
+done
+assert_absent "$local_race_meta" "local teardown left retired task metadata"
+pass "fm-playbot-lanes: local teardown blocks prepared PR poll republication"
+
+override_home="$FIXTURE_ROOT/override-home"
+override_state="$FIXTURE_ROOT/independent-state"
+override_data="$FIXTURE_ROOT/independent-data"
+mkdir -p "$override_home" "$override_state" "$override_data"
+printf '%s\n' fm-pr-check-migration-scan-v1 > "$override_state/.pr-check-migration-scan-v1"
+printf '%s\n' fm-pr-check-migration-v1 > "$override_state/.pr-check-migration-v1"
+chmod 0600 "$override_state/.pr-check-migration-scan-v1" \
+  "$override_state/.pr-check-migration-v1"
+override_task_id=fm-autoarm-independent-data-route
+cat > "$override_state/$override_task_id.meta" <<EOF
+window=remote:$override_task_id
+kind=secondmate
+remote_host=remote-test
+remote_root=$ROOT
+home=$retired_home
+EOF
+chmod 0600 "$override_state/$override_task_id.meta"
+printf '%s\n' "- $override_task_id - Independent data fixture (host: remote-test; root: $ROOT; home: $retired_home; scope: test; projects: none; added 2026-09-03)" \
+  > "$override_data/secondmates.md"
+FM_HOME="$override_home" FM_STATE_OVERRIDE="$override_state" FM_DATA_OVERRIDE="$override_data" \
+  "$ROOT/bin/fm-pr-check.sh" "$override_task_id" https://github.com/o/r/pull/58 \
+  > "$FIXTURE_ROOT/override-publisher.out" 2>&1 \
+  || fail "configured independent data route was treated as retired: $(cat "$FIXTURE_ROOT/override-publisher.out")"
+bash -c '
+  . "$1"
+  fm_pr_poll_artifacts_valid "$2" "$3" "$4"
+' _ "$ROOT/bin/fm-pr-lib.sh" "$override_state" "$override_task_id" \
+  "$ROOT/bin/fm-pr-poll.sh" \
+  || fail "independent state and data overrides did not publish a valid PR poll"
+pass "fm-playbot-lanes: publication honors independent state and data overrides"
+
 partial_task_id=fm-autoarm-partial-remote
 partial_meta="$FM_HOME_FIXTURE/state/$partial_task_id.meta"
 cat > "$partial_meta" <<EOF

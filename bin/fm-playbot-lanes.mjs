@@ -3750,6 +3750,12 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
     });
     const bound = await supervisionWithCheckLock(state, taskId, () => {
       if (requestedTaskId) {
+        const identityEnv = {
+          ...process.env,
+          FM_HOME: controllerRoot(),
+          FM_STATE_OVERRIDE: state,
+          FM_DATA_OVERRIDE: process.env.FM_DATA_OVERRIDE || path.join(controllerRoot(), "data"),
+        };
         const identity = spawnSync("bash", [
           "-c",
           '. "$1"; declare -F fm_task_identity_retired >/dev/null || exit 2; fm_task_identity_retired "$2" "$3"',
@@ -3757,7 +3763,7 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
           identityHelper,
           state,
           taskId,
-        ], { encoding: "utf8", timeout: 5_000, windowsHide: true });
+        ], { env: identityEnv, encoding: "utf8", timeout: 5_000, windowsHide: true });
         if (identity.error || identity.signal || identity.status === null || identity.status > 1) {
           supervisionRefuse(`firstmate task '${taskId}' identity could not be validated, so no task-keyed watcher poll was armed`);
         }

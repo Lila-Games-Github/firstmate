@@ -118,7 +118,7 @@ fm_task_id_creation_valid() {
 }
 
 fm_task_identity_retired() {
-  local state=$1 id=$2 meta kind remote_host lib_dir registry
+  local state=$1 id=$2 meta kind remote_host lib_dir data_dir registry
   fm_pr_task_id_valid "$id" || return 0
   meta="$state/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
@@ -134,7 +134,12 @@ fm_task_identity_retired() {
     # shellcheck source=bin/fm-secondmate-registry-lib.sh
     . "$lib_dir/fm-secondmate-registry-lib.sh" || return 0
   fi
-  registry="$(dirname "$state")/data/secondmates.md"
+  data_dir=${FM_DATA_OVERRIDE:-${DATA:-}}
+  if [ -z "$data_dir" ]; then
+    [ -n "${FM_HOME:-}" ] || return 0
+    data_dir="$FM_HOME/data"
+  fi
+  registry="$data_dir/secondmates.md"
   secondmate_registry_line_for_id "$registry" "$id" >/dev/null 2>&1 || return 0
   return 1
 }
