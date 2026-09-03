@@ -1,0 +1,33 @@
+Learning-candidate public CLI end-to-end evidence
+shell=GNU bash, version 5.3.9(1)-release (x86_64-redhat-linux-gnu)
+
+[read-only summary keeps a malformed-but-readable legacy name unchanged]
+LEARNING CANDIDATES: 1 unresolved
+- lc-30061c480a392089d7e82b61 [firstmate/workflow-gap-blocker] legacy record remains visible
+read_only_store_unchanged=yes
+spool_observed name=fm-learning-candidates.mctySI mode=600
+spool_cleaned_after_read=yes
+
+[ordinary summary corrects the name without changing record bytes]
+LEARNING CANDIDATES: 1 unresolved
+- lc-30061c480a392089d7e82b61 [firstmate/workflow-gap-blocker] legacy record remains visible
+canonical_name=lc-30061c480a392089d7e82b61.unresolved.json
+content_hash_preserved=yes
+
+[valid siblings and invalid entries are surfaced without electing a winner]
+stdout:
+lc-5bff4dd2bd063bfdfd4306bf	unresolved	firstmate	workflow-gap-blocker	valid neighbor remains visible
+lc-b3bf927eb4e3557094a1db74	dismissed	firstmate	workflow-gap-blocker	both valid siblings remain inspectable
+lc-b3bf927eb4e3557094a1db74	unresolved	firstmate	workflow-gap-blocker	both valid siblings remain inspectable
+stderr:
+fm-learning-candidate: skipped candidate entry: /tmp/tmp.RUZDvRXewL/siblings/state/learning-candidates/lc-000000000000000000000000.unresolved.json: candidate path must be a regular file
+fm-learning-candidate: skipped candidate entry: /tmp/tmp.RUZDvRXewL/siblings/state/learning-candidates/lc-5bff4dd2bd063bfdfd4306bf.legacy.json: invalid candidate record: lc-5bff4dd2bd063bfdfd4306bf
+fm-learning-candidate: inconsistent candidate siblings: lc-b3bf927eb4e3557094a1db74: /tmp/tmp.RUZDvRXewL/siblings/state/learning-candidates/lc-b3bf927eb4e3557094a1db74.dismissed.json /tmp/tmp.RUZDvRXewL/siblings/state/learning-candidates/lc-b3bf927eb4e3557094a1db74.unresolved.json
+same_id_valid_rows=2
+valid_neighbor_rows=1
+
+[enumeration failure is explicit and renders no partial summary]
+exit_status=2
+stdout_bytes=0
+simulated enumeration failure
+fm-learning-candidate: could not enumerate candidate store: /tmp/tmp.RUZDvRXewL/failure/state/learning-candidates
