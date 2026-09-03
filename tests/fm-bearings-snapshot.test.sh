@@ -969,6 +969,15 @@ test_oversized_parsed_backlog_survives_all_public_snapshot_routes() {
         and (.parent_event.raw | endswith($status_tail))))
   ' >/dev/null || fail "fleet snapshot lost oversized backlog content, schema, or task association"
 
+  # The canonical route above has already proven both secondmate status paths.
+  # Keep the oversized main backlog but avoid repeating those costly fixtures
+  # when the final Bearings route exercises its own projection.
+  : > "$home/data/secondmates.md"
+  rm -f -- \
+    "$home/state/oversized-status-valid.meta" \
+    "$home/state/oversized-status-valid.status" \
+    "$home/state/oversized-status-fallback.meta" \
+    "$home/state/oversized-status-fallback.status"
   bearings=$(run "$home" "$fakebin" --json)
   printf '%s' "$bearings" | jq -e '
     .schema == "fm-bearings.v1"
