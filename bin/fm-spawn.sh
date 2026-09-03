@@ -23,6 +23,17 @@
 #   landing_branch= is optional, ship-only, and read by bin/fm-teardown.sh, whose
 #   landed-work test then verifies landing against the recorded branch instead of
 #   the default branch; absent means default-branch behavior exactly.
+#   The same field selects the task's BASE: a fresh ship spawn refreshes its
+#   clean pooled worktree by fetching +refs/heads/<branch>:refs/remotes/origin/<branch>
+#   and hard-resetting to origin/<branch>, so the worker's task branch starts at
+#   that branch's live tip rather than origin's default branch; without the flag
+#   the refresh resolves and fetches origin's default branch exactly as before.
+#   After the reset the spawn asserts HEAD equals the fetched tip and descends
+#   from it, and refuses to launch naming both commits when they differ; a
+#   landing branch that cannot be fetched refuses the same way and never falls
+#   back to the default branch. --relaunch reads the recorded landing_branch=
+#   as a record-owned axis and, like every relaunch, re-enters the recorded
+#   worktree without refreshing its base, so the work already on it is kept.
 #   bin/fm-landing-branch.sh is the guarded helper that records or corrects the
 #   field on an EXISTING task under the meta lock. The flag is refused on --scout,
 #   --secondmate, and --relaunch spawns (relaunch preserves a recorded value), and
@@ -1042,6 +1053,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  LANDING_BRANCH=$(fm_meta_get "$RELAUNCH_META" landing_branch)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1767,21 +1779,30 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 }
 
 freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
+  # Base selection: the task's recorded landing branch when one is set (the
+  # branch its work must land on, so a lane starts from that branch's live
+  # tip), otherwise origin's resolved default branch. The two legs share the
+  # same fetch, clean-check, reset, and tip assertion; only the branch differs,
+  # and a landing branch never falls back to the default branch on any failure.
+  local worktree=$1 base target expected actual status
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  if [ -n "$LANDING_BRANCH" ]; then
+    base=$LANDING_BRANCH
+  else
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    base=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
   fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+  target="origin/$base"
+  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$base:refs/remotes/origin/$base"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -1802,8 +1823,8 @@ freshen_spawn_worktree_base() {  # <worktree>
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
-  if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+  if [ "$actual" != "$expected" ] || ! git -C "$worktree" merge-base --is-ancestor "$expected" HEAD 2>/dev/null; then
+    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch from a potentially stale base" >&2
     return 1
   fi
 }
@@ -2671,7 +2692,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo landing_branch tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)

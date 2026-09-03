@@ -6,6 +6,9 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin/main tip or stops when origin is
 # unreachable.
+# A ship task given --landing-branch must instead start from that branch's
+# fetched tip, and must refuse rather than fall back to the default branch when
+# the landing base cannot be fetched or the refreshed HEAD does not match it.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -82,6 +85,139 @@ run_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJECT_DIR" "$@" 2>&1
+}
+
+LANDING=proto/godot/frog-pile
+
+# Publish a landing branch that diverges from the default branch, then make the
+# project clone (whose refs the pooled worktree shares) aware of it so the
+# spawn's landing-branch resolution check passes. Echoes the landing tip.
+add_landing_branch() {  # <case-dir> <default>
+  local case_dir=$1 default=$2 publisher="$1/publisher"
+  git -C "$publisher" checkout --quiet -b "$LANDING" "$INITIAL_SHA"
+  printf 'lane work lands here\n' > "$publisher/landing.txt"
+  git -C "$publisher" add landing.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm landing-tip
+  git -C "$publisher" push --quiet origin "$LANDING"
+  git -C "$publisher" checkout --quiet "$default"
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$publisher" rev-parse HEAD >/dev/null
+  git -C "$PROJECT_DIR" rev-parse "origin/$LANDING"
+}
+
+add_task_record() {  # <id>
+  mkdir -p "$HOME_DIR/data/$1"
+  printf 'brief for %s\n' "$1" > "$HOME_DIR/data/$1/brief.md"
+}
+
+assert_no_half_launched_task() {  # <id> <label>
+  [ ! -e "$HOME_DIR/state/$1.meta" ] || fail "$2 left a task record behind after refusing to launch"
+  [ ! -e "$HOME_DIR/state/$1.status" ] || fail "$2 left a status log behind after refusing to launch"
+}
+
+test_landing_branch_bases_task_on_landing_tip() {
+  local rec id out status landing_tip main_tip branch_head parent
+  id='pool-landing-base-r6'
+  rec=$(make_case landing-base "$id")
+  read_case_record "$rec"
+  landing_tip=$(add_landing_branch "$CASE_DIR" "$DEFAULT_BRANCH")
+  main_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  [ "$landing_tip" != "$main_tip" ] || fail "fixture did not make the landing tip differ from the default tip"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --landing-branch "$LANDING")
+  status=$?
+  expect_code 0 "$status" "spawn with a landing branch should launch"$'\n'"$out"
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$landing_tip" ] || fail "spawn based the task on '$branch_head', not the landing tip '$landing_tip'"
+  [ "$branch_head" != "$main_tip" ] || fail "spawn based the task on the default branch despite --landing-branch"
+  assert_grep 'lane work lands here' "$POOL_DIR/landing.txt" "the landing branch content is missing from the task base"
+  [ ! -e "$POOL_DIR/advanced-main.txt" ] || fail "default-branch-only content leaked into a landing-branch base"
+  [ "$(grep -c '^landing_branch=' "$HOME_DIR/state/$id.meta")" = 1 ] \
+    || fail "the task record did not record the landing branch exactly once"
+
+  git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+  printf 'first lane commit\n' > "$POOL_DIR/lane.txt"
+  git -C "$POOL_DIR" add lane.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm lane
+  parent=$(git -C "$POOL_DIR" rev-parse HEAD^)
+  [ "$parent" = "$landing_tip" ] || fail "the task branch's first commit parent is '$parent', not the landing tip '$landing_tip'"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed landing base: HEAD=%s origin/%s=%s origin/%s=%s\n' \
+      "$branch_head" "$LANDING" "$landing_tip" "$DEFAULT_BRANCH" "$main_tip"
+  fi
+
+  id='pool-landing-absent-r6'
+  add_task_record "$id"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn without a landing branch should still launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$main_tip" ] \
+    || fail "a spawn without --landing-branch did not keep basing the task on the default branch"
+  pass "a ship spawn with --landing-branch starts from the landing tip while the default path is unchanged"
+}
+
+test_unfetchable_landing_branch_refuses_without_default_fallback() {
+  local rec id out status before local_only
+  id='pool-landing-unfetchable-r7'
+  rec=$(make_case landing-unfetchable "$id")
+  read_case_record "$rec"
+  local_only=local/only-here
+  git -C "$PROJECT_DIR" branch --quiet "$local_only" "$INITIAL_SHA"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --landing-branch "$local_only")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched although the landing branch does not exist on origin"
+  assert_contains "$out" "could not fetch 'origin/$local_only'" \
+    "spawn did not name the unfetchable landing branch: $out"
+  assert_contains "$out" "refusing to launch from a potentially stale base" \
+    "spawn did not refuse in the stale-base style: $out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the pooled worktree after failing to fetch the landing branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" != "$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")" ] \
+    || fail "spawn fell back to the default branch after failing to fetch the landing branch"
+  assert_no_half_launched_task "$id" "an unfetchable landing branch"
+  pass "a landing branch missing from origin refuses the spawn instead of falling back to the default branch"
+}
+
+test_landing_base_mismatch_refuses_naming_both_commits() {
+  local rec id out status landing_tip main_tip real_git
+  id='pool-landing-mismatch-r8'
+  rec=$(make_case landing-mismatch "$id")
+  read_case_record "$rec"
+  landing_tip=$(add_landing_branch "$CASE_DIR" "$DEFAULT_BRANCH")
+  main_tip=$(git -C "$PROJECT_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  real_git=$(command -v git)
+  # Inject the defect under test: the reset lands on the default tip instead of
+  # the landing tip, as if the base moved between fetch and reset.
+  cat > "$FAKEBIN_DIR/git" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *" reset --hard origin/$LANDING")
+    rewritten=()
+    for arg in "\$@"; do
+      [ "\$arg" != "origin/$LANDING" ] || arg="origin/$DEFAULT_BRANCH"
+      rewritten+=("\$arg")
+    done
+    set -- "\${rewritten[@]}" ;;
+esac
+exec "$real_git" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/git"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --landing-branch "$LANDING")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched although the refreshed base did not match the landing tip"
+  assert_contains "$out" "refusing to launch from a potentially stale base" \
+    "spawn did not refuse in the stale-base style: $out"
+  assert_contains "$out" "$landing_tip" "the refusal did not name the expected landing tip: $out"
+  assert_contains "$out" "$main_tip" "the refusal did not name the actual mismatched commit: $out"
+  assert_contains "$out" "origin/$LANDING" "the refusal did not name the landing branch: $out"
+  assert_no_half_launched_task "$id" "a landing base mismatch"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed landing mismatch refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a refreshed base that does not match the landing tip refuses the spawn naming both commits"
 }
 
 test_stale_pool_base_refreshes_before_branching() {
@@ -233,5 +369,8 @@ test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_landing_branch_bases_task_on_landing_tip
+test_unfetchable_landing_branch_refuses_without_default_fallback
+test_landing_base_mismatch_refuses_naming_both_commits
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
