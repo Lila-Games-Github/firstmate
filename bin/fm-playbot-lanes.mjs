@@ -725,7 +725,9 @@ function git(root, args, options = {}) {
     ...(timeout === undefined ? {} : { timeout }),
   });
   if (result.error?.code === "ETIMEDOUT") {
-    throw new Error(`git ${args[0] ?? "operation"} timed out after ${timeout}ms`);
+    let operation = args[0] ?? "operation";
+    for (let index = 0; args[index] === "-c"; index += 2) operation = args[index + 2] ?? "operation";
+    throw new Error(`git ${operation} timed out after ${timeout}ms`);
   }
   if (result.error) throw new Error(result.error.message);
   if (result.status !== 0) {
@@ -749,8 +751,16 @@ function remoteGitTimeoutMs() {
   return timeout;
 }
 
+function redactUrlUserinfo(value) {
+  return String(value).replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[redacted]@");
+}
+
 function remoteGit(root, args, options = {}) {
-  return git(root, args, { ...options, timeout: remoteGitTimeoutMs() });
+  try {
+    return git(root, args, { ...options, timeout: remoteGitTimeoutMs() });
+  } catch (error) {
+    throw new Error(redactUrlUserinfo(error instanceof Error ? error.message : String(error)));
+  }
 }
 
 function gitPathIdentity(value) {
@@ -1367,9 +1377,17 @@ function landingRemote(root, landingBranch) {
   try {
     git(root, ["cat-file", "-e", `${commit}^{commit}`]);
   } catch {
-    // The exact one-ref fallback writes fetched objects and its remote-tracking
-    // ref, while leaving FETCH_HEAD, local branches, the index, and worktree untouched.
-    remoteGit(root, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, `+${remoteRef}:${remoteTrackingRef}`]);
+    // The exact one-ref fallback disables submodule recursion, automatic maintenance,
+    // automatic GC, and fetch commit-graph writes.
+    // It writes only fetched objects and its remote-tracking ref, while leaving
+    // FETCH_HEAD, local branches, the index, and worktree untouched.
+    remoteGit(root, [
+      "-c", "maintenance.auto=false",
+      "-c", "gc.auto=0",
+      "-c", "fetch.writeCommitGraph=false",
+      "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+      remote, `+${remoteRef}:${remoteTrackingRef}`,
+    ]);
     git(root, ["cat-file", "-e", `${commit}^{commit}`]);
   }
   return {
@@ -1435,12 +1453,23 @@ function explicitWorkspaceSelector(tool, value) {
   return workspace;
 }
 
-function rootFreshness(root, landingBranch) {
-  const worktreePath = canonicalPath(root);
+function projectAwareWorkspaceRoot(project, workspaceRoot) {
+  const worktreePath = canonicalPath(workspaceRoot.path);
   if (!worktreePath) throw new Error("workspace root path is empty");
   if (!pathPresence(worktreePath)) throw new Error(`workspace root is missing: ${worktreePath}`);
   const top = canonicalPath(stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--show-toplevel"])));
   if (top !== worktreePath) throw new Error(`path resolves inside Git worktree ${top} instead of naming it exactly`);
+  const projectRoot = project.roots.find((candidate) => candidate.id === workspaceRoot.projectRootId);
+  if (!projectRoot?.path) throw new Error(`project root ${workspaceRoot.projectRootId} is missing`);
+  const workspaceCommonDir = canonicalPath(stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
+  const projectCommonDir = canonicalPath(stripTerminalLineEnding(git(projectRoot.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
+  if (workspaceCommonDir !== projectCommonDir) {
+    throw new Error(`workspace root repository does not match project root ${workspaceRoot.projectRootId}`);
+  }
+  return { worktreePath, projectRoot };
+}
+
+function rootFreshnessAtPath(worktreePath, landingBranch) {
   const shallow = stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--is-shallow-repository"]));
   if (shallow === "true") throw new Error("repository is shallow; complete ancestry is required for workspace freshness");
   if (shallow !== "false") throw new Error("Git returned unreadable shallow-repository evidence");
@@ -1474,11 +1503,16 @@ function rootFreshness(root, landingBranch) {
   };
 }
 
+function rootFreshness(project, workspaceRoot, landingBranch) {
+  const { worktreePath } = projectAwareWorkspaceRoot(project, workspaceRoot);
+  return rootFreshnessAtPath(worktreePath, landingBranch);
+}
+
 function workspaceFreshness(project, workspace, landingBranch) {
   if (workspace.roots.length === 0) throw new Error(`workspace ${workspace.id} has no persisted workspace roots`);
   const roots = workspace.roots.map((root) => {
     try {
-      return { projectRootId: root.projectRootId, ...rootFreshness(root.path, landingBranch) };
+      return { projectRootId: root.projectRootId, ...rootFreshness(project, root, landingBranch) };
     } catch (error) {
       throw new Error(`freshness is unreadable for workspace ${workspace.id} root ${root.projectRootId}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1506,7 +1540,8 @@ function gitWorktreePaths(projectRootPath) {
 }
 
 function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
-  const rootPath = canonicalPath(workspaceRoot.path);
+  let rootPath = canonicalPath(workspaceRoot.path);
+  let projectRoot = null;
   const result = {
     projectRootId: workspaceRoot.projectRootId,
     path: rootPath,
@@ -1542,8 +1577,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     return result;
   }
   try {
-    const top = canonicalPath(stripTerminalLineEnding(git(rootPath, ["rev-parse", "--show-toplevel"])));
-    if (top !== rootPath) throw new Error(`root resolves inside Git worktree ${top} instead of naming it exactly`);
+    ({ worktreePath: rootPath, projectRoot } = projectAwareWorkspaceRoot(project, workspaceRoot));
     const headCommit = String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
     result.head = {
       commit: headCommit,
@@ -1554,7 +1588,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     return result;
   }
   try {
-    result.freshness = rootFreshness(rootPath, landingBranch);
+    result.freshness = rootFreshnessAtPath(rootPath, landingBranch);
     result.head = result.freshness.head;
     result.landing = result.freshness.landingBranchTip;
     result.commitsAhead = result.freshness.unlandedCommits;
@@ -1574,8 +1608,6 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     result.submodules.inspected = status.submodules;
     result.submodules.persisted = status.persistedSubmodules;
     result.submodules.unreadable = status.unreadableSubmodules;
-    const projectRoot = project.roots.find((candidate) => candidate.id === workspaceRoot.projectRootId);
-    if (!projectRoot?.path) throw new Error(`project root ${workspaceRoot.projectRootId} is missing`);
     result.gitRegistration = {
       projectRootPath: canonicalPath(projectRoot.path),
       registered: gitWorktreePaths(projectRoot.path).includes(rootPath),

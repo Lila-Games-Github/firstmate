@@ -76,8 +76,8 @@ Each root reports `worktreePath`, the exact `head` commit and subject, the curre
 `current` and `headIsCleanFastForwardOfLandingTip` are true when the landing tip is an ancestor of the workspace head, including when the workspace has legitimate commits ahead.
 They are false when the workspace is behind or diverged.
 The aggregate workspace `current` is true only when every root is current.
-Missing roots, paths that do not name an exact Git worktree, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
-When the remotely observed landing commit is absent locally, the bounded fallback fetch uses one exact branch refspec with no tags and no `FETCH_HEAD`; it writes only the fetched objects and that branch's `refs/remotes/<remote>/<branch>` tracking ref, without changing a local branch, index, or worktree.
+Missing roots, paths that do not name an exact Git worktree, repositories whose common Git directory does not match the persisted project root, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
+When the remotely observed landing commit is absent locally, the bounded fallback fetch uses one exact branch refspec, disables submodule recursion, automatic maintenance, automatic garbage collection, and fetch commit-graph writes, and writes only the fetched objects and that branch's `refs/remotes/<remote>/<branch>` tracking ref without writing `FETCH_HEAD` or changing a local branch, index, or worktree.
 
 `get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.
 `list_parked_threads` accepts either an exact `project` with its required `landingBranch`, or global scope with both fields omitted.

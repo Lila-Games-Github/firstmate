@@ -178,6 +178,7 @@ freshness_diverged="$freshness_repo/.worktrees/diverged"
 freshness_clean="$freshness_repo/.worktrees/clean"
 freshness_ahead="$freshness_repo/.worktrees/ahead"
 freshness_race="$freshness_repo/.worktrees/race"
+freshness_identity="$freshness_repo/.worktrees/identity"
 freshness_shallow="$FIXTURE_ROOT/freshness-shallow"
 git -C "$freshness_repo" worktree add -b freshness-behind "$freshness_behind" main >/dev/null
 git -C "$freshness_repo" worktree add -b freshness-diverged "$freshness_diverged" main >/dev/null
@@ -191,6 +192,7 @@ git -C "$freshness_repo" worktree add -b freshness-ahead "$freshness_ahead" main
 printf 'ahead\n' >> "$freshness_ahead/freshness.txt"
 git -C "$freshness_ahead" commit -am "ahead lane work" >/dev/null
 git -C "$freshness_repo" worktree add -b freshness-race "$freshness_race" main >/dev/null
+git -C "$freshness_repo" worktree add -b freshness-identity "$freshness_identity" main >/dev/null
 printf 'original\n' > "$freshness_race/race.txt"
 git -C "$freshness_race" add race.txt
 git -C "$freshness_race" commit -m "race original head" >/dev/null
@@ -203,14 +205,16 @@ freshness_race_next=$(git -C "$freshness_race" rev-parse HEAD)
 git -C "$freshness_race" switch freshness-race >/dev/null
 git clone --depth=1 --branch main "file://$freshness_remote" "$freshness_shallow" >/dev/null
 
-FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" FRESHNESS_RACE="$freshness_race" FRESHNESS_SHALLOW="$freshness_shallow" node --no-warnings <<'NODE'
+FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" FRESHNESS_RACE="$freshness_race" FRESHNESS_IDENTITY="$freshness_identity" FRESHNESS_SHALLOW="$freshness_shallow" node --no-warnings <<'NODE'
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
 const now = new Date().toISOString();
 db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness', 'freshness-fixture', 'root-freshness', 'active', now, now);
 db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness', 'freshness-fixture', process.env.FRESHNESS_REPO, 'main');
+db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness-shallow', 'freshness-shallow', process.env.FRESHNESS_SHALLOW, 'main');
 db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness', 'project-freshness', 'repo-freshness', 0);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-shallow', 'project-freshness', 'repo-freshness-shallow', 1);
 const workspace = db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 const root = db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)');
 for (const [id, name, rootPath, branch] of [
@@ -219,12 +223,14 @@ for (const [id, name, rootPath, branch] of [
   ['ws-fresh-behind', 'fresh-behind', process.env.FRESHNESS_BEHIND, 'freshness-behind'],
   ['ws-fresh-diverged', 'fresh-diverged', process.env.FRESHNESS_DIVERGED, 'freshness-diverged'],
   ['ws-fresh-race', 'fresh-race', process.env.FRESHNESS_RACE, 'freshness-race'],
-  ['ws-fresh-shallow', 'fresh-shallow', process.env.FRESHNESS_SHALLOW, 'main'],
+  ['ws-fresh-identity', 'fresh-identity', process.env.FRESHNESS_IDENTITY, 'freshness-identity'],
   ['ws-fresh-unreadable', 'fresh-unreadable', path.join(process.env.FRESHNESS_REPO, '.worktrees', 'missing'), 'freshness-missing'],
 ]) {
   workspace.run(id, 'project-freshness', name, 'worktree', 0, 'active', now, now);
   root.run(id, 'root-freshness', rootPath, branch);
 }
+workspace.run('ws-fresh-shallow', 'project-freshness', 'fresh-shallow', 'worktree', 0, 'active', now, now);
+root.run('ws-fresh-shallow', 'root-freshness-shallow', process.env.FRESHNESS_SHALLOW, 'main');
 db.close();
 NODE
 
@@ -360,14 +366,28 @@ mkdir -p "$timeout_git_bin"
 cat > "$timeout_git_bin/git" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ "${1:-}" = "-C" ] && [ "${3:-}" = "ls-remote" ]; then
+operation=
+skip=2
+for arg in "$@"; do
+  if [ "$skip" -gt 0 ]; then
+    skip=$((skip - 1))
+    continue
+  fi
+  if [ "$arg" = "-c" ]; then
+    skip=1
+    continue
+  fi
+  operation=$arg
+  break
+done
+if [ "${1:-}" = "-C" ] && [ "$operation" = "ls-remote" ]; then
   if [ "$FM_TEST_REMOTE_TIMEOUT_MODE" = "ls-remote" ]; then
     exec "$FM_TEST_SLEEP_BIN" 2
   fi
   printf '%s\trefs/heads/main\n' '1111111111111111111111111111111111111111'
   exit 0
 fi
-if [ "${1:-}" = "-C" ] && [ "${3:-}" = "fetch" ] && [ "$FM_TEST_REMOTE_TIMEOUT_MODE" = "fetch" ]; then
+if [ "${1:-}" = "-C" ] && [ "$operation" = "fetch" ] && [ "$FM_TEST_REMOTE_TIMEOUT_MODE" = "fetch" ]; then
   exec "$FM_TEST_SLEEP_BIN" 2
 fi
 exec "$FM_TEST_REAL_GIT" "$@"
@@ -389,6 +409,46 @@ if (!value.error.message.includes(`git ${process.env.TIMEOUT_MODE} timed out aft
 NODE
 done
 pass "fm-playbot-lanes: workspace freshness bounds remote Git operations"
+
+credential_helper_bin="$FIXTURE_ROOT/credential-helper-bin"
+mkdir -p "$credential_helper_bin"
+cat > "$credential_helper_bin/git-remote-credentialfail" <<'SH'
+#!/usr/bin/env bash
+printf 'remote helper failed for %s\n' "$2" >&2
+exit 1
+SH
+chmod 0700 "$credential_helper_bin/git-remote-credentialfail"
+credential_remote='credentialfail::https://freshness-user:freshness-failure-secret@example.invalid/repository.git'
+git -C "$freshness_repo" remote set-url origin "$credential_remote"
+out=$(PATH="$credential_helper_bin:$PATH" rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"main"}}}')
+git -C "$freshness_repo" remote set-url origin "$freshness_remote"
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "a failed remote freshness call exposed URL credentials"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable')) process.exit(1);
+if (!value.error.message.includes('https://[redacted]@example.invalid/repository.git')) process.exit(1);
+if (value.error.message.includes('freshness-user') || value.error.message.includes('freshness-failure-secret')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: failed remote freshness redacts URL credentials"
+
+git -C "$freshness_repo" worktree remove --force "$freshness_identity" >/dev/null
+git clone "$FIXTURE_ROOT/controller-remote.git" "$freshness_identity" >/dev/null
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-identity","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "workspace freshness trusted a replacement clone from another repository"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable')) process.exit(1);
+if (!value.error.message.includes('workspace root repository does not match project root root-freshness')) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "retirement inspection trusted a replacement clone from another repository"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-identity');
+const blocker = workspace?.blockers.find(candidate => candidate.code === 'git-unreadable');
+if (!blocker?.message.includes('workspace root repository does not match project root root-freshness')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: freshness and retirement verify repository identity"
 
 # This is the end-to-end reproduction for the fleet-visibility defect. The
 # public MCP call used to resolve an omitted workspace through Playbot's UI
@@ -1986,7 +2046,19 @@ freshness_branch_before=$(git -C "$freshness_clean" symbolic-ref HEAD)
 freshness_index_before=$(git -C "$freshness_clean" write-tree)
 freshness_status_before=$(git -C "$freshness_clean" status --porcelain=v1 --untracked-files=all)
 freshness_file_before=$(cksum "$freshness_clean/freshness.txt")
+commit_graph_file=$(git -C "$freshness_clean" rev-parse --git-path objects/info/commit-graph)
+commit_graph_chain=$(git -C "$freshness_clean" rev-parse --git-path objects/info/commit-graphs/commit-graph-chain)
+[ ! -e "$commit_graph_file" ] && [ ! -e "$commit_graph_chain" ] \
+  || fail "fallback fetch fixture already had a commit graph"
+git -C "$freshness_clean" config maintenance.auto true
+git -C "$freshness_clean" config gc.auto 1
+git -C "$freshness_clean" config fetch.writeCommitGraph true
+git -C "$freshness_clean" config fetch.recurseSubmodules on-demand
 out=$(freshness_call ws-fresh-clean)
+git -C "$freshness_clean" config --unset-all maintenance.auto
+git -C "$freshness_clean" config --unset-all gc.auto
+git -C "$freshness_clean" config --unset-all fetch.writeCommitGraph
+git -C "$freshness_clean" config --unset-all fetch.recurseSubmodules
 OUT="$out" REMOTE_HEAD="$remote_only_head" LOCAL_HEAD="$freshness_head_before" node --no-warnings <<'NODE' \
   || fail "freshness fallback fetch did not return the exact remote-only landing tip"
 const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
@@ -2007,6 +2079,8 @@ fetch_head_after=missing
 [ ! -e "$fetch_head_path" ] || fetch_head_after=$(cksum "$fetch_head_path")
 [ "$fetch_head_after" = "$fetch_head_before" ] \
   || fail "freshness fallback fetch wrote FETCH_HEAD"
+[ ! -e "$commit_graph_file" ] && [ ! -e "$commit_graph_chain" ] \
+  || fail "freshness fallback fetch wrote a commit graph"
 [ "$(git -C "$freshness_clean" rev-parse refs/remotes/origin/main)" = "$remote_only_head" ] \
   || fail "freshness fallback fetch did not update the exact remote-tracking ref"
 git -C "$freshness_clean" cat-file -e "$remote_only_head^{commit}" \
@@ -5348,31 +5422,23 @@ db.close();
 NODE
 retirement_list main > "$retirement_inventory"
 OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' \
-  || fail "the pre-action Git registration baseline was not returned"
+  || fail "an unregistered clone was not rejected as another repository"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const root = value.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-unregistered').roots[0];
-if (root.gitRegistration?.registered !== false || !root.gitRegistration.projectRootPath) process.exit(1);
+if (root.gitRegistration !== null) process.exit(1);
+if (!root.blockers.some(blocker => blocker.code === 'git-unreadable' && blocker.message.includes('workspace root repository does not match project root root-worker'))) process.exit(1);
 NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(retirement_call ws-retire-unregistered ',"confirm":true')
 OUT="$out" UNREGISTERED_ROOT="$unregistered_root" node --no-warnings <<'NODE' \
-  || fail "an already-missing registration was falsely reported as partial deletion"
+  || fail "retirement did not fail closed on an unregistered clone from another repository"
 const value = JSON.parse(process.env.OUT);
-if (!value.error?.message.includes('no removal was verified')) process.exit(1);
-const data = value.error.data;
-if (data.deleted || data.partialAction || data.verification.checks.gitRegistrationsGone[0].removed) process.exit(1);
-if (data.verification.checks.gitRegistrationsGone[0].beforeRegistered !== false) process.exit(1);
-if (!data.reconciliation.remaining.alreadyMissingGitRegistrations.includes(process.env.UNREGISTERED_ROOT)) process.exit(1);
-if (!data.audit.appended) process.exit(1);
+if (!value.error?.message.includes('failed its immediate retirement safety recheck')) process.exit(1);
+if (!value.error.message.includes('workspace root repository does not match project root root-worker')) process.exit(1);
 NODE
 [ -d "$unregistered_root" ] || fail "the rejected unregistered workspace was unexpectedly removed"
-AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" node --no-warnings <<'NODE' \
-  || fail "the already-missing registration audit falsely recorded destructive change"
-const fs = require('node:fs');
-const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
-if (audit.workspace.id !== 'ws-retire-unregistered' || audit.deletionObserved) process.exit(1);
-if (audit.reconciliation.removed.gitRegistrations.length !== 0) process.exit(1);
-NODE
-pass "fm-playbot-lanes: rejection distinguishes already-missing registration from removal"
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "repository identity rejection reached destructive IPC"
+pass "fm-playbot-lanes: retirement rejects unregistered clones from another repository"
 
 partial_repository="$FIXTURE_ROOT/partial-repository"
 partial_remote="$FIXTURE_ROOT/partial-remote.git"
