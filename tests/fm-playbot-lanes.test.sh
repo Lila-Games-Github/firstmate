@@ -387,6 +387,15 @@ OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness accepted inc
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('freshness is unreadable') || !value.error.message.includes('repository is shallow')) process.exit(1);
 NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness-shallow","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement misattributed a shallow repository to the landing branch"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-shallow');
+const blocker = workspace?.roots[0]?.blockers.find(candidate => candidate.code === 'freshness-unreadable');
+if (!blocker?.message.includes('repository is shallow')) process.exit(1);
+if (workspace.blockers.some(candidate => candidate.code === 'landing-branch-unresolvable')) process.exit(1);
+if (workspace.freshness !== null || workspace.roots[0].freshness !== null || workspace.retirable) process.exit(1);
+NODE
 pass "fm-playbot-lanes: workspace freshness requires explicit selectors and complete readable Git state"
 
 freshness_race_bin="$FIXTURE_ROOT/freshness-race-bin"
@@ -511,6 +520,7 @@ const value = JSON.parse(process.env.OUT).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-identity');
 const blocker = workspace?.blockers.find(candidate => candidate.code === 'git-unreadable');
 if (!blocker?.message.includes('workspace root repository does not match project root root-freshness')) process.exit(1);
+if (workspace.freshness !== null || workspace.roots[0].freshness !== null || workspace.retirable) process.exit(1);
 NODE
 pass "fm-playbot-lanes: freshness and retirement verify repository identity"
 
@@ -4613,6 +4623,8 @@ OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an unresol
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 if (!workspace.blockers.some(blocker => blocker.code === 'landing-branch-unresolvable')) process.exit(1);
+if (workspace.blockers.some(blocker => blocker.code === 'freshness-unreadable')) process.exit(1);
+if (workspace.freshness !== null || workspace.roots[0].freshness !== null) process.exit(1);
 NODE
 pass "fm-playbot-lanes: landing branches require current resolvable remote evidence"
 
@@ -5023,6 +5035,10 @@ const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, '
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const blocker = workspace.roots[0].blockers.find(candidate => candidate.code === 'git-unreadable');
 if (!blocker || !blocker.message.includes(`refs/replace/${process.env.REPLACED_COMMIT}`)) process.exit(1);
+const freshnessBlocker = workspace.roots[0].blockers.find(candidate => candidate.code === 'freshness-unreadable');
+if (!freshnessBlocker || !freshnessBlocker.message.includes(`refs/replace/${process.env.REPLACED_COMMIT}`)) process.exit(1);
+if (workspace.roots[0].blockers.some(candidate => candidate.code === 'landing-branch-unresolvable')) process.exit(1);
+if (workspace.freshness !== null || workspace.roots[0].freshness !== null) process.exit(1);
 NODE
 GIT_NO_REPLACE_OBJECTS=1 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" reset --hard "$replacement_landing" >/dev/null
 retirement_list main > "$retirement_inventory"

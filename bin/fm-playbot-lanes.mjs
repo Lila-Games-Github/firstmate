@@ -769,6 +769,13 @@ function remoteGit(root, args, options = {}) {
   }
 }
 
+class LandingBranchUnresolvableError extends Error {
+  constructor(cause) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "LandingBranchUnresolvableError";
+  }
+}
+
 function gitPathIdentity(value) {
   return process.platform === "win32" ? String(value).replaceAll("\\", "/") : String(value);
 }
@@ -1330,6 +1337,22 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
 function landingRemote(root, landingBranch) {
   const requested = String(landingBranch ?? "").trim();
   if (!requested) throw new Error("landingBranch is required and must name the branch this workspace lands on");
+  let tip;
+  try {
+    tip = landingRemoteTip(root, requested);
+  } catch (error) {
+    throw new LandingBranchUnresolvableError(error);
+  }
+  const { commit } = tip;
+  const localObject = stripTerminalLineEnding(freshnessGit(root, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], { input: `${commit}\n` }));
+  const presentLocally = localObject.toLowerCase() === `${commit.toLowerCase()} commit`;
+  if (!presentLocally && localObject.toLowerCase() !== `${commit.toLowerCase()} missing`) {
+    throw new Error(`local repository returned unreadable evidence for remote commit ${commit}`);
+  }
+  return { requested, ...tip, presentLocally };
+}
+
+function landingRemoteTip(root, requested) {
   const remotes = String(freshnessGit(root, ["remote"])).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
   let remote = null;
   let branch = requested.replace(/^refs\/heads\//, "");
@@ -1385,24 +1408,10 @@ function landingRemote(root, landingBranch) {
   if (!/^[0-9a-f]{40,64}$/i.test(commit) || resolvedRef !== remoteRef) {
     throw new Error(`remote ${remote} returned unreadable evidence for ${remoteRef}`);
   }
-  const localObject = stripTerminalLineEnding(freshnessGit(root, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], { input: `${commit}\n` }));
-  const presentLocally = localObject.toLowerCase() === `${commit.toLowerCase()} commit`;
-  if (!presentLocally && localObject.toLowerCase() !== `${commit.toLowerCase()} missing`) {
-    throw new Error(`local repository returned unreadable evidence for remote commit ${commit}`);
-  }
-  return {
-    requested,
-    remote,
-    branch,
-    remoteRef,
-    commit,
-    observedAt,
-    presentLocally,
-  };
+  return { remote, branch, remoteRef, commit, observedAt };
 }
 
 function aheadCommits(root, landingCommit, headCommit) {
-  assertNoGitAncestryOverrides(root, freshnessGit);
   const raw = freshnessGit(root, ["log", "-z", "--format=%H", `${landingCommit}..${headCommit}`], { encoding: "buffer" });
   return commitRecords(root, raw, "ahead-commit", freshnessGit);
 }
@@ -1663,7 +1672,10 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
         });
       }
     } catch (error) {
-      result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
+      const message = error instanceof Error ? error.message : String(error);
+      result.blockers.push(error instanceof LandingBranchUnresolvableError
+        ? { code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${message}` }
+        : { code: "freshness-unreadable", message: `Workspace freshness is unreadable at ${rootPath}: ${message}` });
     }
   }
   try {
@@ -1846,13 +1858,9 @@ function inspectWorkspace(project, workspace, landingBranch) {
     evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch, coverage.complete));
     evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
   }
-  evidence.freshness = coverage.complete
-    ? workspaceFreshnessReading(
-      project,
-      workspace,
-      landingBranch,
-      evidence.roots.map((root) => root.freshness),
-    )
+  const rootReadings = evidence.roots.map((root) => root.freshness);
+  evidence.freshness = coverage.complete && rootReadings.every((reading) => reading !== null)
+    ? workspaceFreshnessReading(project, workspace, landingBranch, rootReadings)
     : null;
   evidence.retirable = evidence.blockers.length === 0;
   evidence.verdict = evidence.retirable ? "retirable" : "blocked";
