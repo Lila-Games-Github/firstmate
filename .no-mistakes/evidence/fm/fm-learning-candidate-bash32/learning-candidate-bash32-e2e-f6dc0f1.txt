@@ -1,0 +1,36 @@
+Learning-candidate Bash compatibility end-to-end evidence
+commit=f6dc0f1bef484390953f4da363e12928f6a87971
+shell=GNU bash, version 5.3.9(1)-release (x86_64-redhat-linux-gnu)
+
+[read-only summary keeps malformed-but-readable name unchanged]
+LEARNING CANDIDATES: 1 unresolved
+- lc-f5ade505f7e4912b51b45b8d [firstmate/workflow-gap-blocker] legacy record remains visible
+read_only_store_unchanged=yes
+private_spool_mode=600
+spool_removed_after_summary=yes
+
+[ordinary summary corrects name without changing content]
+LEARNING CANDIDATES: 1 unresolved
+- lc-f5ade505f7e4912b51b45b8d [firstmate/workflow-gap-blocker] legacy record remains visible
+canonical_name=lc-f5ade505f7e4912b51b45b8d.unresolved.json
+content_hash_preserved=yes
+
+[injected enumeration failure is explicit before rendering]
+exit_status=2
+stdout_bytes=0
+simulated enumeration failure
+fm-learning-candidate: could not enumerate candidate store: /tmp/tmp.X87T7SbO0t/home/state/learning-candidates
+
+[list --all retains valid siblings and neighbors while reporting unsafe entries]
+stdout:
+lc-3a675f89faf2a913618118d2	dismissed	firstmate	workflow-gap-blocker	both valid siblings remain inspectable
+lc-3a675f89faf2a913618118d2	unresolved	firstmate	workflow-gap-blocker	both valid siblings remain inspectable
+lc-cfdd209ebec62b8b8cdfc8b1	unresolved	firstmate	workflow-gap-blocker	valid neighbor remains visible
+stderr:
+fm-learning-candidate: skipped candidate entry: /tmp/tmp.9EpTjcel5s/home/state/learning-candidates/lc-000000000000000000000000.unresolved.json: candidate path must be a regular file
+fm-learning-candidate: inconsistent candidate siblings: lc-3a675f89faf2a913618118d2: /tmp/tmp.9EpTjcel5s/home/state/learning-candidates/lc-3a675f89faf2a913618118d2.dismissed.json /tmp/tmp.9EpTjcel5s/home/state/learning-candidates/lc-3a675f89faf2a913618118d2.unresolved.json
+fm-learning-candidate: skipped candidate entry: /tmp/tmp.9EpTjcel5s/home/state/learning-candidates/lc-48e6fcc62c4ba472477dee3d.legacy.json: candidate record exceeds 1048576-byte limit
+fm-learning-candidate: skipped candidate entry: /tmp/tmp.9EpTjcel5s/home/state/learning-candidates/lc-a077e7c546a82a68cc04177b.unresolved.json: invalid candidate record: lc-a077e7c546a82a68cc04177b
+same_id_valid_rows=2
+valid_neighbor_rows=1
+invalid_entries_preserved=yes

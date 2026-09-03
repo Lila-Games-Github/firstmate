@@ -1,0 +1,19 @@
+run:
+  id: 33726232252
+  title: "fix: support learning summaries on Bash 3.2"
+  status: completed
+  conclusion: failure
+  workflow: CI
+  branch: fm/fm-learning-candidate-bash32
+  created: 13m ago
+job:
+  id: 100555708769
+  name: Stock macOS Bash snapshot compatibility
+  status: completed
+  conclusion: success
+steps[5]{number,name,status,conclusion}:
+  1,Set up job,completed,success
+  2,Run actions/checkout@v6,completed,success
+  3,Run snapshot consumers with stock Bash,completed,success
+  6,Post Run actions/checkout@v6,completed,success
+  7,Complete job,completed,success
