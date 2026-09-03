@@ -1,0 +1,10 @@
+comparison: byte-identical
+fixture: oversized parsed backlog with a status event longer than 131072 bytes
+shell: GNU bash, version 5.3.9(1)-release (x86_64-redhat-linux-gnu)
+base_commit: 4b2ff6ac1a3eb0514a8370cf2965e9339c670855
+target_commit: 786db0b0f2a76f8b8986c277d63f42ef44454e99
+base_sha256: 5806248d7574fe490c075bb3312428af276cc7e775980536bb09e9b1afcba02b
+target_sha256: 5806248d7574fe490c075bb3312428af276cc7e775980536bb09e9b1afcba02b
+output_bytes: 2699
+base_elapsed_seconds: 5.91
+target_elapsed_seconds: 5.75

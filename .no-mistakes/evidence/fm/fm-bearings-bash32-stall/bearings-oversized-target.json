@@ -1,0 +1,103 @@
+{
+  "schema": "fm-bearings.v1",
+  "home": "fm-bearings.JjTflB/oversized-parsed-backlog",
+  "generated": "2026-07-11T18:00:00Z",
+  "prs": "not_requested (run: /bearings include PRs)",
+  "in_flight": [
+    {
+      "id": "active-large",
+      "kind": "ship",
+      "state": "working",
+      "doing": "status-prefix-retain-large-body-0000000000000000000000000000000000000000000000000000000000…"
+    }
+  ],
+  "secondmates": [
+    {
+      "id": "oversized-status-fallback",
+      "state": "unknown",
+      "doing": "secondmate metadata is not registered",
+      "provenance": "parent-event-fallback",
+      "freshness": "historical-event",
+      "age_seconds": 0,
+      "contradiction": false,
+      "reason": "secondmate metadata is not registered"
+    },
+    {
+      "id": "oversized-status-valid",
+      "state": "no_active_work",
+      "doing": "No active child work",
+      "provenance": "structured-home",
+      "freshness": "fresh",
+      "age_seconds": 0,
+      "contradiction": false,
+      "reason": "-"
+    }
+  ],
+  "decisions_open": [],
+  "landed": [],
+  "gates": [
+    {
+      "id": "large-marker",
+      "title": "retain-large-body-000000000000000000000000000000000000000000…",
+      "blocked_by": "-",
+      "reason": "-",
+      "owner": "(main)"
+    }
+  ],
+  "reports": [],
+  "recorded_prs": [],
+  "unhealthy_endpoints": [
+    {
+      "id": "oversized-status-fallback",
+      "backend": "tmux",
+      "target": "firstmate:fm-oversized-status-fallback",
+      "exists": true,
+      "agent": "dead"
+    },
+    {
+      "id": "oversized-status-valid",
+      "backend": "tmux",
+      "target": "firstmate:fm-oversized-status-valid",
+      "exists": true,
+      "agent": "dead"
+    }
+  ],
+  "omitted": [
+    {
+      "surface": "backlog item bodies",
+      "reveal": "--fields bodies"
+    },
+    {
+      "surface": "task paths",
+      "reveal": "--fields paths"
+    },
+    {
+      "surface": "watch/steer actions",
+      "reveal": "--fields actions"
+    },
+    {
+      "surface": "healthy endpoint detail",
+      "reveal": "--fields endpoints"
+    },
+    {
+      "surface": "full scout-report inventory",
+      "reveal": "--all-reports"
+    },
+    {
+      "surface": "superseded queued items",
+      "reveal": "--all-queued"
+    },
+    {
+      "surface": "secondmate home(s) with unreadable backlog: 1",
+      "reveal": "inspect the listed secondmate home backlogs"
+    },
+    {
+      "surface": "secondmate parent activity evidence truncated for 2 record(s)",
+      "reveal": "raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"
+    },
+    {
+      "surface": "live PR discovery + checks",
+      "reveal": "--include-prs"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+comparison: all Bearings fixture outputs byte-identical
+base_commit: 4b2ff6ac1a3eb0514a8370cf2965e9339c670855
+target_commit: 786db0b0f2a76f8b8986c277d63f42ef44454e99
+compared_invocations: 56
+compared_streams_per_invocation: stdout, stderr, exit-status
+shell: GNU bash, version 5.3.9(1)-release (x86_64-redhat-linux-gnu)
