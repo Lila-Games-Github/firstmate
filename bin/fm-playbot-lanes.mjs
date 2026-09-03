@@ -63,6 +63,8 @@ const SERVER_VERSION = "0.6.0";
 const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
+const DEFAULT_REMOTE_GIT_TIMEOUT_MS = 15_000;
+const MAX_REMOTE_GIT_TIMEOUT_MS = 300_000;
 
 // This exact list is the one allowance shared by retirement inventory and
 // retirement itself. Playbot's Godot editor integration rewrites these eight
@@ -714,12 +716,17 @@ function gitEnvironment() {
 
 function git(root, args, options = {}) {
   const encoding = options.encoding ?? "utf8";
+  const timeout = options.timeout;
   const result = spawnSync("git", ["-C", root, ...args], {
     encoding,
     env: gitEnvironment(),
     input: options.input,
     maxBuffer: 16 * 1024 * 1024,
+    ...(timeout === undefined ? {} : { timeout }),
   });
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(`git ${args[0] ?? "operation"} timed out after ${timeout}ms`);
+  }
   if (result.error) throw new Error(result.error.message);
   if (result.status !== 0) {
     const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : String(result.stderr ?? "");
@@ -727,6 +734,23 @@ function git(root, args, options = {}) {
     throw new Error((stderr || stdout || `git exited ${result.status}`).trim());
   }
   return result.stdout;
+}
+
+function remoteGitTimeoutMs() {
+  const configured = process.env.PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS;
+  if (configured === undefined) return DEFAULT_REMOTE_GIT_TIMEOUT_MS;
+  if (!/^[1-9]\d*$/.test(configured)) {
+    throw new Error("PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS must be a positive integer");
+  }
+  const timeout = Number(configured);
+  if (!Number.isSafeInteger(timeout) || timeout > MAX_REMOTE_GIT_TIMEOUT_MS) {
+    throw new Error(`PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS must not exceed ${MAX_REMOTE_GIT_TIMEOUT_MS}`);
+  }
+  return timeout;
+}
+
+function remoteGit(root, args, options = {}) {
+  return git(root, args, { ...options, timeout: remoteGitTimeoutMs() });
 }
 
 function gitPathIdentity(value) {
@@ -1330,7 +1354,7 @@ function landingRemote(root, landingBranch) {
   }
   const remoteRef = `refs/heads/${branch}`;
   const observedAt = nowIso();
-  const rows = String(git(root, ["ls-remote", "--exit-code", remote, remoteRef])).trim().split(/\r?\n/).filter(Boolean);
+  const rows = String(remoteGit(root, ["ls-remote", "--exit-code", remote, remoteRef])).trim().split(/\r?\n/).filter(Boolean);
   if (rows.length !== 1) throw new Error(`remote ${remote} did not resolve exactly one ${remoteRef}`);
   const [commit, resolvedRef] = rows[0].split(/\s+/);
   if (!/^[0-9a-f]{40,64}$/i.test(commit) || resolvedRef !== remoteRef) {
@@ -1339,7 +1363,7 @@ function landingRemote(root, landingBranch) {
   try {
     git(root, ["cat-file", "-e", `${commit}^{commit}`]);
   } catch {
-    git(root, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, remoteRef]);
+    remoteGit(root, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, remoteRef]);
     git(root, ["cat-file", "-e", `${commit}^{commit}`]);
   }
   return {
@@ -1359,7 +1383,7 @@ function aheadCommits(root, landingCommit, headCommit) {
 }
 
 function explicitLandingBranch(tool, value) {
-  const landingBranch = String(value ?? "").trim();
+  const landingBranch = typeof value === "string" ? value.trim() : "";
   if (!landingBranch) throw new Error(`${tool} requires an explicit landingBranch`);
   return landingBranch;
 }
@@ -4506,8 +4530,8 @@ function toolDefinitions() {
     },
     {
       name: "list_parked_threads",
-      description: `Detector for chats in one project that may be parked on a question or approval card, with each worker workspace's freshness against an explicit landing branch. It reads persisted chat state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), landingBranch: string("Explicit branch these workers' workspaces must land on") }, ["project", "landingBranch"]),
+      description: `Detector for chats across every project, or one named project, that may be parked on a question or approval card, with each worker workspace's freshness against an explicit landing branch. It reads persisted chat state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
+      inputSchema: object({ project: string("Optional project id, root path, or unique project name; every project when omitted"), landingBranch: string("Explicit branch these workers' workspaces must land on") }, ["landingBranch"]),
       // The only one of the three card reads that is genuinely side-effect-free:
       // it never contacts Playbot. get_thread_card and list_queued_messages
       // deliberately carry no readOnlyHint, because that hint is what lets a
@@ -4596,26 +4620,30 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   if (name === "list_parked_threads") {
-    const project = resolveProject(args.project, projects);
+    const project = args.project ? resolveProject(args.project, projects) : null;
     const landingBranch = explicitLandingBranch(name, args.landingBranch);
+    const projectsById = new Map(projects.map((candidate) => [candidate.id, candidate]));
     const freshnessByWorkspace = new Map();
     // No scope-widening parameter: the confirming read this hands back has no
     // matching one, so an archived chat offered here would be a candidate
     // get_thread_card then refuses to resolve.
-    const candidates = threadsForProject(project.id, null)
+    const candidates = threadsForProject(project?.id ?? null, null)
       .filter((row) => row.agent_status === "pending_input")
       .map((row) => {
-        let freshness = freshnessByWorkspace.get(row.workspace_id);
+        const candidateProject = project ?? projectsById.get(row.project_id);
+        if (!candidateProject) throw new Error(`project ${row.project_id} for parked thread ${row.thread_id} is not readable`);
+        const freshnessKey = `${candidateProject.id}\0${row.workspace_id}`;
+        let freshness = freshnessByWorkspace.get(freshnessKey);
         if (!freshness) {
-          const workspace = project.workspaces.find((candidate) => candidate.id === row.workspace_id);
+          const workspace = candidateProject.workspaces.find((candidate) => candidate.id === row.workspace_id);
           if (!workspace) throw new Error(`workspace ${row.workspace_id} for parked thread ${row.thread_id} is not readable`);
-          freshness = workspaceFreshness(project, workspace, landingBranch);
-          freshnessByWorkspace.set(row.workspace_id, freshness);
+          freshness = workspaceFreshness(candidateProject, workspace, landingBranch);
+          freshnessByWorkspace.set(freshnessKey, freshness);
         }
         return { ...publicThread(row), freshness };
       });
     return {
-      project: { id: project.id, name: project.name },
+      ...(project ? { project: { id: project.id, name: project.name } } : {}),
       landingBranch,
       candidates,
       confirmWith: "get_thread_card",

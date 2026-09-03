@@ -335,6 +335,61 @@ NODE
   || fail "retirement head-race fixture did not move HEAD"
 pass "fm-playbot-lanes: retirement fallback keeps head subjects snapshot-consistent"
 
+git -C "$freshness_race" reset --hard "$freshness_race_head" >/dev/null
+rm -f "$freshness_race_marker"
+out=$(FM_TEST_REAL_GIT="$real_git" \
+  FM_TEST_FRESHNESS_RACE_MARKER="$freshness_race_marker" \
+  FM_TEST_FRESHNESS_RACE_ROOT="$freshness_race" \
+  FM_TEST_FRESHNESS_RACE_NEXT="$freshness_race_next" \
+  PATH="$freshness_race_bin:$PATH" \
+  rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-race","landingBranch":"main"}}}')
+OUT="$out" EXPECTED_HEAD="$freshness_race_head" node --no-warnings <<'NODE' \
+  || fail "successful workspace freshness mixed Git evidence from two heads"
+const root = JSON.parse(process.env.OUT).result.structuredContent.freshness.roots[0];
+if (root.head.commit !== process.env.EXPECTED_HEAD || root.head.subject !== 'race original head') process.exit(1);
+if (root.commitsAhead !== 1 || root.commitsBehind !== 0 || !root.current) process.exit(1);
+if (root.unlandedCommits.length !== 1) process.exit(1);
+if (root.unlandedCommits[0].commit !== process.env.EXPECTED_HEAD || root.unlandedCommits[0].subject !== 'race original head') process.exit(1);
+NODE
+[ "$(git -C "$freshness_race" rev-parse HEAD)" = "$freshness_race_next" ] \
+  || fail "successful freshness race fixture did not move HEAD"
+pass "fm-playbot-lanes: successful workspace freshness pins one head snapshot"
+
+timeout_git_bin="$FIXTURE_ROOT/timeout-git-bin"
+mkdir -p "$timeout_git_bin"
+cat > "$timeout_git_bin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "-C" ] && [ "${3:-}" = "ls-remote" ]; then
+  if [ "$FM_TEST_REMOTE_TIMEOUT_MODE" = "ls-remote" ]; then
+    exec "$FM_TEST_SLEEP_BIN" 2
+  fi
+  printf '%s\trefs/heads/main\n' '1111111111111111111111111111111111111111'
+  exit 0
+fi
+if [ "${1:-}" = "-C" ] && [ "${3:-}" = "fetch" ] && [ "$FM_TEST_REMOTE_TIMEOUT_MODE" = "fetch" ]; then
+  exec "$FM_TEST_SLEEP_BIN" 2
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod 0700 "$timeout_git_bin/git"
+sleep_bin=$(command -v sleep)
+for timeout_mode in ls-remote fetch; do
+  out=$(FM_TEST_REAL_GIT="$real_git" \
+    FM_TEST_SLEEP_BIN="$sleep_bin" \
+    FM_TEST_REMOTE_TIMEOUT_MODE="$timeout_mode" \
+    PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS=50 \
+    PATH="$timeout_git_bin:$PATH" \
+    rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"main"}}}')
+  OUT="$out" TIMEOUT_MODE="$timeout_mode" node --no-warnings <<'NODE' \
+    || fail "workspace freshness did not surface the $timeout_mode remote timeout explicitly"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable')) process.exit(1);
+if (!value.error.message.includes(`git ${process.env.TIMEOUT_MODE} timed out after 50ms`)) process.exit(1);
+NODE
+done
+pass "fm-playbot-lanes: workspace freshness bounds remote Git operations"
+
 # This is the end-to-end reproduction for the fleet-visibility defect. The
 # public MCP call used to resolve an omitted workspace through Playbot's UI
 # selection and silently return only that workspace, even though the same
@@ -1718,6 +1773,15 @@ NODE
 [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a workspace before validating landingBranch"
 pass "fm-playbot-lanes: new-workspace dispatch requires landingBranch before creation"
 
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":{\"branch\":\"main\"},\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-invalid-landing\"},\"title\":\"Invalid landing branch\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch coerced a malformed landing branch"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('requires an explicit landingBranch')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a workspace before rejecting a malformed landingBranch"
+pass "fm-playbot-lanes: new-workspace dispatch rejects malformed landingBranch before creation"
+
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace plus newWorkspace was not rejected"
 const value = JSON.parse(process.env.OUT);
@@ -1846,6 +1910,34 @@ const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('Thread not found in project project-worker')) process.exit(1);
 NODE
 pass "fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot"
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = new Date().toISOString();
+db.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('chat-fresh-parked', 'ws-fresh-clean', 'Fresh parked', 0, 1, null, 'full-access', 0, 0, '', null, 'pending_input', 0, now, now, now, 0);
+db.close();
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads did not preserve omitted-project global scope"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (Object.hasOwn(value, 'project') || value.landingBranch !== 'main') process.exit(1);
+if (value.candidates.length !== 2) process.exit(1);
+const candidates = Object.fromEntries(value.candidates.map(candidate => [candidate.id, candidate]));
+if (candidates['chat-worker-alt']?.freshness.workspace.projectId !== 'project-worker') process.exit(1);
+if (candidates['chat-fresh-parked']?.freshness.workspace.projectId !== 'project-freshness') process.exit(1);
+if (!candidates['chat-worker-alt'].freshness.current || !candidates['chat-fresh-parked'].freshness.current) process.exit(1);
+NODE
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('DELETE FROM workspace_threads WHERE id = ?').run('chat-fresh-parked');
+db.close();
+NODE
+pass "fm-playbot-lanes: parked detection resolves freshness across every project"
 
 # The detector advertises no parameter that widens its scope, because
 # get_thread_card has none to match, and it ignores one if a client sends it
@@ -4216,7 +4308,7 @@ if (!freshness || !list || !retire || !parked || !status) process.exit(1);
 if (freshness.inputSchema.required.join(',') !== 'project,workspace,landingBranch') process.exit(1);
 if (list.inputSchema.required.join(',') !== 'project,landingBranch') process.exit(1);
 if (retire.inputSchema.required.join(',') !== 'project,workspace,landingBranch,confirm') process.exit(1);
-if (parked.inputSchema.required.join(',') !== 'project,landingBranch') process.exit(1);
+if (parked.inputSchema.required.join(',') !== 'landingBranch') process.exit(1);
 if (status.inputSchema.required.join(',') !== 'project,thread,landingBranch') process.exit(1);
 if (retire.inputSchema.properties.confirm.const !== true) process.exit(1);
 if (retire.inputSchema.properties.workspaces || retire.inputSchema.properties.all) process.exit(1);

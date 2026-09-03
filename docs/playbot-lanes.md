@@ -78,7 +78,8 @@ The aggregate workspace `current` is true only when every root is current.
 Missing roots, paths that do not name an exact Git worktree, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
 
 `get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.
-`list_parked_threads` now requires one exact `project` plus `landingBranch` and places the matching workspace `freshness` on every candidate.
+`list_parked_threads` requires `landingBranch`, accepts an optional exact `project`, and searches every project when `project` is omitted.
+It evaluates the explicit landing branch against each candidate's owning project and places the matching workspace `freshness` on every candidate.
 The parked-chat detection remains a persisted, non-resuming read, while freshness consults Git and current remote branch evidence.
 
 ### Workspace retirement
@@ -191,7 +192,7 @@ An `unknown` verdict is classified by the chat-creation API this Playbot exposes
 
 A Playbot worker that asks a question parks until someone chooses an option, and an ordinary text send does not reach it while it waits.
 Forced steering can attach an instruction to that active turn, but it does not answer or dismiss the card, so the worker remains parked until the card is resolved through the dedicated answer surface.
-`list_parked_threads` is the project-scoped detector: it reads persisted status, resumes nothing, and contacts Playbot not at all while also reading workspace freshness from Git.
+`list_parked_threads` is the optionally project-scoped detector: it reads persisted status, resumes nothing, and contacts Playbot not at all while also reading workspace freshness from Git.
 Its results are candidates rather than findings, because Playbot reports a merely rehydrated chat as `pending_input` whether or not it is actually parked.
 It shares one scope with the thread resolution described above and takes no parameter that widens it, because the confirming read has none to match, so every candidate it offers is resolvable by the `get_thread_card` pointer it hands back; an archived chat, and any chat in an archived workspace, is offered by neither.
 
