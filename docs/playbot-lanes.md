@@ -71,15 +71,18 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 `get_workspace_freshness` requires an explicit active workspace selector by id, root path, or unique name plus an explicit `landingBranch`.
 The landing branch is always explicit because a repository's default branch may not be where lane work lands.
 Callers must pass the real landing target, such as `proto/godot/frog-pile`; the tool never substitutes `main`, a repository default, or the workspace's base branch.
+When a branch's first path component is also a configured remote name, the short form is ambiguous and rejected; use `refs/remotes/<remote>/<branch>` to name the remote branch explicitly.
 Each root reports `worktreePath`, the exact `head` commit and subject, the current remote-backed `landingBranchTip`, numeric `commitsAhead` and `commitsBehind`, `current`, `headIsCleanFastForwardOfLandingTip`, and `unlandedCommits` with each commit's exact subject.
 `current` and `headIsCleanFastForwardOfLandingTip` are true when the landing tip is an ancestor of the workspace head, including when the workspace has legitimate commits ahead.
 They are false when the workspace is behind or diverged.
 The aggregate workspace `current` is true only when every root is current.
 Missing roots, paths that do not name an exact Git worktree, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
+When the remotely observed landing commit is absent locally, the bounded fallback fetch uses one exact branch refspec with no tags and no `FETCH_HEAD`; it writes only the fetched objects and that branch's `refs/remotes/<remote>/<branch>` tracking ref, without changing a local branch, index, or worktree.
 
 `get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.
-`list_parked_threads` requires `landingBranch`, accepts an optional exact `project`, and searches every project when `project` is omitted.
-It evaluates the explicit landing branch against each candidate's owning project and places the matching workspace `freshness` on every candidate.
+`list_parked_threads` accepts either an exact `project` with its required `landingBranch`, or global scope with both fields omitted.
+Global scope accepts an optional `landingBranches` map from project id, root path, or unique name to that project's explicit landing branch.
+It places `freshness` only on candidates whose owning project has an explicit target, and uncovered projects are returned without freshness rather than compared against another project's branch.
 The parked-chat detection remains a persisted, non-resuming read, while freshness consults Git and current remote branch evidence.
 
 ### Workspace retirement
@@ -192,7 +195,7 @@ An `unknown` verdict is classified by the chat-creation API this Playbot exposes
 
 A Playbot worker that asks a question parks until someone chooses an option, and an ordinary text send does not reach it while it waits.
 Forced steering can attach an instruction to that active turn, but it does not answer or dismiss the card, so the worker remains parked until the card is resolved through the dedicated answer surface.
-`list_parked_threads` is the optionally project-scoped detector: it reads persisted status, resumes nothing, and contacts Playbot not at all while also reading workspace freshness from Git.
+`list_parked_threads` is the optionally project-scoped detector: it reads persisted status, resumes nothing, and contacts Playbot not at all, while explicit project targets can add workspace freshness from Git.
 Its results are candidates rather than findings, because Playbot reports a merely rehydrated chat as `pending_input` whether or not it is actually parked.
 It shares one scope with the thread resolution described above and takes no parameter that widens it, because the confirming read has none to match, so every candidate it offers is resolvable by the `get_thread_card` pointer it hands back; an archived chat, and any chat in an archived workspace, is offered by neither.
 

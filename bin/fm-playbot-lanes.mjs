@@ -1318,14 +1318,16 @@ function landingRemote(root, landingBranch) {
   let remote = null;
   let branch = requested.replace(/^refs\/heads\//, "");
   const remoteRefMatch = requested.match(/^refs\/remotes\/([^/]+)\/(.+)$/);
-  if (remoteRefMatch && remotes.includes(remoteRefMatch[1])) {
+  if (remoteRefMatch) {
+    if (!remotes.includes(remoteRefMatch[1])) {
+      throw new Error(`landing branch ${requested} names unconfigured remote ${remoteRefMatch[1]}`);
+    }
     [, remote, branch] = remoteRefMatch;
   } else {
-    const slash = requested.indexOf("/");
-    const prefix = slash > 0 ? requested.slice(0, slash) : "";
+    const slash = branch.indexOf("/");
+    const prefix = slash > 0 ? branch.slice(0, slash) : "";
     if (prefix && remotes.includes(prefix)) {
-      remote = prefix;
-      branch = requested.slice(slash + 1);
+      throw new Error(`landing branch ${requested} is ambiguous because ${prefix} is a configured remote; use refs/remotes/${prefix}/${branch.slice(slash + 1)} to name the remote branch explicitly`);
     }
   }
   git(root, ["check-ref-format", "--branch", branch]);
@@ -1349,10 +1351,12 @@ function landingRemote(root, landingBranch) {
     } else if (remotes.length === 0) {
       throw new Error(`landing branch ${requested} has no remote from which to obtain current evidence`);
     } else {
-      throw new Error(`landing branch ${requested} has no upstream and this repository has multiple remotes; name it as <remote>/${requested}`);
+      throw new Error(`landing branch ${requested} has no upstream and this repository has multiple remotes; name it as refs/remotes/<remote>/${branch}`);
     }
   }
   const remoteRef = `refs/heads/${branch}`;
+  const remoteTrackingRef = `refs/remotes/${remote}/${branch}`;
+  git(root, ["check-ref-format", remoteTrackingRef]);
   const observedAt = nowIso();
   const rows = String(remoteGit(root, ["ls-remote", "--exit-code", remote, remoteRef])).trim().split(/\r?\n/).filter(Boolean);
   if (rows.length !== 1) throw new Error(`remote ${remote} did not resolve exactly one ${remoteRef}`);
@@ -1363,7 +1367,9 @@ function landingRemote(root, landingBranch) {
   try {
     git(root, ["cat-file", "-e", `${commit}^{commit}`]);
   } catch {
-    remoteGit(root, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, remoteRef]);
+    // The exact one-ref fallback writes fetched objects and its remote-tracking
+    // ref, while leaving FETCH_HEAD, local branches, the index, and worktree untouched.
+    remoteGit(root, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, `+${remoteRef}:${remoteTrackingRef}`]);
     git(root, ["cat-file", "-e", `${commit}^{commit}`]);
   }
   return {
@@ -1386,6 +1392,41 @@ function explicitLandingBranch(tool, value) {
   const landingBranch = typeof value === "string" ? value.trim() : "";
   if (!landingBranch) throw new Error(`${tool} requires an explicit landingBranch`);
   return landingBranch;
+}
+
+function parkedLandingTargets(args, projects) {
+  const hasProject = args.project !== undefined;
+  const hasLandingBranch = args.landingBranch !== undefined;
+  const hasLandingBranches = args.landingBranches !== undefined;
+  if (hasProject) {
+    if (typeof args.project !== "string" || !args.project.trim()) {
+      throw new Error("list_parked_threads project must be an explicit id, path, or unique name when provided");
+    }
+    if (hasLandingBranches) {
+      throw new Error("list_parked_threads landingBranches is only valid when project is omitted");
+    }
+    const project = resolveProject(args.project, projects);
+    return {
+      project,
+      landingBranches: new Map([[project.id, explicitLandingBranch("list_parked_threads", args.landingBranch)]]),
+    };
+  }
+  if (hasLandingBranch) {
+    throw new Error("list_parked_threads landingBranch is only valid with an explicit project; use landingBranches for global scope");
+  }
+  if (!hasLandingBranches) return { project: null, landingBranches: new Map() };
+  if (!args.landingBranches || typeof args.landingBranches !== "object" || Array.isArray(args.landingBranches)) {
+    throw new Error("list_parked_threads landingBranches must map project selectors to explicit landing branches");
+  }
+  const landingBranches = new Map();
+  for (const [selector, value] of Object.entries(args.landingBranches)) {
+    const project = resolveProject(selector, projects);
+    if (landingBranches.has(project.id)) {
+      throw new Error(`list_parked_threads landingBranches names project ${project.id} more than once`);
+    }
+    landingBranches.set(project.id, explicitLandingBranch(`list_parked_threads landingBranches.${selector}`, value));
+  }
+  return { project: null, landingBranches };
 }
 
 function explicitWorkspaceSelector(tool, value) {
@@ -4482,7 +4523,7 @@ function toolDefinitions() {
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
         workspace: string("Workspace id, root path, or unique name"),
-        landingBranch: string("Explicit branch this workspace's work must land on; name <remote>/<branch> when a local branch has no unambiguous upstream"),
+        landingBranch: string("Explicit branch this workspace's work must land on; use refs/remotes/<remote>/<branch> to name a remote branch unambiguously"),
       }, ["project", "workspace", "landingBranch"]),
       annotations: { readOnlyHint: true },
     },
@@ -4491,7 +4532,7 @@ function toolDefinitions() {
       description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence, unarchived thread states, commits and subjects ahead, and exact tracked and untracked paths. Local workspaces and any workspace with uncertain evidence are reported blocked.",
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
-        landingBranch: string("Explicit branch these workspaces must already be landed on; name <remote>/<branch> when a local branch has no unambiguous upstream"),
+        landingBranch: string("Explicit branch these workspaces must already be landed on; use refs/remotes/<remote>/<branch> to name a remote branch unambiguously"),
       }, ["project", "landingBranch"]),
       annotations: { readOnlyHint: true },
     },
@@ -4530,8 +4571,18 @@ function toolDefinitions() {
     },
     {
       name: "list_parked_threads",
-      description: `Detector for chats across every project, or one named project, that may be parked on a question or approval card, with each worker workspace's freshness against an explicit landing branch. It reads persisted chat state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
-      inputSchema: object({ project: string("Optional project id, root path, or unique project name; every project when omitted"), landingBranch: string("Explicit branch these workers' workspaces must land on") }, ["landingBranch"]),
+      description: `Detector for chats across every project, or one named project, that may be parked on a question or approval card. A project-scoped read requires one landingBranch and adds freshness to every candidate. A global read accepts an optional landingBranches map and adds freshness only to candidates whose project is covered. It reads persisted chat state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
+      inputSchema: {
+        ...object({
+          project: string("Optional project id, root path, or unique project name; every project when omitted"),
+          landingBranch: string("Explicit landing branch; valid only with project"),
+          landingBranches: { type: "object", description: "Optional global-scope map from project id, root path, or unique name to its explicit landing branch", additionalProperties: { type: "string" } },
+        }),
+        oneOf: [
+          { required: ["project", "landingBranch"], not: { required: ["landingBranches"] } },
+          { not: { anyOf: [{ required: ["project"] }, { required: ["landingBranch"] }] } },
+        ],
+      },
       // The only one of the three card reads that is genuinely side-effect-free:
       // it never contacts Playbot. get_thread_card and list_queued_messages
       // deliberately carry no readOnlyHint, because that hint is what lets a
@@ -4620,8 +4671,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   if (name === "list_parked_threads") {
-    const project = args.project ? resolveProject(args.project, projects) : null;
-    const landingBranch = explicitLandingBranch(name, args.landingBranch);
+    const { project, landingBranches } = parkedLandingTargets(args, projects);
     const projectsById = new Map(projects.map((candidate) => [candidate.id, candidate]));
     const freshnessByWorkspace = new Map();
     // No scope-widening parameter: the confirming read this hands back has no
@@ -4632,7 +4682,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       .map((row) => {
         const candidateProject = project ?? projectsById.get(row.project_id);
         if (!candidateProject) throw new Error(`project ${row.project_id} for parked thread ${row.thread_id} is not readable`);
-        const freshnessKey = `${candidateProject.id}\0${row.workspace_id}`;
+        const landingBranch = landingBranches.get(candidateProject.id);
+        if (!landingBranch) return publicThread(row);
+        const freshnessKey = `${candidateProject.id}\0${row.workspace_id}\0${landingBranch}`;
         let freshness = freshnessByWorkspace.get(freshnessKey);
         if (!freshness) {
           const workspace = candidateProject.workspaces.find((candidate) => candidate.id === row.workspace_id);
@@ -4643,8 +4695,10 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         return { ...publicThread(row), freshness };
       });
     return {
-      ...(project ? { project: { id: project.id, name: project.name } } : {}),
-      landingBranch,
+      ...(project ? {
+        project: { id: project.id, name: project.name },
+        landingBranch: landingBranches.get(project.id),
+      } : {}),
       candidates,
       confirmWith: "get_thread_card",
       note: "Persisted status only. Playbot reports a rehydrated chat as pending_input even when it is not parked, so confirm each candidate with get_thread_card before answering anything.",

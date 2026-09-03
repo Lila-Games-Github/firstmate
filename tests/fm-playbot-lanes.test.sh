@@ -1920,15 +1920,44 @@ db.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
   .run('chat-fresh-parked', 'ws-fresh-clean', 'Fresh parked', 0, 1, null, 'full-access', 0, 0, '', null, 'pending_input', 0, now, now, now, 0);
 db.close();
 NODE
+git -C "$freshness_repo" push origin main:refs/heads/proto/godot/frog-pile >/dev/null
+
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"landingBranch":"main"}}}')
-OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads did not preserve omitted-project global scope"
+OUT="$out" node --no-warnings <<'NODE' || fail "global parked detection accepted one project's landing branch for every project"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('landingBranch is only valid with an explicit project')) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"project":"project-worker","landingBranch":"main","landingBranches":{"project-worker":"main"}}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "project-scoped parked detection accepted a global landing map"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('landingBranches is only valid when project is omitted')) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"landingBranches":{"project-worker":"main","project-freshness":"proto/godot/frog-pile"}}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads did not apply per-project landing targets"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
-if (Object.hasOwn(value, 'project') || value.landingBranch !== 'main') process.exit(1);
+if (Object.hasOwn(value, 'project') || Object.hasOwn(value, 'landingBranch')) process.exit(1);
 if (value.candidates.length !== 2) process.exit(1);
 const candidates = Object.fromEntries(value.candidates.map(candidate => [candidate.id, candidate]));
 if (candidates['chat-worker-alt']?.freshness.workspace.projectId !== 'project-worker') process.exit(1);
 if (candidates['chat-fresh-parked']?.freshness.workspace.projectId !== 'project-freshness') process.exit(1);
+if (candidates['chat-worker-alt'].freshness.landingBranch !== 'main') process.exit(1);
+if (candidates['chat-fresh-parked'].freshness.landingBranch !== 'proto/godot/frog-pile') process.exit(1);
 if (!candidates['chat-worker-alt'].freshness.current || !candidates['chat-fresh-parked'].freshness.current) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"landingBranches":{"project-worker":"main"}}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "global parked detection attached freshness to an uncovered project"
+const candidates = Object.fromEntries(JSON.parse(process.env.OUT).result.structuredContent.candidates.map(candidate => [candidate.id, candidate]));
+if (!Object.hasOwn(candidates['chat-worker-alt'], 'freshness')) process.exit(1);
+if (Object.hasOwn(candidates['chat-fresh-parked'], 'freshness')) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "global parked detection required freshness targets"
+const candidates = JSON.parse(process.env.OUT).result.structuredContent.candidates;
+if (candidates.length !== 2 || candidates.some(candidate => Object.hasOwn(candidate, 'freshness'))) process.exit(1);
 NODE
 FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -1937,7 +1966,79 @@ const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'play
 db.prepare('DELETE FROM workspace_threads WHERE id = ?').run('chat-fresh-parked');
 db.close();
 NODE
-pass "fm-playbot-lanes: parked detection resolves freshness across every project"
+pass "fm-playbot-lanes: parked detection uses only explicit per-project landing targets"
+
+freshness_publisher="$FIXTURE_ROOT/freshness-publisher"
+git clone "$freshness_remote" "$freshness_publisher" >/dev/null
+git -C "$freshness_publisher" config user.name "Firstmate tests"
+git -C "$freshness_publisher" config user.email "firstmate-tests@example.invalid"
+printf 'remote only\n' >> "$freshness_publisher/freshness.txt"
+git -C "$freshness_publisher" commit -am "remote-only landing advance" >/dev/null
+git -C "$freshness_publisher" tag remote-only-tag
+git -C "$freshness_publisher" branch remote-only-other
+git -C "$freshness_publisher" push origin main remote-only-other remote-only-tag >/dev/null
+remote_only_head=$(git -C "$freshness_publisher" rev-parse HEAD)
+fetch_head_path=$(git -C "$freshness_clean" rev-parse --git-path FETCH_HEAD)
+fetch_head_before=missing
+[ ! -e "$fetch_head_path" ] || fetch_head_before=$(cksum "$fetch_head_path")
+freshness_head_before=$(git -C "$freshness_clean" rev-parse HEAD)
+freshness_branch_before=$(git -C "$freshness_clean" symbolic-ref HEAD)
+freshness_index_before=$(git -C "$freshness_clean" write-tree)
+freshness_status_before=$(git -C "$freshness_clean" status --porcelain=v1 --untracked-files=all)
+freshness_file_before=$(cksum "$freshness_clean/freshness.txt")
+out=$(freshness_call ws-fresh-clean)
+OUT="$out" REMOTE_HEAD="$remote_only_head" LOCAL_HEAD="$freshness_head_before" node --no-warnings <<'NODE' \
+  || fail "freshness fallback fetch did not return the exact remote-only landing tip"
+const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
+if (root.head.commit !== process.env.LOCAL_HEAD || root.landingBranchTip.commit !== process.env.REMOTE_HEAD) process.exit(1);
+if (root.commitsAhead !== 0 || root.commitsBehind !== 1 || root.current) process.exit(1);
+NODE
+[ "$(git -C "$freshness_clean" rev-parse HEAD)" = "$freshness_head_before" ] \
+  || fail "freshness fallback fetch moved the checked-out branch"
+[ "$(git -C "$freshness_clean" symbolic-ref HEAD)" = "$freshness_branch_before" ] \
+  || fail "freshness fallback fetch changed the checked-out branch"
+[ "$(git -C "$freshness_clean" write-tree)" = "$freshness_index_before" ] \
+  || fail "freshness fallback fetch changed the index"
+[ "$(git -C "$freshness_clean" status --porcelain=v1 --untracked-files=all)" = "$freshness_status_before" ] \
+  || fail "freshness fallback fetch changed worktree status"
+[ "$(cksum "$freshness_clean/freshness.txt")" = "$freshness_file_before" ] \
+  || fail "freshness fallback fetch changed worktree content"
+fetch_head_after=missing
+[ ! -e "$fetch_head_path" ] || fetch_head_after=$(cksum "$fetch_head_path")
+[ "$fetch_head_after" = "$fetch_head_before" ] \
+  || fail "freshness fallback fetch wrote FETCH_HEAD"
+[ "$(git -C "$freshness_clean" rev-parse refs/remotes/origin/main)" = "$remote_only_head" ] \
+  || fail "freshness fallback fetch did not update the exact remote-tracking ref"
+git -C "$freshness_clean" cat-file -e "$remote_only_head^{commit}" \
+  || fail "freshness fallback fetch did not retain the landing commit object"
+if git -C "$freshness_clean" show-ref --verify --quiet refs/remotes/origin/remote-only-other; then
+  fail "freshness fallback fetch updated another remote-tracking ref"
+fi
+if git -C "$freshness_clean" show-ref --verify --quiet refs/tags/remote-only-tag; then
+  fail "freshness fallback fetch imported a tag"
+fi
+pass "fm-playbot-lanes: fallback fetch writes only objects and one remote-tracking ref"
+
+git -C "$freshness_clean" remote add release "$freshness_remote"
+git -C "$freshness_clean" branch --track release/1.0 origin/main >/dev/null
+for ambiguous_landing in release/1.0 refs/heads/release/1.0; do
+  out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness \
+    "{\"project\":\"project-freshness\",\"workspace\":\"ws-fresh-clean\",\"landingBranch\":\"$ambiguous_landing\"}" 2>&1) \
+    && fail "workspace freshness accepted ambiguous landing branch $ambiguous_landing"
+  case "$out" in
+    *"is ambiguous because release is a configured remote"*"use refs/remotes/release/1.0"*) ;;
+    *) fail "workspace freshness did not explain ambiguous landing branch $ambiguous_landing" ;;
+  esac
+done
+out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness \
+  '{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"refs/remotes/release/main"}')
+OUT="$out" REMOTE_HEAD="$remote_only_head" node --no-warnings <<'NODE' \
+  || fail "workspace freshness rejected an unambiguous remote landing branch"
+const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
+if (root.landingBranch !== 'refs/remotes/release/main') process.exit(1);
+if (root.landingBranchTip.remote !== 'release' || root.landingBranchTip.commit !== process.env.REMOTE_HEAD) process.exit(1);
+NODE
+pass "fm-playbot-lanes: remote-prefixed landing branches require unambiguous refs"
 
 # The detector advertises no parameter that widens its scope, because
 # get_thread_card has none to match, and it ignores one if a client sends it
@@ -1956,13 +2057,13 @@ const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('Thread not found in project project-worker')) process.exit(1);
 NODE
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
-OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads advertises a scope-widening parameter get_thread_card cannot match"
+OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads exposed an unintended input schema"
 const tools = JSON.parse(process.env.OUT).result.tools;
 const detector = tools.find(tool => tool.name === 'list_parked_threads');
 if (!detector) process.exit(1);
-if (JSON.stringify(Object.keys(detector.inputSchema.properties)) !== '["project","landingBranch"]') process.exit(1);
+if (JSON.stringify(Object.keys(detector.inputSchema.properties)) !== '["project","landingBranch","landingBranches"]') process.exit(1);
 NODE
-pass "fm-playbot-lanes: the parked detector cannot be widened past its confirming read's scope"
+pass "fm-playbot-lanes: the parked detector exposes only its scoped target inputs"
 
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "get_thread_card did not enumerate the card's questions and options"
@@ -4308,7 +4409,10 @@ if (!freshness || !list || !retire || !parked || !status) process.exit(1);
 if (freshness.inputSchema.required.join(',') !== 'project,workspace,landingBranch') process.exit(1);
 if (list.inputSchema.required.join(',') !== 'project,landingBranch') process.exit(1);
 if (retire.inputSchema.required.join(',') !== 'project,workspace,landingBranch,confirm') process.exit(1);
-if (parked.inputSchema.required.join(',') !== 'landingBranch') process.exit(1);
+if (parked.inputSchema.required.length !== 0 || parked.inputSchema.oneOf.length !== 2) process.exit(1);
+if (parked.inputSchema.oneOf[0].required.join(',') !== 'project,landingBranch') process.exit(1);
+if (parked.inputSchema.oneOf[0].not.required.join(',') !== 'landingBranches') process.exit(1);
+if (parked.inputSchema.oneOf[1].not.anyOf.map(rule => rule.required[0]).join(',') !== 'project,landingBranch') process.exit(1);
 if (status.inputSchema.required.join(',') !== 'project,thread,landingBranch') process.exit(1);
 if (retire.inputSchema.properties.confirm.const !== true) process.exit(1);
 if (retire.inputSchema.properties.workspaces || retire.inputSchema.properties.all) process.exit(1);
