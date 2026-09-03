@@ -1,0 +1,32 @@
+$ # fixture: origin/main and origin/proto/godot/frog-pile both advanced past the pooled worktree HEAD
+$ git -C project log --oneline --graph --all
+* d46a4e7 (origin/main, origin/HEAD) advance main
+| * eeb6f00 (origin/proto/godot/frog-pile) frog-pile tip
+|/  
+* dd062cf (HEAD -> main) initial
+
+$ fm-spawn.sh frog-pile-lane-1 project --mode local-only --yolo off --landing-branch proto/godot/frog-pile
+warning: <tmp>/home/data/frog-pile-lane-1/brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode local-only - confirm its definition of done matches
+notice: frog-pile-lane-1 ships mode=local-only while the standing posture for project is no-mistakes - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state
+spawned frog-pile-lane-1 harness=codex kind=ship mode=local-only yolo=off window=firstmate:fm-frog-pile-lane-1 worktree=<tmp>/pool
+exit=0
+
+$ git -C pool log --oneline --decorate -1   # where the worker starts
+eeb6f00 (HEAD, origin/proto/godot/frog-pile) frog-pile tip
+$ git -C pool rev-parse HEAD origin/proto/godot/frog-pile origin/main
+eeb6f00231e3df325e6023b2649606434c79463d
+eeb6f00231e3df325e6023b2649606434c79463d
+d46a4e74bbf53628cc7add1d5728e62f7fdb30cb
+$ ls pool
+frog.txt
+README.md
+$ grep landing_branch= state/frog-pile-lane-1.meta
+landing_branch=proto/godot/frog-pile
+
+$ # worker creates its task branch and commits
+$ git -C pool log --oneline --graph --all --decorate
+* 22be545 (HEAD -> fm/frog-pile-lane-1) first lane commit
+* eeb6f00 (origin/proto/godot/frog-pile) frog-pile tip
+| * d46a4e7 (origin/main, origin/HEAD) advance main
+|/  
+* dd062cf (main) initial

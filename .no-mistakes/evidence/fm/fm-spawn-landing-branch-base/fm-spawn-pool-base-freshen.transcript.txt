@@ -1,0 +1,22 @@
+# observed spawn: spawned pool-current-base-r1 harness=codex kind=ship mode=no-mistakes yolo=off window=firstmate:fm-pool-current-base-r1 worktree=/tmp/fm-spawn-pool-base-freshen.lOvuYP/current-base/pool
+# observed base: HEAD=33d184af6b94af52781526bcb815dffeb7aed3e1 origin/main=33d184af6b94af52781526bcb815dffeb7aed3e1 advanced-main=must survive a newly spawned branch
+ok - a stale pooled worktree refreshes to current origin/main before a crew branch is created
+ok - a stale pooled worktree resolves and refreshes a non-main default branch
+# observed direct-pr spawn: spawned pool-direct-pr-r3 harness=codex kind=ship mode=direct-PR yolo=off window=firstmate:fm-pool-direct-pr-r3 worktree=/tmp/fm-spawn-pool-base-freshen.lOvuYP/direct-pr/pool
+# observed scout spawn: spawned pool-scout-r3 harness=codex kind=scout window=firstmate:fm-pool-scout-r3 worktree=/tmp/fm-spawn-pool-base-freshen.lOvuYP/scout/pool
+ok - direct-PR ships and scouts both refresh stale pooled worktrees before launch
+# observed dirty refusal: error: pooled worktree '/tmp/fm-spawn-pool-base-freshen.lOvuYP/dirty-refusal/pool' is not clean; refusing to discard uncommitted work while refreshing its base; preserved=keep this local work
+ok - a dirty pooled worktree is refused without discarding its local work
+# observed unresolved-default refusal: error: could not resolve origin's current default branch for pooled worktree '/tmp/fm-spawn-pool-base-freshen.lOvuYP/unresolved-default/pool'; refusing to launch from a potentially stale base
+ok - an unresolved remote default branch refuses the pooled worktree
+# observed unreachable-origin refusal: error: could not fetch origin for pooled worktree '/tmp/fm-spawn-pool-base-freshen.lOvuYP/unreachable-origin/pool'; refusing to launch from a potentially stale base
+ok - an unreachable origin refuses a potentially stale pooled worktree
+# observed landing base: HEAD=ca59d8167c958c2293cdee589e68de709d4f7732 origin/proto/godot/frog-pile=ca59d8167c958c2293cdee589e68de709d4f7732 origin/main=21cb5661b04067994e4eb7809a0fd64ad2dedec5
+ok - a ship spawn with --landing-branch starts from the landing tip while the default path is unchanged
+# observed local landing base: HEAD=2a450bdb996b2680badabeb1ddff2542bfb6cfc3 refs/heads/local/only-here=2a450bdb996b2680badabeb1ddff2542bfb6cfc3 origin/main=96c3fb6f4f936c1d8f5ae0aa959f965213585271
+ok - a landing branch missing from origin bases the spawn on the project clone's local branch tip
+# observed unresolvable landing refusal: error: --landing-branch 'nowhere/at-all' does not resolve in /tmp/fm-spawn-pool-base-freshen.lOvuYP/landing-nowhere/project as a local branch or an origin remote-tracking branch
+ok - a landing branch that resolves nowhere refuses the spawn before touching the worktree
+# observed landing mismatch refusal: error: pooled worktree '/tmp/fm-spawn-pool-base-freshen.lOvuYP/landing-mismatch/pool' is at '72c407d8edf2debb74e6f59f7e0dce02da8298de', not current 'origin/proto/godot/frog-pile' ('31855db7520cba6f26f3c3e74bf7a07b3d09420a'); refusing to launch from a potentially stale base
+ok - a refreshed base that does not match the landing tip refuses the spawn naming both commits
+# all fm-spawn-pool-base-freshen tests passed
