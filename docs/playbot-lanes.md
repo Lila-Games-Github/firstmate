@@ -80,6 +80,7 @@ They are false when the workspace is behind or diverged.
 The aggregate workspace `current` is true only when every root is current.
 Workspace root rows must cover every project root exactly once; missing, extra, or duplicate project-root IDs, paths that do not name an exact Git worktree, repositories whose common Git directory does not match the persisted project root, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
 Freshness reads the remote tip with bounded `git ls-remote` and performs zero writes to the workspace repository, including when that tip is absent locally.
+Lazy object fetching is disabled on every freshness Git call, so a partial clone reports a missing landing tip as not present locally rather than downloading it on demand.
 The remote bound defaults to 15 seconds and is overridable through `PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS`, a positive integer of milliseconds up to 300000; a malformed value is validated once and reported as an explicit configuration error rather than a landing-branch failure.
 
 `get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.

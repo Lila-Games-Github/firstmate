@@ -736,6 +736,11 @@ function git(root, args, options = {}) {
   return result.stdout;
 }
 
+// Every freshness Git call runs with lazy fetching disabled so a partial or
+// promisor clone can never turn a read into an on-demand object download;
+// a missing object is reported as the explicit remote-tip-absent result
+// instead. Together with ls-remote as the only remote command, this keeps
+// the freshness surface free of writes to any workspace repository.
 function freshnessGitEnvironment() {
   return { ...gitEnvironment(), GIT_NO_LAZY_FETCH: "1" };
 }

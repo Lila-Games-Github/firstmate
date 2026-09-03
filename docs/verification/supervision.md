@@ -646,6 +646,31 @@ The broader `bin/fm-test-run.sh --changed --base origin/main` run passed 36 of 3
 The isolated fixture was then run from this workspace-retirement tree and a detached worktree at exact base `d4d6398c92da7ac82f800e5ddc3c9b8923a5152d` under the same constrained environment; both returned exit 139 with byte-identical output whose SHA-256 was `10f6ac65180a19b3c37dce19ff7e6ae123cd0fe69e3a9737e88a88fec707afbf`.
 There is no branch/base diff in `bin/fm-teardown.sh`, `tests/fm-teardown.test.sh`, or `tests/lib.sh`, so that pre-existing failure is disconfirming evidence rather than a workspace-retirement regression.
 
+On 2026-09-04, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 157 checks at commit `a5e302f` after adding the read-only workspace freshness surface in `playbot_lanes@0.6.0`.
+The freshness fixtures use real Git repositories with local bare remotes and prove the guarantees [playbot-lanes.md](../playbot-lanes.md#workspace-freshness) states: the remote tip is read only through `ls-remote`, no freshness call writes to a workspace repository, a real partial clone reports a missing landing tip as not present locally instead of lazily fetching it, the head hash is pinned once per reading even when `HEAD` moves after capture, a failing remote's error text carries no URL credentials, a replaced unrelated clone is an explicit identity mismatch, and a malformed `PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS` is a configuration error rather than landing evidence.
+The exact freshness-specific output was:
+
+```text
+ok - fm-playbot-lanes: workspace freshness reports Git evidence without remote URLs
+ok - fm-playbot-lanes: landing upstream lookup matches the exact local branch
+ok - fm-playbot-lanes: partial-clone freshness disables lazy object fetching
+ok - fm-playbot-lanes: freshness rejects incomplete multi-root workspace coverage
+ok - fm-playbot-lanes: workspace freshness requires explicit selectors and complete readable Git state
+ok - fm-playbot-lanes: successful workspace freshness pins one head snapshot
+ok - fm-playbot-lanes: workspace freshness bounds remote Git operations
+ok - fm-playbot-lanes: a malformed remote Git timeout is an explicit configuration error
+ok - fm-playbot-lanes: failed remote freshness redacts URL credentials
+ok - fm-playbot-lanes: freshness and retirement verify repository identity
+ok - fm-playbot-lanes: new-workspace dispatch requires landingBranch before creation
+ok - fm-playbot-lanes: new-workspace dispatch rejects malformed landingBranch before creation
+ok - fm-playbot-lanes: dispatch rejects landingBranch without newWorkspace before any side effect
+ok - fm-playbot-lanes: parked detection uses only explicit per-project landing targets
+ok - fm-playbot-lanes: retirement reuses the full workspace freshness shape
+ok - fm-playbot-lanes: remote-prefixed landing branches require unambiguous refs
+ok - fm-playbot-lanes: landing branches require current resolvable remote evidence
+ok - fm-playbot-lanes: retirement inventory reports a malformed remote Git timeout as configuration, not landing evidence
+```
+
 On 2026-08-24, Playbot 0.95.0 on Linux was verified to expose the question-card, snapshot, and pending-queue channels the card tools use, and to have kept the composer mounted while a card is displayed.
 `app:metadata` returned `{name: "Playbot", version: "0.95.0"}`, matching the extracted `resources/app.asar` `/package.json` and the crashpad `--annotation=_version=0.95.0`.
 The channel names and payload shapes were confirmed from the running app's extracted `.vite/build/main.js`, where `threads:respondToUserInput` takes `{threadId, requestId, response, composerContext?}` and resolves the pending Codex `item/tool/requestUserInput` request, `threads:getSnapshot` takes `{threadId}` and returns `userInputRequests`, `pendingMessages`, and `outboundMessages` among its fields, `threads:recallMessage` takes `{threadId, messageId}` and returns `{outcome, message?, snapshot}`, and `threads:send` returns that same thread snapshot.
