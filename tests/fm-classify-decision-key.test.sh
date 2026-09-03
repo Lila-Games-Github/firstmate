@@ -259,6 +259,26 @@ test_incremental_agrees_with_full_fold_across_appends() {
   pass "the incremental fold matches the full fold across appends in both key positions"
 }
 
+test_whitespace_checks_preserve_fold_output_bytes() {
+  local dir f before after
+  dir=$(case_dir whitespace-output)
+  f="$dir/t.status"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$f"
+  before=$(status_open_decisions "$f")
+
+  {
+    printf ' \t  \n'
+    printf 'working: '
+    awk 'BEGIN { for (i = 0; i < 132000; i++) printf "s" }'
+    printf '\n'
+  } >> "$f"
+  after=$(status_open_decisions "$f")
+
+  [ "$after" = "$before" ] \
+    || fail "blank and oversized non-decision events changed folded output bytes: '$after' vs '$before'"
+  pass "whitespace checks preserve folded output bytes across blank and oversized non-decision events"
+}
+
 test_stated_key_is_honored_in_both_positions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
@@ -272,3 +292,4 @@ test_corr_only_tag_opens_as_default_like_a_bare_line
 test_key_only_before_colon_still_opens_no_regression
 test_blocked_and_resolved_are_tag_order_independent
 test_incremental_agrees_with_full_fold_across_appends
+test_whitespace_checks_preserve_fold_output_bytes

@@ -888,7 +888,7 @@ batch_command() {
 
 summary_command() {
   local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
-  local producer_pid correct_hint=1 previous=''
+  local enumeration_status=missing correct_hint=1 previous=''
   local -a samples=() sibling_paths=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -904,11 +904,18 @@ summary_command() {
     acquire_read_correction_lock || true
   fi
   exec 3< <(
-    CDPATH='' cd -- "$CANDIDATE_DIR" && \
-      find . -maxdepth 1 -name 'lc-*.json' -print0 | LC_ALL=C sort -z
+    if CDPATH='' cd -- "$CANDIDATE_DIR" && \
+      find . -maxdepth 1 -name 'lc-*.json' -print0 | LC_ALL=C sort -z; then
+      printf 'FM_LEARNING_ENUMERATION_OK\0'
+    else
+      printf 'FM_LEARNING_ENUMERATION_FAILED\0'
+    fi
   )
-  producer_pid=$!
   while IFS= read -r -d '' name; do
+    case "$name" in
+      FM_LEARNING_ENUMERATION_OK) enumeration_status=ok; continue ;;
+      FM_LEARNING_ENUMERATION_FAILED) enumeration_status=failed; continue ;;
+    esac
     load_enumerated_record "$name" "$correct_hint" || continue
     id=$(printf '%s\n' "$RECORD_JSON" | jq -r '.id')
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
@@ -935,7 +942,8 @@ summary_command() {
     sample_count=$((sample_count + 1))
   done <&3
   exec 3<&-
-  wait "$producer_pid" || die "could not enumerate candidate store: $CANDIDATE_DIR"
+  [ "$enumeration_status" = ok ] \
+    || die "could not enumerate candidate store: $CANDIDATE_DIR"
   [ "$count" -gt 0 ] || return 0
 
   printf 'LEARNING CANDIDATES: %s unresolved\n' "$count"

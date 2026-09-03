@@ -306,9 +306,13 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
 }
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
-  stripped=${line//[[:space:]]/}
-  [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
+  local open=$1 line=$2 resolve=$3 held=$4 verb key note
+  # Bash 3.2 performs global parameter replacement quadratically on large strings.
+  # Test for a non-whitespace character without constructing a stripped copy.
+  case "$line" in
+    *[![:space:]]*) : ;;
+    *) printf '%s' "$open"; return 0 ;;
+  esac
   verb=$(status_line_verb "$line")
   key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
   _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
