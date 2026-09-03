@@ -80,10 +80,12 @@ They are false when the workspace is behind or diverged.
 The aggregate workspace `current` is true only when every root is current.
 Workspace root rows must cover every project root exactly once; missing, extra, or duplicate project-root IDs, paths that do not name an exact Git worktree, repositories whose common Git directory does not match the persisted project root, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
 Freshness reads the remote tip with bounded `git ls-remote` and performs zero writes to the workspace repository, including when that tip is absent locally.
+The remote bound defaults to 15 seconds and is overridable through `PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS`, a positive integer of milliseconds up to 300000; a malformed value is validated once and reported as an explicit configuration error rather than a landing-branch failure.
 
 `get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.
 `list_parked_threads` accepts either an exact `project` with its required `landingBranch`, or global scope with both fields omitted.
 Global scope accepts an optional `landingBranches` map from project id, root path, or unique name to that project's explicit landing branch.
+These rules are stated in the tool's schema descriptions and enforced when the tool is called; the schema root is a plain object without combinators so every MCP client can load it.
 It places `freshness` only on candidates whose owning project has an explicit target, and uncovered projects are returned without freshness rather than compared against another project's branch.
 The parked-chat detection remains a persisted, non-resuming read, while freshness consults Git and current remote branch evidence.
 
@@ -131,6 +133,7 @@ If Playbot rejects the deletion after removing anything, the tool compares every
 
 `dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x through 0.95.x.
 With `newWorkspace`, it requires an explicit `landingBranch`, creates the isolated workspace and worker chat, reads the workspace's `freshness`, and returns that evidence with the dispatch result.
+`landingBranch` is valid only together with `newWorkspace`; passing it when dispatching into an existing workspace or thread is rejected before any chat is created or message sent, because freshness for an existing workspace is read with `get_workspace_freshness` or `get_thread_status`.
 The landing branch is validated before any workspace is created, and an unreadable post-creation workspace stops dispatch before the task is sent with an error naming the workspace and chat that were already created.
 The message can enter a non-selected project and does not require changing UI focus.
 For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.

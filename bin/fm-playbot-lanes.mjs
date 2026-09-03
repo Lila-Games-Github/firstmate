@@ -744,16 +744,22 @@ function freshnessGit(root, args, options = {}) {
   return git(root, args, { ...options, env: freshnessGitEnvironment() });
 }
 
+let resolvedRemoteGitTimeoutMs = null;
+
 function remoteGitTimeoutMs() {
+  if (resolvedRemoteGitTimeoutMs !== null) return resolvedRemoteGitTimeoutMs;
   const configured = process.env.PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS;
-  if (configured === undefined) return DEFAULT_REMOTE_GIT_TIMEOUT_MS;
-  if (!/^[1-9]\d*$/.test(configured)) {
-    throw new Error("PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS must be a positive integer");
+  let timeout = DEFAULT_REMOTE_GIT_TIMEOUT_MS;
+  if (configured !== undefined) {
+    if (!/^[1-9]\d*$/.test(configured)) {
+      throw new Error("configuration error: PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS must be a positive integer");
+    }
+    timeout = Number(configured);
+    if (!Number.isSafeInteger(timeout) || timeout > MAX_REMOTE_GIT_TIMEOUT_MS) {
+      throw new Error(`configuration error: PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS must not exceed ${MAX_REMOTE_GIT_TIMEOUT_MS}`);
+    }
   }
-  const timeout = Number(configured);
-  if (!Number.isSafeInteger(timeout) || timeout > MAX_REMOTE_GIT_TIMEOUT_MS) {
-    throw new Error(`PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS must not exceed ${MAX_REMOTE_GIT_TIMEOUT_MS}`);
-  }
+  resolvedRemoteGitTimeoutMs = timeout;
   return timeout;
 }
 
@@ -1341,6 +1347,7 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
 function landingRemote(root, landingBranch) {
   const requested = String(landingBranch ?? "").trim();
   if (!requested) throw new Error("landingBranch is required and must name the branch this workspace lands on");
+  remoteGitTimeoutMs();
   let tip;
   try {
     tip = landingRemoteTip(root, requested);
@@ -4750,14 +4757,11 @@ function toolDefinitions() {
       description: `Detector for chats across every project, or one named project, that may be parked on a question or approval card. A project-scoped read requires one landingBranch and adds freshness to every candidate. A global read accepts an optional landingBranches map and adds freshness only to candidates whose project is covered. It reads persisted chat state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
       inputSchema: {
         ...object({
-          project: string("Optional project id, root path, or unique project name; every project when omitted"),
-          landingBranch: string("Explicit landing branch; valid only with project"),
-          landingBranches: { type: "object", description: "Optional global-scope map from project id, root path, or unique name to its explicit landing branch", additionalProperties: { type: "string" } },
+          project: string("Optional project id, root path, or unique project name; every project when omitted. When present, landingBranch is required and landingBranches is rejected."),
+          landingBranch: string("Explicit landing branch for a project-scoped read; required with project and rejected without it"),
+          landingBranches: { type: "object", description: "Optional global-scope map from project id, root path, or unique name to its explicit landing branch; valid only when project is omitted", additionalProperties: { type: "string" } },
         }),
-        oneOf: [
-          { required: ["project", "landingBranch"], not: { required: ["landingBranches"] } },
-          { not: { anyOf: [{ required: ["project"] }, { required: ["landingBranch"] }] } },
-        ],
+        description: "Either project with landingBranch, or neither with an optional landingBranches map; the server enforces this at call time.",
       },
       // The only one of the three card reads that is genuinely side-effect-free:
       // it never contacts Playbot. get_thread_card and list_queued_messages
@@ -4804,7 +4808,7 @@ function toolDefinitions() {
     {
       name: "dispatch",
       description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Required with newWorkspace: explicit branch the new workspace's work must land on"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -4919,6 +4923,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
 
   if (name === "dispatch") {
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
+    if (!wantsNewWorkspace && args.landingBranch !== undefined) {
+      throw new Error("dispatch landingBranch is only valid together with newWorkspace; an existing workspace's freshness is read with get_workspace_freshness or get_thread_status");
+    }
     const landingBranch = wantsNewWorkspace ? explicitLandingBranch(name, args.landingBranch) : null;
     // Validated before anything is created or sent: a taskId that cannot key a
     // check would otherwise be discovered only after the worker was already

@@ -483,6 +483,18 @@ if (!value.error.message.includes('git ls-remote timed out after 50ms')) process
 NODE
 pass "fm-playbot-lanes: workspace freshness bounds remote Git operations"
 
+for bad_timeout in abc 0 -5 300001; do
+  out=$(PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS="$bad_timeout" \
+    rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"main"}}}')
+  OUT="$out" node --no-warnings <<'NODE' \
+    || fail "a malformed PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS ($bad_timeout) was not reported as a configuration error"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('configuration error: PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS')) process.exit(1);
+if (value.error.message.includes('Landing branch')) process.exit(1);
+NODE
+done
+pass "fm-playbot-lanes: a malformed remote Git timeout is an explicit configuration error"
+
 credential_helper_bin="$FIXTURE_ROOT/credential-helper-bin"
 mkdir -p "$credential_helper_bin"
 cat > "$credential_helper_bin/git-remote-credentialfail" <<'SH'
@@ -1915,6 +1927,22 @@ if (!value.error?.message.includes('requires an explicit landingBranch')) proces
 NODE
 [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a workspace before rejecting a malformed landingBranch"
 pass "fm-playbot-lanes: new-workspace dispatch rejects malformed landingBranch before creation"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch silently ignored landingBranch without newWorkspace"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('landingBranch is only valid together with newWorkspace')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch contacted Playbot before rejecting landingBranch without newWorkspace"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":null,\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Ignored landing\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch silently ignored a null landingBranch without newWorkspace"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('landingBranch is only valid together with newWorkspace')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a chat before rejecting a null landingBranch without newWorkspace"
+pass "fm-playbot-lanes: dispatch rejects landingBranch without newWorkspace before any side effect"
 
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace plus newWorkspace was not rejected"
@@ -4565,10 +4593,15 @@ if (!freshness || !list || !retire || !parked || !status) process.exit(1);
 if (freshness.inputSchema.required.join(',') !== 'project,workspace,landingBranch') process.exit(1);
 if (list.inputSchema.required.join(',') !== 'project,landingBranch') process.exit(1);
 if (retire.inputSchema.required.join(',') !== 'project,workspace,landingBranch,confirm') process.exit(1);
-if (parked.inputSchema.required.length !== 0 || parked.inputSchema.oneOf.length !== 2) process.exit(1);
-if (parked.inputSchema.oneOf[0].required.join(',') !== 'project,landingBranch') process.exit(1);
-if (parked.inputSchema.oneOf[0].not.required.join(',') !== 'landingBranches') process.exit(1);
-if (parked.inputSchema.oneOf[1].not.anyOf.map(rule => rule.required[0]).join(',') !== 'project,landingBranch') process.exit(1);
+if (parked.inputSchema.type !== 'object' || parked.inputSchema.required.length !== 0) process.exit(1);
+if (Object.keys(parked.inputSchema.properties).join(',') !== 'project,landingBranch,landingBranches') process.exit(1);
+if (!parked.inputSchema.properties.landingBranch.description.includes('required with project')) process.exit(1);
+if (!parked.inputSchema.properties.landingBranches.description.includes('only when project is omitted')) process.exit(1);
+const rootCombinators = ['oneOf', 'anyOf', 'allOf', 'not'];
+for (const tool of tools) {
+  if (tool.inputSchema.type !== 'object') process.exit(1);
+  if (rootCombinators.some(keyword => keyword in tool.inputSchema)) process.exit(1);
+}
 if (status.inputSchema.required.join(',') !== 'project,thread,landingBranch') process.exit(1);
 if (retire.inputSchema.properties.confirm.const !== true) process.exit(1);
 if (retire.inputSchema.properties.workspaces || retire.inputSchema.properties.all) process.exit(1);
@@ -4633,6 +4666,20 @@ if (local.blockers.some(blocker => blocker.code === 'freshness-unreadable')) pro
 if (local.freshness !== null) process.exit(1);
 NODE
 pass "fm-playbot-lanes: landing branches require current resolvable remote evidence"
+
+PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS=abc retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "a malformed remote Git timeout was reported as a landing-branch failure in retirement inventory"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+for (const id of ['ws-worker-alt', 'ws-worker']) {
+  const workspace = value.workspaces.find(candidate => candidate.workspace.id === id);
+  if (workspace.blockers.some(blocker => blocker.code === 'landing-branch-unresolvable')) process.exit(1);
+  const blocker = workspace.blockers.find(blocker => blocker.code === 'freshness-unreadable');
+  if (!blocker?.message.includes('configuration error: PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS')) process.exit(1);
+  if (blocker.message.includes('Landing branch')) process.exit(1);
+  if (workspace.freshness !== null) process.exit(1);
+}
+NODE
+pass "fm-playbot-lanes: retirement inventory reports a malformed remote Git timeout as configuration, not landing evidence"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_retirable_workspaces\",\"arguments\":{\"project\":$worker_json}}}")
