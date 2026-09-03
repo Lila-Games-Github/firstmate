@@ -994,7 +994,7 @@ SH
 }
 
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
-  local dir state fakebin armout armpid watcher_pid i status alive_while_stopped healthy_while_stopped
+  local dir state fakebin armout armpid watcher_pid i status beacon_age alive_while_stopped healthy_while_stopped
   dir=$(make_case stopped-watcher)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1024,6 +1024,15 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   kill -CONT "$watcher_pid" 2>/dev/null || true
   [ "$alive_while_stopped" -eq 1 ] || fail "SIGSTOP watcher was not classified as a live pid"
   [ "$healthy_while_stopped" -eq 0 ] || fail "SIGSTOP watcher with a stale beacon was classified healthy"
+  i=0
+  beacon_age=999999
+  while [ "$i" -lt 80 ]; do
+    beacon_age=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_path_age "$2"' _ "$LIB" "$state/.last-watcher-beat")
+    [ "$beacon_age" -lt 300 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$beacon_age" -lt 300 ] || fail "SIGCONT watcher did not resume through a fresh beacon"
   kill -TERM "$watcher_pid" 2>/dev/null || true
   wait_for_exit "$armpid" 80
   status=$?

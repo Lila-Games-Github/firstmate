@@ -88,10 +88,10 @@
 #
 # `list` and `batch` default to unresolved candidates, oldest first. `list` is a
 # concise tab-separated surface; `batch` emits a JSON array with complete records
-# for independent curation. `summary` streams sorted record names and content,
-# retains only the at-most-five unresolved records it will display, and trusts
-# record content for its count. It has no index, transaction, pending write,
-# repair pass, or repair command.
+# for independent curation. `summary` reads sorted NUL-delimited record names from
+# an ephemeral private spool, retains only the at-most-five unresolved records it
+# will display, and trusts record content for its count. It has no index,
+# transaction, pending write, repair pass, or repair command.
 # `summary` is silent when no candidate is unresolved and otherwise emits its
 # capped detail lines plus one remainder line. `get` emits one complete record.
 #
@@ -358,8 +358,10 @@ store_available_read_only() {
 
 LOCK_HELD=0
 TEMP_FILE=
+ENUMERATION_FILE=
 cleanup() {
   [ -z "$TEMP_FILE" ] || rm -f -- "$TEMP_FILE" 2>/dev/null || true
+  [ -z "$ENUMERATION_FILE" ] || rm -f -- "$ENUMERATION_FILE" 2>/dev/null || true
   if [ "$LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$MUTATION_LOCK" || true
     LOCK_HELD=0
@@ -888,7 +890,7 @@ batch_command() {
 
 summary_command() {
   local limit=3 count=0 sample_count=0 idx=0 name id state impact project signal line
-  local enumeration_status=missing correct_hint=1 previous=''
+  local correct_hint=1 previous=''
   local -a samples=() sibling_paths=()
   shift
   while [ "$#" -gt 0 ]; do
@@ -903,19 +905,19 @@ summary_command() {
   if [ "$correct_hint" -eq 1 ]; then
     acquire_read_correction_lock || true
   fi
-  exec 3< <(
-    if CDPATH='' cd -- "$CANDIDATE_DIR" && \
-      find . -maxdepth 1 -name 'lc-*.json' -print0 | LC_ALL=C sort -z; then
-      printf 'FM_LEARNING_ENUMERATION_OK\0'
-    else
-      printf 'FM_LEARNING_ENUMERATION_FAILED\0'
-    fi
-  )
+  ENUMERATION_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-learning-candidates.XXXXXX") \
+    || die "could not create candidate enumeration file"
+  chmod 600 "$ENUMERATION_FILE"
+  if ! (
+    CDPATH='' cd -- "$CANDIDATE_DIR" && \
+      find . -maxdepth 1 -name 'lc-*.json' -print0 | LC_ALL=C sort -z
+  ) >"$ENUMERATION_FILE"; then
+    die "could not enumerate candidate store: $CANDIDATE_DIR"
+  fi
+  exec 3< "$ENUMERATION_FILE"
+  rm -f -- "$ENUMERATION_FILE"
+  ENUMERATION_FILE=
   while IFS= read -r -d '' name; do
-    case "$name" in
-      FM_LEARNING_ENUMERATION_OK) enumeration_status=ok; continue ;;
-      FM_LEARNING_ENUMERATION_FAILED) enumeration_status=failed; continue ;;
-    esac
     load_enumerated_record "$name" "$correct_hint" || continue
     id=$(printf '%s\n' "$RECORD_JSON" | jq -r '.id')
     state=$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')
@@ -942,8 +944,6 @@ summary_command() {
     sample_count=$((sample_count + 1))
   done <&3
   exec 3<&-
-  [ "$enumeration_status" = ok ] \
-    || die "could not enumerate candidate store: $CANDIDATE_DIR"
   [ "$count" -gt 0 ] || return 0
 
   printf 'LEARNING CANDIDATES: %s unresolved\n' "$count"
