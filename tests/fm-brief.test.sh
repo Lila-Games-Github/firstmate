@@ -392,6 +392,10 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "local-only brief still steers the worker back onto main"
   assert_no_grep "merges it into local \`main\`" "$brief" \
     "local-only brief still names local main as the merge target"
+  assert_grep "firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)." "$brief" \
+    "local-only brief rule does not route the merge to the recorded landing branch"
+  ! grep -i 'merg' "$brief" | grep -qF "\`main\`" \
+    || fail "a local-only brief line still names main as the merge target: $(grep -i 'merg' "$brief" | grep -F "\`main\`")"
   assert_no_grep "The captain approves the ready branch" "$brief" \
     "local-only brief hard-coded captain-only authority"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \

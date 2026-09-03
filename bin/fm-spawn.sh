@@ -29,9 +29,12 @@
 #   that branch's live tip rather than origin's default branch; without the flag
 #   the refresh resolves and fetches origin's default branch exactly as before.
 #   After the reset the spawn asserts HEAD equals the fetched tip and descends
-#   from it, and refuses to launch naming both commits when they differ; a
-#   landing branch that cannot be fetched refuses the same way and never falls
-#   back to the default branch. --relaunch reads the recorded landing_branch=
+#   from it, and refuses to launch naming both commits when they differ. When
+#   origin has no such branch but the project clone holds a local refs/heads/<branch>
+#   (the linked pooled worktree shares its refs), the base is that local tip under
+#   the same clean-check, reset, and tip assertion; a landing branch that resolves
+#   nowhere, or an origin that cannot be queried, refuses the same way, and a
+#   landing branch never falls back to the default branch. --relaunch reads the recorded landing_branch=
 #   as a record-owned axis and, like every relaunch, re-enters the recorded
 #   worktree without refreshing its base, so the work already on it is kept.
 #   bin/fm-landing-branch.sh is the guarded helper that records or corrects the
@@ -1782,16 +1785,31 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 freshen_spawn_worktree_base() {  # <worktree>
   # Base selection: the task's recorded landing branch when one is set (the
   # branch its work must land on, so a lane starts from that branch's live
-  # tip), otherwise origin's resolved default branch. The two legs share the
-  # same fetch, clean-check, reset, and tip assertion; only the branch differs,
+  # tip), otherwise origin's resolved default branch. The legs share the same
+  # clean-check, reset, and tip assertion; only the base ref differs (origin/<branch>,
+  # or the project clone's local refs/heads/<branch> when origin has no such branch),
   # and a landing branch never falls back to the default branch on any failure.
-  local worktree=$1 base target expected actual status
+  local worktree=$1 base target expected actual status probe
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   if [ -n "$LANDING_BRANCH" ]; then
     base=$LANDING_BRANCH
+    target="origin/$base"
+    probe=0
+    git -C "$worktree" ls-remote --exit-code --heads origin "refs/heads/$base" >/dev/null 2>&1 || probe=$?
+    if [ "$probe" -eq 2 ]; then
+      if git -C "$worktree" rev-parse --verify --quiet "refs/heads/$base^{commit}" >/dev/null 2>&1; then
+        target="refs/heads/$base"
+      else
+        echo "error: landing branch '$base' resolves neither as '$target' on origin nor as local 'refs/heads/$base' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+        return 1
+      fi
+    elif [ "$probe" -ne 0 ]; then
+      echo "error: could not query origin for landing branch '$base' of pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
   else
     if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
       echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
@@ -1801,9 +1819,10 @@ freshen_spawn_worktree_base() {  # <worktree>
       echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     }
+    target="origin/$base"
   fi
-  target="origin/$base"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$base:refs/remotes/origin/$base"; then
+  if [ "$target" = "origin/$base" ] \
+    && ! git -C "$worktree" fetch --quiet origin "+refs/heads/$base:refs/remotes/origin/$base"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
