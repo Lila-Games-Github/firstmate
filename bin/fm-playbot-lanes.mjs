@@ -719,7 +719,7 @@ function git(root, args, options = {}) {
   const timeout = options.timeout;
   const result = spawnSync("git", ["-C", root, ...args], {
     encoding,
-    env: gitEnvironment(),
+    env: options.env ?? gitEnvironment(),
     input: options.input,
     maxBuffer: 16 * 1024 * 1024,
     ...(timeout === undefined ? {} : { timeout }),
@@ -734,6 +734,14 @@ function git(root, args, options = {}) {
     throw new Error((stderr || stdout || `git exited ${result.status}`).trim());
   }
   return result.stdout;
+}
+
+function freshnessGitEnvironment() {
+  return { ...gitEnvironment(), GIT_NO_LAZY_FETCH: "1" };
+}
+
+function freshnessGit(root, args, options = {}) {
+  return git(root, args, { ...options, env: freshnessGitEnvironment() });
 }
 
 function remoteGitTimeoutMs() {
@@ -755,7 +763,7 @@ function redactUrlUserinfo(value) {
 
 function remoteGit(root, args, options = {}) {
   try {
-    return git(root, args, { ...options, timeout: remoteGitTimeoutMs() });
+    return git(root, args, { ...options, env: freshnessGitEnvironment(), timeout: remoteGitTimeoutMs() });
   } catch (error) {
     throw new Error(redactUrlUserinfo(error instanceof Error ? error.message : String(error)));
   }
@@ -785,11 +793,11 @@ function prefixGitPath(prefix, value) {
   return prefix ? `${prefix}/${value}` : value;
 }
 
-function assertNoGitAncestryOverrides(root) {
-  const commonDir = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+function assertNoGitAncestryOverrides(root, runGit = git) {
+  const commonDir = stripTerminalLineEnding(runGit(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
   const grafts = path.join(commonDir, "info", "grafts");
   if (pathPresence(grafts)) throw new Error(`Git graft metadata blocks retirement evidence: ${grafts}`);
-  const replacementRefs = String(git(root, ["for-each-ref", "--format=%(refname)", "refs/replace/"]))
+  const replacementRefs = String(runGit(root, ["for-each-ref", "--format=%(refname)", "refs/replace/"]))
     .split(/\r?\n/)
     .filter(Boolean)
     .sort();
@@ -970,8 +978,8 @@ function gitSubmodulePaths(root) {
   return [...new Set(paths)].sort();
 }
 
-function exactCommitSubject(root, commit) {
-  const raw = git(root, ["show", "-s", "--encoding=UTF-8", "--format=format:%B%x00", commit], { encoding: "buffer" });
+function exactCommitSubject(root, commit, runGit = git) {
+  const raw = runGit(root, ["show", "-s", "--encoding=UTF-8", "--format=format:%B%x00", commit], { encoding: "buffer" });
   if (raw.length === 0 || raw.at(-1) !== 0 || raw.subarray(0, -1).includes(0)) {
     throw new Error(`Git returned unreadable commit-subject evidence for ${commit}`);
   }
@@ -980,12 +988,12 @@ function exactCommitSubject(root, commit) {
   return message.subarray(0, lineEnd < 0 ? message.length : lineEnd).toString("utf8");
 }
 
-function commitRecords(root, raw, label) {
+function commitRecords(root, raw, label, runGit = git) {
   const commits = raw.toString("utf8").split("\0").filter(Boolean);
   if (commits.some((commit) => !/^[0-9a-f]{40,64}$/i.test(commit))) {
     throw new Error(`Git returned unreadable ${label} evidence`);
   }
-  return commits.map((commit) => ({ commit, subject: exactCommitSubject(root, commit) }));
+  return commits.map((commit) => ({ commit, subject: exactCommitSubject(root, commit, runGit) }));
 }
 
 function repositoryPseudoObjectRecords(root) {
@@ -1322,7 +1330,7 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
 function landingRemote(root, landingBranch) {
   const requested = String(landingBranch ?? "").trim();
   if (!requested) throw new Error("landingBranch is required and must name the branch this workspace lands on");
-  const remotes = String(git(root, ["remote"])).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  const remotes = String(freshnessGit(root, ["remote"])).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
   let remote = null;
   let branch = requested.replace(/^refs\/heads\//, "");
   const remoteRefMatch = requested.match(/^refs\/remotes\/([^/]+)\/(.+)$/);
@@ -1338,15 +1346,21 @@ function landingRemote(root, landingBranch) {
       throw new Error(`landing branch ${requested} is ambiguous because ${prefix} is a configured remote; use refs/remotes/${prefix}/${branch.slice(slash + 1)} to name the remote branch explicitly`);
     }
   }
-  git(root, ["check-ref-format", "--branch", branch]);
+  freshnessGit(root, ["check-ref-format", "--branch", branch]);
   if (!remote) {
-    const upstream = String(git(root, [
+    const localRef = `refs/heads/${branch}`;
+    const upstream = String(freshnessGit(root, [
       "for-each-ref",
-      "--format=%(upstream:remotename)%09%(upstream:remoteref)",
-      `refs/heads/${branch}`,
-    ])).trim();
-    if (upstream) {
-      const [upstreamRemote, upstreamRef] = upstream.split("\t");
+      "--format=%(refname)%09%(upstream:remotename)%09%(upstream:remoteref)",
+      localRef,
+    ]))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((row) => row.split("\t"))
+      .find(([ref]) => ref === localRef);
+    const upstreamRemote = upstream?.[1] ?? "";
+    const upstreamRef = upstream?.[2] ?? "";
+    if (upstreamRemote || upstreamRef) {
       if (!upstreamRemote || !upstreamRef?.startsWith("refs/heads/")) {
         throw new Error(`landing branch ${requested} has an unreadable upstream binding`);
       }
@@ -1371,7 +1385,7 @@ function landingRemote(root, landingBranch) {
   if (!/^[0-9a-f]{40,64}$/i.test(commit) || resolvedRef !== remoteRef) {
     throw new Error(`remote ${remote} returned unreadable evidence for ${remoteRef}`);
   }
-  const localObject = stripTerminalLineEnding(git(root, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], { input: `${commit}\n` }));
+  const localObject = stripTerminalLineEnding(freshnessGit(root, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], { input: `${commit}\n` }));
   const presentLocally = localObject.toLowerCase() === `${commit.toLowerCase()} commit`;
   if (!presentLocally && localObject.toLowerCase() !== `${commit.toLowerCase()} missing`) {
     throw new Error(`local repository returned unreadable evidence for remote commit ${commit}`);
@@ -1388,9 +1402,9 @@ function landingRemote(root, landingBranch) {
 }
 
 function aheadCommits(root, landingCommit, headCommit) {
-  assertNoGitAncestryOverrides(root);
-  const raw = git(root, ["log", "-z", "--format=%H", `${landingCommit}..${headCommit}`], { encoding: "buffer" });
-  return commitRecords(root, raw, "ahead-commit");
+  assertNoGitAncestryOverrides(root, freshnessGit);
+  const raw = freshnessGit(root, ["log", "-z", "--format=%H", `${landingCommit}..${headCommit}`], { encoding: "buffer" });
+  return commitRecords(root, raw, "ahead-commit", freshnessGit);
 }
 
 function explicitLandingBranch(tool, value) {
@@ -1440,16 +1454,16 @@ function explicitWorkspaceSelector(tool, value) {
   return workspace;
 }
 
-function projectAwareWorkspaceRoot(project, workspaceRoot) {
+function projectAwareWorkspaceRoot(project, workspaceRoot, runGit = git) {
   const worktreePath = canonicalPath(workspaceRoot.path);
   if (!worktreePath) throw new Error("workspace root path is empty");
   if (!pathPresence(worktreePath)) throw new Error(`workspace root is missing: ${worktreePath}`);
-  const top = canonicalPath(stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--show-toplevel"])));
+  const top = canonicalPath(stripTerminalLineEnding(runGit(worktreePath, ["rev-parse", "--show-toplevel"])));
   if (top !== worktreePath) throw new Error(`path resolves inside Git worktree ${top} instead of naming it exactly`);
   const projectRoot = project.roots.find((candidate) => candidate.id === workspaceRoot.projectRootId);
   if (!projectRoot?.path) throw new Error(`project root ${workspaceRoot.projectRootId} is missing`);
-  const workspaceCommonDir = canonicalPath(stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
-  const projectCommonDir = canonicalPath(stripTerminalLineEnding(git(projectRoot.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
+  const workspaceCommonDir = canonicalPath(stripTerminalLineEnding(runGit(worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
+  const projectCommonDir = canonicalPath(stripTerminalLineEnding(runGit(projectRoot.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
   if (workspaceCommonDir !== projectCommonDir) {
     throw new Error(`workspace root repository does not match project root ${workspaceRoot.projectRootId}`);
   }
@@ -1457,13 +1471,13 @@ function projectAwareWorkspaceRoot(project, workspaceRoot) {
 }
 
 function rootFreshnessAtPath(worktreePath, landingBranch) {
-  const shallow = stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--is-shallow-repository"]));
+  const shallow = stripTerminalLineEnding(freshnessGit(worktreePath, ["rev-parse", "--is-shallow-repository"]));
   if (shallow === "true") throw new Error("repository is shallow; complete ancestry is required for workspace freshness");
   if (shallow !== "false") throw new Error("Git returned unreadable shallow-repository evidence");
-  const headCommit = String(git(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+  const headCommit = String(freshnessGit(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
   const head = {
     commit: headCommit,
-    subject: exactCommitSubject(worktreePath, headCommit),
+    subject: exactCommitSubject(worktreePath, headCommit, freshnessGit),
   };
   const landing = landingRemote(worktreePath, landingBranch);
   if (!landing.presentLocally) {
@@ -1481,8 +1495,8 @@ function rootFreshnessAtPath(worktreePath, landingBranch) {
       unlandedCommits: null,
     };
   }
-  assertNoGitAncestryOverrides(worktreePath);
-  const counts = String(git(worktreePath, ["rev-list", "--left-right", "--count", `${landing.commit}...${head.commit}`])).trim().split(/\s+/);
+  assertNoGitAncestryOverrides(worktreePath, freshnessGit);
+  const counts = String(freshnessGit(worktreePath, ["rev-list", "--left-right", "--count", `${landing.commit}...${head.commit}`])).trim().split(/\s+/);
   if (counts.length !== 2 || counts.some((count) => !/^\d+$/.test(count))) {
     throw new Error("Git returned unreadable ahead/behind counts");
   }
@@ -1508,8 +1522,23 @@ function rootFreshnessAtPath(worktreePath, landingBranch) {
 }
 
 function rootFreshness(project, workspaceRoot, landingBranch) {
-  const { worktreePath } = projectAwareWorkspaceRoot(project, workspaceRoot);
+  const { worktreePath } = projectAwareWorkspaceRoot(project, workspaceRoot, freshnessGit);
   return rootFreshnessAtPath(worktreePath, landingBranch);
+}
+
+function workspaceFreshnessReading(project, workspace, landingBranch, roots) {
+  return {
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      kind: workspace.kind,
+      projectId: project.id,
+      project: project.name,
+    },
+    landingBranch,
+    current: roots.length > 0 && roots.every((root) => root?.current === true),
+    roots,
+  };
 }
 
 function workspaceFreshness(project, workspace, landingBranch) {
@@ -1521,18 +1550,7 @@ function workspaceFreshness(project, workspace, landingBranch) {
       throw new Error(`freshness is unreadable for workspace ${workspace.id} root ${root.projectRootId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   });
-  return {
-    workspace: {
-      id: workspace.id,
-      name: workspace.name,
-      kind: workspace.kind,
-      projectId: project.id,
-      project: project.name,
-    },
-    landingBranch,
-    current: roots.every((root) => root.current),
-    roots,
-  };
+  return workspaceFreshnessReading(project, workspace, landingBranch, roots);
 }
 
 function gitWorktreePaths(projectRootPath) {
@@ -1592,7 +1610,10 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     return result;
   }
   try {
-    result.freshness = rootFreshnessAtPath(rootPath, landingBranch);
+    result.freshness = {
+      projectRootId: workspaceRoot.projectRootId,
+      ...rootFreshnessAtPath(rootPath, landingBranch),
+    };
     result.head = result.freshness.head;
     result.landing = result.freshness.landingBranchTip;
     result.commitsAhead = result.freshness.unlandedCommits;
@@ -1779,10 +1800,12 @@ function inspectWorkspace(project, workspace, landingBranch) {
     evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch));
     evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
   }
-  evidence.freshness = {
-    current: evidence.roots.length > 0 && evidence.roots.every((root) => root.freshness?.current === true),
-    roots: evidence.roots.map((root) => root.freshness),
-  };
+  evidence.freshness = workspaceFreshnessReading(
+    project,
+    workspace,
+    landingBranch,
+    evidence.roots.map((root) => root.freshness),
+  );
   evidence.retirable = evidence.blockers.length === 0;
   evidence.verdict = evidence.retirable ? "retirable" : "blocked";
   return evidence;

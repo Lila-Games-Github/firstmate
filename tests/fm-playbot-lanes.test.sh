@@ -180,6 +180,9 @@ freshness_ahead="$freshness_repo/.worktrees/ahead"
 freshness_race="$freshness_repo/.worktrees/race"
 freshness_identity="$freshness_repo/.worktrees/identity"
 freshness_shallow="$FIXTURE_ROOT/freshness-shallow"
+freshness_partial_source="$FIXTURE_ROOT/freshness-partial-source"
+freshness_partial_remote="$FIXTURE_ROOT/freshness-partial-remote.git"
+freshness_partial="$FIXTURE_ROOT/freshness-partial"
 git -C "$freshness_repo" worktree add -b freshness-behind "$freshness_behind" main >/dev/null
 git -C "$freshness_repo" worktree add -b freshness-diverged "$freshness_diverged" main >/dev/null
 printf 'diverged\n' >> "$freshness_diverged/freshness.txt"
@@ -204,8 +207,24 @@ git -C "$freshness_race" commit -m "race moved head" >/dev/null
 freshness_race_next=$(git -C "$freshness_race" rev-parse HEAD)
 git -C "$freshness_race" switch freshness-race >/dev/null
 git clone --depth=1 --branch main "file://$freshness_remote" "$freshness_shallow" >/dev/null
+mkdir -p "$freshness_partial_source"
+git -C "$freshness_partial_source" init --initial-branch=main >/dev/null
+git -C "$freshness_partial_source" config user.name "Firstmate tests"
+git -C "$freshness_partial_source" config user.email "firstmate-tests@example.invalid"
+printf 'partial baseline\n' > "$freshness_partial_source/partial.txt"
+git -C "$freshness_partial_source" add partial.txt
+git -C "$freshness_partial_source" commit -m "partial baseline" >/dev/null
+git init --bare --initial-branch=main "$freshness_partial_remote" >/dev/null
+git -C "$freshness_partial_remote" config uploadpack.allowFilter true
+git -C "$freshness_partial_source" remote add origin "$freshness_partial_remote"
+git -C "$freshness_partial_source" push -u origin main >/dev/null
+git clone --filter=blob:none "file://$freshness_partial_remote" "$freshness_partial" >/dev/null
+printf 'partial remote advance\n' >> "$freshness_partial_source/partial.txt"
+git -C "$freshness_partial_source" commit -am "partial remote advance" >/dev/null
+git -C "$freshness_partial_source" push origin main >/dev/null
+freshness_partial_tip=$(git -C "$freshness_partial_source" rev-parse HEAD)
 
-FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" FRESHNESS_RACE="$freshness_race" FRESHNESS_IDENTITY="$freshness_identity" FRESHNESS_SHALLOW="$freshness_shallow" node --no-warnings <<'NODE'
+FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" FRESHNESS_RACE="$freshness_race" FRESHNESS_IDENTITY="$freshness_identity" FRESHNESS_SHALLOW="$freshness_shallow" FRESHNESS_PARTIAL="$freshness_partial" node --no-warnings <<'NODE'
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
@@ -213,8 +232,10 @@ const now = new Date().toISOString();
 db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness', 'freshness-fixture', 'root-freshness', 'active', now, now);
 db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness', 'freshness-fixture', process.env.FRESHNESS_REPO, 'main');
 db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness-shallow', 'freshness-shallow', process.env.FRESHNESS_SHALLOW, 'main');
+db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness-partial', 'freshness-partial', process.env.FRESHNESS_PARTIAL, 'main');
 db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness', 'project-freshness', 'repo-freshness', 0);
 db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-shallow', 'project-freshness', 'repo-freshness-shallow', 1);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-partial', 'project-freshness', 'repo-freshness-partial', 2);
 const workspace = db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 const root = db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)');
 for (const [id, name, rootPath, branch] of [
@@ -231,6 +252,8 @@ for (const [id, name, rootPath, branch] of [
 }
 workspace.run('ws-fresh-shallow', 'project-freshness', 'fresh-shallow', 'worktree', 0, 'active', now, now);
 root.run('ws-fresh-shallow', 'root-freshness-shallow', process.env.FRESHNESS_SHALLOW, 'main');
+workspace.run('ws-fresh-partial', 'project-freshness', 'fresh-partial', 'worktree', 0, 'active', now, now);
+root.run('ws-fresh-partial', 'root-freshness-partial', process.env.FRESHNESS_PARTIAL, 'main');
 db.close();
 NODE
 
@@ -276,6 +299,40 @@ for (const name of ['CLEAN', 'AHEAD', 'BEHIND', 'DIVERGED']) {
 }
 NODE
 pass "fm-playbot-lanes: workspace freshness reports Git evidence without remote URLs"
+
+git -C "$freshness_repo" push origin main:topic >/dev/null
+git -C "$freshness_repo" remote add backup "$freshness_remote"
+git -C "$freshness_repo" fetch backup topic >/dev/null
+git -C "$freshness_repo" branch topic/child main
+git -C "$freshness_repo" branch --set-upstream-to=backup/topic topic/child >/dev/null
+if out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness \
+  '{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"topic"}' 2>&1); then
+  fail "workspace freshness borrowed an upstream from a descendant branch"
+fi
+case "$out" in
+  *"landing branch topic has no upstream and this repository has multiple remotes"*) ;;
+  *) fail "workspace freshness did not ignore a descendant branch upstream" ;;
+esac
+git -C "$freshness_repo" remote remove backup
+pass "fm-playbot-lanes: landing upstream lookup matches the exact local branch"
+
+if GIT_NO_LAZY_FETCH=1 git -C "$freshness_partial" cat-file -e "$freshness_partial_tip^{commit}" 2>/dev/null; then
+  fail "partial-clone fixture already contained the remote-only landing tip"
+fi
+out=$(freshness_call ws-fresh-partial)
+OUT="$out" REMOTE_HEAD="$freshness_partial_tip" node --no-warnings <<'NODE' \
+  || fail "partial-clone freshness did not return unknown distance without lazy fetching"
+const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
+if (root.landingBranchTip.commit !== process.env.REMOTE_HEAD) process.exit(1);
+if (root.landingBranchTip.presentLocally !== false || root.distanceKnown !== false) process.exit(1);
+if (root.relation !== 'behind-or-diverged' || root.commitsAhead !== null || root.commitsBehind !== null) process.exit(1);
+NODE
+if GIT_NO_LAZY_FETCH=1 git -C "$freshness_partial" cat-file -e "$freshness_partial_tip^{commit}" 2>/dev/null; then
+  fail "freshness lazily fetched a remote-only commit into a partial clone"
+fi
+env -u GIT_NO_LAZY_FETCH git -C "$freshness_partial" cat-file -e "$freshness_partial_tip^{commit}" \
+  || fail "partial-clone fixture could not demonstrate Git's default lazy fetch"
+pass "fm-playbot-lanes: partial-clone freshness disables lazy object fetching"
 
 if out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness '{"project":"project-freshness","landingBranch":"main"}' 2>&1); then
   fail "workspace freshness accepted an omitted workspace selector through the executable call interface"
@@ -2072,8 +2129,11 @@ const root = workspace?.roots[0];
 if (root?.landing.commit !== process.env.REMOTE_HEAD || root.freshness.distanceKnown !== false) process.exit(1);
 if (root.commitsAhead !== null || root.commitsBehind !== null) process.exit(1);
 if (!root.blockers.some(blocker => blocker.code === 'landing-tip-not-present-locally')) process.exit(1);
+if (workspace.freshness.workspace.id !== 'ws-fresh-clean') process.exit(1);
+if (workspace.freshness.workspace.projectId !== 'project-freshness') process.exit(1);
+if (workspace.freshness.landingBranch !== 'main' || workspace.freshness.roots[0].projectRootId !== 'root-freshness') process.exit(1);
 NODE
-pass "fm-playbot-lanes: retirement blocks when remote distance is unknown"
+pass "fm-playbot-lanes: retirement reuses the full workspace freshness shape"
 
 git -C "$freshness_clean" remote add release "$freshness_remote"
 git -C "$freshness_clean" branch --track release/1.0 origin/main >/dev/null
