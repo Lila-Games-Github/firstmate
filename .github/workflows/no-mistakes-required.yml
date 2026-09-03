@@ -41,12 +41,14 @@ jobs:
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The only marker-free exception is a title-declared fork sync that the
-      # base revision's verifier can prove from Git history. The head must be a
-      # two-parent merge of upstream/main into fork history already in the PR
-      # base; all introduced non-merge commits must be upstream-reachable; and
-      # the merge may invent content only in paths both sides touched. Every
-      # shallow, missing, unreachable, ambiguous, or indeterminate proof fails.
+      # The only marker-free exception has a title beginning with the literal,
+      # case-sensitive "Sync fork with upstream/main" prefix; any suffix is
+      # allowed, but the base revision's verifier must still prove the sync from
+      # Git history. The head must be a two-parent merge of upstream/main into
+      # fork history already in the PR base; all introduced non-merge commits
+      # must be upstream-reachable; and the merge may invent content only in
+      # paths both sides touched. Every shallow, missing, unreachable,
+      # ambiguous, or indeterminate proof fails.
       - name: Check out the trusted base revision for fork-sync verification
         if: steps.marker.outputs.found != 'true'
         uses: actions/checkout@v6

@@ -3,10 +3,12 @@
 #
 # This verifier is the second acceptance path for the Require no-mistakes
 # workflow after its unchanged deterministic PR-body marker check.
-# It accepts only a declared upstream/main sync whose head is one two-parent
-# merge, whose fork parent is already in the PR base, whose upstream parent and
-# every introduced non-merge commit are reachable from the fetched upstream
-# main, and whose merge tree invents changes only on paths both sides touched.
+# It accepts only a title beginning with the literal case-sensitive prefix
+# "Sync fork with upstream/main", with any suffix permitted, whose head is one
+# two-parent merge, whose fork parent is already in the PR base, whose upstream
+# parent and every introduced non-merge commit are reachable from the fetched
+# upstream main, and whose merge tree invents changes only on paths both sides
+# touched.
 # Every missing object, fetch failure, shallow repository, ambiguous merge base,
 # or indeterminate diff fails closed.
 #
@@ -64,7 +66,7 @@ done
 [ -n "$BASE_SHA" ] || fail "the PR base commit is unavailable"
 
 case "$TITLE" in
-  "Sync fork with upstream/main"|"Sync fork with upstream/main "*) ;;
+  "Sync fork with upstream/main"*) ;;
   *) fail "the title must start with 'Sync fork with upstream/main'" ;;
 esac
 
@@ -121,7 +123,8 @@ MERGE_BASE=$(sed -n '1p' "$TMP_DIR/merge-bases")
 path_changed_between() {
   local from=$1 to=$2 path=$3 rc
   set +e
-  git diff --quiet --no-ext-diff --no-renames "$from" "$to" -- "$path"
+  git --literal-pathspecs diff --quiet --no-ext-diff --no-renames \
+    "$from" "$to" -- "$path"
   rc=$?
   set -e
   case "$rc" in

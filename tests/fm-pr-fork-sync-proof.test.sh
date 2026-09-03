@@ -80,6 +80,8 @@ run_reject() {  # <case-id> <repo> <title> <head> <base> <upstream-url> <diagnos
 
 run_accept genuine-conflict-sync "$REPO" \
   'Sync fork with upstream/main (fixture)' "$GENUINE_HEAD" "$BASE_COMMIT" "$UPSTREAM"
+run_accept punctuated-title-valid-proof "$REPO" \
+  'Sync fork with upstream/main: September' "$GENUINE_HEAD" "$BASE_COMMIT" "$UPSTREAM"
 
 run_reject ordinary-hand-opened "$REPO" \
   'Ordinary hand-opened change' "$GENUINE_HEAD" "$BASE_COMMIT" "$UPSTREAM" \
@@ -95,7 +97,7 @@ git -C "$REPO" checkout -q claimed-sync
 git -C "$REPO" merge -q --no-ff "$HANDMADE_SIDE" -m 'Claimed upstream sync'
 CLAIMED_HEAD=$(git -C "$REPO" rev-parse HEAD)
 run_reject claimed-but-not-upstream "$REPO" \
-  'Sync fork with upstream/main (claimed only)' "$CLAIMED_HEAD" "$BASE_COMMIT" "$UPSTREAM" \
+  'Sync fork with upstream/main: September' "$CLAIMED_HEAD" "$BASE_COMMIT" "$UPSTREAM" \
   "second parent is not reachable from upstream/main"
 
 git -C "$REPO" checkout -q -b injected-merge "$BASE_COMMIT"
@@ -109,6 +111,19 @@ git -C "$REPO" commit -qm 'Merge upstream with unrelated authored content'
 INJECTED_HEAD=$(git -C "$REPO" rev-parse HEAD)
 run_reject unrelated-merge-authorship "$REPO" \
   'Sync fork with upstream/main (injected)' "$INJECTED_HEAD" "$BASE_COMMIT" "$UPSTREAM" \
+  "although upstream did not touch it"
+
+git -C "$REPO" checkout -q -b pathspec-magic-injected "$BASE_COMMIT"
+if git -C "$REPO" merge --no-ff --no-commit "$UPSTREAM_TIP" >/dev/null 2>&1; then
+  fail "pathspec-magic fixture unexpectedly merged without the intended conflict"
+fi
+printf 'resolved fork and upstream\n' > "$REPO/conflict.txt"
+printf 'invented during merge\n' > "$REPO/:(top)conflict.txt"
+git -C "$REPO" --literal-pathspecs add conflict.txt ':(top)conflict.txt'
+git -C "$REPO" commit -qm 'Merge upstream with pathspec-magic authored content'
+PATHSPEC_MAGIC_HEAD=$(git -C "$REPO" rev-parse HEAD)
+run_reject pathspec-magic-merge-authorship "$REPO" \
+  'Sync fork with upstream/main: crafted path' "$PATHSPEC_MAGIC_HEAD" "$BASE_COMMIT" "$UPSTREAM" \
   "although upstream did not touch it"
 
 run_reject upstream-unreachable "$REPO" \

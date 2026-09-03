@@ -14,6 +14,7 @@ It evaluates every PR opening and body edit independently, so a later edit canno
 GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
 The sole marker-free exception is a fork-sync merge whose title starts with `Sync fork with upstream/main` and whose Git history passes [`bin/fm-pr-fork-sync-proof.sh`](bin/fm-pr-fork-sync-proof.sh).
+The title prefix is literal and case-sensitive, and any suffix after it is accepted, including punctuation.
 The verifier fetches `https://github.com/kunchenguid/firstmate` read-only, requires the PR head to be one two-parent merge whose first parent is already in the PR base and whose second parent is reachable from upstream `main`, and requires every non-merge commit introduced by the PR to be upstream-reachable.
 It also proves that the merge result preserves each side's untouched paths, allowing authored conflict resolution only where both sides changed the same path.
 Titles, labels, and body claims never grant the exception by themselves, and shallow history, failed fetches, missing commits, ambiguous ancestry, or indeterminate diffs fail closed.
