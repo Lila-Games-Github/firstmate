@@ -4625,6 +4625,12 @@ const workspace = value.workspaces.find(candidate => candidate.workspace.id === 
 if (!workspace.blockers.some(blocker => blocker.code === 'landing-branch-unresolvable')) process.exit(1);
 if (workspace.blockers.some(blocker => blocker.code === 'freshness-unreadable')) process.exit(1);
 if (workspace.freshness !== null || workspace.roots[0].freshness !== null) process.exit(1);
+const local = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker');
+if (local.blockers[0]?.code !== 'local-workspace') process.exit(1);
+const localBlocker = local.blockers.find(blocker => blocker.code === 'landing-branch-unresolvable');
+if (!localBlocker?.message.includes('root root-worker')) process.exit(1);
+if (local.blockers.some(blocker => blocker.code === 'freshness-unreadable')) process.exit(1);
+if (local.freshness !== null) process.exit(1);
 NODE
 pass "fm-playbot-lanes: landing branches require current resolvable remote evidence"
 
@@ -5064,6 +5070,13 @@ const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, '
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const blocker = workspace.blockers.find(candidate => candidate.code === 'git-unreadable');
 if (!blocker || !blocker.message.includes(process.env.GRAFT_FILE)) process.exit(1);
+const local = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker');
+if (local.blockers[0]?.code !== 'local-workspace') process.exit(1);
+const localBlocker = local.blockers.find(candidate => candidate.code === 'freshness-unreadable');
+if (!localBlocker?.message.includes(process.env.GRAFT_FILE)) process.exit(1);
+if (local.blockers.some(candidate => candidate.code === 'landing-branch-unresolvable')) process.exit(1);
+if (local.freshness !== null) process.exit(1);
+if (local.roots[0]?.inspection !== 'skipped because Local workspaces are never retirable') process.exit(1);
 NODE
 rm -f "$graft_file"
 pass "fm-playbot-lanes: repository graft metadata blocks retirement evidence"

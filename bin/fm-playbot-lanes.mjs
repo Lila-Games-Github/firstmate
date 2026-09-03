@@ -776,6 +776,10 @@ class LandingBranchUnresolvableError extends Error {
   }
 }
 
+function freshnessBlockerCode(error) {
+  return error instanceof LandingBranchUnresolvableError ? "landing-branch-unresolvable" : "freshness-unreadable";
+}
+
 function gitPathIdentity(value) {
   return process.platform === "win32" ? String(value).replaceAll("\\", "/") : String(value);
 }
@@ -1593,7 +1597,8 @@ function workspaceFreshness(project, workspace, landingBranch) {
     try {
       return { projectRootId: root.projectRootId, ...rootFreshness(project, root, landingBranch) };
     } catch (error) {
-      throw new Error(`freshness is unreadable for workspace ${workspace.id} root ${root.projectRootId}: ${error instanceof Error ? error.message : String(error)}`);
+      const message = `freshness is unreadable for workspace ${workspace.id} root ${root.projectRootId}: ${error instanceof Error ? error.message : String(error)}`;
+      throw error instanceof LandingBranchUnresolvableError ? new LandingBranchUnresolvableError(message) : new Error(message);
     }
   });
   return workspaceFreshnessReading(project, workspace, landingBranch, roots);
@@ -1673,9 +1678,13 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      result.blockers.push(error instanceof LandingBranchUnresolvableError
-        ? { code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${message}` }
-        : { code: "freshness-unreadable", message: `Workspace freshness is unreadable at ${rootPath}: ${message}` });
+      const code = freshnessBlockerCode(error);
+      result.blockers.push({
+        code,
+        message: code === "landing-branch-unresolvable"
+          ? `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${message}`
+          : `Workspace freshness is unreadable at ${rootPath}: ${message}`,
+      });
     }
   }
   try {
@@ -1821,7 +1830,7 @@ function localWorkspaceRetirementEvidence(project, workspace, landingBranch) {
     try {
       freshness = workspaceFreshness(project, workspace, landingBranch);
     } catch (error) {
-      blockers.push({ code: "freshness-unreadable", message: error instanceof Error ? error.message : String(error) });
+      blockers.push({ code: freshnessBlockerCode(error), message: error instanceof Error ? error.message : String(error) });
     }
   }
   return {
