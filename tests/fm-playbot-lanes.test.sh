@@ -150,6 +150,120 @@ git -C "$FIXTURE_ROOT/worker" push -u origin main >/dev/null \
 git -C "$FIXTURE_ROOT/worker" worktree add -b alt "$FIXTURE_ROOT/worker/.worktrees/alt" main >/dev/null \
   || fail "could not create the retirement fixture worktree"
 
+git -C "$FIXTURE_ROOT/controller" init --initial-branch=main >/dev/null \
+  || fail "could not initialize the controller freshness fixture"
+git -C "$FIXTURE_ROOT/controller" config user.name "Firstmate tests"
+git -C "$FIXTURE_ROOT/controller" config user.email "firstmate-tests@example.invalid"
+printf 'controller\n' > "$FIXTURE_ROOT/controller/controller.txt"
+git -C "$FIXTURE_ROOT/controller" add controller.txt
+git -C "$FIXTURE_ROOT/controller" commit -m "controller baseline" >/dev/null
+git init --bare --initial-branch=main "$FIXTURE_ROOT/controller-remote.git" >/dev/null
+git -C "$FIXTURE_ROOT/controller" remote add origin "$FIXTURE_ROOT/controller-remote.git"
+git -C "$FIXTURE_ROOT/controller" push -u origin main >/dev/null
+
+freshness_repo="$FIXTURE_ROOT/freshness"
+freshness_remote="$FIXTURE_ROOT/user:freshness-secret-token@freshness-remote.git"
+mkdir -p "$freshness_repo"
+git -C "$freshness_repo" init --initial-branch=main >/dev/null
+git -C "$freshness_repo" config user.name "Firstmate tests"
+git -C "$freshness_repo" config user.email "firstmate-tests@example.invalid"
+printf 'baseline\n' > "$freshness_repo/freshness.txt"
+git -C "$freshness_repo" add freshness.txt
+git -C "$freshness_repo" commit -m "freshness baseline" >/dev/null
+git init --bare --initial-branch=main "$freshness_remote" >/dev/null
+git -C "$freshness_repo" remote add origin "$freshness_remote"
+git -C "$freshness_repo" push -u origin main >/dev/null
+freshness_behind="$freshness_repo/.worktrees/behind"
+freshness_diverged="$freshness_repo/.worktrees/diverged"
+freshness_clean="$freshness_repo/.worktrees/clean"
+freshness_ahead="$freshness_repo/.worktrees/ahead"
+freshness_race="$freshness_repo/.worktrees/race"
+freshness_identity="$freshness_repo/.worktrees/identity"
+freshness_shallow="$FIXTURE_ROOT/freshness-shallow"
+freshness_partial_source="$FIXTURE_ROOT/freshness-partial-source"
+freshness_partial_remote="$FIXTURE_ROOT/freshness-partial-remote.git"
+freshness_partial="$FIXTURE_ROOT/freshness-partial"
+git -C "$freshness_repo" worktree add -b freshness-behind "$freshness_behind" main >/dev/null
+git -C "$freshness_repo" worktree add -b freshness-diverged "$freshness_diverged" main >/dev/null
+printf 'diverged\n' >> "$freshness_diverged/freshness.txt"
+git -C "$freshness_diverged" commit -am "diverged lane work" >/dev/null
+printf 'landing advance\n' >> "$freshness_repo/freshness.txt"
+git -C "$freshness_repo" commit -am "landing advance" >/dev/null
+git -C "$freshness_repo" push origin main >/dev/null
+git -C "$freshness_repo" worktree add -b freshness-clean "$freshness_clean" main >/dev/null
+git -C "$freshness_repo" worktree add -b freshness-ahead "$freshness_ahead" main >/dev/null
+printf 'ahead\n' >> "$freshness_ahead/freshness.txt"
+git -C "$freshness_ahead" commit -am "ahead lane work" >/dev/null
+git -C "$freshness_repo" worktree add -b freshness-race "$freshness_race" main >/dev/null
+git -C "$freshness_repo" worktree add -b freshness-identity "$freshness_identity" main >/dev/null
+printf 'original\n' > "$freshness_race/race.txt"
+git -C "$freshness_race" add race.txt
+git -C "$freshness_race" commit -m "race original head" >/dev/null
+freshness_race_head=$(git -C "$freshness_race" rev-parse HEAD)
+git -C "$freshness_race" switch --detach main >/dev/null
+printf 'moved\n' > "$freshness_race/race.txt"
+git -C "$freshness_race" add race.txt
+git -C "$freshness_race" commit -m "race moved head" >/dev/null
+freshness_race_next=$(git -C "$freshness_race" rev-parse HEAD)
+git -C "$freshness_race" switch freshness-race >/dev/null
+git clone --depth=1 --branch main "file://$freshness_remote" "$freshness_shallow" >/dev/null
+mkdir -p "$freshness_partial_source"
+git -C "$freshness_partial_source" init --initial-branch=main >/dev/null
+git -C "$freshness_partial_source" config user.name "Firstmate tests"
+git -C "$freshness_partial_source" config user.email "firstmate-tests@example.invalid"
+printf 'partial baseline\n' > "$freshness_partial_source/partial.txt"
+git -C "$freshness_partial_source" add partial.txt
+git -C "$freshness_partial_source" commit -m "partial baseline" >/dev/null
+git init --bare --initial-branch=main "$freshness_partial_remote" >/dev/null
+git -C "$freshness_partial_remote" config uploadpack.allowFilter true
+git -C "$freshness_partial_source" remote add origin "$freshness_partial_remote"
+git -C "$freshness_partial_source" push -u origin main >/dev/null
+git clone --filter=blob:none "file://$freshness_partial_remote" "$freshness_partial" >/dev/null
+printf 'partial remote advance\n' >> "$freshness_partial_source/partial.txt"
+git -C "$freshness_partial_source" commit -am "partial remote advance" >/dev/null
+git -C "$freshness_partial_source" push origin main >/dev/null
+freshness_partial_tip=$(git -C "$freshness_partial_source" rev-parse HEAD)
+
+FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" FRESHNESS_RACE="$freshness_race" FRESHNESS_IDENTITY="$freshness_identity" FRESHNESS_SHALLOW="$freshness_shallow" FRESHNESS_PARTIAL="$freshness_partial" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = new Date().toISOString();
+db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness', 'freshness-fixture', 'root-freshness', 'active', now, now);
+db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness-shallow', 'freshness-shallow', 'root-freshness-shallow', 'active', now, now);
+db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness-partial', 'freshness-partial', 'root-freshness-partial', 'active', now, now);
+db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-freshness-incomplete', 'freshness-incomplete', 'root-freshness-incomplete-one', 'active', now, now);
+db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness', 'freshness-fixture', process.env.FRESHNESS_REPO, 'main');
+db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness-shallow', 'freshness-shallow', process.env.FRESHNESS_SHALLOW, 'main');
+db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-freshness-partial', 'freshness-partial', process.env.FRESHNESS_PARTIAL, 'main');
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness', 'project-freshness', 'repo-freshness', 0);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-shallow', 'project-freshness-shallow', 'repo-freshness-shallow', 0);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-partial', 'project-freshness-partial', 'repo-freshness-partial', 0);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-incomplete-one', 'project-freshness-incomplete', 'repo-freshness', 0);
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-freshness-incomplete-two', 'project-freshness-incomplete', 'repo-project-controller', 1);
+const workspace = db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+const root = db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)');
+for (const [id, name, rootPath, branch] of [
+  ['ws-fresh-clean', 'fresh-clean', process.env.FRESHNESS_CLEAN, 'freshness-clean'],
+  ['ws-fresh-ahead', 'fresh-ahead', process.env.FRESHNESS_AHEAD, 'freshness-ahead'],
+  ['ws-fresh-behind', 'fresh-behind', process.env.FRESHNESS_BEHIND, 'freshness-behind'],
+  ['ws-fresh-diverged', 'fresh-diverged', process.env.FRESHNESS_DIVERGED, 'freshness-diverged'],
+  ['ws-fresh-race', 'fresh-race', process.env.FRESHNESS_RACE, 'freshness-race'],
+  ['ws-fresh-identity', 'fresh-identity', process.env.FRESHNESS_IDENTITY, 'freshness-identity'],
+  ['ws-fresh-unreadable', 'fresh-unreadable', path.join(process.env.FRESHNESS_REPO, '.worktrees', 'missing'), 'freshness-missing'],
+]) {
+  workspace.run(id, 'project-freshness', name, 'worktree', 0, 'active', now, now);
+  root.run(id, 'root-freshness', rootPath, branch);
+}
+workspace.run('ws-fresh-shallow', 'project-freshness-shallow', 'fresh-shallow', 'worktree', 0, 'active', now, now);
+root.run('ws-fresh-shallow', 'root-freshness-shallow', process.env.FRESHNESS_SHALLOW, 'main');
+workspace.run('ws-fresh-partial', 'project-freshness-partial', 'fresh-partial', 'worktree', 0, 'active', now, now);
+root.run('ws-fresh-partial', 'root-freshness-partial', process.env.FRESHNESS_PARTIAL, 'main');
+workspace.run('ws-fresh-incomplete', 'project-freshness-incomplete', 'fresh-incomplete', 'worktree', 0, 'active', now, now);
+root.run('ws-fresh-incomplete', 'root-freshness-incomplete-one', process.env.FRESHNESS_CLEAN, 'freshness-clean');
+db.close();
+NODE
+
 node --check "$SCRIPT" || fail "fm-playbot-lanes script failed node syntax validation"
 pass "fm-playbot-lanes: node syntax is valid"
 
@@ -160,9 +274,267 @@ rpc() {
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "list_projects did not return all fixture projects"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
-if (value.projects.length !== 3) process.exit(1);
+if (value.projects.length !== 7) process.exit(1);
 NODE
 pass "fm-playbot-lanes: global project discovery is project-id and path aware"
+
+freshness_call() {
+  node --no-warnings "$SCRIPT" call get_workspace_freshness "{\"project\":\"project-freshness\",\"workspace\":\"$1\",\"landingBranch\":\"main\"}"
+}
+
+clean_freshness=$(freshness_call ws-fresh-clean)
+ahead_freshness=$(freshness_call ws-fresh-ahead)
+behind_freshness=$(freshness_call ws-fresh-behind)
+diverged_freshness=$(freshness_call ws-fresh-diverged)
+CLEAN="$clean_freshness" AHEAD="$ahead_freshness" BEHIND="$behind_freshness" DIVERGED="$diverged_freshness" node --no-warnings <<'NODE' \
+  || fail "get_workspace_freshness did not distinguish clean, ahead, behind, and diverged worktrees"
+const value = (name) => JSON.parse(process.env[name]).structuredContent.freshness;
+const root = (name) => value(name).roots[0];
+if (!value('CLEAN').current || root('CLEAN').commitsAhead !== 0 || root('CLEAN').commitsBehind !== 0) process.exit(1);
+if (!root('CLEAN').headIsCleanFastForwardOfLandingTip) process.exit(1);
+if (!value('AHEAD').current || root('AHEAD').commitsAhead !== 1 || root('AHEAD').commitsBehind !== 0) process.exit(1);
+if (!root('AHEAD').headIsCleanFastForwardOfLandingTip || root('AHEAD').unlandedCommits[0]?.subject !== 'ahead lane work') process.exit(1);
+if (value('BEHIND').current || root('BEHIND').commitsAhead !== 0 || root('BEHIND').commitsBehind !== 1) process.exit(1);
+if (root('BEHIND').headIsCleanFastForwardOfLandingTip || root('BEHIND').unlandedCommits.length !== 0) process.exit(1);
+if (value('DIVERGED').current || root('DIVERGED').commitsAhead !== 1 || root('DIVERGED').commitsBehind !== 1) process.exit(1);
+if (root('DIVERGED').headIsCleanFastForwardOfLandingTip || root('DIVERGED').unlandedCommits[0]?.subject !== 'diverged lane work') process.exit(1);
+for (const name of ['CLEAN', 'AHEAD', 'BEHIND', 'DIVERGED']) {
+  if (!root(name).worktreePath || !root(name).head.commit || !root(name).landingBranchTip.commit) process.exit(1);
+  if (!root(name).landingBranchTip.presentLocally || !root(name).distanceKnown) process.exit(1);
+  if (Object.hasOwn(root(name).landingBranchTip, 'remoteUrl')) process.exit(1);
+  if (JSON.stringify(value(name)).includes('freshness-secret-token')) process.exit(1);
+}
+NODE
+pass "fm-playbot-lanes: workspace freshness reports Git evidence without remote URLs"
+
+git -C "$freshness_repo" push origin main:topic >/dev/null
+git -C "$freshness_repo" remote add backup "$freshness_remote"
+git -C "$freshness_repo" fetch backup topic >/dev/null
+git -C "$freshness_repo" branch topic/child main
+git -C "$freshness_repo" branch --set-upstream-to=backup/topic topic/child >/dev/null
+if out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness \
+  '{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"topic"}' 2>&1); then
+  fail "workspace freshness borrowed an upstream from a descendant branch"
+fi
+case "$out" in
+  *"landing branch topic has no upstream and this repository has multiple remotes"*) ;;
+  *) fail "workspace freshness did not ignore a descendant branch upstream" ;;
+esac
+git -C "$freshness_repo" remote remove backup
+pass "fm-playbot-lanes: landing upstream lookup matches the exact local branch"
+
+if GIT_NO_LAZY_FETCH=1 git -C "$freshness_partial" cat-file -e "$freshness_partial_tip^{commit}" 2>/dev/null; then
+  fail "partial-clone fixture already contained the remote-only landing tip"
+fi
+out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness \
+  '{"project":"project-freshness-partial","workspace":"ws-fresh-partial","landingBranch":"main"}')
+OUT="$out" REMOTE_HEAD="$freshness_partial_tip" node --no-warnings <<'NODE' \
+  || fail "partial-clone freshness did not return unknown distance without lazy fetching"
+const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
+if (root.landingBranchTip.commit !== process.env.REMOTE_HEAD) process.exit(1);
+if (root.landingBranchTip.presentLocally !== false || root.distanceKnown !== false) process.exit(1);
+if (root.relation !== 'behind-or-diverged' || root.commitsAhead !== null || root.commitsBehind !== null) process.exit(1);
+NODE
+if GIT_NO_LAZY_FETCH=1 git -C "$freshness_partial" cat-file -e "$freshness_partial_tip^{commit}" 2>/dev/null; then
+  fail "freshness lazily fetched a remote-only commit into a partial clone"
+fi
+env -u GIT_NO_LAZY_FETCH git -C "$freshness_partial" cat-file -e "$freshness_partial_tip^{commit}" \
+  || fail "partial-clone fixture could not demonstrate Git's default lazy fetch"
+pass "fm-playbot-lanes: partial-clone freshness disables lazy object fetching"
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness-incomplete","workspace":"ws-fresh-incomplete","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "workspace freshness returned a verdict for an incomplete multi-root workspace"
+const value = JSON.parse(process.env.OUT);
+const message = value.error?.message ?? '';
+if (!message.includes('workspace ws-fresh-incomplete root coverage mismatch')) process.exit(1);
+if (!message.includes('missing project root id(s): root-freshness-incomplete-two')) process.exit(1);
+if (message.includes('root-freshness-incomplete-one,')) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness-incomplete","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "retirement omitted the incomplete multi-root workspace blocker"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-incomplete');
+const blocker = workspace?.blockers.find(candidate => candidate.code === 'workspace-root-mismatch');
+if (!blocker || blocker.message !== 'workspace ws-fresh-incomplete root coverage mismatch: missing project root id(s): root-freshness-incomplete-two') process.exit(1);
+if (JSON.stringify(blocker.missingProjectRootIds) !== '["root-freshness-incomplete-two"]') process.exit(1);
+if (blocker.extraProjectRootIds.length !== 0 || blocker.duplicateProjectRootIds.length !== 0) process.exit(1);
+if (workspace.freshness !== null || workspace.retirable) process.exit(1);
+NODE
+pass "fm-playbot-lanes: freshness rejects incomplete multi-root workspace coverage"
+
+if out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness '{"project":"project-freshness","landingBranch":"main"}' 2>&1); then
+  fail "workspace freshness accepted an omitted workspace selector through the executable call interface"
+fi
+case "$out" in
+  *"requires an explicit workspace selector by id, path, or name"*) ;;
+  *) fail "workspace freshness omitted-selector failure did not name the explicit workspace requirement" ;;
+esac
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness guessed an omitted landing branch"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('requires an explicit landingBranch')) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-unreadable","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness guessed through an unreadable worktree"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable') || !value.error.message.includes('workspace root is missing')) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness-shallow","workspace":"ws-fresh-shallow","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness accepted incomplete ancestry from a shallow repository"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable') || !value.error.message.includes('repository is shallow')) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness-shallow","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "retirement misattributed a shallow repository to the landing branch"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-shallow');
+const blocker = workspace?.roots[0]?.blockers.find(candidate => candidate.code === 'freshness-unreadable');
+if (!blocker?.message.includes('repository is shallow')) process.exit(1);
+if (workspace.blockers.some(candidate => candidate.code === 'landing-branch-unresolvable')) process.exit(1);
+if (workspace.freshness !== null || workspace.roots[0].freshness !== null || workspace.retirable) process.exit(1);
+NODE
+pass "fm-playbot-lanes: workspace freshness requires explicit selectors and complete readable Git state"
+
+freshness_race_bin="$FIXTURE_ROOT/freshness-race-bin"
+freshness_race_marker="$FIXTURE_ROOT/freshness-race-moved"
+real_git=$(command -v git)
+mkdir -p "$freshness_race_bin"
+cat > "$freshness_race_bin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ ! -e "$FM_TEST_FRESHNESS_RACE_MARKER" ] \
+  && [ "${1:-}" = "-C" ] \
+  && [ "${2:-}" = "$FM_TEST_FRESHNESS_RACE_ROOT" ] \
+  && [ "${3:-}" = "rev-parse" ] \
+  && [ "${4:-}" = "--verify" ] \
+  && [ "${5:-}" = "HEAD^{commit}" ]; then
+  output=$("$FM_TEST_REAL_GIT" "$@") || exit $?
+  : > "$FM_TEST_FRESHNESS_RACE_MARKER"
+  "$FM_TEST_REAL_GIT" -C "$FM_TEST_FRESHNESS_RACE_ROOT" reset --hard "$FM_TEST_FRESHNESS_RACE_NEXT" >/dev/null || exit $?
+  printf '%s\n' "$output"
+  exit 0
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod 0700 "$freshness_race_bin/git"
+out=$(FM_TEST_REAL_GIT="$real_git" \
+  FM_TEST_FRESHNESS_RACE_MARKER="$freshness_race_marker" \
+  FM_TEST_FRESHNESS_RACE_ROOT="$freshness_race" \
+  FM_TEST_FRESHNESS_RACE_NEXT="$freshness_race_next" \
+  PATH="$freshness_race_bin:$PATH" \
+  rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness","landingBranch":"missing-landing"}}}')
+OUT="$out" EXPECTED_HEAD="$freshness_race_head" node --no-warnings <<'NODE' \
+  || fail "retirement fallback combined a captured head with another commit's subject"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-race');
+const root = workspace.roots[0];
+if (root.head.commit !== process.env.EXPECTED_HEAD || root.head.subject !== 'race original head') process.exit(1);
+if (!root.blockers.some(blocker => blocker.code === 'landing-branch-unresolvable')) process.exit(1);
+NODE
+[ "$(git -C "$freshness_race" rev-parse HEAD)" = "$freshness_race_next" ] \
+  || fail "retirement head-race fixture did not move HEAD"
+pass "fm-playbot-lanes: retirement fallback keeps head subjects snapshot-consistent"
+
+git -C "$freshness_race" reset --hard "$freshness_race_head" >/dev/null
+rm -f "$freshness_race_marker"
+out=$(FM_TEST_REAL_GIT="$real_git" \
+  FM_TEST_FRESHNESS_RACE_MARKER="$freshness_race_marker" \
+  FM_TEST_FRESHNESS_RACE_ROOT="$freshness_race" \
+  FM_TEST_FRESHNESS_RACE_NEXT="$freshness_race_next" \
+  PATH="$freshness_race_bin:$PATH" \
+  rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-race","landingBranch":"main"}}}')
+OUT="$out" EXPECTED_HEAD="$freshness_race_head" node --no-warnings <<'NODE' \
+  || fail "successful workspace freshness mixed Git evidence from two heads"
+const root = JSON.parse(process.env.OUT).result.structuredContent.freshness.roots[0];
+if (root.head.commit !== process.env.EXPECTED_HEAD || root.head.subject !== 'race original head') process.exit(1);
+if (root.commitsAhead !== 1 || root.commitsBehind !== 0 || !root.current) process.exit(1);
+if (root.unlandedCommits.length !== 1) process.exit(1);
+if (root.unlandedCommits[0].commit !== process.env.EXPECTED_HEAD || root.unlandedCommits[0].subject !== 'race original head') process.exit(1);
+NODE
+[ "$(git -C "$freshness_race" rev-parse HEAD)" = "$freshness_race_next" ] \
+  || fail "successful freshness race fixture did not move HEAD"
+pass "fm-playbot-lanes: successful workspace freshness pins one head snapshot"
+
+timeout_git_bin="$FIXTURE_ROOT/timeout-git-bin"
+mkdir -p "$timeout_git_bin"
+cat > "$timeout_git_bin/git" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = "-C" ] && [ "${3:-}" = "ls-remote" ]; then
+  exec "$FM_TEST_SLEEP_BIN" 2
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod 0700 "$timeout_git_bin/git"
+sleep_bin=$(command -v sleep)
+out=$(FM_TEST_REAL_GIT="$real_git" \
+  FM_TEST_SLEEP_BIN="$sleep_bin" \
+  PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS=50 \
+  PATH="$timeout_git_bin:$PATH" \
+  rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "workspace freshness did not surface the ls-remote timeout explicitly"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable')) process.exit(1);
+if (!value.error.message.includes('git ls-remote timed out after 50ms')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: workspace freshness bounds remote Git operations"
+
+for bad_timeout in abc 0 -5 300001; do
+  out=$(PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS="$bad_timeout" \
+    rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"main"}}}')
+  OUT="$out" node --no-warnings <<'NODE' \
+    || fail "a malformed PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS ($bad_timeout) was not reported as a configuration error"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('configuration error: PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS')) process.exit(1);
+if (value.error.message.includes('Landing branch')) process.exit(1);
+NODE
+done
+pass "fm-playbot-lanes: a malformed remote Git timeout is an explicit configuration error"
+
+credential_helper_bin="$FIXTURE_ROOT/credential-helper-bin"
+mkdir -p "$credential_helper_bin"
+cat > "$credential_helper_bin/git-remote-credentialfail" <<'SH'
+#!/usr/bin/env bash
+printf 'remote helper failed for %s\n' "$2" >&2
+exit 1
+SH
+chmod 0700 "$credential_helper_bin/git-remote-credentialfail"
+credential_remote='credentialfail::https://freshness-user:freshness-failure-secret@example.invalid/repository.git'
+git -C "$freshness_repo" remote set-url origin "$credential_remote"
+out=$(PATH="$credential_helper_bin:$PATH" rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"main"}}}')
+git -C "$freshness_repo" remote set-url origin "$freshness_remote"
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "a failed remote freshness call exposed URL credentials"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable')) process.exit(1);
+if (!value.error.message.includes('https://[redacted]@example.invalid/repository.git')) process.exit(1);
+if (value.error.message.includes('freshness-user') || value.error.message.includes('freshness-failure-secret')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: failed remote freshness redacts URL credentials"
+
+git -C "$freshness_repo" worktree remove --force "$freshness_identity" >/dev/null
+git clone "$FIXTURE_ROOT/controller-remote.git" "$freshness_identity" >/dev/null
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-identity","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "workspace freshness trusted a replacement clone from another repository"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable')) process.exit(1);
+if (!value.error.message.includes('workspace root repository does not match project root root-freshness')) process.exit(1);
+NODE
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "retirement inspection trusted a replacement clone from another repository"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-identity');
+const blocker = workspace?.blockers.find(candidate => candidate.code === 'git-unreadable');
+if (!blocker?.message.includes('workspace root repository does not match project root root-freshness')) process.exit(1);
+if (workspace.freshness !== null || workspace.roots[0].freshness !== null || workspace.retirable) process.exit(1);
+NODE
+pass "fm-playbot-lanes: freshness and retirement verify repository identity"
 
 # This is the end-to-end reproduction for the fleet-visibility defect. The
 # public MCP call used to resolve an omitted workspace through Playbot's UI
@@ -293,7 +665,7 @@ if (value.thread.id !== 'chat-worker' || value.finalAnswer !== 'ACK' || value.co
 NODE
 pass "fm-playbot-lanes: thread reads are bounded and non-resuming"
 
-out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "normal-terminal caller could not read thread status without a controller project"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.thread.id !== 'chat-worker' || value.thread.status !== 'ready') process.exit(1);
@@ -303,7 +675,7 @@ pass "fm-playbot-lanes: normal-terminal callers can poll thread status"
 # Resolving the workspace before the thread made every request without an
 # explicit workspace fall back to the UI-selected workspace and then scope the
 # lookup to it, so a named chat living anywhere else reported "Thread not found".
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"chat-worker-alt\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"chat-worker-alt\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a thread in a non-selected workspace did not resolve without an explicit workspace"
 const value = JSON.parse(process.env.OUT);
 if (value.error) process.exit(1);
@@ -316,7 +688,7 @@ const value = JSON.parse(process.env.OUT);
 if (value.error) process.exit(1);
 if (value.result.structuredContent.thread.id !== 'chat-worker-alt') process.exit(1);
 NODE
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"workspace\":\"ws-worker\",\"thread\":\"chat-worker-alt\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"workspace\":\"ws-worker\",\"thread\":\"chat-worker-alt\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an explicit wrong workspace did not still fail closed"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('Thread not found in workspace ws-worker')) process.exit(1);
@@ -327,14 +699,14 @@ pass "fm-playbot-lanes: a named thread resolves project-wide, and an explicit wo
 # explicit-workspace path applies: a chat in an ARCHIVED workspace stays out of
 # the default scope entirely, so it is never sent to or answered, and its title
 # cannot collide with an active chat's.
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"Greeting\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an identically titled chat in an archived workspace made an active chat's title ambiguous"
 const value = JSON.parse(process.env.OUT);
 if (value.error) process.exit(1);
 const thread = value.result.structuredContent.thread;
 if (thread.id !== 'chat-worker' || thread.workspaceId !== 'ws-worker') process.exit(1);
 NODE
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"chat-worker-archived\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path"),\"thread\":\"chat-worker-archived\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a chat in an archived workspace resolved inside the default project-wide scope"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('Thread not found in project project-worker')) process.exit(1);
@@ -870,7 +1242,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup did not fail closed 
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== false || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== false || value.checks.controllerPresent !== true) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 20) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 21) process.exit(1);
 NODE
 threads_after=$(FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -1023,8 +1395,11 @@ function createWorkspaceRows(db, spec) {
     JOIN repositories r ON r.id = pr.repository_id WHERE pr.project_id = ?
   `).all(spec.projectId);
   for (const root of roots) {
+    const worktreePath = path.join(root.repo_path, '.worktrees', branch);
+    const created = spawnSync('git', ['-C', root.repo_path, 'worktree', 'add', '--detach', worktreePath, 'main'], { encoding: 'utf8' });
+    if (created.status !== 0) throw new Error((created.stderr || created.stdout || 'git worktree add failed').trim());
     db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
-      .run(id, root.root_id, path.join(root.repo_path, '.worktrees', branch), branch);
+      .run(id, root.root_id, worktreePath, branch);
   }
   return { id, name: spec.name ?? null };
 }
@@ -1130,13 +1505,13 @@ async function electronInvoke(channel, payload) {
       };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.5.0\n');
+      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.6.0\n');
       return [{
         name: 'playbot_lanes',
         enabled: true,
         error: null,
-        toolCount: 20,
-        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.5.0') },
+        toolCount: 21,
+        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.6.0') },
       }];
     }
     if (channel === 'threads:launch') {
@@ -1397,16 +1772,16 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup accepted a stale loa
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.toolCount !== 20) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.5.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.5.0' || value.checks.expectedSchemaVersion !== '0.5.0') process.exit(1);
+if (!value.checks.hooks.ready || value.checks.toolCount !== 21) process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.6.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.6.0' || value.checks.expectedSchemaVersion !== '0.6.0') process.exit(1);
 if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
 NODE
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
 OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup reloaded an MCP whose build identity was already current"
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== false) process.exit(1);
-if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 20) process.exit(1);
+if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 21) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project"
 
@@ -1419,8 +1794,8 @@ const value = JSON.parse(process.env.OUT);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 const mcpCalls = calls.filter(call => call.channel.startsWith('codex:mcpServers:'));
 if (value.ready !== true || value.changed !== true) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.5.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.5.0' || value.checks.expectedSchemaVersion !== '0.5.0') process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.6.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.6.0' || value.checks.expectedSchemaVersion !== '0.6.0') process.exit(1);
 if (!value.installation.reload.startsWith('reloaded ')) process.exit(1);
 if (mcpCalls.filter(call => call.channel === 'codex:mcpServers:reload').length !== 1) process.exit(1);
 if (mcpCalls.some(call => !['codex:mcpServers:list', 'codex:mcpServers:reload'].includes(call.channel))) process.exit(1);
@@ -1504,7 +1879,7 @@ pass "fm-playbot-lanes: create_chat launches with the Playbot-generated thread i
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"develop\",\"branch\":\"fm-branch-3\"},\"title\":\"Isolated task\",\"message\":\"Do the isolated work\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"develop\",\"branch\":\"fm-branch-3\"},\"title\":\"Isolated task\",\"message\":\"Do the isolated work\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "dispatch did not create the workspace and worker chat in one launch"
 const fs = require('node:fs');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
@@ -1517,11 +1892,12 @@ if (calls[2].payload.threadId !== 'thread-created-4' || calls[2].payload.text !=
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.thread.workspaceId !== 'ws-created-3' || value.lane.worker.workspaceId !== 'ws-created-3') process.exit(1);
 if (value.lane.supervisor.id !== 'chat-controller' || !value.lane.active) process.exit(1);
+if (!value.freshness.current || value.freshness.roots[0].commitsAhead !== 0 || value.freshness.roots[0].commitsBehind !== 0) process.exit(1);
 NODE
 pass "fm-playbot-lanes: dispatch creates a workspace, creates the worker chat inside it, and delivers the task"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "normal-terminal dispatch did not create and send without a controller chat"
 const fs = require('node:fs');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
@@ -1529,16 +1905,51 @@ if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.lane !== null || value.thread.workspaceId !== 'ws-created-4') process.exit(1);
 if (value.supervision?.mode !== 'poll') process.exit(1);
+if (!value.freshness.current || !value.freshness.roots[0].headIsCleanFastForwardOfLandingTip) process.exit(1);
 if (value.supervision.tools.join(',') !== 'get_thread_status,read_thread,get_thread_card') process.exit(1);
 NODE
 pass "fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision"
 
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-no-landing\"},\"title\":\"No landing branch\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch guessed a landing branch while creating a workspace"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('requires an explicit landingBranch')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a workspace before validating landingBranch"
+pass "fm-playbot-lanes: new-workspace dispatch requires landingBranch before creation"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":{\"branch\":\"main\"},\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-invalid-landing\"},\"title\":\"Invalid landing branch\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch coerced a malformed landing branch"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('requires an explicit landingBranch')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a workspace before rejecting a malformed landingBranch"
+pass "fm-playbot-lanes: new-workspace dispatch rejects malformed landingBranch before creation"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch silently ignored landingBranch without newWorkspace"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('landingBranch is only valid together with newWorkspace')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch contacted Playbot before rejecting landingBranch without newWorkspace"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":null,\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Ignored landing\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch silently ignored a null landingBranch without newWorkspace"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('landingBranch is only valid together with newWorkspace')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a chat before rejecting a null landingBranch without newWorkspace"
+pass "fm-playbot-lanes: dispatch rejects landingBranch without newWorkspace before any side effect"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace plus newWorkspace was not rejected"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('not both')) process.exit(1);
 NODE
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{},\"thread\":\"Greeting\",\"message\":\"x\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{},\"thread\":\"Greeting\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "thread plus newWorkspace was not rejected"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('cannot be combined with newWorkspace')) process.exit(1);
@@ -1579,7 +1990,7 @@ NODE
 pass "fm-playbot-lanes: create_workspace falls back to workspace:create on a legacy Playbot"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-legacy-2\"},\"title\":\"Legacy task\",\"message\":\"Do the legacy work\"}}}")
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-legacy-2\"},\"title\":\"Legacy task\",\"message\":\"Do the legacy work\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "legacy dispatch did not fall back to the pre-0.94 create-and-send sequence"
 const fs = require('node:fs');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
@@ -1643,12 +2054,14 @@ rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 # offers is resolvable by the get_thread_card pointer it hands back: the parked
 # chat in the ARCHIVED workspace is out of scope for both, and the parked chat in
 # an active-but-unselected workspace is in scope for both.
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_parked_threads\",\"arguments\":{\"project\":$worker_json}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_parked_threads\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads did not report the parked candidate with a confirm pointer"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.candidates.length !== 1) process.exit(1);
 if (value.candidates[0].id !== 'chat-worker-alt' || value.candidates[0].workspaceId !== 'ws-worker-alt') process.exit(1);
 if (value.candidates[0].status !== 'pending_input' || value.candidates[0].queuedCount !== 0) process.exit(1);
+const freshness = value.candidates[0].freshness;
+if (!freshness.current || freshness.roots[0].commitsAhead !== 0 || freshness.roots[0].commitsBehind !== 0) process.exit(1);
 if (value.candidates.some(candidate => candidate.id === 'chat-worker-retired-parked')) process.exit(1);
 if (value.confirmWith !== 'get_thread_card' || !value.note.includes('confirm each candidate')) process.exit(1);
 NODE
@@ -1660,12 +2073,163 @@ if (!value.error || !value.error.message.includes('Thread not found in project p
 NODE
 pass "fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot"
 
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = new Date().toISOString();
+db.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('chat-fresh-parked', 'ws-fresh-clean', 'Fresh parked', 0, 1, null, 'full-access', 0, 0, '', null, 'pending_input', 0, now, now, now, 0);
+db.close();
+NODE
+git -C "$freshness_repo" push origin main:refs/heads/proto/godot/frog-pile >/dev/null
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "global parked detection accepted one project's landing branch for every project"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('landingBranch is only valid with an explicit project')) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"project":"project-worker","landingBranch":"main","landingBranches":{"project-worker":"main"}}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "project-scoped parked detection accepted a global landing map"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('landingBranches is only valid when project is omitted')) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"landingBranches":{"project-worker":"main","project-freshness":"proto/godot/frog-pile"}}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads did not apply per-project landing targets"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (Object.hasOwn(value, 'project') || Object.hasOwn(value, 'landingBranch')) process.exit(1);
+if (value.candidates.length !== 2) process.exit(1);
+const candidates = Object.fromEntries(value.candidates.map(candidate => [candidate.id, candidate]));
+if (candidates['chat-worker-alt']?.freshness.workspace.projectId !== 'project-worker') process.exit(1);
+if (candidates['chat-fresh-parked']?.freshness.workspace.projectId !== 'project-freshness') process.exit(1);
+if (candidates['chat-worker-alt'].freshness.landingBranch !== 'main') process.exit(1);
+if (candidates['chat-fresh-parked'].freshness.landingBranch !== 'proto/godot/frog-pile') process.exit(1);
+if (!candidates['chat-worker-alt'].freshness.current || !candidates['chat-fresh-parked'].freshness.current) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{"landingBranches":{"project-worker":"main"}}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "global parked detection attached freshness to an uncovered project"
+const candidates = Object.fromEntries(JSON.parse(process.env.OUT).result.structuredContent.candidates.map(candidate => [candidate.id, candidate]));
+if (!Object.hasOwn(candidates['chat-worker-alt'], 'freshness')) process.exit(1);
+if (Object.hasOwn(candidates['chat-fresh-parked'], 'freshness')) process.exit(1);
+NODE
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_parked_threads","arguments":{}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "global parked detection required freshness targets"
+const candidates = JSON.parse(process.env.OUT).result.structuredContent.candidates;
+if (candidates.length !== 2 || candidates.some(candidate => Object.hasOwn(candidate, 'freshness'))) process.exit(1);
+NODE
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('DELETE FROM workspace_threads WHERE id = ?').run('chat-fresh-parked');
+db.close();
+NODE
+pass "fm-playbot-lanes: parked detection uses only explicit per-project landing targets"
+
+freshness_publisher="$FIXTURE_ROOT/freshness-publisher"
+git clone "$freshness_remote" "$freshness_publisher" >/dev/null
+git -C "$freshness_publisher" config user.name "Firstmate tests"
+git -C "$freshness_publisher" config user.email "firstmate-tests@example.invalid"
+printf 'remote only\n' >> "$freshness_publisher/freshness.txt"
+git -C "$freshness_publisher" commit -am "remote-only landing advance" >/dev/null
+git -C "$freshness_publisher" tag remote-only-tag
+git -C "$freshness_publisher" branch remote-only-other
+git -C "$freshness_publisher" push origin main remote-only-other remote-only-tag >/dev/null
+remote_only_head=$(git -C "$freshness_publisher" rev-parse HEAD)
+freshness_head_before=$(git -C "$freshness_clean" rev-parse HEAD)
+freshness_branch_before=$(git -C "$freshness_clean" symbolic-ref HEAD)
+freshness_index_before=$(git -C "$freshness_clean" write-tree)
+freshness_status_before=$(git -C "$freshness_clean" status --porcelain=v1 --untracked-files=all)
+freshness_file_before=$(cksum "$freshness_clean/freshness.txt")
+freshness_tracking_before=$(git -C "$freshness_clean" rev-parse refs/remotes/origin/main)
+freshness_git_dir=$(git -C "$freshness_clean" rev-parse --path-format=absolute --git-common-dir)
+freshness_git_state_before=$(find "$freshness_git_dir" -type f -exec cksum {} \; | LC_ALL=C sort)
+freshness_dot_git_before=$(cksum "$freshness_clean/.git")
+out=$(freshness_call ws-fresh-clean)
+freshness_git_state_after=$(find "$freshness_git_dir" -type f -exec cksum {} \; | LC_ALL=C sort)
+freshness_dot_git_after=$(cksum "$freshness_clean/.git")
+OUT="$out" REMOTE_HEAD="$remote_only_head" LOCAL_HEAD="$freshness_head_before" node --no-warnings <<'NODE' \
+  || fail "freshness did not report an absent remote tip as an unknown-distance result"
+const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
+if (root.head.commit !== process.env.LOCAL_HEAD || root.landingBranchTip.commit !== process.env.REMOTE_HEAD) process.exit(1);
+if (root.landingBranchTip.presentLocally !== false || root.distanceKnown !== false) process.exit(1);
+if (root.relation !== 'behind-or-diverged') process.exit(1);
+if (root.commitsAhead !== null || root.commitsBehind !== null || root.unlandedCommits !== null) process.exit(1);
+if (root.current || root.headIsCleanFastForwardOfLandingTip) process.exit(1);
+NODE
+[ "$freshness_git_state_after" = "$freshness_git_state_before" ] \
+  || fail "freshness changed workspace repository state"
+[ "$freshness_dot_git_after" = "$freshness_dot_git_before" ] \
+  || fail "freshness changed the worktree Git link"
+[ "$(git -C "$freshness_clean" rev-parse HEAD)" = "$freshness_head_before" ] \
+  || fail "freshness moved the checked-out branch"
+[ "$(git -C "$freshness_clean" symbolic-ref HEAD)" = "$freshness_branch_before" ] \
+  || fail "freshness changed the checked-out branch"
+[ "$(git -C "$freshness_clean" write-tree)" = "$freshness_index_before" ] \
+  || fail "freshness changed the index"
+[ "$(git -C "$freshness_clean" status --porcelain=v1 --untracked-files=all)" = "$freshness_status_before" ] \
+  || fail "freshness changed worktree status"
+[ "$(cksum "$freshness_clean/freshness.txt")" = "$freshness_file_before" ] \
+  || fail "freshness changed worktree content"
+[ "$(git -C "$freshness_clean" rev-parse refs/remotes/origin/main)" = "$freshness_tracking_before" ] \
+  || fail "freshness changed the remote-tracking ref"
+if git -C "$freshness_clean" cat-file -e "$remote_only_head^{commit}" 2>/dev/null; then
+  fail "freshness imported the absent remote landing commit"
+fi
+if git -C "$freshness_clean" show-ref --verify --quiet refs/remotes/origin/remote-only-other; then
+  fail "freshness imported another remote-tracking ref"
+fi
+if git -C "$freshness_clean" show-ref --verify --quiet refs/tags/remote-only-tag; then
+  fail "freshness imported a tag"
+fi
+pass "fm-playbot-lanes: absent remote tips return unknown distance without repository writes"
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness","landingBranch":"main"}}}')
+OUT="$out" REMOTE_HEAD="$remote_only_head" node --no-warnings <<'NODE' \
+  || fail "retirement inventory did not preserve unknown-distance freshness"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-clean');
+const root = workspace?.roots[0];
+if (root?.landing.commit !== process.env.REMOTE_HEAD || root.freshness.distanceKnown !== false) process.exit(1);
+if (root.commitsAhead !== null || root.commitsBehind !== null) process.exit(1);
+if (!root.blockers.some(blocker => blocker.code === 'landing-tip-not-present-locally')) process.exit(1);
+if (workspace.freshness.workspace.id !== 'ws-fresh-clean') process.exit(1);
+if (workspace.freshness.workspace.projectId !== 'project-freshness') process.exit(1);
+if (workspace.freshness.landingBranch !== 'main' || workspace.freshness.roots[0].projectRootId !== 'root-freshness') process.exit(1);
+NODE
+pass "fm-playbot-lanes: retirement reuses the full workspace freshness shape"
+
+git -C "$freshness_clean" remote add release "$freshness_remote"
+git -C "$freshness_clean" branch --track release/1.0 origin/main >/dev/null
+for ambiguous_landing in release/1.0 refs/heads/release/1.0; do
+  out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness \
+    "{\"project\":\"project-freshness\",\"workspace\":\"ws-fresh-clean\",\"landingBranch\":\"$ambiguous_landing\"}" 2>&1) \
+    && fail "workspace freshness accepted ambiguous landing branch $ambiguous_landing"
+  case "$out" in
+    *"is ambiguous because release is a configured remote"*"use refs/remotes/release/1.0"*) ;;
+    *) fail "workspace freshness did not explain ambiguous landing branch $ambiguous_landing" ;;
+  esac
+done
+out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness \
+  '{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"refs/remotes/release/main"}')
+OUT="$out" REMOTE_HEAD="$remote_only_head" node --no-warnings <<'NODE' \
+  || fail "workspace freshness rejected an unambiguous remote landing branch"
+const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
+if (root.landingBranch !== 'refs/remotes/release/main') process.exit(1);
+if (root.landingBranchTip.remote !== 'release' || root.landingBranchTip.commit !== process.env.REMOTE_HEAD) process.exit(1);
+NODE
+pass "fm-playbot-lanes: remote-prefixed landing branches require unambiguous refs"
+
 # The detector advertises no parameter that widens its scope, because
 # get_thread_card has none to match, and it ignores one if a client sends it
 # anyway: a thread-level archived chat is outside the confirming read's scope,
 # so offering it would hand back a candidate that pointer refuses to resolve.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_parked_threads\",\"arguments\":{\"project\":$worker_json,\"includeArchived\":true}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_parked_threads\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"includeArchived\":true}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "the parked detector offered an archived chat its own confirming read cannot resolve"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.candidates.length !== 1 || value.candidates[0].id !== 'chat-worker-alt') process.exit(1);
@@ -1677,13 +2241,13 @@ const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('Thread not found in project project-worker')) process.exit(1);
 NODE
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
-OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads advertises a scope-widening parameter get_thread_card cannot match"
+OUT="$out" node --no-warnings <<'NODE' || fail "list_parked_threads exposed an unintended input schema"
 const tools = JSON.parse(process.env.OUT).result.tools;
 const detector = tools.find(tool => tool.name === 'list_parked_threads');
 if (!detector) process.exit(1);
-if (JSON.stringify(Object.keys(detector.inputSchema.properties)) !== '["project"]') process.exit(1);
+if (JSON.stringify(Object.keys(detector.inputSchema.properties)) !== '["project","landingBranch","landingBranches"]') process.exit(1);
 NODE
-pass "fm-playbot-lanes: the parked detector cannot be widened past its confirming read's scope"
+pass "fm-playbot-lanes: the parked detector exposes only its scoped target inputs"
 
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "get_thread_card did not enumerate the card's questions and options"
@@ -2115,19 +2679,20 @@ update.run(JSON.stringify({ queueVersion: 2, entries: [{ id: 'held-1' }] }), 'ch
 update.run(JSON.stringify({ messages: [] }), 'chat-worker-alt');
 db.close();
 NODE
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$worker_json,\"thread\":\"Greeting\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"thread\":\"Greeting\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a recognized two-message ledger was not counted"
 const value = JSON.parse(process.env.OUT);
 if (value.error) process.exit(1);
 if (value.result.structuredContent.thread.queuedCount !== 2) process.exit(1);
+if (!value.result.structuredContent.freshness.current) process.exit(1);
 NODE
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":\"firstmate\",\"thread\":\"Firstmate\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"landingBranch\":\"main\",\"project\":\"firstmate\",\"thread\":\"Firstmate\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an unrecognized queue ledger was reported as an empty queue"
 const value = JSON.parse(process.env.OUT);
 if (value.error) process.exit(1);
 if (value.result.structuredContent.thread.queuedCount !== null) process.exit(1);
 NODE
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_status\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"thread\":\"chat-worker-alt\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an empty ledger was not counted as zero"
 const value = JSON.parse(process.env.OUT);
 if (value.error) process.exit(1);
@@ -2743,7 +3308,7 @@ watch_for_wake() {  # <seconds> <output-file>
 }
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-1\"},\"title\":\"Autoarm task\",\"message\":\"Do the watched work\",\"taskId\":\"fm-autoarm-probe\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-1\"},\"title\":\"Autoarm task\",\"message\":\"Do the watched work\",\"taskId\":\"fm-autoarm-probe\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an external-terminal dispatch did not report an armed watcher poll"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.lane !== null) process.exit(1);
@@ -2773,7 +3338,7 @@ pass "fm-playbot-lanes: an external-terminal dispatch arms and registers that wo
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
 printf '2099-08-25T09:30:00.000Z\n' > "$FIXTURE_ROOT/send-completes-at"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-fast-turn\"},\"title\":\"Fast completed turn\",\"message\":\"Do the fast completed work\",\"taskId\":\"fm-autoarm-fast-turn\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-fast-turn\"},\"title\":\"Fast completed turn\",\"message\":\"Do the fast completed work\",\"taskId\":\"fm-autoarm-fast-turn\"}")
 rm -f "$FIXTURE_ROOT/send-reconciles" "$FIXTURE_ROOT/send-completes-at"
 fast_turn_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-fast-turn || fail "the fast-completed worker's poll was not armed"
@@ -2820,7 +3385,7 @@ esac
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-turn\"},\"title\":\"Completed turn\",\"message\":\"Do the completed work\",\"taskId\":\"fm-autoarm-turn\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-turn\"},\"title\":\"Completed turn\",\"message\":\"Do the completed work\",\"taskId\":\"fm-autoarm-turn\"}")
 rm -f "$FIXTURE_ROOT/send-reconciles"
 turn_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-turn || fail "the completed-turn worker's poll was not armed"
@@ -2900,7 +3465,7 @@ pass "fm-playbot-lanes: forced exact-message delivery retires after terminal com
 # wakes firstmate on every watcher interval until teardown.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-retire-failure\"},\"title\":\"Retirement failure\",\"message\":\"Do the retirement work\",\"taskId\":\"fm-autoarm-retire-failure\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-retire-failure\"},\"title\":\"Retirement failure\",\"message\":\"Do the retirement work\",\"taskId\":\"fm-autoarm-retire-failure\"}")
 rm -f "$FIXTURE_ROOT/send-reconciles"
 retire_failure_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-retire-failure || fail "the retirement-failure worker's poll was not armed"
@@ -2950,7 +3515,7 @@ done
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-cleanup-failure\"},\"title\":\"Cleanup failure\",\"message\":\"Do the cleanup work\",\"taskId\":\"fm-autoarm-cleanup-failure\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-cleanup-failure\"},\"title\":\"Cleanup failure\",\"message\":\"Do the cleanup work\",\"taskId\":\"fm-autoarm-cleanup-failure\"}")
 rm -f "$FIXTURE_ROOT/send-reconciles"
 cleanup_failure_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 cleanup_failure_check="$FM_HOME_FIXTURE/state/fm-autoarm-cleanup-failure.check.sh"
@@ -3005,7 +3570,7 @@ rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
 printf 'send\n' > "$FIXTURE_ROOT/refresh-failure"
 printf '2099-08-25T11:00:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-refresh-failure\"},\"title\":\"Refresh failure\",\"message\":\"Accept without a readable boundary\",\"taskId\":\"fm-autoarm-refresh-failure\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-refresh-failure\"},\"title\":\"Refresh failure\",\"message\":\"Accept without a readable boundary\",\"taskId\":\"fm-autoarm-refresh-failure\"}")
 rm -f "$FIXTURE_ROOT/send-reconciles" "$FIXTURE_ROOT/refresh-failure" "$FIXTURE_ROOT/send-accepted-at"
 refresh_failure_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 OUT="$out" node --no-warnings <<'NODE' || fail "the transient-refresh dispatch did not preserve its accepted delivery verdict"
@@ -3079,7 +3644,7 @@ cp "$FM_HOME_FIXTURE/state/fm-autoarm-probe.check.sh" "$stale_generation_check"
 chmod 0700 "$stale_generation_check"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-2\"},\"title\":\"Autoarm again\",\"message\":\"Do the rearmed work\",\"taskId\":\"fm-autoarm-probe\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-2\"},\"title\":\"Autoarm again\",\"message\":\"Do the rearmed work\",\"taskId\":\"fm-autoarm-probe\"}")
 rm -f "$FIXTURE_ROOT/send-reconciles"
 OUT="$out" node --no-warnings <<'NODE' || fail "re-dispatching the same task did not re-arm its poll"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
@@ -3146,7 +3711,7 @@ restore_rpc() {
 }
 rm -f "$FIXTURE_ROOT/register-count" "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" restore_rpc \
-  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-restore\"},\"title\":\"Restore binding\",\"message\":\"Do the restore work\",\"taskId\":\"fm-autoarm-restore\"}}}")
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-restore\"},\"title\":\"Restore binding\",\"message\":\"Do the restore work\",\"taskId\":\"fm-autoarm-restore\"}}}")
 restore_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 restore_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
 check_is_registered fm-autoarm-restore || fail "the restoration fixture did not establish its prior binding"
@@ -3190,7 +3755,7 @@ pass "fm-playbot-lanes: the armed poll reports a stopped worker once and then re
 # tool, so disarming here would strand the real task with nothing watching it -
 # the exact defect this surface exists to remove.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-11\"},\"title\":\"Queued task\",\"message\":\"Do the queued work\",\"taskId\":\"fm-autoarm-queued\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-11\"},\"title\":\"Queued task\",\"message\":\"Do the queued work\",\"taskId\":\"fm-autoarm-queued\"}")
 queued_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 queued_message=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.delivery.messageId)')
 check_is_registered fm-autoarm-queued || fail "the queued-task worker's poll was not armed"
@@ -3630,7 +4195,7 @@ pass "fm-playbot-lanes: exact-thread delivery and recall evidence stay ownership
 # is just as finished as one that stopped, so it retires the same way.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-8\"},\"title\":\"Vanishing worker\",\"message\":\"Do the vanishing work\",\"taskId\":\"fm-autoarm-vanish\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-8\"},\"title\":\"Vanishing worker\",\"message\":\"Do the vanishing work\",\"taskId\":\"fm-autoarm-vanish\"}")
 rm -f "$FIXTURE_ROOT/send-reconciles"
 vanish_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 check_is_registered fm-autoarm-vanish || fail "the vanishing worker's poll was not armed"
@@ -3652,7 +4217,7 @@ for leftover in fm-autoarm-vanish.check.sh fm-autoarm-vanish.check-trust fm-auto
 done
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-db-unreadable\"},\"title\":\"Unreadable delivered worker\",\"message\":\"Do the unreadable work\",\"taskId\":\"fm-autoarm-db-delivered\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-db-unreadable\"},\"title\":\"Unreadable delivered worker\",\"message\":\"Do the unreadable work\",\"taskId\":\"fm-autoarm-db-delivered\"}")
 rm -f "$FIXTURE_ROOT/send-reconciles"
 db_delivered_check="$FM_HOME_FIXTURE/state/fm-autoarm-db-delivered.check.sh"
 db_delivered_trust="$FM_HOME_FIXTURE/state/fm-autoarm-db-delivered.check-trust"
@@ -3676,7 +4241,7 @@ rm -f "$db_delivered_trust"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/send-non-object"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-db-unconfirmed\"},\"title\":\"Unreadable unconfirmed worker\",\"message\":\"Do the unconfirmed work\",\"taskId\":\"fm-autoarm-db-unconfirmed\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-db-unconfirmed\"},\"title\":\"Unreadable unconfirmed worker\",\"message\":\"Do the unconfirmed work\",\"taskId\":\"fm-autoarm-db-unconfirmed\"}")
 rm -f "$FIXTURE_ROOT/send-non-object"
 OUT="$out" node --no-warnings <<'NODE' || fail "the unreadable-restoration fixture did not begin with unknown delivery"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
@@ -3712,7 +4277,7 @@ const expected = ['array', 'boolean', 'null', 'number', 'object', 'string'];
 if (!taskId || JSON.stringify([...taskId.type].sort()) !== JSON.stringify(expected)) process.exit(1);
 NODE
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-3\"},\"title\":\"Unkeyed task\",\"message\":\"Do the unkeyed work\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-3\"},\"title\":\"Unkeyed task\",\"message\":\"Do the unkeyed work\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a dispatch without a taskId skipped arming instead of keying on the workspace"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== true || value.supervision.taskIdSource !== 'workspace-id') process.exit(1);
@@ -3729,7 +4294,7 @@ pass "fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on 
 # poll on the literal name "null", which no teardown matches and which a second
 # unset dispatch would silently retarget off the first worker.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-9\"},\"title\":\"Null key\",\"message\":\"Do the null-keyed work\",\"taskId\":null}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-9\"},\"title\":\"Null key\",\"message\":\"Do the null-keyed work\",\"taskId\":null}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a null taskId was coerced instead of taken as absent"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== true || value.supervision.taskIdSource !== 'workspace-id') process.exit(1);
@@ -3738,7 +4303,7 @@ NODE
 [ ! -e "$FM_HOME_FIXTURE/state/null.check.sh" ] \
   || fail "a null taskId armed a poll keyed on the literal name null"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-nonstring\"},\"title\":\"Non-string key\",\"message\":\"Do the non-string-keyed work\",\"taskId\":{\"unexpected\":true}}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-nonstring\"},\"title\":\"Non-string key\",\"message\":\"Do the non-string-keyed work\",\"taskId\":{\"unexpected\":true}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a non-string taskId did not take the workspace fallback"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== true || value.supervision.taskIdSource !== 'workspace-id') process.exit(1);
@@ -3749,7 +4314,7 @@ pass "fm-playbot-lanes: null and non-string taskIds take the workspace fallback"
 # A taskId that could not key a check is refused BEFORE anything is created or
 # sent, because discovering it afterwards is exactly the unwatched worker.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-4\"},\"title\":\"Bad key\",\"message\":\"x\",\"taskId\":\"../escape\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-4\"},\"title\":\"Bad key\",\"message\":\"x\",\"taskId\":\"../escape\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an unusable taskId was accepted"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('cannot key a watcher poll')) process.exit(1);
@@ -3757,7 +4322,7 @@ NODE
 [ ! -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] \
   || fail "a dispatch refused for its taskId still created or sent something: $(cat "$FIXTURE_ROOT/ipc-calls.jsonl")"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-padded\"},\"title\":\"Padded key\",\"message\":\"x\",\"taskId\":\" fm-autoarm-padded \"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-padded\"},\"title\":\"Padded key\",\"message\":\"x\",\"taskId\":\" fm-autoarm-padded \"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a whitespace-padded explicit taskId was normalized instead of refused"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('cannot key a watcher poll')) process.exit(1);
@@ -3771,7 +4336,7 @@ pass "fm-playbot-lanes: an unusable taskId is refused before any worker is creat
 # beside a warning that says nothing is polling it.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-firstmate-home" \
-  rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-5\"},\"title\":\"Unarmable\",\"message\":\"Do the unwatched work\",\"taskId\":\"fm-autoarm-unarmable\"}}}")
+  rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-5\"},\"title\":\"Unarmable\",\"message\":\"Do the unwatched work\",\"taskId\":\"fm-autoarm-unarmable\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an arming failure was not reported loudly beside the delivered task"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== false) process.exit(1);
@@ -3792,7 +4357,7 @@ FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-check-register.sh" fm-autoarm-foreign >
   || fail "could not register the foreign check the arming must refuse to replace"
 foreign_before=$(cat "$foreign")
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-6\"},\"title\":\"Clobber\",\"message\":\"Do the clobbering work\",\"taskId\":\"fm-autoarm-foreign\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-6\"},\"title\":\"Clobber\",\"message\":\"Do the clobbering work\",\"taskId\":\"fm-autoarm-foreign\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "arming over another owner's check was not refused"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== false) process.exit(1);
@@ -3809,7 +4374,7 @@ pass "fm-playbot-lanes: arming never replaces a check this server did not genera
 # lane poll and orphans its trust binding, which is the same unwatched worker
 # moved later in the task's life, so the publish has to refuse by name instead.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-10\"},\"title\":\"PR collision\",\"message\":\"Do the reviewable work\",\"taskId\":\"fm-autoarm-pr\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-10\"},\"title\":\"PR collision\",\"message\":\"Do the reviewable work\",\"taskId\":\"fm-autoarm-pr\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "the collision fixture's dispatch did not arm a poll"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== true) process.exit(1);
@@ -3880,7 +4445,7 @@ FM_TEST_REAL_MV=$(command -v mv) FM_TEST_BLOCK_PR_CHECK="$FM_HOME_FIXTURE/state/
   > "$FIXTURE_ROOT/pr-first.out" 2>&1 &
 pr_first_pid=$!
 wait_for_file "$pr_first_entered" || fail "the PR-first race never reached its publish boundary"
-home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$pr_first_id\"},\"title\":\"PR-first collision\",\"message\":\"Do the PR-first work\",\"taskId\":\"$pr_first_id\"}" \
+home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$pr_first_id\"},\"title\":\"PR-first collision\",\"message\":\"Do the PR-first work\",\"taskId\":\"$pr_first_id\"}" \
   > "$FIXTURE_ROOT/pr-first-lane.out" &
 pr_first_lane_pid=$!
 sleep 0.5
@@ -3923,7 +4488,7 @@ rm -f "$lane_first_entered" "$lane_first_release"
 FM_TEST_BLOCK_LANE_CHECK="$FM_HOME_FIXTURE/state/$lane_first_id.check.sh" \
   FM_TEST_RACE_ENTERED="$lane_first_entered" FM_TEST_RACE_RELEASE="$lane_first_release" \
   NODE_OPTIONS="--require=$lane_pause" \
-  home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$lane_first_id\"},\"title\":\"Lane-first collision\",\"message\":\"Do the lane-first work\",\"taskId\":\"$lane_first_id\"}" \
+  home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$lane_first_id\"},\"title\":\"Lane-first collision\",\"message\":\"Do the lane-first work\",\"taskId\":\"$lane_first_id\"}" \
   > "$FIXTURE_ROOT/lane-first.out" &
 lane_first_pid=$!
 wait_for_file "$lane_first_entered" || fail "the lane-first race never reached its publish boundary"
@@ -3949,7 +4514,7 @@ check_is_registered "$lane_first_id" || fail "the waiting PR owner overwrote the
 dead_lane_id=fm-autoarm-dead-lock-lane
 stage_pid_reused_publication_lock "$FM_HOME_FIXTURE/state" "$dead_lane_id" \
   || fail "could not stage a publication lock whose dead owner PID was reused"
-out=$(home_dispatch "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$dead_lane_id\"},\"title\":\"Dead lock lane\",\"message\":\"Recover the dead lane lock\",\"taskId\":\"$dead_lane_id\"}")
+out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$dead_lane_id\"},\"title\":\"Dead lock lane\",\"message\":\"Recover the dead lane lock\",\"taskId\":\"$dead_lane_id\"}")
 kill "$PID_REUSE_PROCESS" 2>/dev/null || true
 wait "$PID_REUSE_PROCESS" 2>/dev/null || true
 PID_REUSE_PROCESS=
@@ -3977,7 +4542,7 @@ pass "fm-playbot-lanes: concurrent owners serialize and dead or PID-reused publi
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-7\"},\"title\":\"Routed task\",\"message\":\"Do the routed work\",\"taskId\":\"fm-autoarm-routed\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-7\"},\"title\":\"Routed task\",\"message\":\"Do the routed work\",\"taskId\":\"fm-autoarm-routed\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a Playbot-chat dispatch did not report its routed supervision path"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.mode !== 'routed-wake') process.exit(1);
@@ -4018,12 +4583,26 @@ retirement_call() {
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace retirement tools were not exposed with one-at-a-time schemas"
 const tools = JSON.parse(process.env.OUT).result.tools;
-if (tools.length !== 20) process.exit(1);
+if (tools.length !== 21) process.exit(1);
+const freshness = tools.find(tool => tool.name === 'get_workspace_freshness');
 const list = tools.find(tool => tool.name === 'list_retirable_workspaces');
 const retire = tools.find(tool => tool.name === 'retire_workspace');
-if (!list || !retire) process.exit(1);
+const parked = tools.find(tool => tool.name === 'list_parked_threads');
+const status = tools.find(tool => tool.name === 'get_thread_status');
+if (!freshness || !list || !retire || !parked || !status) process.exit(1);
+if (freshness.inputSchema.required.join(',') !== 'project,workspace,landingBranch') process.exit(1);
 if (list.inputSchema.required.join(',') !== 'project,landingBranch') process.exit(1);
 if (retire.inputSchema.required.join(',') !== 'project,workspace,landingBranch,confirm') process.exit(1);
+if (parked.inputSchema.type !== 'object' || parked.inputSchema.required.length !== 0) process.exit(1);
+if (Object.keys(parked.inputSchema.properties).join(',') !== 'project,landingBranch,landingBranches') process.exit(1);
+if (!parked.inputSchema.properties.landingBranch.description.includes('required with project')) process.exit(1);
+if (!parked.inputSchema.properties.landingBranches.description.includes('only when project is omitted')) process.exit(1);
+const rootCombinators = ['oneOf', 'anyOf', 'allOf', 'not'];
+for (const tool of tools) {
+  if (tool.inputSchema.type !== 'object') process.exit(1);
+  if (rootCombinators.some(keyword => keyword in tool.inputSchema)) process.exit(1);
+}
+if (status.inputSchema.required.join(',') !== 'project,thread,landingBranch') process.exit(1);
 if (retire.inputSchema.properties.confirm.const !== true) process.exit(1);
 if (retire.inputSchema.properties.workspaces || retire.inputSchema.properties.all) process.exit(1);
 NODE
@@ -4058,12 +4637,17 @@ const byId = Object.fromEntries(value.workspaces.map(workspace => [workspace.wor
 if (value.trackedChurnAllowlist.length !== 8) process.exit(1);
 if (!value.untrackedBoundary.includes('block retirement')) process.exit(1);
 if (byId['ws-worker'].blockers[0]?.code !== 'local-workspace') process.exit(1);
+if (byId['ws-worker'].roots[0]?.inspection !== 'skipped because Local workspaces are never retirable') process.exit(1);
+if (!byId['ws-worker'].freshness || byId['ws-worker'].freshness.roots[0].distanceKnown !== true) process.exit(1);
 if (!byId['ws-worker-alt'].blockers.some(blocker => blocker.code === 'active-threads')) process.exit(1);
 const active = byId['ws-worker-alt'].threads.blocking;
 if (active.length !== 1 || active[0].id !== 'chat-worker-alt' || active[0].status !== 'pending_input') process.exit(1);
 if (!byId['ws-retire-no-roots'].blockers.some(blocker => blocker.code === 'missing-root')) process.exit(1);
 if (!byId['ws-retire-unreadable'].blockers.some(blocker => blocker.code === 'git-unreadable')) process.exit(1);
 if (!byId['ws-worker-alt'].roots[0].landing.commit || byId['ws-worker-alt'].roots[0].landing.remote !== 'origin') process.exit(1);
+const freshness = byId['ws-worker-alt'].freshness;
+if (!freshness.current || freshness.roots[0].commitsAhead !== 0 || freshness.roots[0].commitsBehind !== 0) process.exit(1);
+if (JSON.stringify(freshness.roots[0]) !== JSON.stringify(byId['ws-worker-alt'].roots[0].freshness)) process.exit(1);
 NODE
 pass "fm-playbot-lanes: inventory is non-destructive and reports Local, thread, root, and Git refusals with evidence"
 
@@ -4072,8 +4656,30 @@ OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an unresol
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 if (!workspace.blockers.some(blocker => blocker.code === 'landing-branch-unresolvable')) process.exit(1);
+if (workspace.blockers.some(blocker => blocker.code === 'freshness-unreadable')) process.exit(1);
+if (workspace.freshness !== null || workspace.roots[0].freshness !== null) process.exit(1);
+const local = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker');
+if (local.blockers[0]?.code !== 'local-workspace') process.exit(1);
+const localBlocker = local.blockers.find(blocker => blocker.code === 'landing-branch-unresolvable');
+if (!localBlocker?.message.includes('root root-worker')) process.exit(1);
+if (local.blockers.some(blocker => blocker.code === 'freshness-unreadable')) process.exit(1);
+if (local.freshness !== null) process.exit(1);
 NODE
 pass "fm-playbot-lanes: landing branches require current resolvable remote evidence"
+
+PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS=abc retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "a malformed remote Git timeout was reported as a landing-branch failure in retirement inventory"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+for (const id of ['ws-worker-alt', 'ws-worker']) {
+  const workspace = value.workspaces.find(candidate => candidate.workspace.id === id);
+  if (workspace.blockers.some(blocker => blocker.code === 'landing-branch-unresolvable')) process.exit(1);
+  const blocker = workspace.blockers.find(blocker => blocker.code === 'freshness-unreadable');
+  if (!blocker?.message.includes('configuration error: PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS')) process.exit(1);
+  if (blocker.message.includes('Landing branch')) process.exit(1);
+  if (workspace.freshness !== null) process.exit(1);
+}
+NODE
+pass "fm-playbot-lanes: retirement inventory reports a malformed remote Git timeout as configuration, not landing evidence"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_retirable_workspaces\",\"arguments\":{\"project\":$worker_json}}}")
@@ -4109,11 +4715,29 @@ NODE
 if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
   fail "retirement without confirmation reached workspace:delete"
 fi
-out=$(retirement_call ws-worker ',"confirm":true')
+local_skip_git_bin="$FIXTURE_ROOT/local-skip-git-bin"
+local_skip_marker="$FIXTURE_ROOT/local-retirement-inspection-ran"
+mkdir -p "$local_skip_git_bin"
+cat > "$local_skip_git_bin/git" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "status" ] || [ "$arg" = "fetch" ]; then
+    : > "$FM_TEST_LOCAL_SKIP_MARKER"
+  fi
+done
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod 0700 "$local_skip_git_bin/git"
+out=$(FM_TEST_REAL_GIT="$real_git" FM_TEST_LOCAL_SKIP_MARKER="$local_skip_marker" PATH="$local_skip_git_bin:$PATH" \
+  retirement_call ws-worker ',"confirm":true')
 OUT="$out" node --no-warnings <<'NODE' || fail "Local workspace retirement was not refused before IPC"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('local-workspace')) process.exit(1);
+const inspection = value.error.data?.inspection;
+if (!inspection?.freshness || inspection.freshness.roots[0].distanceKnown !== true) process.exit(1);
+if (inspection.roots[0]?.inspection !== 'skipped because Local workspaces are never retirable') process.exit(1);
 NODE
+[ ! -e "$local_skip_marker" ] || fail "Local retirement ran Git status or submodule fetch inspection"
 out=$(retirement_call ws-retire-no-roots ',"confirm":true')
 OUT="$out" node --no-warnings <<'NODE' || fail "a workspace with no roots was not refused before IPC"
 const value = JSON.parse(process.env.OUT);
@@ -4464,6 +5088,10 @@ const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, '
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const blocker = workspace.roots[0].blockers.find(candidate => candidate.code === 'git-unreadable');
 if (!blocker || !blocker.message.includes(`refs/replace/${process.env.REPLACED_COMMIT}`)) process.exit(1);
+const freshnessBlocker = workspace.roots[0].blockers.find(candidate => candidate.code === 'freshness-unreadable');
+if (!freshnessBlocker || !freshnessBlocker.message.includes(`refs/replace/${process.env.REPLACED_COMMIT}`)) process.exit(1);
+if (workspace.roots[0].blockers.some(candidate => candidate.code === 'landing-branch-unresolvable')) process.exit(1);
+if (workspace.freshness !== null || workspace.roots[0].freshness !== null) process.exit(1);
 NODE
 GIT_NO_REPLACE_OBJECTS=1 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" reset --hard "$replacement_landing" >/dev/null
 retirement_list main > "$retirement_inventory"
@@ -4489,6 +5117,13 @@ const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, '
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const blocker = workspace.blockers.find(candidate => candidate.code === 'git-unreadable');
 if (!blocker || !blocker.message.includes(process.env.GRAFT_FILE)) process.exit(1);
+const local = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker');
+if (local.blockers[0]?.code !== 'local-workspace') process.exit(1);
+const localBlocker = local.blockers.find(candidate => candidate.code === 'freshness-unreadable');
+if (!localBlocker?.message.includes(process.env.GRAFT_FILE)) process.exit(1);
+if (local.blockers.some(candidate => candidate.code === 'landing-branch-unresolvable')) process.exit(1);
+if (local.freshness !== null) process.exit(1);
+if (local.roots[0]?.inspection !== 'skipped because Local workspaces are never retirable') process.exit(1);
 NODE
 rm -f "$graft_file"
 pass "fm-playbot-lanes: repository graft metadata blocks retirement evidence"
@@ -4842,13 +5477,13 @@ db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
 db.close();
 NODE
 retirement_list main > "$retirement_inventory"
-OUT_FILE="$retirement_inventory" DEFAULT_REMOTE="$FIXTURE_ROOT/worker-remote.git" WORKTREE_REMOTE="$worktree_remote" DEFAULT_HEAD="$operation_base" node --no-warnings <<'NODE' \
+OUT_FILE="$retirement_inventory" DEFAULT_HEAD="$operation_base" node --no-warnings <<'NODE' \
   || fail "worktree-specific remote evidence was reused across roots"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const ordinary = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt').roots[0];
 const specific = value.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-remote-specific').roots[0];
-if (ordinary.landing.remoteUrl !== process.env.DEFAULT_REMOTE || ordinary.landing.commit !== process.env.DEFAULT_HEAD) process.exit(1);
-if (specific.landing.remote !== 'retirement-specific' || specific.landing.remoteUrl !== process.env.WORKTREE_REMOTE || specific.landing.commit === ordinary.landing.commit) process.exit(1);
+if (Object.hasOwn(ordinary.landing, 'remoteUrl') || ordinary.landing.commit !== process.env.DEFAULT_HEAD) process.exit(1);
+if (specific.landing.remote !== 'retirement-specific' || Object.hasOwn(specific.landing, 'remoteUrl') || specific.landing.commit === ordinary.landing.commit) process.exit(1);
 if (specific.commitsAhead.length === 0 || !specific.blockers.some(blocker => blocker.code === 'unlanded-commits')) process.exit(1);
 NODE
 git -C "$worktree_remote_root" config --worktree --unset-all branch.main.remote
@@ -4955,31 +5590,23 @@ db.close();
 NODE
 retirement_list main > "$retirement_inventory"
 OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' \
-  || fail "the pre-action Git registration baseline was not returned"
+  || fail "an unregistered clone was not rejected as another repository"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const root = value.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-unregistered').roots[0];
-if (root.gitRegistration?.registered !== false || !root.gitRegistration.projectRootPath) process.exit(1);
+if (root.gitRegistration !== null) process.exit(1);
+if (!root.blockers.some(blocker => blocker.code === 'git-unreadable' && blocker.message.includes('workspace root repository does not match project root root-worker'))) process.exit(1);
 NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(retirement_call ws-retire-unregistered ',"confirm":true')
 OUT="$out" UNREGISTERED_ROOT="$unregistered_root" node --no-warnings <<'NODE' \
-  || fail "an already-missing registration was falsely reported as partial deletion"
+  || fail "retirement did not fail closed on an unregistered clone from another repository"
 const value = JSON.parse(process.env.OUT);
-if (!value.error?.message.includes('no removal was verified')) process.exit(1);
-const data = value.error.data;
-if (data.deleted || data.partialAction || data.verification.checks.gitRegistrationsGone[0].removed) process.exit(1);
-if (data.verification.checks.gitRegistrationsGone[0].beforeRegistered !== false) process.exit(1);
-if (!data.reconciliation.remaining.alreadyMissingGitRegistrations.includes(process.env.UNREGISTERED_ROOT)) process.exit(1);
-if (!data.audit.appended) process.exit(1);
+if (!value.error?.message.includes('failed its immediate retirement safety recheck')) process.exit(1);
+if (!value.error.message.includes('workspace root repository does not match project root root-worker')) process.exit(1);
 NODE
 [ -d "$unregistered_root" ] || fail "the rejected unregistered workspace was unexpectedly removed"
-AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" node --no-warnings <<'NODE' \
-  || fail "the already-missing registration audit falsely recorded destructive change"
-const fs = require('node:fs');
-const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
-if (audit.workspace.id !== 'ws-retire-unregistered' || audit.deletionObserved) process.exit(1);
-if (audit.reconciliation.removed.gitRegistrations.length !== 0) process.exit(1);
-NODE
-pass "fm-playbot-lanes: rejection distinguishes already-missing registration from removal"
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "repository identity rejection reached destructive IPC"
+pass "fm-playbot-lanes: retirement rejects unregistered clones from another repository"
 
 partial_repository="$FIXTURE_ROOT/partial-repository"
 partial_remote="$FIXTURE_ROOT/partial-remote.git"
@@ -5127,6 +5754,16 @@ const expectedRemoved = audit.baseline.database.workspaceRootRows.find((row) => 
 if (JSON.stringify(audit.reconciliation.removed.workspaceRootRows[0]) !== JSON.stringify(expectedRemoved)) process.exit(1);
 NODE
 pass "fm-playbot-lanes: exact root-row deltas report partial deletion"
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare("UPDATE workspaces SET archive_state = 'archived' WHERE id IN (?, ?)")
+  .run('ws-retire-partial', 'ws-retire-root-row');
+db.prepare('DELETE FROM project_roots WHERE id = ?').run('root-partial-two');
+db.close();
+NODE
 
 incomplete_success_root="$FIXTURE_ROOT/worker/.worktrees/incomplete-success"
 git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-incomplete-success "$incomplete_success_root" "$operation_base" >/dev/null \

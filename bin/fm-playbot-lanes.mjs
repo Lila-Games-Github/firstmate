@@ -59,10 +59,12 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.5.0";
+const SERVER_VERSION = "0.6.0";
 const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
+const DEFAULT_REMOTE_GIT_TIMEOUT_MS = 15_000;
+const MAX_REMOTE_GIT_TIMEOUT_MS = 300_000;
 
 // This exact list is the one allowance shared by retirement inventory and
 // retirement itself. Playbot's Godot editor integration rewrites these eight
@@ -714,12 +716,17 @@ function gitEnvironment() {
 
 function git(root, args, options = {}) {
   const encoding = options.encoding ?? "utf8";
+  const timeout = options.timeout;
   const result = spawnSync("git", ["-C", root, ...args], {
     encoding,
-    env: gitEnvironment(),
+    env: options.env ?? gitEnvironment(),
     input: options.input,
     maxBuffer: 16 * 1024 * 1024,
+    ...(timeout === undefined ? {} : { timeout }),
   });
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(`git ${args[0] ?? "operation"} timed out after ${timeout}ms`);
+  }
   if (result.error) throw new Error(result.error.message);
   if (result.status !== 0) {
     const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8") : String(result.stderr ?? "");
@@ -727,6 +734,61 @@ function git(root, args, options = {}) {
     throw new Error((stderr || stdout || `git exited ${result.status}`).trim());
   }
   return result.stdout;
+}
+
+// Every freshness Git call runs with lazy fetching disabled so a partial or
+// promisor clone can never turn a read into an on-demand object download;
+// a missing object is reported as the explicit remote-tip-absent result
+// instead. Together with ls-remote as the only remote command, this keeps
+// the freshness surface free of writes to any workspace repository.
+function freshnessGitEnvironment() {
+  return { ...gitEnvironment(), GIT_NO_LAZY_FETCH: "1" };
+}
+
+function freshnessGit(root, args, options = {}) {
+  return git(root, args, { ...options, env: freshnessGitEnvironment() });
+}
+
+let resolvedRemoteGitTimeoutMs = null;
+
+function remoteGitTimeoutMs() {
+  if (resolvedRemoteGitTimeoutMs !== null) return resolvedRemoteGitTimeoutMs;
+  const configured = process.env.PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS;
+  let timeout = DEFAULT_REMOTE_GIT_TIMEOUT_MS;
+  if (configured !== undefined) {
+    if (!/^[1-9]\d*$/.test(configured)) {
+      throw new Error("configuration error: PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS must be a positive integer");
+    }
+    timeout = Number(configured);
+    if (!Number.isSafeInteger(timeout) || timeout > MAX_REMOTE_GIT_TIMEOUT_MS) {
+      throw new Error(`configuration error: PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS must not exceed ${MAX_REMOTE_GIT_TIMEOUT_MS}`);
+    }
+  }
+  resolvedRemoteGitTimeoutMs = timeout;
+  return timeout;
+}
+
+function redactUrlUserinfo(value) {
+  return String(value).replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1[redacted]@");
+}
+
+function remoteGit(root, args, options = {}) {
+  try {
+    return git(root, args, { ...options, env: freshnessGitEnvironment(), timeout: remoteGitTimeoutMs() });
+  } catch (error) {
+    throw new Error(redactUrlUserinfo(error instanceof Error ? error.message : String(error)));
+  }
+}
+
+class LandingBranchUnresolvableError extends Error {
+  constructor(cause) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "LandingBranchUnresolvableError";
+  }
+}
+
+function freshnessBlockerCode(error) {
+  return error instanceof LandingBranchUnresolvableError ? "landing-branch-unresolvable" : "freshness-unreadable";
 }
 
 function gitPathIdentity(value) {
@@ -753,11 +815,11 @@ function prefixGitPath(prefix, value) {
   return prefix ? `${prefix}/${value}` : value;
 }
 
-function assertNoGitAncestryOverrides(root) {
-  const commonDir = stripTerminalLineEnding(git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+function assertNoGitAncestryOverrides(root, runGit = git) {
+  const commonDir = stripTerminalLineEnding(runGit(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
   const grafts = path.join(commonDir, "info", "grafts");
   if (pathPresence(grafts)) throw new Error(`Git graft metadata blocks retirement evidence: ${grafts}`);
-  const replacementRefs = String(git(root, ["for-each-ref", "--format=%(refname)", "refs/replace/"]))
+  const replacementRefs = String(runGit(root, ["for-each-ref", "--format=%(refname)", "refs/replace/"]))
     .split(/\r?\n/)
     .filter(Boolean)
     .sort();
@@ -938,8 +1000,8 @@ function gitSubmodulePaths(root) {
   return [...new Set(paths)].sort();
 }
 
-function exactCommitSubject(root, commit) {
-  const raw = git(root, ["show", "-s", "--encoding=UTF-8", "--format=format:%B%x00", commit], { encoding: "buffer" });
+function exactCommitSubject(root, commit, runGit = git) {
+  const raw = runGit(root, ["show", "-s", "--encoding=UTF-8", "--format=format:%B%x00", commit], { encoding: "buffer" });
   if (raw.length === 0 || raw.at(-1) !== 0 || raw.subarray(0, -1).includes(0)) {
     throw new Error(`Git returned unreadable commit-subject evidence for ${commit}`);
   }
@@ -948,12 +1010,12 @@ function exactCommitSubject(root, commit) {
   return message.subarray(0, lineEnd < 0 ? message.length : lineEnd).toString("utf8");
 }
 
-function commitRecords(root, raw, label) {
+function commitRecords(root, raw, label, runGit = git) {
   const commits = raw.toString("utf8").split("\0").filter(Boolean);
   if (commits.some((commit) => !/^[0-9a-f]{40,64}$/i.test(commit))) {
     throw new Error(`Git returned unreadable ${label} evidence`);
   }
-  return commits.map((commit) => ({ commit, subject: exactCommitSubject(root, commit) }));
+  return commits.map((commit) => ({ commit, subject: exactCommitSubject(root, commit, runGit) }));
 }
 
 function repositoryPseudoObjectRecords(root) {
@@ -1290,29 +1352,54 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
 function landingRemote(root, landingBranch) {
   const requested = String(landingBranch ?? "").trim();
   if (!requested) throw new Error("landingBranch is required and must name the branch this workspace lands on");
-  const remotes = String(git(root, ["remote"])).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  remoteGitTimeoutMs();
+  let tip;
+  try {
+    tip = landingRemoteTip(root, requested);
+  } catch (error) {
+    throw new LandingBranchUnresolvableError(error);
+  }
+  const { commit } = tip;
+  const localObject = stripTerminalLineEnding(freshnessGit(root, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], { input: `${commit}\n` }));
+  const presentLocally = localObject.toLowerCase() === `${commit.toLowerCase()} commit`;
+  if (!presentLocally && localObject.toLowerCase() !== `${commit.toLowerCase()} missing`) {
+    throw new Error(`local repository returned unreadable evidence for remote commit ${commit}`);
+  }
+  return { requested, ...tip, presentLocally };
+}
+
+function landingRemoteTip(root, requested) {
+  const remotes = String(freshnessGit(root, ["remote"])).split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
   let remote = null;
   let branch = requested.replace(/^refs\/heads\//, "");
   const remoteRefMatch = requested.match(/^refs\/remotes\/([^/]+)\/(.+)$/);
-  if (remoteRefMatch && remotes.includes(remoteRefMatch[1])) {
+  if (remoteRefMatch) {
+    if (!remotes.includes(remoteRefMatch[1])) {
+      throw new Error(`landing branch ${requested} names unconfigured remote ${remoteRefMatch[1]}`);
+    }
     [, remote, branch] = remoteRefMatch;
   } else {
-    const slash = requested.indexOf("/");
-    const prefix = slash > 0 ? requested.slice(0, slash) : "";
+    const slash = branch.indexOf("/");
+    const prefix = slash > 0 ? branch.slice(0, slash) : "";
     if (prefix && remotes.includes(prefix)) {
-      remote = prefix;
-      branch = requested.slice(slash + 1);
+      throw new Error(`landing branch ${requested} is ambiguous because ${prefix} is a configured remote; use refs/remotes/${prefix}/${branch.slice(slash + 1)} to name the remote branch explicitly`);
     }
   }
-  git(root, ["check-ref-format", "--branch", branch]);
+  freshnessGit(root, ["check-ref-format", "--branch", branch]);
   if (!remote) {
-    const upstream = String(git(root, [
+    const localRef = `refs/heads/${branch}`;
+    const upstream = String(freshnessGit(root, [
       "for-each-ref",
-      "--format=%(upstream:remotename)%09%(upstream:remoteref)",
-      `refs/heads/${branch}`,
-    ])).trim();
-    if (upstream) {
-      const [upstreamRemote, upstreamRef] = upstream.split("\t");
+      "--format=%(refname)%09%(upstream:remotename)%09%(upstream:remoteref)",
+      localRef,
+    ]))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((row) => row.split("\t"))
+      .find(([ref]) => ref === localRef);
+    const upstreamRemote = upstream?.[1] ?? "";
+    const upstreamRef = upstream?.[2] ?? "";
+    if (upstreamRemote || upstreamRef) {
       if (!upstreamRemote || !upstreamRef?.startsWith("refs/heads/")) {
         throw new Error(`landing branch ${requested} has an unreadable upstream binding`);
       }
@@ -1325,38 +1412,208 @@ function landingRemote(root, landingBranch) {
     } else if (remotes.length === 0) {
       throw new Error(`landing branch ${requested} has no remote from which to obtain current evidence`);
     } else {
-      throw new Error(`landing branch ${requested} has no upstream and this repository has multiple remotes; name it as <remote>/${requested}`);
+      throw new Error(`landing branch ${requested} has no upstream and this repository has multiple remotes; name it as refs/remotes/<remote>/${branch}`);
     }
   }
   const remoteRef = `refs/heads/${branch}`;
   const observedAt = nowIso();
-  const rows = String(git(root, ["ls-remote", "--exit-code", remote, remoteRef])).trim().split(/\r?\n/).filter(Boolean);
+  // Freshness obtains remote evidence only through ls-remote and performs no repository writes.
+  const rows = String(remoteGit(root, ["ls-remote", "--exit-code", remote, remoteRef])).trim().split(/\r?\n/).filter(Boolean);
   if (rows.length !== 1) throw new Error(`remote ${remote} did not resolve exactly one ${remoteRef}`);
   const [commit, resolvedRef] = rows[0].split(/\s+/);
   if (!/^[0-9a-f]{40,64}$/i.test(commit) || resolvedRef !== remoteRef) {
     throw new Error(`remote ${remote} returned unreadable evidence for ${remoteRef}`);
   }
-  try {
-    git(root, ["cat-file", "-e", `${commit}^{commit}`]);
-  } catch {
-    git(root, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, remoteRef]);
-    git(root, ["cat-file", "-e", `${commit}^{commit}`]);
+  return { remote, branch, remoteRef, commit, observedAt };
+}
+
+function aheadCommits(root, landingCommit, headCommit) {
+  const raw = freshnessGit(root, ["log", "-z", "--format=%H", `${landingCommit}..${headCommit}`], { encoding: "buffer" });
+  return commitRecords(root, raw, "ahead-commit", freshnessGit);
+}
+
+function explicitLandingBranch(tool, value) {
+  const landingBranch = typeof value === "string" ? value.trim() : "";
+  if (!landingBranch) throw new Error(`${tool} requires an explicit landingBranch`);
+  return landingBranch;
+}
+
+function parkedLandingTargets(args, projects) {
+  const hasProject = args.project !== undefined;
+  const hasLandingBranch = args.landingBranch !== undefined;
+  const hasLandingBranches = args.landingBranches !== undefined;
+  if (hasProject) {
+    if (typeof args.project !== "string" || !args.project.trim()) {
+      throw new Error("list_parked_threads project must be an explicit id, path, or unique name when provided");
+    }
+    if (hasLandingBranches) {
+      throw new Error("list_parked_threads landingBranches is only valid when project is omitted");
+    }
+    const project = resolveProject(args.project, projects);
+    return {
+      project,
+      landingBranches: new Map([[project.id, explicitLandingBranch("list_parked_threads", args.landingBranch)]]),
+    };
+  }
+  if (hasLandingBranch) {
+    throw new Error("list_parked_threads landingBranch is only valid with an explicit project; use landingBranches for global scope");
+  }
+  if (!hasLandingBranches) return { project: null, landingBranches: new Map() };
+  if (!args.landingBranches || typeof args.landingBranches !== "object" || Array.isArray(args.landingBranches)) {
+    throw new Error("list_parked_threads landingBranches must map project selectors to explicit landing branches");
+  }
+  const landingBranches = new Map();
+  for (const [selector, value] of Object.entries(args.landingBranches)) {
+    const project = resolveProject(selector, projects);
+    if (landingBranches.has(project.id)) {
+      throw new Error(`list_parked_threads landingBranches names project ${project.id} more than once`);
+    }
+    landingBranches.set(project.id, explicitLandingBranch(`list_parked_threads landingBranches.${selector}`, value));
+  }
+  return { project: null, landingBranches };
+}
+
+function explicitWorkspaceSelector(tool, value) {
+  const workspace = String(value ?? "").trim();
+  if (!workspace) throw new Error(`${tool} requires an explicit workspace selector by id, path, or name`);
+  return workspace;
+}
+
+function projectAwareWorkspaceRoot(project, workspaceRoot, runGit = git) {
+  const worktreePath = canonicalPath(workspaceRoot.path);
+  if (!worktreePath) throw new Error("workspace root path is empty");
+  if (!pathPresence(worktreePath)) throw new Error(`workspace root is missing: ${worktreePath}`);
+  const top = canonicalPath(stripTerminalLineEnding(runGit(worktreePath, ["rev-parse", "--show-toplevel"])));
+  if (top !== worktreePath) throw new Error(`path resolves inside Git worktree ${top} instead of naming it exactly`);
+  const projectRoot = project.roots.find((candidate) => candidate.id === workspaceRoot.projectRootId);
+  if (!projectRoot?.path) throw new Error(`project root ${workspaceRoot.projectRootId} is missing`);
+  const workspaceCommonDir = canonicalPath(stripTerminalLineEnding(runGit(worktreePath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
+  const projectCommonDir = canonicalPath(stripTerminalLineEnding(runGit(projectRoot.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"])));
+  if (workspaceCommonDir !== projectCommonDir) {
+    throw new Error(`workspace root repository does not match project root ${workspaceRoot.projectRootId}`);
+  }
+  return { worktreePath, projectRoot };
+}
+
+function rootFreshnessAtPath(worktreePath, landingBranch) {
+  const shallow = stripTerminalLineEnding(freshnessGit(worktreePath, ["rev-parse", "--is-shallow-repository"]));
+  if (shallow === "true") throw new Error("repository is shallow; complete ancestry is required for workspace freshness");
+  if (shallow !== "false") throw new Error("Git returned unreadable shallow-repository evidence");
+  const headCommit = String(freshnessGit(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+  const head = {
+    commit: headCommit,
+    subject: exactCommitSubject(worktreePath, headCommit, freshnessGit),
+  };
+  const landing = landingRemote(worktreePath, landingBranch);
+  if (!landing.presentLocally) {
+    return {
+      worktreePath,
+      head,
+      landingBranch: landing.requested,
+      landingBranchTip: landing,
+      relation: "behind-or-diverged",
+      distanceKnown: false,
+      commitsAhead: null,
+      commitsBehind: null,
+      current: false,
+      headIsCleanFastForwardOfLandingTip: false,
+      unlandedCommits: null,
+    };
+  }
+  assertNoGitAncestryOverrides(worktreePath, freshnessGit);
+  const counts = String(freshnessGit(worktreePath, ["rev-list", "--left-right", "--count", `${landing.commit}...${head.commit}`])).trim().split(/\s+/);
+  if (counts.length !== 2 || counts.some((count) => !/^\d+$/.test(count))) {
+    throw new Error("Git returned unreadable ahead/behind counts");
+  }
+  const commitsBehind = Number(counts[0]);
+  const commitsAhead = Number(counts[1]);
+  const unlandedCommits = aheadCommits(worktreePath, landing.commit, headCommit);
+  if (unlandedCommits.length !== commitsAhead) {
+    throw new Error(`Git returned ${commitsAhead} ahead commit(s) but ${unlandedCommits.length} unlanded commit record(s)`);
   }
   return {
-    requested,
-    remote,
-    remoteUrl: String(git(root, ["remote", "get-url", remote])).trim(),
-    branch,
-    remoteRef,
-    commit,
-    observedAt,
+    worktreePath,
+    head,
+    landingBranch: landing.requested,
+    landingBranchTip: landing,
+    relation: commitsBehind === 0 ? (commitsAhead === 0 ? "equal" : "ahead") : (commitsAhead === 0 ? "behind" : "diverged"),
+    distanceKnown: true,
+    commitsAhead,
+    commitsBehind,
+    current: commitsBehind === 0,
+    headIsCleanFastForwardOfLandingTip: commitsBehind === 0,
+    unlandedCommits,
   };
 }
 
-function aheadCommits(root, landingCommit) {
-  assertNoGitAncestryOverrides(root);
-  const raw = git(root, ["log", "-z", "--format=%H", `${landingCommit}..HEAD`], { encoding: "buffer" });
-  return commitRecords(root, raw, "ahead-commit");
+function rootFreshness(project, workspaceRoot, landingBranch) {
+  const { worktreePath } = projectAwareWorkspaceRoot(project, workspaceRoot, freshnessGit);
+  return rootFreshnessAtPath(worktreePath, landingBranch);
+}
+
+function workspaceFreshnessReading(project, workspace, landingBranch, roots) {
+  return {
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      kind: workspace.kind,
+      projectId: project.id,
+      project: project.name,
+    },
+    landingBranch,
+    current: roots.length > 0 && roots.every((root) => root?.current === true),
+    roots,
+  };
+}
+
+function workspaceRootCoverage(project, workspace) {
+  const expected = new Set(project.roots.map((root) => root.id));
+  const counts = new Map();
+  for (const root of workspace.roots) {
+    counts.set(root.projectRootId, (counts.get(root.projectRootId) ?? 0) + 1);
+  }
+  const missingProjectRootIds = [...expected].filter((id) => !counts.has(id)).sort();
+  const extraProjectRootIds = [...counts.keys()].filter((id) => !expected.has(id)).sort();
+  const duplicateProjectRootIds = [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([id]) => id)
+    .sort();
+  const problems = [];
+  if (missingProjectRootIds.length > 0) problems.push(`missing project root id(s): ${missingProjectRootIds.join(", ")}`);
+  if (extraProjectRootIds.length > 0) problems.push(`extra project root id(s): ${extraProjectRootIds.join(", ")}`);
+  if (duplicateProjectRootIds.length > 0) problems.push(`duplicate project root id(s): ${duplicateProjectRootIds.join(", ")}`);
+  return {
+    complete: problems.length === 0,
+    missingProjectRootIds,
+    extraProjectRootIds,
+    duplicateProjectRootIds,
+    message: problems.length === 0 ? null : `workspace ${workspace.id} root coverage mismatch: ${problems.join("; ")}`,
+  };
+}
+
+function workspaceRootCoverageBlocker(coverage) {
+  return {
+    code: "workspace-root-mismatch",
+    message: coverage.message,
+    missingProjectRootIds: coverage.missingProjectRootIds,
+    extraProjectRootIds: coverage.extraProjectRootIds,
+    duplicateProjectRootIds: coverage.duplicateProjectRootIds,
+  };
+}
+
+function workspaceFreshness(project, workspace, landingBranch) {
+  const coverage = workspaceRootCoverage(project, workspace);
+  if (!coverage.complete) throw new Error(coverage.message);
+  if (workspace.roots.length === 0) throw new Error(`workspace ${workspace.id} has no persisted workspace roots`);
+  const roots = workspace.roots.map((root) => {
+    try {
+      return { projectRootId: root.projectRootId, ...rootFreshness(project, root, landingBranch) };
+    } catch (error) {
+      const message = `freshness is unreadable for workspace ${workspace.id} root ${root.projectRootId}: ${error instanceof Error ? error.message : String(error)}`;
+      throw error instanceof LandingBranchUnresolvableError ? new LandingBranchUnresolvableError(message) : new Error(message);
+    }
+  });
+  return workspaceFreshnessReading(project, workspace, landingBranch, roots);
 }
 
 function gitWorktreePaths(projectRootPath) {
@@ -1367,8 +1624,9 @@ function gitWorktreePaths(projectRootPath) {
     .map((field) => canonicalPath(field.slice("worktree ".length)));
 }
 
-function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
-  const rootPath = canonicalPath(workspaceRoot.path);
+function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshness = true) {
+  let rootPath = canonicalPath(workspaceRoot.path);
+  let projectRoot = null;
   const result = {
     projectRootId: workspaceRoot.projectRootId,
     path: rootPath,
@@ -1376,6 +1634,8 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     head: null,
     landing: null,
     commitsAhead: [],
+    commitsBehind: null,
+    freshness: null,
     tracked: {
       paths: [],
       allowedChurnPaths: [],
@@ -1402,12 +1662,44 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     return result;
   }
   try {
-    const top = canonicalPath(stripTerminalLineEnding(git(rootPath, ["rev-parse", "--show-toplevel"])));
-    if (top !== rootPath) throw new Error(`root resolves inside Git worktree ${top} instead of naming it exactly`);
+    ({ worktreePath: rootPath, projectRoot } = projectAwareWorkspaceRoot(project, workspaceRoot));
+    const headCommit = String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
     result.head = {
-      commit: String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim(),
-      subject: exactCommitSubject(rootPath, "HEAD"),
+      commit: headCommit,
+      subject: exactCommitSubject(rootPath, headCommit),
     };
+  } catch (error) {
+    result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
+    return result;
+  }
+  if (readFreshness) {
+    try {
+      result.freshness = {
+        projectRootId: workspaceRoot.projectRootId,
+        ...rootFreshnessAtPath(rootPath, landingBranch),
+      };
+      result.head = result.freshness.head;
+      result.landing = result.freshness.landingBranchTip;
+      result.commitsAhead = result.freshness.unlandedCommits;
+      result.commitsBehind = result.freshness.commitsBehind;
+      if (!result.freshness.distanceKnown) {
+        result.blockers.push({
+          code: "landing-tip-not-present-locally",
+          message: `Landing branch ${landingBranch} tip ${result.landing.commit} is not present locally, so its exact distance from the workspace head is unknown`,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = freshnessBlockerCode(error);
+      result.blockers.push({
+        code,
+        message: code === "landing-branch-unresolvable"
+          ? `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${message}`
+          : `Workspace freshness is unreadable at ${rootPath}: ${message}`,
+      });
+    }
+  }
+  try {
     const status = workspaceGitStatus(rootPath);
     result.tracked.paths = status.trackedPaths;
     result.tracked.allowedChurnPaths = status.allowedTrackedChurnPaths;
@@ -1419,8 +1711,6 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     result.submodules.inspected = status.submodules;
     result.submodules.persisted = status.persistedSubmodules;
     result.submodules.unreadable = status.unreadableSubmodules;
-    const projectRoot = project.roots.find((candidate) => candidate.id === workspaceRoot.projectRootId);
-    if (!projectRoot?.path) throw new Error(`project root ${workspaceRoot.projectRootId} is missing`);
     result.gitRegistration = {
       projectRootPath: canonicalPath(projectRoot.path),
       registered: gitWorktreePaths(projectRoot.path).includes(rootPath),
@@ -1429,13 +1719,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
     return result;
   }
-  try {
-    result.landing = landingRemote(rootPath, landingBranch);
-    result.commitsAhead = aheadCommits(rootPath, result.landing.commit);
-  } catch (error) {
-    result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
-  }
-  if (result.commitsAhead.length > 0) {
+  if (Array.isArray(result.commitsAhead) && result.commitsAhead.length > 0) {
     result.blockers.push({
       code: "unlanded-commits",
       message: `${result.commitsAhead.length} commit(s) are ahead of ${landingBranch}`,
@@ -1504,60 +1788,110 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
   return result;
 }
 
-function inspectWorkspace(project, workspace, landingBranch) {
+function retirementWorkspaceRecord(project, workspace) {
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    kind: workspace.kind,
+    selected: workspace.selected,
+    archiveState: workspace.archiveState,
+    projectId: project.id,
+    project: project.name,
+  };
+}
+
+function retirementThreadEvidence(workspace) {
   const unarchivedThreads = threadRows()
     .filter((row) => row.workspace_id === workspace.id && !row.archived)
     .map((row) => ({ id: row.thread_id, title: row.title, status: row.agent_status, updatedAt: row.updated_at }));
   const blockingThreads = unarchivedThreads.filter((thread) => thread.status === "working" || thread.status === "pending_input");
   const uncertainThreads = unarchivedThreads.filter((thread) => !RETIRABLE_THREAD_STATES.has(thread.status) && !blockingThreads.includes(thread));
-  const evidence = {
-    workspace: {
-      id: workspace.id,
-      name: workspace.name,
-      kind: workspace.kind,
-      selected: workspace.selected,
-      archiveState: workspace.archiveState,
-      projectId: project.id,
-      project: project.name,
-    },
-    landingBranch: String(landingBranch ?? ""),
-    threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
-    roots: [],
-    blockers: [],
-  };
-  if (workspace.kind === "local") {
-    evidence.blockers.push({ code: "local-workspace", message: "Local workspaces are never retirable" });
-  }
+  return { unarchivedThreads, blockingThreads, uncertainThreads };
+}
+
+function retirementThreadBlockers(blockingThreads, uncertainThreads) {
+  const blockers = [];
   if (blockingThreads.length > 0) {
-    evidence.blockers.push({
+    blockers.push({
       code: "active-threads",
       message: `${blockingThreads.length} unarchived chat(s) are working or pending input`,
       threads: blockingThreads,
     });
   }
   if (uncertainThreads.length > 0) {
-    evidence.blockers.push({
+    blockers.push({
       code: "thread-state-uncertain",
       message: `${uncertainThreads.length} unarchived chat(s) have missing or unrecognized persisted states`,
       threads: uncertainThreads,
     });
   }
-  if (workspace.roots.length === 0) {
-    evidence.blockers.push({ code: "missing-root", message: "Workspace has no persisted workspace roots" });
-  } else if (workspace.kind !== "local") {
-    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch));
-    evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
+  return blockers;
+}
+
+function localWorkspaceRetirementEvidence(project, workspace, landingBranch) {
+  const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace);
+  const blockers = [
+    { code: "local-workspace", message: "Local workspaces are never retirable" },
+    ...retirementThreadBlockers(blockingThreads, uncertainThreads),
+  ];
+  let freshness = null;
+  const coverage = workspaceRootCoverage(project, workspace);
+  if (!coverage.complete) {
+    blockers.push(workspaceRootCoverageBlocker(coverage));
   } else {
-    evidence.roots = workspace.roots.map((root) => ({
+    try {
+      freshness = workspaceFreshness(project, workspace, landingBranch);
+    } catch (error) {
+      blockers.push({ code: freshnessBlockerCode(error), message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return {
+    workspace: retirementWorkspaceRecord(project, workspace),
+    landingBranch: String(landingBranch ?? ""),
+    threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
+    roots: workspace.roots.map((root) => ({
       projectRootId: root.projectRootId,
       path: canonicalPath(root.path),
       branch: root.branch,
       inspection: "skipped because Local workspaces are never retirable",
-    }));
+    })),
+    blockers,
+    freshness,
+    retirable: false,
+    verdict: "blocked",
+  };
+}
+
+function inspectWorkspace(project, workspace, landingBranch) {
+  const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace);
+  const coverage = workspaceRootCoverage(project, workspace);
+  const evidence = {
+    workspace: retirementWorkspaceRecord(project, workspace),
+    landingBranch: String(landingBranch ?? ""),
+    threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
+    roots: [],
+    blockers: retirementThreadBlockers(blockingThreads, uncertainThreads),
+  };
+  if (!coverage.complete) evidence.blockers.push(workspaceRootCoverageBlocker(coverage));
+  if (workspace.roots.length === 0) {
+    evidence.blockers.push({ code: "missing-root", message: "Workspace has no persisted workspace roots" });
+  } else {
+    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch, coverage.complete));
+    evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
   }
+  const rootReadings = evidence.roots.map((root) => root.freshness);
+  evidence.freshness = coverage.complete && rootReadings.every((reading) => reading !== null)
+    ? workspaceFreshnessReading(project, workspace, landingBranch, rootReadings)
+    : null;
   evidence.retirable = evidence.blockers.length === 0;
   evidence.verdict = evidence.retirable ? "retirable" : "blocked";
   return evidence;
+}
+
+function workspaceRetirementEvidence(project, workspace, landingBranch) {
+  return workspace.kind === "local"
+    ? localWorkspaceRetirementEvidence(project, workspace, landingBranch)
+    : inspectWorkspace(project, workspace, landingBranch);
 }
 
 function retirementAuditPath() {
@@ -1969,7 +2303,7 @@ function captureWorkspaceRetirementBaseline(project, inspection) {
 }
 
 async function retireWorkspace(project, workspace, landingBranch) {
-  const inspection = inspectWorkspace(project, workspace, landingBranch);
+  const inspection = workspaceRetirementEvidence(project, workspace, landingBranch);
   if (!inspection.retirable) {
     const summary = inspection.blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
     throw Object.assign(new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck: ${summary}`), {
@@ -4372,11 +4706,21 @@ function toolDefinitions() {
       inputSchema: object({ project: string("Project id, root path, or unique project name"), name: string("Optional workspace name; Playbot shows a generated name when omitted"), baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"), branch: string("Optional name for the new working branch; generated when omitted") }, ["project"]),
     },
     {
+      name: "get_workspace_freshness",
+      description: "Read one workspace's exact Git heads against a caller-named landing branch using current remote evidence. Reports ahead and behind counts, whether each head is a clean fast-forward of the landing tip, and every unlanded commit subject. Missing or unreadable worktrees, repositories, or branches fail closed.",
+      inputSchema: object({
+        project: string("Project id, root path, or unique project name"),
+        workspace: string("Workspace id, root path, or unique name"),
+        landingBranch: string("Explicit branch this workspace's work must land on; use refs/remotes/<remote>/<branch> to name a remote branch unambiguously"),
+      }, ["project", "workspace", "landingBranch"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
       name: "list_retirable_workspaces",
       description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence, unarchived thread states, commits and subjects ahead, and exact tracked and untracked paths. Local workspaces and any workspace with uncertain evidence are reported blocked.",
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
-        landingBranch: string("Explicit branch these workspaces must already be landed on; name <remote>/<branch> when a local branch has no unambiguous upstream"),
+        landingBranch: string("Explicit branch these workspaces must already be landed on; use refs/remotes/<remote>/<branch> to name a remote branch unambiguously"),
       }, ["project", "landingBranch"]),
       annotations: { readOnlyHint: true },
     },
@@ -4409,14 +4753,21 @@ function toolDefinitions() {
     },
     {
       name: "get_thread_status",
-      description: "Get one Playbot chat's persisted status and route membership without resuming it.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      description: "Get one Playbot chat's persisted status, route membership, and workspace freshness against an explicit landing branch without resuming it.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), landingBranch: string("Explicit branch this worker's workspace must land on") }, ["project", "thread", "landingBranch"]),
       annotations: { readOnlyHint: true },
     },
     {
       name: "list_parked_threads",
-      description: `Cheap detector for chats that may be parked on a question or approval card, read from persisted state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
-      inputSchema: object({ project: string("Optional project id, root path, or unique project name; every project when omitted") }),
+      description: `Detector for chats across every project, or one named project, that may be parked on a question or approval card. A project-scoped read requires one landingBranch and adds freshness to every candidate. A global read accepts an optional landingBranches map and adds freshness only to candidates whose project is covered. It reads persisted chat state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
+      inputSchema: {
+        ...object({
+          project: string("Optional project id, root path, or unique project name; every project when omitted. When present, landingBranch is required and landingBranches is rejected."),
+          landingBranch: string("Explicit landing branch for a project-scoped read; required with project and rejected without it"),
+          landingBranches: { type: "object", description: "Optional global-scope map from project id, root path, or unique name to its explicit landing branch; valid only when project is omitted", additionalProperties: { type: "string" } },
+        }),
+        description: "Either project with landingBranch, or neither with an optional landingBranches map; the server enforces this at call time.",
+      },
       // The only one of the three card reads that is genuinely side-effect-free:
       // it never contacts Playbot. get_thread_card and list_queued_messages
       // deliberately carry no readOnlyHint, because that hint is what lets a
@@ -4462,7 +4813,7 @@ function toolDefinitions() {
     {
       name: "dispatch",
       description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -4505,14 +4856,34 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   if (name === "list_parked_threads") {
-    const scope = args.project ? resolveProject(args.project, projects).id : null;
+    const { project, landingBranches } = parkedLandingTargets(args, projects);
+    const projectsById = new Map(projects.map((candidate) => [candidate.id, candidate]));
+    const freshnessByWorkspace = new Map();
     // No scope-widening parameter: the confirming read this hands back has no
     // matching one, so an archived chat offered here would be a candidate
     // get_thread_card then refuses to resolve.
-    const candidates = threadsForProject(scope, null)
+    const candidates = threadsForProject(project?.id ?? null, null)
       .filter((row) => row.agent_status === "pending_input")
-      .map(publicThread);
+      .map((row) => {
+        const candidateProject = project ?? projectsById.get(row.project_id);
+        if (!candidateProject) throw new Error(`project ${row.project_id} for parked thread ${row.thread_id} is not readable`);
+        const landingBranch = landingBranches.get(candidateProject.id);
+        if (!landingBranch) return publicThread(row);
+        const freshnessKey = `${candidateProject.id}\0${row.workspace_id}\0${landingBranch}`;
+        let freshness = freshnessByWorkspace.get(freshnessKey);
+        if (!freshness) {
+          const workspace = candidateProject.workspaces.find((candidate) => candidate.id === row.workspace_id);
+          if (!workspace) throw new Error(`workspace ${row.workspace_id} for parked thread ${row.thread_id} is not readable`);
+          freshness = workspaceFreshness(candidateProject, workspace, landingBranch);
+          freshnessByWorkspace.set(freshnessKey, freshness);
+        }
+        return { ...publicThread(row), freshness };
+      });
     return {
+      ...(project ? {
+        project: { id: project.id, name: project.name },
+        landingBranch: landingBranches.get(project.id),
+      } : {}),
       candidates,
       confirmWith: "get_thread_card",
       note: "Persisted status only. Playbot reports a rehydrated chat as pending_input even when it is not parked, so confirm each candidate with get_thread_card before answering anything.",
@@ -4520,12 +4891,16 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   const project = resolveProject(args.project, projects);
+  if (name === "get_workspace_freshness") {
+    const landingBranch = explicitLandingBranch(name, args.landingBranch);
+    const workspace = resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace));
+    return { freshness: workspaceFreshness(project, workspace, landingBranch) };
+  }
   if (name === "list_retirable_workspaces") {
-    const landingBranch = String(args.landingBranch ?? "").trim();
-    if (!landingBranch) throw new Error("list_retirable_workspaces requires an explicit landingBranch");
+    const landingBranch = explicitLandingBranch(name, args.landingBranch);
     const workspaces = project.workspaces
       .filter((workspace) => workspace.archiveState === "active")
-      .map((workspace) => inspectWorkspace(project, workspace, landingBranch));
+      .map((workspace) => workspaceRetirementEvidence(project, workspace, landingBranch));
     return {
       project: { id: project.id, name: project.name },
       landingBranch,
@@ -4553,6 +4928,10 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
 
   if (name === "dispatch") {
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
+    if (!wantsNewWorkspace && args.landingBranch !== undefined) {
+      throw new Error("dispatch landingBranch is only valid together with newWorkspace; an existing workspace's freshness is read with get_workspace_freshness or get_thread_status");
+    }
+    const landingBranch = wantsNewWorkspace ? explicitLandingBranch(name, args.landingBranch) : null;
     // Validated before anything is created or sent: a taskId that cannot key a
     // check would otherwise be discovered only after the worker was already
     // working, which is the unwatched-worker case this arming exists to remove.
@@ -4581,6 +4960,16 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode });
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
+    let freshness = null;
+    if (wantsNewWorkspace) {
+      try {
+        const freshProject = resolveProject(project.id, topology());
+        const createdWorkspace = resolveWorkspace(freshProject, worker.workspace_id);
+        freshness = workspaceFreshness(freshProject, createdWorkspace, landingBranch);
+      } catch (error) {
+        throw new Error(`Workspace ${worker.workspace_id} and chat ${worker.thread_id} were created, but dispatch stopped before sending because freshness could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
@@ -4589,6 +4978,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         return {
           lane,
           ...sent,
+          ...(freshness ? { freshness } : {}),
           supervision: {
             mode: "routed-wake",
             laneId: lane.id,
@@ -4606,7 +4996,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         baseline: acceptedBaseline ?? { ...armingBaseline, acceptanceMs: null },
         delivery: acceptedBaseline ? sent.delivery : null,
       });
-      const result = { lane: null, ...sent, supervision };
+      const result = { lane: null, ...sent, ...(freshness ? { freshness } : {}), supervision };
       if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
       return result;
     } catch (error) {
@@ -4652,7 +5042,14 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
   if (name === "get_thread_status") {
     const publicValue = publicThread(thread);
-    return { thread: publicValue, lanes: loadRoutes().filter((route) => route.supervisor?.id === thread.thread_id || route.worker?.id === thread.thread_id) };
+    const landingBranch = explicitLandingBranch(name, args.landingBranch);
+    const workspace = project.workspaces.find((candidate) => candidate.id === thread.workspace_id);
+    if (!workspace) throw new Error(`workspace ${thread.workspace_id} for thread ${thread.thread_id} is not readable`);
+    return {
+      thread: publicValue,
+      freshness: workspaceFreshness(project, workspace, landingBranch),
+      lanes: loadRoutes().filter((route) => route.supervisor?.id === thread.thread_id || route.worker?.id === thread.thread_id),
+    };
   }
   if (name === "get_thread_card") {
     const { snapshot, version } = await threadSnapshot(thread);
