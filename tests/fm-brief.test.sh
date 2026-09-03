@@ -396,8 +396,10 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
-  assert_grep "Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`state/$id.meta\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded." "$brief" \
+  assert_grep "Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`'$home/state/$id.meta'\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded." "$brief" \
     "local-only brief does not keep the worker on its recorded landing branch"
+  assert_no_grep "in \`state/$id.meta\`" "$brief" \
+    "local-only brief still points the worker at a meta path relative to firstmate's home"
   assert_grep "If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward." "$brief" \
     "local-only brief lost the landing-branch rebase instruction"
   assert_no_grep "if \`main\` has advanced, rebase onto it" "$brief" \
