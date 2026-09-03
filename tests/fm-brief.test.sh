@@ -219,7 +219,19 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "originating lane captures only" "$brief" \
       "$id: brief assigned asynchronous curation to the implementation lane"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
+    assert_grep "at a detached HEAD on a clean copy of your task's base branch (its recorded landing branch, else the default branch)." "$brief" \
+      "$id: ship brief does not describe its base as the recorded landing branch, else the default branch"
+    assert_no_grep "at a detached HEAD on a clean default branch" "$brief" \
+      "$id: ship brief still describes its base as the default branch unconditionally"
   done
+  id='brief-scout-preamble-a1'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "fm-brief.sh $id --scout should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_grep "at a detached HEAD on a clean default branch." "$brief" \
+    "$id: scout brief lost its default-branch base wording although scouts take no landing branch"
+  assert_no_grep "recorded landing branch" "$brief" \
+    "$id: scout brief gained landing-branch wording although scouts take no landing branch"
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
