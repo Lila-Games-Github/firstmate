@@ -107,9 +107,9 @@ SH
   assert_contains "$out" "ok - fixture assertion 1" \
     "default oversized route completes through the public compatibility wrapper"
   assert_present "$record" "default oversized route did not receive a timeout bound"
-  [ "$(cat "$record")" = 90 ] \
-    || fail "default oversized route needs a 90s runner tripwire, got $(cat "$record")s"
-  pass "stock Bash compatibility: oversized route keeps three-times observed runner headroom"
+  [ "$(cat "$record")" = 180 ] \
+    || fail "default oversized route needs the proven 180s Bearings runner bound, got $(cat "$record")s"
+  pass "stock Bash compatibility: oversized route uses the proven Bearings runner bound"
 }
 
 test_every_hung_consumer_is_named_and_streamed() {
