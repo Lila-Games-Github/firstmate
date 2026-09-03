@@ -130,6 +130,9 @@ fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
 fm-lint-workflows.sh: 3 workflow files valid
 ```
 
+On stock macOS Bash 3.2, the PID exposed by the process substitution previously used for NUL-delimited enumeration is not a waitable child, so `wait` reports `pid ... is not a child of this shell`.
+The fix writes the byte-safe NUL-delimited enumeration to an ephemeral private spool and opens it only after successful production, keeping enumeration status explicit.
+
 ## Harness and backend applicability review
 
 The supported harness launch templates and their common brief substitution were reviewed with:
