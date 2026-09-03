@@ -5,6 +5,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+fm_test_require_node "fm-calm-pi-extension"
+pass "fm-calm-pi-extension: node $("$FM_TEST_NODE_BIN" -p 'process.versions.node') resolved at $FM_TEST_NODE_BIN"
+
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
@@ -73,8 +76,8 @@ find_chrome() {
 
 test_home_resolution() {
   local fixture out status version
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm home-resolution test"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "skip: npm not found for Pi calm home-resolution test"
     return 0
   fi
   if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
@@ -199,8 +202,8 @@ test_pi_compat_no_upper_bound() {
 
 test_pi_compat_degraded_adapter() {
   local fixture out status
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm degraded-adapter test"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "skip: npm not found for Pi calm degraded-adapter test"
     return 0
   fi
   if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
@@ -303,11 +306,6 @@ JS
 
 test_pi_compat_missing_adapter_exports() {
   local fixture out status
-  if ! command -v node >/dev/null 2>&1; then
-    echo "skip: node not found for Pi calm missing-adapter-export test"
-    return 0
-  fi
-
   fixture="$TMP_ROOT/missing-adapter-exports"
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
@@ -356,8 +354,8 @@ JS
 
 test_builtin_gate_load_time() {
   local fixture out output_file status
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm gate test"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "skip: npm not found for Pi calm gate test"
     return 0
   fi
   if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
@@ -443,8 +441,8 @@ JS
 
 test_calm_activation_collision_and_regression_bound() {
   local fixture out output_file status
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm activation test"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "skip: npm not found for Pi calm activation test"
     return 0
   fi
   if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
@@ -658,8 +656,8 @@ JS
 
 test_rendering_and_session_lifecycle() {
   local fixture out output_file status version
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm renderer test"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "skip: npm not found for Pi calm renderer test"
     return 0
   fi
   if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
@@ -1358,8 +1356,8 @@ JS
 
 test_calm_mid_turn_working_notes() {
   local fixture out output_file status version
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm mid-turn renderer test"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "skip: npm not found for Pi calm mid-turn renderer test"
     return 0
   fi
   if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
@@ -2213,8 +2211,8 @@ TS
 
 test_working_ship_geometry_and_lifecycle() {
   local fixture out status version
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi Calm working-ship test"
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "skip: npm not found for Pi Calm working-ship test"
     return 0
   fi
   if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
