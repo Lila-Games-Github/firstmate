@@ -1,0 +1,8 @@
+CASE pipeline-authored body contains the literal no-mistakes marker
+Found no-mistakes signature in PR #101 body.
+GITHUB_OUTPUT=found=true
+RESULT fork-sync checkout/proof steps are skipped by their found != true conditions
+
+CASE ordinary hand-opened body has no marker
+GITHUB_OUTPUT=found=false
+RESULT workflow continues to the mechanical fork-sync proof, where an ordinary title is rejected

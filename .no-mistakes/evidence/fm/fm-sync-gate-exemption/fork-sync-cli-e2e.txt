@@ -1,0 +1,17 @@
+CASE valid punctuated fork-sync title and genuine merge
+Proved fork-sync merge: head 58dd37e4a7a059e7c4c3263b08507a1c2e611a63 merges upstream/main parent b773253c96c4b56ff6145920e6c458839ca1feb6 without unrelated authored changes.
+RESULT accepted as expected
+
+CASE ordinary title with an otherwise genuine merge
+fork-sync proof failed: the title must start with 'Sync fork with upstream/main'
+exit=1
+RESULT rejected as expected
+
+REGRESSION crafted colon-magic merge-authored path
+Before literal-pathspec fix:
+Proved fork-sync merge: head 0f7222ff356236d077ac677fbf60a263c91f0215 merges upstream/main parent b773253c96c4b56ff6145920e6c458839ca1feb6 without unrelated authored changes.
+exit=0
+At target commit:
+fork-sync proof failed: the merge changes ':(top)conflict.txt' although upstream did not touch it
+exit=1
+RESULT reproduced old bypass and confirmed target rejects it
