@@ -1004,6 +1004,7 @@ fm_pr_poll_retirement_discard_obsolete() {
 
 fm_pr_poll_retirement_publish() {
   local state=$1 id=$2 template=$3 result=$4 receipt state_device tmp
+  local receipt_hash receipt_identity status=0
   [ "$result" = merged ] || return 1
   fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -1030,15 +1031,38 @@ fm_pr_poll_retirement_publish() {
     || ! chmod 0600 "$tmp" \
     || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
     || ! fm_pr_poll_retirement_parse "$tmp" \
-    || [ "$FM_PR_RETIRE_ID" != "$id" ] \
+    || [ "$FM_PR_RETIRE_ID" != "$id" ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  receipt_hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; return 1; }
+  receipt_identity=$(fm_pr_file_identity "$tmp") || { rm -f -- "$tmp"; return 1; }
+  if ! fm_pr_poll_lock_acquire "$state" "$id"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if fm_task_identity_retired "$state" "$id" \
     || ! fm_pr_poll_snapshot_matches "$state" "$id" "$template" \
     || ! fm_pr_regular_destination_on_device_or_absent "$receipt" "$state_device" \
     || [ -e "$receipt" ] || [ -L "$receipt" ] \
     || ! mv -f -- "$tmp" "$receipt"; then
-    rm -f -- "$tmp"
-    return 1
+    status=1
+  else
+    tmp=
+    if ! fm_pr_poll_retirement_receipt_valid "$state" "$id"; then
+      fm_pr_poll_retirement_remove_exact "$receipt" "$state_device" \
+        "$receipt_identity" "$receipt_hash" || true
+      status=1
+    fi
   fi
-  fm_pr_poll_retirement_receipt_valid "$state" "$id" || return 1
+  if [ "$status" -ne 0 ] && [ ! -e "$tmp" ] && [ ! -L "$tmp" ]; then
+    fm_pr_poll_retirement_remove_exact "$receipt" "$state_device" \
+      "$receipt_identity" "$receipt_hash" || true
+    tmp=
+  fi
+  [ -z "$tmp" ] || rm -f -- "$tmp"
+  fm_pr_poll_lock_release || status=1
+  return "$status"
 }
 
 fm_pr_poll_retirement_recover_one() {

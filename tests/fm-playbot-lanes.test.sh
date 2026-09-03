@@ -4108,6 +4108,153 @@ for leftover in "$retired_pr_task_id.check.sh" "$retired_pr_task_id.check-trust"
 done
 pass "fm-playbot-lanes: remote teardown blocks prepared PR poll republication"
 
+retired_writer_bin="$FIXTURE_ROOT/retired-writer-bin"
+mkdir -p "$retired_writer_bin"
+cat > "$retired_writer_bin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=${@: -1}
+if [ "$destination" = "$FM_TEST_BLOCK_PUBLICATION_LOCK" ]; then
+  : > "$FM_TEST_BLOCKED_PUBLISH_ENTERED"
+  while [ ! -e "$FM_TEST_BLOCKED_PUBLISH_RELEASE" ]; do sleep 0.05; done
+fi
+exec "$FM_TEST_REAL_LN" "$@"
+SH
+chmod 0700 "$retired_writer_bin/ln"
+
+retired_migration_task_id=fm-autoarm-retired-remote-migration
+retired_migration_meta="$FM_HOME_FIXTURE/state/$retired_migration_task_id.meta"
+cat > "$retired_migration_meta" <<EOF
+window=remote:$retired_migration_task_id
+kind=secondmate
+remote_host=remote-test
+remote_root=$ROOT
+home=$retired_home
+EOF
+chmod 0600 "$retired_migration_meta"
+printf '%s\n' "- $retired_migration_task_id - Retired remote migration fixture (host: remote-test; root: $ROOT; home: $retired_home; scope: test; projects: none; added 2026-09-02)" \
+  > "$retired_registry"
+printf 'legacy task check\n' > "$FM_HOME_FIXTURE/state/$retired_migration_task_id.check.sh"
+retired_migration_entered="$FIXTURE_ROOT/retired-migration-entered"
+retired_migration_release="$FIXTURE_ROOT/retired-migration-release"
+rm -f "$retired_migration_entered" "$retired_migration_release"
+FM_HOME="$FM_HOME_FIXTURE" FM_TEST_REAL_LN="$real_ln" \
+  FM_TEST_BLOCK_PUBLICATION_LOCK="$FM_HOME_FIXTURE/state/.$retired_migration_task_id.check-publish.lock" \
+  FM_TEST_BLOCKED_PUBLISH_ENTERED="$retired_migration_entered" \
+  FM_TEST_BLOCKED_PUBLISH_RELEASE="$retired_migration_release" \
+  PATH="$retired_writer_bin:$PATH" "$ROOT/bin/fm-pr-check-migrate.sh" \
+  > "$FIXTURE_ROOT/retired-migration.out" 2>&1 &
+retired_migration_pid=$!
+wait_for_file "$retired_migration_entered" \
+  || fail "remote migration publisher did not reach its task publication boundary"
+env -u NO_MISTAKES_GATE FM_HOME="$FM_HOME_FIXTURE" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_SSH_BIN="$retire_bin/ssh" "$ROOT/bin/fm-teardown.sh" "$retired_migration_task_id" \
+  > "$FIXTURE_ROOT/retired-migration-teardown.out" 2>&1 \
+  || fail "remote teardown failed ahead of a blocked migration publisher: $(cat "$FIXTURE_ROOT/retired-migration-teardown.out")"
+: > "$retired_migration_release"
+retired_migration_status=0
+wait "$retired_migration_pid" || retired_migration_status=$?
+[ "$retired_migration_status" -ne 0 ] \
+  || fail "migration publisher accepted a task identity retired before quarantine publication"
+for leftover in "$FM_HOME_FIXTURE/state/.pr-check-quarantine/$retired_migration_task_id."*; do
+  [ ! -e "$leftover" ] && [ ! -L "$leftover" ] \
+    || fail "migration publisher recreated ${leftover##*/} after remote teardown"
+done
+assert_absent "$retired_migration_meta" "remote teardown left migration task metadata"
+assert_no_grep "- $retired_migration_task_id " "$retired_registry" \
+  "remote teardown left the migration task route"
+printf '%s\n' fm-pr-check-migration-v1 > "$FM_HOME_FIXTURE/state/.pr-check-migration-v1"
+printf '%s\n' fm-pr-check-migration-scan-v1 > "$FM_HOME_FIXTURE/state/.pr-check-migration-scan-v1"
+chmod 0600 "$FM_HOME_FIXTURE/state/.pr-check-migration-v1" \
+  "$FM_HOME_FIXTURE/state/.pr-check-migration-scan-v1"
+pass "fm-playbot-lanes: remote teardown blocks migration quarantine republication"
+
+retired_receipt_task_id=fm-autoarm-retired-remote-receipt
+retired_receipt_meta="$FM_HOME_FIXTURE/state/$retired_receipt_task_id.meta"
+cat > "$retired_receipt_meta" <<EOF
+window=remote:$retired_receipt_task_id
+kind=secondmate
+remote_host=remote-test
+remote_root=$ROOT
+home=$retired_home
+EOF
+chmod 0600 "$retired_receipt_meta"
+printf '%s\n' "- $retired_receipt_task_id - Retired remote receipt fixture (host: remote-test; root: $ROOT; home: $retired_home; scope: test; projects: none; added 2026-09-02)" \
+  > "$retired_registry"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-pr-check.sh" "$retired_receipt_task_id" \
+  https://github.com/o/r/pull/55 > "$FIXTURE_ROOT/retired-receipt-seed.out" 2>&1 \
+  || fail "could not seed the retirement receipt publisher: $(cat "$FIXTURE_ROOT/retired-receipt-seed.out")"
+retired_receipt_entered="$FIXTURE_ROOT/retired-receipt-entered"
+retired_receipt_release="$FIXTURE_ROOT/retired-receipt-release"
+rm -f "$retired_receipt_entered" "$retired_receipt_release"
+FM_TEST_REAL_LN="$real_ln" \
+  FM_TEST_BLOCK_PUBLICATION_LOCK="$FM_HOME_FIXTURE/state/.$retired_receipt_task_id.check-publish.lock" \
+  FM_TEST_BLOCKED_PUBLISH_ENTERED="$retired_receipt_entered" \
+  FM_TEST_BLOCKED_PUBLISH_RELEASE="$retired_receipt_release" \
+  PATH="$retired_writer_bin:$PATH" bash -c '
+    . "$1"
+    fm_pr_poll_snapshot_capture "$2" "$3" "$4" || exit 1
+    fm_pr_poll_retirement_publish "$2" "$3" "$4" merged
+  ' _ "$ROOT/bin/fm-pr-lib.sh" "$FM_HOME_FIXTURE/state" "$retired_receipt_task_id" \
+  "$ROOT/bin/fm-pr-poll.sh" > "$FIXTURE_ROOT/retired-receipt-publisher.out" 2>&1 &
+retired_receipt_pid=$!
+wait_for_file "$retired_receipt_entered" \
+  || fail "retirement receipt publisher did not reach its task publication boundary"
+env -u NO_MISTAKES_GATE FM_HOME="$FM_HOME_FIXTURE" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_SSH_BIN="$retire_bin/ssh" "$ROOT/bin/fm-teardown.sh" "$retired_receipt_task_id" \
+  > "$FIXTURE_ROOT/retired-receipt-teardown.out" 2>&1 \
+  || fail "remote teardown failed ahead of a blocked receipt publisher: $(cat "$FIXTURE_ROOT/retired-receipt-teardown.out")"
+: > "$retired_receipt_release"
+if wait "$retired_receipt_pid"; then
+  fail "retirement receipt publisher accepted a task identity retired before publication"
+fi
+for leftover in "$retired_receipt_task_id.check.sh" "$retired_receipt_task_id.check-trust" \
+  "$retired_receipt_task_id.pr-poll" "$retired_receipt_task_id.pr-poll-registration" \
+  "$retired_receipt_task_id.pr-poll-retirement" "$retired_receipt_task_id.lane-poll"; do
+  [ ! -e "$FM_HOME_FIXTURE/state/$leftover" ] \
+    || fail "retirement receipt publisher recreated $leftover after remote teardown"
+done
+assert_absent "$retired_receipt_meta" "remote teardown left receipt task metadata"
+assert_no_grep "- $retired_receipt_task_id " "$retired_registry" \
+  "remote teardown left the receipt task route"
+pass "fm-playbot-lanes: remote teardown blocks retirement receipt republication"
+
+rollback_receipt_task_id=fm-autoarm-receipt-rollback
+rollback_receipt_meta="$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.meta"
+printf 'kind=ship\n' > "$rollback_receipt_meta"
+chmod 0600 "$rollback_receipt_meta"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-pr-check.sh" "$rollback_receipt_task_id" \
+  https://github.com/o/r/pull/56 > "$FIXTURE_ROOT/rollback-receipt-seed.out" 2>&1 \
+  || fail "could not seed the receipt rollback publisher: $(cat "$FIXTURE_ROOT/rollback-receipt-seed.out")"
+rollback_receipt_bin="$FIXTURE_ROOT/rollback-receipt-bin"
+mkdir -p "$rollback_receipt_bin"
+cat > "$rollback_receipt_bin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=${@: -1}
+"$FM_TEST_REAL_MV" "$@" || exit $?
+if [ "$destination" = "$FM_TEST_ROLLBACK_RECEIPT" ]; then
+  rm -f -- "$FM_TEST_ROLLBACK_META"
+fi
+SH
+chmod 0700 "$rollback_receipt_bin/mv"
+if FM_TEST_REAL_MV="$real_mv" \
+  FM_TEST_ROLLBACK_RECEIPT="$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.pr-poll-retirement" \
+  FM_TEST_ROLLBACK_META="$rollback_receipt_meta" PATH="$rollback_receipt_bin:$PATH" bash -c '
+    . "$1"
+    fm_pr_poll_snapshot_capture "$2" "$3" "$4" || exit 1
+    fm_pr_poll_retirement_publish "$2" "$3" "$4" merged
+  ' _ "$ROOT/bin/fm-pr-lib.sh" "$FM_HOME_FIXTURE/state" "$rollback_receipt_task_id" \
+  "$ROOT/bin/fm-pr-poll.sh" > "$FIXTURE_ROOT/rollback-receipt.out" 2>&1; then
+  fail "retirement receipt publisher accepted failed final validation"
+fi
+assert_absent "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.pr-poll-retirement" \
+  "retirement receipt publisher retained a receipt after final validation failed"
+rm -f "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.check.sh" \
+  "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.pr-poll" \
+  "$FM_HOME_FIXTURE/state/$rollback_receipt_task_id.pr-poll-registration"
+pass "fm-playbot-lanes: failed retirement receipt validation rolls publication back"
+
 partial_task_id=fm-autoarm-partial-remote
 partial_meta="$FM_HOME_FIXTURE/state/$partial_task_id.meta"
 cat > "$partial_meta" <<EOF
