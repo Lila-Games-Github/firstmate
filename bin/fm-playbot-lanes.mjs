@@ -59,7 +59,7 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.5.0";
+const SERVER_VERSION = "0.6.0";
 const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
@@ -1359,6 +1359,70 @@ function aheadCommits(root, landingCommit) {
   return commitRecords(root, raw, "ahead-commit");
 }
 
+function explicitLandingBranch(tool, value) {
+  const landingBranch = String(value ?? "").trim();
+  if (!landingBranch) throw new Error(`${tool} requires an explicit landingBranch`);
+  return landingBranch;
+}
+
+function rootFreshness(root, landingBranch) {
+  const worktreePath = canonicalPath(root);
+  if (!worktreePath) throw new Error("workspace root path is empty");
+  if (!pathPresence(worktreePath)) throw new Error(`workspace root is missing: ${worktreePath}`);
+  const top = canonicalPath(stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--show-toplevel"])));
+  if (top !== worktreePath) throw new Error(`path resolves inside Git worktree ${top} instead of naming it exactly`);
+  const head = {
+    commit: String(git(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim(),
+    subject: exactCommitSubject(worktreePath, "HEAD"),
+  };
+  const landing = landingRemote(worktreePath, landingBranch);
+  assertNoGitAncestryOverrides(worktreePath);
+  const counts = String(git(worktreePath, ["rev-list", "--left-right", "--count", `${landing.commit}...${head.commit}`])).trim().split(/\s+/);
+  if (counts.length !== 2 || counts.some((count) => !/^\d+$/.test(count))) {
+    throw new Error("Git returned unreadable ahead/behind counts");
+  }
+  const commitsBehind = Number(counts[0]);
+  const commitsAhead = Number(counts[1]);
+  const unlandedCommits = aheadCommits(worktreePath, landing.commit);
+  if (unlandedCommits.length !== commitsAhead) {
+    throw new Error(`Git returned ${commitsAhead} ahead commit(s) but ${unlandedCommits.length} unlanded commit record(s)`);
+  }
+  return {
+    worktreePath,
+    head,
+    landingBranch: landing.requested,
+    landingBranchTip: landing,
+    commitsAhead,
+    commitsBehind,
+    current: commitsBehind === 0,
+    headIsCleanFastForwardOfLandingTip: commitsBehind === 0,
+    unlandedCommits,
+  };
+}
+
+function workspaceFreshness(project, workspace, landingBranch) {
+  if (workspace.roots.length === 0) throw new Error(`workspace ${workspace.id} has no persisted workspace roots`);
+  const roots = workspace.roots.map((root) => {
+    try {
+      return { projectRootId: root.projectRootId, ...rootFreshness(root.path, landingBranch) };
+    } catch (error) {
+      throw new Error(`freshness is unreadable for workspace ${workspace.id} root ${root.projectRootId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  return {
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      kind: workspace.kind,
+      projectId: project.id,
+      project: project.name,
+    },
+    landingBranch,
+    current: roots.every((root) => root.current),
+    roots,
+  };
+}
+
 function gitWorktreePaths(projectRootPath) {
   return git(projectRootPath, ["worktree", "list", "--porcelain", "-z"], { encoding: "buffer" })
     .toString("utf8")
@@ -1376,6 +1440,8 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     head: null,
     landing: null,
     commitsAhead: [],
+    commitsBehind: null,
+    freshness: null,
     tracked: {
       paths: [],
       allowedChurnPaths: [],
@@ -1408,6 +1474,20 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
       commit: String(git(rootPath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim(),
       subject: exactCommitSubject(rootPath, "HEAD"),
     };
+  } catch (error) {
+    result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
+    return result;
+  }
+  try {
+    result.freshness = rootFreshness(rootPath, landingBranch);
+    result.head = result.freshness.head;
+    result.landing = result.freshness.landingBranchTip;
+    result.commitsAhead = result.freshness.unlandedCommits;
+    result.commitsBehind = result.freshness.commitsBehind;
+  } catch (error) {
+    result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
+  }
+  try {
     const status = workspaceGitStatus(rootPath);
     result.tracked.paths = status.trackedPaths;
     result.tracked.allowedChurnPaths = status.allowedTrackedChurnPaths;
@@ -1428,12 +1508,6 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
   } catch (error) {
     result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
     return result;
-  }
-  try {
-    result.landing = landingRemote(rootPath, landingBranch);
-    result.commitsAhead = aheadCommits(rootPath, result.landing.commit);
-  } catch (error) {
-    result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
   }
   if (result.commitsAhead.length > 0) {
     result.blockers.push({
@@ -1544,17 +1618,14 @@ function inspectWorkspace(project, workspace, landingBranch) {
   }
   if (workspace.roots.length === 0) {
     evidence.blockers.push({ code: "missing-root", message: "Workspace has no persisted workspace roots" });
-  } else if (workspace.kind !== "local") {
+  } else {
     evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch));
     evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
-  } else {
-    evidence.roots = workspace.roots.map((root) => ({
-      projectRootId: root.projectRootId,
-      path: canonicalPath(root.path),
-      branch: root.branch,
-      inspection: "skipped because Local workspaces are never retirable",
-    }));
   }
+  evidence.freshness = {
+    current: evidence.roots.length > 0 && evidence.roots.every((root) => root.freshness?.current === true),
+    roots: evidence.roots.map((root) => root.freshness),
+  };
   evidence.retirable = evidence.blockers.length === 0;
   evidence.verdict = evidence.retirable ? "retirable" : "blocked";
   return evidence;
@@ -4372,6 +4443,16 @@ function toolDefinitions() {
       inputSchema: object({ project: string("Project id, root path, or unique project name"), name: string("Optional workspace name; Playbot shows a generated name when omitted"), baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"), branch: string("Optional name for the new working branch; generated when omitted") }, ["project"]),
     },
     {
+      name: "get_workspace_freshness",
+      description: "Read one workspace's exact Git heads against a caller-named landing branch using current remote evidence. Reports ahead and behind counts, whether each head is a clean fast-forward of the landing tip, and every unlanded commit subject. Missing or unreadable worktrees, repositories, or branches fail closed.",
+      inputSchema: object({
+        project: string("Project id, root path, or unique project name"),
+        workspace: string("Workspace id, root path, or unique name"),
+        landingBranch: string("Explicit branch this workspace's work must land on; name <remote>/<branch> when a local branch has no unambiguous upstream"),
+      }, ["project", "workspace", "landingBranch"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
       name: "list_retirable_workspaces",
       description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence, unarchived thread states, commits and subjects ahead, and exact tracked and untracked paths. Local workspaces and any workspace with uncertain evidence are reported blocked.",
       inputSchema: object({
@@ -4409,14 +4490,14 @@ function toolDefinitions() {
     },
     {
       name: "get_thread_status",
-      description: "Get one Playbot chat's persisted status and route membership without resuming it.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
+      description: "Get one Playbot chat's persisted status, route membership, and workspace freshness against an explicit landing branch without resuming it.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), landingBranch: string("Explicit branch this worker's workspace must land on") }, ["project", "thread", "landingBranch"]),
       annotations: { readOnlyHint: true },
     },
     {
       name: "list_parked_threads",
-      description: `Cheap detector for chats that may be parked on a question or approval card, read from persisted state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
-      inputSchema: object({ project: string("Optional project id, root path, or unique project name; every project when omitted") }),
+      description: `Detector for chats in one project that may be parked on a question or approval card, with each worker workspace's freshness against an explicit landing branch. It reads persisted chat state without resuming any chat or focusing the Playbot window. These are CANDIDATES only: Playbot reports a merely rehydrated chat's status as pending_input even when it is not parked, so confirm each one with get_thread_card before acting. Verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}.`,
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), landingBranch: string("Explicit branch these workers' workspaces must land on") }, ["project", "landingBranch"]),
       // The only one of the three card reads that is genuinely side-effect-free:
       // it never contacts Playbot. get_thread_card and list_queued_messages
       // deliberately carry no readOnlyHint, because that hint is what lets a
@@ -4462,7 +4543,7 @@ function toolDefinitions() {
     {
       name: "dispatch",
       description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Required with newWorkspace: explicit branch the new workspace's work must land on"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -4505,14 +4586,27 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   if (name === "list_parked_threads") {
-    const scope = args.project ? resolveProject(args.project, projects).id : null;
+    const project = resolveProject(args.project, projects);
+    const landingBranch = explicitLandingBranch(name, args.landingBranch);
+    const freshnessByWorkspace = new Map();
     // No scope-widening parameter: the confirming read this hands back has no
     // matching one, so an archived chat offered here would be a candidate
     // get_thread_card then refuses to resolve.
-    const candidates = threadsForProject(scope, null)
+    const candidates = threadsForProject(project.id, null)
       .filter((row) => row.agent_status === "pending_input")
-      .map(publicThread);
+      .map((row) => {
+        let freshness = freshnessByWorkspace.get(row.workspace_id);
+        if (!freshness) {
+          const workspace = project.workspaces.find((candidate) => candidate.id === row.workspace_id);
+          if (!workspace) throw new Error(`workspace ${row.workspace_id} for parked thread ${row.thread_id} is not readable`);
+          freshness = workspaceFreshness(project, workspace, landingBranch);
+          freshnessByWorkspace.set(row.workspace_id, freshness);
+        }
+        return { ...publicThread(row), freshness };
+      });
     return {
+      project: { id: project.id, name: project.name },
+      landingBranch,
       candidates,
       confirmWith: "get_thread_card",
       note: "Persisted status only. Playbot reports a rehydrated chat as pending_input even when it is not parked, so confirm each candidate with get_thread_card before answering anything.",
@@ -4520,9 +4614,13 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   const project = resolveProject(args.project, projects);
+  if (name === "get_workspace_freshness") {
+    const landingBranch = explicitLandingBranch(name, args.landingBranch);
+    const workspace = resolveWorkspace(project, args.workspace);
+    return { freshness: workspaceFreshness(project, workspace, landingBranch) };
+  }
   if (name === "list_retirable_workspaces") {
-    const landingBranch = String(args.landingBranch ?? "").trim();
-    if (!landingBranch) throw new Error("list_retirable_workspaces requires an explicit landingBranch");
+    const landingBranch = explicitLandingBranch(name, args.landingBranch);
     const workspaces = project.workspaces
       .filter((workspace) => workspace.archiveState === "active")
       .map((workspace) => inspectWorkspace(project, workspace, landingBranch));
@@ -4553,6 +4651,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
 
   if (name === "dispatch") {
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
+    const landingBranch = wantsNewWorkspace ? explicitLandingBranch(name, args.landingBranch) : null;
     // Validated before anything is created or sent: a taskId that cannot key a
     // check would otherwise be discovered only after the worker was already
     // working, which is the unwatched-worker case this arming exists to remove.
@@ -4581,6 +4680,16 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode });
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
+    let freshness = null;
+    if (wantsNewWorkspace) {
+      try {
+        const freshProject = resolveProject(project.id, topology());
+        const createdWorkspace = resolveWorkspace(freshProject, worker.workspace_id);
+        freshness = workspaceFreshness(freshProject, createdWorkspace, landingBranch);
+      } catch (error) {
+        throw new Error(`Workspace ${worker.workspace_id} and chat ${worker.thread_id} were created, but dispatch stopped before sending because freshness could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
@@ -4589,6 +4698,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         return {
           lane,
           ...sent,
+          ...(freshness ? { freshness } : {}),
           supervision: {
             mode: "routed-wake",
             laneId: lane.id,
@@ -4606,7 +4716,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         baseline: acceptedBaseline ?? { ...armingBaseline, acceptanceMs: null },
         delivery: acceptedBaseline ? sent.delivery : null,
       });
-      const result = { lane: null, ...sent, supervision };
+      const result = { lane: null, ...sent, ...(freshness ? { freshness } : {}), supervision };
       if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
       return result;
     } catch (error) {
@@ -4652,7 +4762,14 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   if (name === "read_thread") return recentConversation(thread, args.turnLimit ?? 8);
   if (name === "get_thread_status") {
     const publicValue = publicThread(thread);
-    return { thread: publicValue, lanes: loadRoutes().filter((route) => route.supervisor?.id === thread.thread_id || route.worker?.id === thread.thread_id) };
+    const landingBranch = explicitLandingBranch(name, args.landingBranch);
+    const workspace = project.workspaces.find((candidate) => candidate.id === thread.workspace_id);
+    if (!workspace) throw new Error(`workspace ${thread.workspace_id} for thread ${thread.thread_id} is not readable`);
+    return {
+      thread: publicValue,
+      freshness: workspaceFreshness(project, workspace, landingBranch),
+      lanes: loadRoutes().filter((route) => route.supervisor?.id === thread.thread_id || route.worker?.id === thread.thread_id),
+    };
   }
   if (name === "get_thread_card") {
     const { snapshot, version } = await threadSnapshot(thread);

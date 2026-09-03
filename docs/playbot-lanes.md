@@ -66,11 +66,26 @@ When present, the workspace and the chat are created together in one launch on 0
 `newWorkspace` is mutually exclusive with `workspace`, and `dispatch` additionally rejects combining it with `thread`, because a just-created workspace has no existing chats.
 When `newWorkspace` is absent, existing workspace selection behavior is unchanged.
 
+### Workspace freshness
+
+`get_workspace_freshness` reads one active workspace selected by id, root path, or unique name against a required `landingBranch`.
+The landing branch is always explicit because a repository's default branch may not be where lane work lands.
+Callers must pass the real landing target, such as `proto/godot/frog-pile`; the tool never substitutes `main`, a repository default, or the workspace's base branch.
+Each root reports `worktreePath`, the exact `head` commit and subject, the current remote-backed `landingBranchTip`, numeric `commitsAhead` and `commitsBehind`, `current`, `headIsCleanFastForwardOfLandingTip`, and `unlandedCommits` with each commit's exact subject.
+`current` and `headIsCleanFastForwardOfLandingTip` are true when the landing tip is an ancestor of the workspace head, including when the workspace has legitimate commits ahead.
+They are false when the workspace is behind or diverged.
+The aggregate workspace `current` is true only when every root is current.
+Missing roots, paths that do not name an exact Git worktree, unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
+
+`get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.
+`list_parked_threads` now requires one exact `project` plus `landingBranch` and places the matching workspace `freshness` on every candidate.
+The parked-chat detection remains a persisted, non-resuming read, while freshness consults Git and current remote branch evidence.
+
 ### Workspace retirement
 
 `list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
 It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
-It reports the verified landing commit, each workspace root's exact head, every ahead commit and subject including an empty or non-UTF-8-encoded subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
+It reports the shared `freshness` reading, the verified landing commit, each workspace root's exact head, every ahead commit and subject including an empty or non-UTF-8-encoded subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
 Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, any missing or unrecognized unarchived chat state, an ahead commit, a tracked modification outside Playbot's exact churn allowlist, a POSIX executable-mode change hidden by `core.fileMode=false`, assume-unchanged or skip-worktree index flags, replacement refs, and an in-progress merge, rebase, cherry-pick, revert, or sequencer are blocking evidence rather than a bare false verdict.
 Tracked-content inspection compares each index object with the actual regular file, symlink target, or populated submodule head using Git's clean filters, so stat-cache shortcuts cannot produce a clean verdict.
 Git evidence clears inherited repository, worktree, index, object-store, namespace, shallow-file, replacement-base, and command-line configuration overrides before inspecting the caller-selected root.
@@ -106,7 +121,8 @@ If Playbot rejects the deletion after removing anything, the tool compares every
 ## Lane lifecycle
 
 `dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x through 0.95.x.
-With `newWorkspace`, it creates the isolated workspace and creates the worker chat inside it.
+With `newWorkspace`, it requires an explicit `landingBranch`, creates the isolated workspace and worker chat, reads the workspace's `freshness`, and returns that evidence with the dispatch result.
+The landing branch is validated before any workspace is created, and an unreadable post-creation workspace stops dispatch before the task is sent with an error naming the workspace and chat that were already created.
 The message can enter a non-selected project and does not require changing UI focus.
 For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.
 
@@ -175,7 +191,7 @@ An `unknown` verdict is classified by the chat-creation API this Playbot exposes
 
 A Playbot worker that asks a question parks until someone chooses an option, and an ordinary text send does not reach it while it waits.
 Forced steering can attach an instruction to that active turn, but it does not answer or dismiss the card, so the worker remains parked until the card is resolved through the dedicated answer surface.
-`list_parked_threads` is the cheap fleet-wide detector: it reads persisted status only, resumes nothing, and contacts Playbot not at all.
+`list_parked_threads` is the project-scoped detector: it reads persisted status, resumes nothing, and contacts Playbot not at all while also reading workspace freshness from Git.
 Its results are candidates rather than findings, because Playbot reports a merely rehydrated chat as `pending_input` whether or not it is actually parked.
 It shares one scope with the thread resolution described above and takes no parameter that widens it, because the confirming read has none to match, so every candidate it offers is resolvable by the `get_thread_card` pointer it hands back; an archived chat, and any chat in an archived workspace, is offered by neither.
 
