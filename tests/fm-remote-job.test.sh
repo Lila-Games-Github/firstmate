@@ -264,6 +264,50 @@ fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_J
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 pass "worker identity binds the canonical configured code root"
 
+# A stop signals the supervisor and its serving child together, and the
+# supervisor then forwards its own TERM, so the child routinely receives a
+# second TERM while it is already releasing ownership. Deliver that barrage
+# directly across the whole shutdown window and require every cycle to leave
+# no lock behind: a lock directory that survives, even holding only a stray
+# publish temp, wedges every later replacement.
+for REPLACEMENT_CYCLE in 1 2 3 4 5; do
+  fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+    || fail "$FM_REMOTE_JOB_ERROR (redundant TERM cycle $REPLACEMENT_CYCLE)"
+  WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+  WORKER_PGID=$(fm_remote_job_process_pgid "$WORKER_PID") \
+    || fail "the redundant TERM fixture could not resolve its process group"
+  for _ in $(seq 1 60); do
+    kill -TERM "$WORKER_PID" 2>/dev/null || break
+    sleep 0.001
+  done
+  for _ in $(seq 1 100); do
+    kill -0 -- "-$WORKER_PGID" 2>/dev/null || break
+    sleep 0.05
+  done
+  ! kill -0 -- "-$WORKER_PGID" 2>/dev/null \
+    || fail "the worker tree did not stop after redundant TERM signals (cycle $REPLACEMENT_CYCLE)"
+  assert_absent "$STATE_ROOT/worker.lock" \
+    "redundant TERM signals during shutdown left worker ownership behind (cycle $REPLACEMENT_CYCLE)"
+  assert_absent "$STATE_ROOT/worker.pid" \
+    "redundant TERM signals during shutdown left the worker pid behind (cycle $REPLACEMENT_CYCLE)"
+done
+pass "a serving worker releases ownership completely under redundant TERM signals"
+
+# A worker killed between creating a lock temp and renaming it into place
+# leaves that temp behind. Ownership recovery must still reclaim the lock
+# instead of failing on a non-empty directory forever.
+mkdir "$STATE_ROOT/worker.lock" || fail "the orphaned lock temp fixture could not recreate the lock"
+: > "$STATE_ROOT/worker.lock/.quarantine.orphan"
+touch -t 200001010000 "$STATE_ROOT/worker.lock/.quarantine.orphan" "$STATE_ROOT/worker.lock"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "$FM_REMOTE_JOB_ERROR (orphaned lock temp)"
+assert_absent "$STATE_ROOT/worker.lock/.quarantine.orphan" \
+  "ownership recovery kept a lock temp orphaned by a killed worker"
+fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "the worker recovered over an orphaned lock temp did not publish the current code identity"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+pass "ownership recovery clears a lock temp orphaned by a killed worker"
+
 CRASHED_WORKER_PID=$NEW_WORKER_PID
 kill -KILL "$CRASHED_WORKER_PID"
 wait "$CRASHED_WORKER_PID" 2>/dev/null || true
