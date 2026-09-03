@@ -3,15 +3,16 @@
 Thanks for wanting to contribute.
 One rule up front:
 
-**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes).**
+**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes) unless they are the mechanically proven fork-sync merges described below.**
 We require this to reduce the maintainer's burden of reviewing and merging contributions.
 
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
+A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and accepts the deterministic signature that no-mistakes writes.
+PRs without that signature fail unless they satisfy the narrow fork-sync exception below.
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature or the proven fork-sync shape will not be reviewed or merged.
 
 The sole marker-free exception is a fork-sync merge whose title starts with `Sync fork with upstream/main` and whose Git history passes [`bin/fm-pr-fork-sync-proof.sh`](bin/fm-pr-fork-sync-proof.sh).
 The title prefix is literal and case-sensitive, and any suffix after it is accepted, including punctuation.
