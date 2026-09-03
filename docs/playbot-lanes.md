@@ -72,12 +72,14 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 The landing branch is always explicit because a repository's default branch may not be where lane work lands.
 Callers must pass the real landing target, such as `proto/godot/frog-pile`; the tool never substitutes `main`, a repository default, or the workspace's base branch.
 When a branch's first path component is also a configured remote name, the short form is ambiguous and rejected; use `refs/remotes/<remote>/<branch>` to name the remote branch explicitly.
-Each root reports `worktreePath`, the exact `head` commit and subject, the current remote-backed `landingBranchTip`, numeric `commitsAhead` and `commitsBehind`, `current`, `headIsCleanFastForwardOfLandingTip`, and `unlandedCommits` with each commit's exact subject.
+Each root reports `worktreePath`, the exact `head` commit and subject, the current remote-backed `landingBranchTip`, `relation`, `distanceKnown`, `commitsAhead`, `commitsBehind`, `current`, `headIsCleanFastForwardOfLandingTip`, and `unlandedCommits` with each commit's exact subject.
+When `landingBranchTip.presentLocally` is true, `distanceKnown` is true, `relation` is `equal`, `ahead`, `behind`, or `diverged`, and the commit counts and unlanded commit records are exact.
+When the remotely observed tip is not present locally, `landingBranchTip.presentLocally` and `distanceKnown` are false, `relation` is `behind-or-diverged`, both commit counts and `unlandedCommits` are null, and both current fields are false rather than guessed.
 `current` and `headIsCleanFastForwardOfLandingTip` are true when the landing tip is an ancestor of the workspace head, including when the workspace has legitimate commits ahead.
 They are false when the workspace is behind or diverged.
 The aggregate workspace `current` is true only when every root is current.
 Missing roots, paths that do not name an exact Git worktree, repositories whose common Git directory does not match the persisted project root, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
-When the remotely observed landing commit is absent locally, the bounded fallback fetch uses one exact branch refspec, disables submodule recursion, automatic maintenance, automatic garbage collection, and fetch commit-graph writes, and writes only the fetched objects and that branch's `refs/remotes/<remote>/<branch>` tracking ref without writing `FETCH_HEAD` or changing a local branch, index, or worktree.
+Freshness reads the remote tip with bounded `git ls-remote` and performs zero writes to the workspace repository, including when that tip is absent locally.
 
 `get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.
 `list_parked_threads` accepts either an exact `project` with its required `landingBranch`, or global scope with both fields omitted.
@@ -89,7 +91,8 @@ The parked-chat detection remains a persisted, non-resuming read, while freshnes
 
 `list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
 It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
-It reports the shared `freshness` reading, the verified landing commit, each workspace root's exact head, every ahead commit and subject including an empty or non-UTF-8-encoded subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
+It reports the shared `freshness` reading, the verified landing commit when locally readable, each workspace root's exact head, every known ahead commit and subject including an empty or non-UTF-8-encoded subject, every unarchived thread state, and all tracked, untracked, and ignored paths.
+Local workspaces receive the shared zero-write freshness reading but skip root retirement inspection, Git status, and submodule publication checks because they are never retirable.
 Local workspaces, missing roots, unreadable Git state, an unresolvable landing branch, a `working` or `pending_input` chat, any missing or unrecognized unarchived chat state, an ahead commit, a tracked modification outside Playbot's exact churn allowlist, a POSIX executable-mode change hidden by `core.fileMode=false`, assume-unchanged or skip-worktree index flags, replacement refs, and an in-progress merge, rebase, cherry-pick, revert, or sequencer are blocking evidence rather than a bare false verdict.
 Tracked-content inspection compares each index object with the actual regular file, symlink target, or populated submodule head using Git's clean filters, so stat-cache shortcuts cannot produce a clean verdict.
 Git evidence clears inherited repository, worktree, index, object-store, namespace, shallow-file, replacement-base, and command-line configuration overrides before inspecting the caller-selected root.

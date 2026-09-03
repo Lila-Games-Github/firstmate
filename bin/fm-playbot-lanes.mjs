@@ -725,9 +725,7 @@ function git(root, args, options = {}) {
     ...(timeout === undefined ? {} : { timeout }),
   });
   if (result.error?.code === "ETIMEDOUT") {
-    let operation = args[0] ?? "operation";
-    for (let index = 0; args[index] === "-c"; index += 2) operation = args[index + 2] ?? "operation";
-    throw new Error(`git ${operation} timed out after ${timeout}ms`);
+    throw new Error(`git ${args[0] ?? "operation"} timed out after ${timeout}ms`);
   }
   if (result.error) throw new Error(result.error.message);
   if (result.status !== 0) {
@@ -1365,30 +1363,18 @@ function landingRemote(root, landingBranch) {
     }
   }
   const remoteRef = `refs/heads/${branch}`;
-  const remoteTrackingRef = `refs/remotes/${remote}/${branch}`;
-  git(root, ["check-ref-format", remoteTrackingRef]);
   const observedAt = nowIso();
+  // Freshness obtains remote evidence only through ls-remote and performs no repository writes.
   const rows = String(remoteGit(root, ["ls-remote", "--exit-code", remote, remoteRef])).trim().split(/\r?\n/).filter(Boolean);
   if (rows.length !== 1) throw new Error(`remote ${remote} did not resolve exactly one ${remoteRef}`);
   const [commit, resolvedRef] = rows[0].split(/\s+/);
   if (!/^[0-9a-f]{40,64}$/i.test(commit) || resolvedRef !== remoteRef) {
     throw new Error(`remote ${remote} returned unreadable evidence for ${remoteRef}`);
   }
-  try {
-    git(root, ["cat-file", "-e", `${commit}^{commit}`]);
-  } catch {
-    // The exact one-ref fallback disables submodule recursion, automatic maintenance,
-    // automatic GC, and fetch commit-graph writes.
-    // It writes only fetched objects and its remote-tracking ref, while leaving
-    // FETCH_HEAD, local branches, the index, and worktree untouched.
-    remoteGit(root, [
-      "-c", "maintenance.auto=false",
-      "-c", "gc.auto=0",
-      "-c", "fetch.writeCommitGraph=false",
-      "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
-      remote, `+${remoteRef}:${remoteTrackingRef}`,
-    ]);
-    git(root, ["cat-file", "-e", `${commit}^{commit}`]);
+  const localObject = stripTerminalLineEnding(git(root, ["cat-file", "--batch-check=%(objectname) %(objecttype)"], { input: `${commit}\n` }));
+  const presentLocally = localObject.toLowerCase() === `${commit.toLowerCase()} commit`;
+  if (!presentLocally && localObject.toLowerCase() !== `${commit.toLowerCase()} missing`) {
+    throw new Error(`local repository returned unreadable evidence for remote commit ${commit}`);
   }
   return {
     requested,
@@ -1397,6 +1383,7 @@ function landingRemote(root, landingBranch) {
     remoteRef,
     commit,
     observedAt,
+    presentLocally,
   };
 }
 
@@ -1479,6 +1466,21 @@ function rootFreshnessAtPath(worktreePath, landingBranch) {
     subject: exactCommitSubject(worktreePath, headCommit),
   };
   const landing = landingRemote(worktreePath, landingBranch);
+  if (!landing.presentLocally) {
+    return {
+      worktreePath,
+      head,
+      landingBranch: landing.requested,
+      landingBranchTip: landing,
+      relation: "behind-or-diverged",
+      distanceKnown: false,
+      commitsAhead: null,
+      commitsBehind: null,
+      current: false,
+      headIsCleanFastForwardOfLandingTip: false,
+      unlandedCommits: null,
+    };
+  }
   assertNoGitAncestryOverrides(worktreePath);
   const counts = String(git(worktreePath, ["rev-list", "--left-right", "--count", `${landing.commit}...${head.commit}`])).trim().split(/\s+/);
   if (counts.length !== 2 || counts.some((count) => !/^\d+$/.test(count))) {
@@ -1495,6 +1497,8 @@ function rootFreshnessAtPath(worktreePath, landingBranch) {
     head,
     landingBranch: landing.requested,
     landingBranchTip: landing,
+    relation: commitsBehind === 0 ? (commitsAhead === 0 ? "equal" : "ahead") : (commitsAhead === 0 ? "behind" : "diverged"),
+    distanceKnown: true,
     commitsAhead,
     commitsBehind,
     current: commitsBehind === 0,
@@ -1593,6 +1597,12 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     result.landing = result.freshness.landingBranchTip;
     result.commitsAhead = result.freshness.unlandedCommits;
     result.commitsBehind = result.freshness.commitsBehind;
+    if (!result.freshness.distanceKnown) {
+      result.blockers.push({
+        code: "landing-tip-not-present-locally",
+        message: `Landing branch ${landingBranch} tip ${result.landing.commit} is not present locally, so its exact distance from the workspace head is unknown`,
+      });
+    }
   } catch (error) {
     result.blockers.push({ code: "landing-branch-unresolvable", message: `Landing branch ${landingBranch} cannot be verified from current remote evidence at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
   }
@@ -1616,7 +1626,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
     result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
     return result;
   }
-  if (result.commitsAhead.length > 0) {
+  if (Array.isArray(result.commitsAhead) && result.commitsAhead.length > 0) {
     result.blockers.push({
       code: "unlanded-commits",
       message: `${result.commitsAhead.length} commit(s) are ahead of ${landingBranch}`,
@@ -1685,44 +1695,84 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch) {
   return result;
 }
 
-function inspectWorkspace(project, workspace, landingBranch) {
+function retirementWorkspaceRecord(project, workspace) {
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    kind: workspace.kind,
+    selected: workspace.selected,
+    archiveState: workspace.archiveState,
+    projectId: project.id,
+    project: project.name,
+  };
+}
+
+function retirementThreadEvidence(workspace) {
   const unarchivedThreads = threadRows()
     .filter((row) => row.workspace_id === workspace.id && !row.archived)
     .map((row) => ({ id: row.thread_id, title: row.title, status: row.agent_status, updatedAt: row.updated_at }));
   const blockingThreads = unarchivedThreads.filter((thread) => thread.status === "working" || thread.status === "pending_input");
   const uncertainThreads = unarchivedThreads.filter((thread) => !RETIRABLE_THREAD_STATES.has(thread.status) && !blockingThreads.includes(thread));
-  const evidence = {
-    workspace: {
-      id: workspace.id,
-      name: workspace.name,
-      kind: workspace.kind,
-      selected: workspace.selected,
-      archiveState: workspace.archiveState,
-      projectId: project.id,
-      project: project.name,
-    },
-    landingBranch: String(landingBranch ?? ""),
-    threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
-    roots: [],
-    blockers: [],
-  };
-  if (workspace.kind === "local") {
-    evidence.blockers.push({ code: "local-workspace", message: "Local workspaces are never retirable" });
-  }
+  return { unarchivedThreads, blockingThreads, uncertainThreads };
+}
+
+function retirementThreadBlockers(blockingThreads, uncertainThreads) {
+  const blockers = [];
   if (blockingThreads.length > 0) {
-    evidence.blockers.push({
+    blockers.push({
       code: "active-threads",
       message: `${blockingThreads.length} unarchived chat(s) are working or pending input`,
       threads: blockingThreads,
     });
   }
   if (uncertainThreads.length > 0) {
-    evidence.blockers.push({
+    blockers.push({
       code: "thread-state-uncertain",
       message: `${uncertainThreads.length} unarchived chat(s) have missing or unrecognized persisted states`,
       threads: uncertainThreads,
     });
   }
+  return blockers;
+}
+
+function localWorkspaceRetirementEvidence(project, workspace, landingBranch) {
+  const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace);
+  const blockers = [
+    { code: "local-workspace", message: "Local workspaces are never retirable" },
+    ...retirementThreadBlockers(blockingThreads, uncertainThreads),
+  ];
+  let freshness = null;
+  try {
+    freshness = workspaceFreshness(project, workspace, landingBranch);
+  } catch (error) {
+    blockers.push({ code: "freshness-unreadable", message: error instanceof Error ? error.message : String(error) });
+  }
+  return {
+    workspace: retirementWorkspaceRecord(project, workspace),
+    landingBranch: String(landingBranch ?? ""),
+    threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
+    roots: workspace.roots.map((root) => ({
+      projectRootId: root.projectRootId,
+      path: canonicalPath(root.path),
+      branch: root.branch,
+      inspection: "skipped because Local workspaces are never retirable",
+    })),
+    blockers,
+    freshness,
+    retirable: false,
+    verdict: "blocked",
+  };
+}
+
+function inspectWorkspace(project, workspace, landingBranch) {
+  const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace);
+  const evidence = {
+    workspace: retirementWorkspaceRecord(project, workspace),
+    landingBranch: String(landingBranch ?? ""),
+    threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
+    roots: [],
+    blockers: retirementThreadBlockers(blockingThreads, uncertainThreads),
+  };
   if (workspace.roots.length === 0) {
     evidence.blockers.push({ code: "missing-root", message: "Workspace has no persisted workspace roots" });
   } else {
@@ -1736,6 +1786,12 @@ function inspectWorkspace(project, workspace, landingBranch) {
   evidence.retirable = evidence.blockers.length === 0;
   evidence.verdict = evidence.retirable ? "retirable" : "blocked";
   return evidence;
+}
+
+function workspaceRetirementEvidence(project, workspace, landingBranch) {
+  return workspace.kind === "local"
+    ? localWorkspaceRetirementEvidence(project, workspace, landingBranch)
+    : inspectWorkspace(project, workspace, landingBranch);
 }
 
 function retirementAuditPath() {
@@ -2147,7 +2203,7 @@ function captureWorkspaceRetirementBaseline(project, inspection) {
 }
 
 async function retireWorkspace(project, workspace, landingBranch) {
-  const inspection = inspectWorkspace(project, workspace, landingBranch);
+  const inspection = workspaceRetirementEvidence(project, workspace, landingBranch);
   if (!inspection.retirable) {
     const summary = inspection.blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
     throw Object.assign(new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck: ${summary}`), {
@@ -4747,7 +4803,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const landingBranch = explicitLandingBranch(name, args.landingBranch);
     const workspaces = project.workspaces
       .filter((workspace) => workspace.archiveState === "active")
-      .map((workspace) => inspectWorkspace(project, workspace, landingBranch));
+      .map((workspace) => workspaceRetirementEvidence(project, workspace, landingBranch));
     return {
       project: { id: project.id, name: project.name },
       landingBranch,

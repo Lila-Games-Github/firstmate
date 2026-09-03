@@ -270,6 +270,7 @@ if (value('DIVERGED').current || root('DIVERGED').commitsAhead !== 1 || root('DI
 if (root('DIVERGED').headIsCleanFastForwardOfLandingTip || root('DIVERGED').unlandedCommits[0]?.subject !== 'diverged lane work') process.exit(1);
 for (const name of ['CLEAN', 'AHEAD', 'BEHIND', 'DIVERGED']) {
   if (!root(name).worktreePath || !root(name).head.commit || !root(name).landingBranchTip.commit) process.exit(1);
+  if (!root(name).landingBranchTip.presentLocally || !root(name).distanceKnown) process.exit(1);
   if (Object.hasOwn(root(name).landingBranchTip, 'remoteUrl')) process.exit(1);
   if (JSON.stringify(value(name)).includes('freshness-secret-token')) process.exit(1);
 }
@@ -366,48 +367,24 @@ mkdir -p "$timeout_git_bin"
 cat > "$timeout_git_bin/git" <<'SH'
 #!/usr/bin/env bash
 set -u
-operation=
-skip=2
-for arg in "$@"; do
-  if [ "$skip" -gt 0 ]; then
-    skip=$((skip - 1))
-    continue
-  fi
-  if [ "$arg" = "-c" ]; then
-    skip=1
-    continue
-  fi
-  operation=$arg
-  break
-done
-if [ "${1:-}" = "-C" ] && [ "$operation" = "ls-remote" ]; then
-  if [ "$FM_TEST_REMOTE_TIMEOUT_MODE" = "ls-remote" ]; then
-    exec "$FM_TEST_SLEEP_BIN" 2
-  fi
-  printf '%s\trefs/heads/main\n' '1111111111111111111111111111111111111111'
-  exit 0
-fi
-if [ "${1:-}" = "-C" ] && [ "$operation" = "fetch" ] && [ "$FM_TEST_REMOTE_TIMEOUT_MODE" = "fetch" ]; then
+if [ "${1:-}" = "-C" ] && [ "${3:-}" = "ls-remote" ]; then
   exec "$FM_TEST_SLEEP_BIN" 2
 fi
 exec "$FM_TEST_REAL_GIT" "$@"
 SH
 chmod 0700 "$timeout_git_bin/git"
 sleep_bin=$(command -v sleep)
-for timeout_mode in ls-remote fetch; do
-  out=$(FM_TEST_REAL_GIT="$real_git" \
-    FM_TEST_SLEEP_BIN="$sleep_bin" \
-    FM_TEST_REMOTE_TIMEOUT_MODE="$timeout_mode" \
-    PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS=50 \
-    PATH="$timeout_git_bin:$PATH" \
-    rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"main"}}}')
-  OUT="$out" TIMEOUT_MODE="$timeout_mode" node --no-warnings <<'NODE' \
-    || fail "workspace freshness did not surface the $timeout_mode remote timeout explicitly"
+out=$(FM_TEST_REAL_GIT="$real_git" \
+  FM_TEST_SLEEP_BIN="$sleep_bin" \
+  PLAYBOT_LANES_REMOTE_GIT_TIMEOUT_MS=50 \
+  PATH="$timeout_git_bin:$PATH" \
+  rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' \
+  || fail "workspace freshness did not surface the ls-remote timeout explicitly"
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('freshness is unreadable')) process.exit(1);
-if (!value.error.message.includes(`git ${process.env.TIMEOUT_MODE} timed out after 50ms`)) process.exit(1);
+if (!value.error.message.includes('git ls-remote timed out after 50ms')) process.exit(1);
 NODE
-done
 pass "fm-playbot-lanes: workspace freshness bounds remote Git operations"
 
 credential_helper_bin="$FIXTURE_ROOT/credential-helper-bin"
@@ -2038,60 +2015,65 @@ git -C "$freshness_publisher" tag remote-only-tag
 git -C "$freshness_publisher" branch remote-only-other
 git -C "$freshness_publisher" push origin main remote-only-other remote-only-tag >/dev/null
 remote_only_head=$(git -C "$freshness_publisher" rev-parse HEAD)
-fetch_head_path=$(git -C "$freshness_clean" rev-parse --git-path FETCH_HEAD)
-fetch_head_before=missing
-[ ! -e "$fetch_head_path" ] || fetch_head_before=$(cksum "$fetch_head_path")
 freshness_head_before=$(git -C "$freshness_clean" rev-parse HEAD)
 freshness_branch_before=$(git -C "$freshness_clean" symbolic-ref HEAD)
 freshness_index_before=$(git -C "$freshness_clean" write-tree)
 freshness_status_before=$(git -C "$freshness_clean" status --porcelain=v1 --untracked-files=all)
 freshness_file_before=$(cksum "$freshness_clean/freshness.txt")
-commit_graph_file=$(git -C "$freshness_clean" rev-parse --git-path objects/info/commit-graph)
-commit_graph_chain=$(git -C "$freshness_clean" rev-parse --git-path objects/info/commit-graphs/commit-graph-chain)
-[ ! -e "$commit_graph_file" ] && [ ! -e "$commit_graph_chain" ] \
-  || fail "fallback fetch fixture already had a commit graph"
-git -C "$freshness_clean" config maintenance.auto true
-git -C "$freshness_clean" config gc.auto 1
-git -C "$freshness_clean" config fetch.writeCommitGraph true
-git -C "$freshness_clean" config fetch.recurseSubmodules on-demand
+freshness_tracking_before=$(git -C "$freshness_clean" rev-parse refs/remotes/origin/main)
+freshness_git_dir=$(git -C "$freshness_clean" rev-parse --path-format=absolute --git-common-dir)
+freshness_git_state_before=$(find "$freshness_git_dir" -type f -exec cksum {} \; | LC_ALL=C sort)
+freshness_dot_git_before=$(cksum "$freshness_clean/.git")
 out=$(freshness_call ws-fresh-clean)
-git -C "$freshness_clean" config --unset-all maintenance.auto
-git -C "$freshness_clean" config --unset-all gc.auto
-git -C "$freshness_clean" config --unset-all fetch.writeCommitGraph
-git -C "$freshness_clean" config --unset-all fetch.recurseSubmodules
+freshness_git_state_after=$(find "$freshness_git_dir" -type f -exec cksum {} \; | LC_ALL=C sort)
+freshness_dot_git_after=$(cksum "$freshness_clean/.git")
 OUT="$out" REMOTE_HEAD="$remote_only_head" LOCAL_HEAD="$freshness_head_before" node --no-warnings <<'NODE' \
-  || fail "freshness fallback fetch did not return the exact remote-only landing tip"
+  || fail "freshness did not report an absent remote tip as an unknown-distance result"
 const root = JSON.parse(process.env.OUT).structuredContent.freshness.roots[0];
 if (root.head.commit !== process.env.LOCAL_HEAD || root.landingBranchTip.commit !== process.env.REMOTE_HEAD) process.exit(1);
-if (root.commitsAhead !== 0 || root.commitsBehind !== 1 || root.current) process.exit(1);
+if (root.landingBranchTip.presentLocally !== false || root.distanceKnown !== false) process.exit(1);
+if (root.relation !== 'behind-or-diverged') process.exit(1);
+if (root.commitsAhead !== null || root.commitsBehind !== null || root.unlandedCommits !== null) process.exit(1);
+if (root.current || root.headIsCleanFastForwardOfLandingTip) process.exit(1);
 NODE
+[ "$freshness_git_state_after" = "$freshness_git_state_before" ] \
+  || fail "freshness changed workspace repository state"
+[ "$freshness_dot_git_after" = "$freshness_dot_git_before" ] \
+  || fail "freshness changed the worktree Git link"
 [ "$(git -C "$freshness_clean" rev-parse HEAD)" = "$freshness_head_before" ] \
-  || fail "freshness fallback fetch moved the checked-out branch"
+  || fail "freshness moved the checked-out branch"
 [ "$(git -C "$freshness_clean" symbolic-ref HEAD)" = "$freshness_branch_before" ] \
-  || fail "freshness fallback fetch changed the checked-out branch"
+  || fail "freshness changed the checked-out branch"
 [ "$(git -C "$freshness_clean" write-tree)" = "$freshness_index_before" ] \
-  || fail "freshness fallback fetch changed the index"
+  || fail "freshness changed the index"
 [ "$(git -C "$freshness_clean" status --porcelain=v1 --untracked-files=all)" = "$freshness_status_before" ] \
-  || fail "freshness fallback fetch changed worktree status"
+  || fail "freshness changed worktree status"
 [ "$(cksum "$freshness_clean/freshness.txt")" = "$freshness_file_before" ] \
-  || fail "freshness fallback fetch changed worktree content"
-fetch_head_after=missing
-[ ! -e "$fetch_head_path" ] || fetch_head_after=$(cksum "$fetch_head_path")
-[ "$fetch_head_after" = "$fetch_head_before" ] \
-  || fail "freshness fallback fetch wrote FETCH_HEAD"
-[ ! -e "$commit_graph_file" ] && [ ! -e "$commit_graph_chain" ] \
-  || fail "freshness fallback fetch wrote a commit graph"
-[ "$(git -C "$freshness_clean" rev-parse refs/remotes/origin/main)" = "$remote_only_head" ] \
-  || fail "freshness fallback fetch did not update the exact remote-tracking ref"
-git -C "$freshness_clean" cat-file -e "$remote_only_head^{commit}" \
-  || fail "freshness fallback fetch did not retain the landing commit object"
+  || fail "freshness changed worktree content"
+[ "$(git -C "$freshness_clean" rev-parse refs/remotes/origin/main)" = "$freshness_tracking_before" ] \
+  || fail "freshness changed the remote-tracking ref"
+if git -C "$freshness_clean" cat-file -e "$remote_only_head^{commit}" 2>/dev/null; then
+  fail "freshness imported the absent remote landing commit"
+fi
 if git -C "$freshness_clean" show-ref --verify --quiet refs/remotes/origin/remote-only-other; then
-  fail "freshness fallback fetch updated another remote-tracking ref"
+  fail "freshness imported another remote-tracking ref"
 fi
 if git -C "$freshness_clean" show-ref --verify --quiet refs/tags/remote-only-tag; then
-  fail "freshness fallback fetch imported a tag"
+  fail "freshness imported a tag"
 fi
-pass "fm-playbot-lanes: fallback fetch writes only objects and one remote-tracking ref"
+pass "fm-playbot-lanes: absent remote tips return unknown distance without repository writes"
+
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-freshness","landingBranch":"main"}}}')
+OUT="$out" REMOTE_HEAD="$remote_only_head" node --no-warnings <<'NODE' \
+  || fail "retirement inventory did not preserve unknown-distance freshness"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-fresh-clean');
+const root = workspace?.roots[0];
+if (root?.landing.commit !== process.env.REMOTE_HEAD || root.freshness.distanceKnown !== false) process.exit(1);
+if (root.commitsAhead !== null || root.commitsBehind !== null) process.exit(1);
+if (!root.blockers.some(blocker => blocker.code === 'landing-tip-not-present-locally')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: retirement blocks when remote distance is unknown"
 
 git -C "$freshness_clean" remote add release "$freshness_remote"
 git -C "$freshness_clean" branch --track release/1.0 origin/main >/dev/null
@@ -4522,6 +4504,8 @@ const byId = Object.fromEntries(value.workspaces.map(workspace => [workspace.wor
 if (value.trackedChurnAllowlist.length !== 8) process.exit(1);
 if (!value.untrackedBoundary.includes('block retirement')) process.exit(1);
 if (byId['ws-worker'].blockers[0]?.code !== 'local-workspace') process.exit(1);
+if (byId['ws-worker'].roots[0]?.inspection !== 'skipped because Local workspaces are never retirable') process.exit(1);
+if (!byId['ws-worker'].freshness || byId['ws-worker'].freshness.roots[0].distanceKnown !== true) process.exit(1);
 if (!byId['ws-worker-alt'].blockers.some(blocker => blocker.code === 'active-threads')) process.exit(1);
 const active = byId['ws-worker-alt'].threads.blocking;
 if (active.length !== 1 || active[0].id !== 'chat-worker-alt' || active[0].status !== 'pending_input') process.exit(1);
@@ -4576,11 +4560,29 @@ NODE
 if [ -s "$FIXTURE_ROOT/ipc-calls.jsonl" ] && grep -F '"channel":"workspace:delete"' "$FIXTURE_ROOT/ipc-calls.jsonl" >/dev/null; then
   fail "retirement without confirmation reached workspace:delete"
 fi
-out=$(retirement_call ws-worker ',"confirm":true')
+local_skip_git_bin="$FIXTURE_ROOT/local-skip-git-bin"
+local_skip_marker="$FIXTURE_ROOT/local-retirement-inspection-ran"
+mkdir -p "$local_skip_git_bin"
+cat > "$local_skip_git_bin/git" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "status" ] || [ "$arg" = "fetch" ]; then
+    : > "$FM_TEST_LOCAL_SKIP_MARKER"
+  fi
+done
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod 0700 "$local_skip_git_bin/git"
+out=$(FM_TEST_REAL_GIT="$real_git" FM_TEST_LOCAL_SKIP_MARKER="$local_skip_marker" PATH="$local_skip_git_bin:$PATH" \
+  retirement_call ws-worker ',"confirm":true')
 OUT="$out" node --no-warnings <<'NODE' || fail "Local workspace retirement was not refused before IPC"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('local-workspace')) process.exit(1);
+const inspection = value.error.data?.inspection;
+if (!inspection?.freshness || inspection.freshness.roots[0].distanceKnown !== true) process.exit(1);
+if (inspection.roots[0]?.inspection !== 'skipped because Local workspaces are never retirable') process.exit(1);
 NODE
+[ ! -e "$local_skip_marker" ] || fail "Local retirement ran Git status or submodule fetch inspection"
 out=$(retirement_call ws-retire-no-roots ',"confirm":true')
 OUT="$out" node --no-warnings <<'NODE' || fail "a workspace with no roots was not refused before IPC"
 const value = JSON.parse(process.env.OUT);
