@@ -177,6 +177,7 @@ freshness_behind="$freshness_repo/.worktrees/behind"
 freshness_diverged="$freshness_repo/.worktrees/diverged"
 freshness_clean="$freshness_repo/.worktrees/clean"
 freshness_ahead="$freshness_repo/.worktrees/ahead"
+freshness_shallow="$FIXTURE_ROOT/freshness-shallow"
 git -C "$freshness_repo" worktree add -b freshness-behind "$freshness_behind" main >/dev/null
 git -C "$freshness_repo" worktree add -b freshness-diverged "$freshness_diverged" main >/dev/null
 printf 'diverged\n' >> "$freshness_diverged/freshness.txt"
@@ -188,8 +189,9 @@ git -C "$freshness_repo" worktree add -b freshness-clean "$freshness_clean" main
 git -C "$freshness_repo" worktree add -b freshness-ahead "$freshness_ahead" main >/dev/null
 printf 'ahead\n' >> "$freshness_ahead/freshness.txt"
 git -C "$freshness_ahead" commit -am "ahead lane work" >/dev/null
+git clone --depth=1 --branch main "file://$freshness_remote" "$freshness_shallow" >/dev/null
 
-FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" node --no-warnings <<'NODE'
+FIXTURE_ROOT="$FIXTURE_ROOT" FRESHNESS_REPO="$freshness_repo" FRESHNESS_CLEAN="$freshness_clean" FRESHNESS_AHEAD="$freshness_ahead" FRESHNESS_BEHIND="$freshness_behind" FRESHNESS_DIVERGED="$freshness_diverged" FRESHNESS_SHALLOW="$freshness_shallow" node --no-warnings <<'NODE'
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
@@ -204,6 +206,7 @@ for (const [id, name, rootPath, branch] of [
   ['ws-fresh-ahead', 'fresh-ahead', process.env.FRESHNESS_AHEAD, 'freshness-ahead'],
   ['ws-fresh-behind', 'fresh-behind', process.env.FRESHNESS_BEHIND, 'freshness-behind'],
   ['ws-fresh-diverged', 'fresh-diverged', process.env.FRESHNESS_DIVERGED, 'freshness-diverged'],
+  ['ws-fresh-shallow', 'fresh-shallow', process.env.FRESHNESS_SHALLOW, 'main'],
   ['ws-fresh-unreadable', 'fresh-unreadable', path.join(process.env.FRESHNESS_REPO, '.worktrees', 'missing'), 'freshness-missing'],
 ]) {
   workspace.run(id, 'project-freshness', name, 'worktree', 0, 'active', now, now);
@@ -252,6 +255,14 @@ for (const name of ['CLEAN', 'AHEAD', 'BEHIND', 'DIVERGED']) {
 NODE
 pass "fm-playbot-lanes: workspace freshness reports real ahead, behind, diverged, and clean Git evidence"
 
+if out=$(node --no-warnings "$SCRIPT" call get_workspace_freshness '{"project":"project-freshness","landingBranch":"main"}' 2>&1); then
+  fail "workspace freshness accepted an omitted workspace selector through the executable call interface"
+fi
+case "$out" in
+  *"requires an explicit workspace selector by id, path, or name"*) ;;
+  *) fail "workspace freshness omitted-selector failure did not name the explicit workspace requirement" ;;
+esac
+
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-clean"}}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness guessed an omitted landing branch"
 const value = JSON.parse(process.env.OUT);
@@ -262,7 +273,12 @@ OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness guessed thro
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('freshness is unreadable') || !value.error.message.includes('workspace root is missing')) process.exit(1);
 NODE
-pass "fm-playbot-lanes: workspace freshness requires an explicit landing branch and fails closed on unreadable Git state"
+out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness","workspace":"ws-fresh-shallow","landingBranch":"main"}}}')
+OUT="$out" node --no-warnings <<'NODE' || fail "workspace freshness accepted incomplete ancestry from a shallow repository"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('freshness is unreadable') || !value.error.message.includes('repository is shallow')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: workspace freshness requires explicit selectors and complete readable Git state"
 
 # This is the end-to-end reproduction for the fleet-visibility defect. The
 # public MCP call used to resolve an omitted workspace through Playbot's UI

@@ -68,14 +68,14 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 
 ### Workspace freshness
 
-`get_workspace_freshness` reads one active workspace selected by id, root path, or unique name against a required `landingBranch`.
+`get_workspace_freshness` requires an explicit active workspace selector by id, root path, or unique name plus an explicit `landingBranch`.
 The landing branch is always explicit because a repository's default branch may not be where lane work lands.
 Callers must pass the real landing target, such as `proto/godot/frog-pile`; the tool never substitutes `main`, a repository default, or the workspace's base branch.
 Each root reports `worktreePath`, the exact `head` commit and subject, the current remote-backed `landingBranchTip`, numeric `commitsAhead` and `commitsBehind`, `current`, `headIsCleanFastForwardOfLandingTip`, and `unlandedCommits` with each commit's exact subject.
 `current` and `headIsCleanFastForwardOfLandingTip` are true when the landing tip is an ancestor of the workspace head, including when the workspace has legitimate commits ahead.
 They are false when the workspace is behind or diverged.
 The aggregate workspace `current` is true only when every root is current.
-Missing roots, paths that do not name an exact Git worktree, unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
+Missing roots, paths that do not name an exact Git worktree, shallow or unreadable repositories, ambiguous remotes, missing landing branches, and inconsistent Git results are explicit errors rather than false or guessed readings.
 
 `get_thread_status` requires the same explicit `landingBranch` and returns this reading as `freshness` beside the persisted thread and lane state.
 `list_parked_threads` now requires one exact `project` plus `landingBranch` and places the matching workspace `freshness` on every candidate.

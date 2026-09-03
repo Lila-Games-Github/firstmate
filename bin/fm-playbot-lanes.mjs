@@ -1353,9 +1353,9 @@ function landingRemote(root, landingBranch) {
   };
 }
 
-function aheadCommits(root, landingCommit) {
+function aheadCommits(root, landingCommit, headCommit) {
   assertNoGitAncestryOverrides(root);
-  const raw = git(root, ["log", "-z", "--format=%H", `${landingCommit}..HEAD`], { encoding: "buffer" });
+  const raw = git(root, ["log", "-z", "--format=%H", `${landingCommit}..${headCommit}`], { encoding: "buffer" });
   return commitRecords(root, raw, "ahead-commit");
 }
 
@@ -1365,15 +1365,25 @@ function explicitLandingBranch(tool, value) {
   return landingBranch;
 }
 
+function explicitWorkspaceSelector(tool, value) {
+  const workspace = String(value ?? "").trim();
+  if (!workspace) throw new Error(`${tool} requires an explicit workspace selector by id, path, or name`);
+  return workspace;
+}
+
 function rootFreshness(root, landingBranch) {
   const worktreePath = canonicalPath(root);
   if (!worktreePath) throw new Error("workspace root path is empty");
   if (!pathPresence(worktreePath)) throw new Error(`workspace root is missing: ${worktreePath}`);
   const top = canonicalPath(stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--show-toplevel"])));
   if (top !== worktreePath) throw new Error(`path resolves inside Git worktree ${top} instead of naming it exactly`);
+  const shallow = stripTerminalLineEnding(git(worktreePath, ["rev-parse", "--is-shallow-repository"]));
+  if (shallow === "true") throw new Error("repository is shallow; complete ancestry is required for workspace freshness");
+  if (shallow !== "false") throw new Error("Git returned unreadable shallow-repository evidence");
+  const headCommit = String(git(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
   const head = {
-    commit: String(git(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim(),
-    subject: exactCommitSubject(worktreePath, "HEAD"),
+    commit: headCommit,
+    subject: exactCommitSubject(worktreePath, headCommit),
   };
   const landing = landingRemote(worktreePath, landingBranch);
   assertNoGitAncestryOverrides(worktreePath);
@@ -1383,7 +1393,7 @@ function rootFreshness(root, landingBranch) {
   }
   const commitsBehind = Number(counts[0]);
   const commitsAhead = Number(counts[1]);
-  const unlandedCommits = aheadCommits(worktreePath, landing.commit);
+  const unlandedCommits = aheadCommits(worktreePath, landing.commit, headCommit);
   if (unlandedCommits.length !== commitsAhead) {
     throw new Error(`Git returned ${commitsAhead} ahead commit(s) but ${unlandedCommits.length} unlanded commit record(s)`);
   }
@@ -4616,7 +4626,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   const project = resolveProject(args.project, projects);
   if (name === "get_workspace_freshness") {
     const landingBranch = explicitLandingBranch(name, args.landingBranch);
-    const workspace = resolveWorkspace(project, args.workspace);
+    const workspace = resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace));
     return { freshness: workspaceFreshness(project, workspace, landingBranch) };
   }
   if (name === "list_retirable_workspaces") {
