@@ -132,6 +132,7 @@ fm-lint-workflows.sh: 3 workflow files valid
 
 On stock macOS Bash 3.2, the PID exposed by the process substitution previously used for NUL-delimited enumeration is not a waitable child, so `wait` reports `pid ... is not a child of this shell`.
 The fix writes the byte-safe NUL-delimited enumeration to an ephemeral private spool and opens it only after successful production, keeping enumeration status explicit.
+GitHub Actions run [33726232252](https://github.com/Lila-Games-Github/firstmate/actions/runs/33726232252) passed the `Stock macOS Bash snapshot compatibility` job on 2026-09-03.
 
 ## Harness and backend applicability review
 
