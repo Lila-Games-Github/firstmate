@@ -18,6 +18,8 @@ FAKE_PERL_LOG="$TMP_ROOT/perl.log"
 REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
+TENTATIVE_PROCESS_PID=
+TENTATIVE_REPLACEMENT_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -25,6 +27,11 @@ mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 cleanup_remote_job_fixture() {
   [ -z "$OTHER_PID" ] || kill "$OTHER_PID" 2>/dev/null || true
   [ -z "$RECOVERY_WORKER_PID" ] || kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+  if [ -n "$TENTATIVE_REPLACEMENT_PID" ]; then
+    fm_remote_job_stop_worker_tree "$TENTATIVE_REPLACEMENT_PID" || true
+    wait "$TENTATIVE_REPLACEMENT_PID" 2>/dev/null || true
+  fi
+  [ -z "$TENTATIVE_PROCESS_PID" ] || kill "$TENTATIVE_PROCESS_PID" 2>/dev/null || true
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -263,6 +270,142 @@ fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the relocated-root probe c
 fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 pass "worker identity binds the canonical configured code root"
+
+# A stop signals the supervisor and its serving child together, and the
+# supervisor then forwards its own TERM, so the child routinely receives a
+# second TERM while it is already releasing ownership. Deliver that barrage
+# directly across the whole shutdown window and require every cycle to leave
+# no lock behind: a lock directory that survives, even holding only a stray
+# publish temp, wedges every later replacement.
+for REPLACEMENT_CYCLE in 1 2 3 4 5; do
+  fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+    || fail "$FM_REMOTE_JOB_ERROR (redundant TERM cycle $REPLACEMENT_CYCLE)"
+  WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+  WORKER_PGID=$(fm_remote_job_process_pgid "$WORKER_PID") \
+    || fail "the redundant TERM fixture could not resolve its process group"
+  for _ in $(seq 1 60); do
+    kill -TERM "$WORKER_PID" 2>/dev/null || break
+    sleep 0.001
+  done
+  for _ in $(seq 1 100); do
+    kill -0 -- "-$WORKER_PGID" 2>/dev/null || break
+    sleep 0.05
+  done
+  ! kill -0 -- "-$WORKER_PGID" 2>/dev/null \
+    || fail "the worker tree did not stop after redundant TERM signals (cycle $REPLACEMENT_CYCLE)"
+  assert_absent "$STATE_ROOT/worker.lock" \
+    "redundant TERM signals during shutdown left worker ownership behind (cycle $REPLACEMENT_CYCLE)"
+  assert_absent "$STATE_ROOT/worker.pid" \
+    "redundant TERM signals during shutdown left the worker pid behind (cycle $REPLACEMENT_CYCLE)"
+done
+pass "a serving worker releases ownership completely under redundant TERM signals"
+
+# A worker killed between creating a lock temp and renaming it into place
+# leaves that temp behind. Ownership recovery must still reclaim the lock
+# instead of failing on a non-empty directory forever.
+mkdir "$STATE_ROOT/worker.lock" || fail "the orphaned lock temp fixture could not recreate the lock"
+: > "$STATE_ROOT/worker.lock/.quarantine.orphan"
+touch -t 200001010000 "$STATE_ROOT/worker.lock/.quarantine.orphan" "$STATE_ROOT/worker.lock"
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "$FM_REMOTE_JOB_ERROR (orphaned lock temp)"
+assert_absent "$STATE_ROOT/worker.lock/.quarantine.orphan" \
+  "ownership recovery kept a lock temp orphaned by a killed worker"
+fm_remote_job_worker_identity_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail "the worker recovered over an orphaned lock temp did not publish the current code identity"
+NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
+pass "ownership recovery clears a lock temp orphaned by a killed worker"
+
+TENTATIVE_HOME="$TMP_ROOT/tentative-account"
+TENTATIVE_STATE="$TMP_ROOT/tentative-jobs"
+TENTATIVE_RUNNING_JOB="$TENTATIVE_STATE/jobs/job-z-running"
+TENTATIVE_SIDE_EFFECT="$TMP_ROOT/tentative-side-effect"
+mkdir -p "$TENTATIVE_HOME"
+(
+  HOME="$TENTATIVE_HOME" FM_REMOTE_JOB_STATE_ROOT="$TENTATIVE_STATE" \
+    FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_QUEUE_TIMEOUT=20 FM_REMOTE_JOB_TIMEOUT=5 \
+    bash -c '. "$1"; fm_remote_job_stage "$2" "$3" "$4" fm-touch-job.sh "$5" </dev/null' \
+    bash "$REMOTE_ROOT/bin/fm-remote-job-lib.sh" "$TENTATIVE_HOME" "$REMOTE_ROOT" \
+    "$REMOTE_HOME" "$TENTATIVE_SIDE_EFFECT"
+) || fail "the tentative quarantine fixture could not stage its queued job"
+mkdir -p "$TENTATIVE_STATE/worker.lock" "$TENTATIVE_RUNNING_JOB/.claim"
+chmod 700 "$TENTATIVE_STATE/worker.lock" "$TENTATIVE_RUNNING_JOB" "$TENTATIVE_RUNNING_JOB/.claim"
+sleep 20 &
+TENTATIVE_PROCESS_PID=$!
+sleep 0.01 &
+TENTATIVE_OWNER_PID=$!
+wait "$TENTATIVE_OWNER_PID" 2>/dev/null || true
+printf '%s\n' "$TENTATIVE_OWNER_PID" > "$TENTATIVE_STATE/worker.lock/pid"
+printf 'stale\n' > "$TENTATIVE_STATE/worker.lock/start"
+printf 'stale\n' > "$TENTATIVE_STATE/worker.lock/command"
+printf 'active execution could not be confirmed stopped\n' \
+  > "$TENTATIVE_STATE/worker.lock/.quarantine.orphan"
+printf 'running\n' > "$TENTATIVE_RUNNING_JOB/state"
+printf '%s\n' "$TENTATIVE_OWNER_PID" > "$TENTATIVE_RUNNING_JOB/.claim/owner"
+printf '%s\n' "$TENTATIVE_PROCESS_PID" > "$TENTATIVE_RUNNING_JOB/.claim/supervisor"
+: > "$TENTATIVE_RUNNING_JOB/stdout"
+: > "$TENTATIVE_RUNNING_JOB/stderr"
+chmod 600 "$TENTATIVE_STATE/worker.lock/pid" "$TENTATIVE_STATE/worker.lock/start" \
+  "$TENTATIVE_STATE/worker.lock/command" "$TENTATIVE_STATE/worker.lock/.quarantine.orphan" \
+  "$TENTATIVE_RUNNING_JOB/state" "$TENTATIVE_RUNNING_JOB/.claim"/* \
+  "$TENTATIVE_RUNNING_JOB/stdout" "$TENTATIVE_RUNNING_JOB/stderr"
+touch -t 200001010000 "$TENTATIVE_STATE/worker.lock"
+TENTATIVE_REPLACEMENT_OUTCOME=timeout
+set -m
+HOME="$TENTATIVE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$TENTATIVE_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
+  > "$TMP_ROOT/tentative-refused.out" 2> "$TMP_ROOT/tentative-refused.err" &
+TENTATIVE_REPLACEMENT_PID=$!
+set +m
+for _ in $(seq 1 100); do
+  if [ -f "$TENTATIVE_SIDE_EFFECT" ]; then
+    TENTATIVE_REPLACEMENT_OUTCOME=executed
+    break
+  fi
+  if ! kill -0 "$TENTATIVE_REPLACEMENT_PID" 2>/dev/null; then
+    TENTATIVE_REPLACEMENT_OUTCOME=exited
+    break
+  fi
+  sleep 0.05
+done
+fm_remote_job_stop_worker_tree "$TENTATIVE_REPLACEMENT_PID" || true
+set +e
+wait "$TENTATIVE_REPLACEMENT_PID" 2>/dev/null
+TENTATIVE_REFUSED_RC=$?
+set -e
+TENTATIVE_REPLACEMENT_PID=
+case "$TENTATIVE_REPLACEMENT_OUTCOME" in
+  executed) fail "a replacement executed queued work while prior execution was alive" ;;
+  timeout) fail "tentative quarantine replacement did not exit within five seconds" ;;
+esac
+[ "$TENTATIVE_REFUSED_RC" -ne 0 ] \
+  || fail "tentative quarantine recovery ignored a recorded live process"
+assert_present "$TENTATIVE_STATE/worker.lock/quarantine" \
+  "a recorded live process lost tentative quarantine protection"
+assert_absent "$TENTATIVE_STATE/worker.lock/.quarantine.orphan" \
+  "ownership recovery did not promote the tentative quarantine"
+assert_absent "$TENTATIVE_SIDE_EFFECT" \
+  "a replacement executed queued work while prior execution was alive"
+kill "$TENTATIVE_PROCESS_PID" 2>/dev/null || true
+wait "$TENTATIVE_PROCESS_PID" 2>/dev/null || true
+TENTATIVE_PROCESS_PID=
+HOME="$TENTATIVE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$TENTATIVE_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
+  > "$TMP_ROOT/tentative-worker.out" 2> "$TMP_ROOT/tentative-worker.err" &
+RECOVERY_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$TENTATIVE_SIDE_EFFECT" ] && break
+  sleep 0.05
+done
+assert_present "$TENTATIVE_SIDE_EFFECT" \
+  "queued work did not resume after tentative quarantined execution stopped"
+assert_absent "$TENTATIVE_STATE/worker.lock/quarantine" \
+  "recovered worker retained the promoted quarantine"
+TENTATIVE_SERVING_PID=$(cat "$TENTATIVE_STATE/worker.pid")
+fm_remote_job_stop_worker_tree "$TENTATIVE_SERVING_PID" \
+  || fail "the tentative quarantine recovery worker did not stop"
+wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
+RECOVERY_WORKER_PID=
+pass "tentative quarantine blocks replacement until recorded execution stops"
 
 CRASHED_WORKER_PID=$NEW_WORKER_PID
 kill -KILL "$CRASHED_WORKER_PID"

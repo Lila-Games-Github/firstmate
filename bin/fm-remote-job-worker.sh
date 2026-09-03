@@ -164,6 +164,8 @@ worker_acquire_lock() {
     fi
     [ ! -L "$WORKER_LOCK/pid" ] && [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] || return 1
     rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" || return 1
+    worker_recover_lock_temps "$WORKER_LOCK" || return 1
+    if [ -e "$WORKER_LOCK/quarantine" ] || [ -L "$WORKER_LOCK/quarantine" ]; then continue; fi
     rmdir "$WORKER_LOCK" || return 1
   done
   return 1
@@ -183,6 +185,29 @@ worker_clear_quarantine() {
   rm -f -- "$WORKER_LOCK/quarantine"
 }
 
+# Recover the temp files a worker renames into place while publishing lock
+# ownership or a quarantine marker. Only regular, non-symlink files matching
+# the worker's own temp names are accepted; anything else keeps the directory
+# in place. A tentative quarantine is promoted so execution must be proven
+# stopped before ownership can be reclaimed.
+worker_recover_lock_temps() { # <lock-dir>
+  local lock=$1 file
+  for file in "$lock"/.pid.* "$lock"/.start.* "$lock"/.command.*; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    rm -f -- "$file" || return 1
+  done
+  for file in "$lock"/.quarantine.*; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    if [ -e "$lock/quarantine" ] || [ -L "$lock/quarantine" ]; then
+      rm -f -- "$file" || return 1
+    else
+      mv -f -- "$file" "$lock/quarantine" || return 1
+    fi
+  done
+}
+
 worker_cleanup() {
   local pid_file ready identity owner_pid
   [ "$WORKER_LOCK_HELD" -eq 1 ] && [ "$WORKER_RELEASE_OWNERSHIP" -eq 1 ] || return 0
@@ -190,6 +215,7 @@ worker_cleanup() {
   if [ -z "$owner_pid" ]; then
     [ ! -L "$WORKER_LOCK/start" ] && [ ! -L "$WORKER_LOCK/command" ] &&
       rm -f -- "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+    worker_recover_lock_temps "$WORKER_LOCK" 2>/dev/null || true
     rmdir "$WORKER_LOCK" 2>/dev/null || true
     WORKER_LOCK_HELD=0
     return 0
@@ -202,6 +228,7 @@ worker_cleanup() {
   [ ! -L "$ready" ] && rm -f -- "$ready" 2>/dev/null || true
   [ ! -L "$identity" ] && rm -f -- "$identity" 2>/dev/null || true
   rm -f -- "$WORKER_LOCK/pid" "$WORKER_LOCK/start" "$WORKER_LOCK/command" 2>/dev/null || true
+  worker_recover_lock_temps "$WORKER_LOCK" 2>/dev/null || true
   rmdir "$WORKER_LOCK" 2>/dev/null || true
   WORKER_LOCK_HELD=0
 }
@@ -291,8 +318,15 @@ worker_stop_active_execution() {
   WORKER_ACTIVE_JOB=
 }
 
+# A stop signals the supervisor and this serving child together, and the
+# supervisor then forwards its own TERM to the child, so a second TERM
+# routinely lands while this handler is already releasing ownership. Ignoring
+# the signal here keeps that redundant TERM from killing the child between
+# creating a lock temp file and renaming it into place, which would leave a
+# lock directory no replacement could ever remove. KILL still stops a wedged
+# shutdown, and the reclaim paths below remove any temp such a kill leaves.
 worker_shutdown() {
-  trap - HUP INT TERM
+  trap '' HUP INT TERM
   worker_publish_quarantine || {
     worker_error "cannot guard worker ownership for shutdown"
     trap worker_shutdown HUP INT TERM
@@ -720,6 +754,7 @@ worker_supervisor_cleanup_dead_child() { # <account-home> <pid>
   [ ! -L "$identity" ] && rm -f -- "$identity" || return 1
   [ ! -L "$lock/start" ] && [ ! -L "$lock/command" ] || return 1
   rm -f -- "$lock/pid" "$lock/start" "$lock/command" || return 1
+  worker_recover_lock_temps "$lock" || return 1
   rmdir "$lock"
 }
 
