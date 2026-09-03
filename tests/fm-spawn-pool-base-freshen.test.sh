@@ -101,7 +101,6 @@ add_landing_branch() {  # <case-dir> <default>
   git -C "$publisher" push --quiet origin "$LANDING"
   git -C "$publisher" checkout --quiet "$default"
   git -C "$PROJECT_DIR" fetch --quiet origin
-  git -C "$publisher" rev-parse HEAD >/dev/null
   git -C "$PROJECT_DIR" rev-parse "origin/$LANDING"
 }
 

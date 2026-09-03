@@ -382,8 +382,16 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
+  assert_grep "Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`state/$id.meta\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded." "$brief" \
+    "local-only brief does not keep the worker on its recorded landing branch"
+  assert_grep "If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward." "$brief" \
+    "local-only brief lost the landing-branch rebase instruction"
+  assert_no_grep "if \`main\` has advanced, rebase onto it" "$brief" \
+    "local-only brief still steers the worker back onto main"
+  assert_no_grep "merges it into local \`main\`" "$brief" \
+    "local-only brief still names local main as the merge target"
   assert_no_grep "The captain approves the ready branch" "$brief" \
     "local-only brief hard-coded captain-only authority"
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
