@@ -41,6 +41,7 @@ jobs:
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # A fork-sync merge has no no-mistakes pipeline to emit the marker.
       # The only marker-free exception has a title beginning with the literal,
       # case-sensitive "Sync fork with upstream/main" prefix; any suffix is
       # allowed, but the base revision's verifier must still prove the sync from
