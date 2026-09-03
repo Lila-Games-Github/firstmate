@@ -78,6 +78,40 @@ run_fixture() {
     "$@" /bin/bash bin/fm-stock-bash-compat.sh 2>&1)
 }
 
+test_oversized_route_default_has_runner_headroom() {
+  local tmp fakebin record out rc
+  tmp=$(fm_test_tmproot fm-stock-bash-compat-default-bounds)
+  make_fixture "$tmp"
+  fakebin="$tmp/fakebin"
+  record="$tmp/oversized-timeout"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" FM_BEARINGS_TEST_ONLY=oversized-parsed-backlog "*)
+    printf '%s\n' "$3" > "$FM_TEST_TIMEOUT_RECORD"
+    ;;
+esac
+shift 3
+"$@"
+SH
+  chmod +x "$fakebin/timeout"
+
+  rc=0
+  out=$(cd "$tmp" && env \
+    PATH="$fakebin:$PATH" \
+    RUNNER_TEMP="$tmp/runner" \
+    FM_TEST_TIMEOUT_RECORD="$record" \
+    /bin/bash bin/fm-stock-bash-compat.sh 2>&1) || rc=$?
+  expect_code 0 "$rc" "default stock Bash compatibility fixture completes"
+  assert_contains "$out" "ok - fixture assertion 1" \
+    "default oversized route completes through the public compatibility wrapper"
+  assert_present "$record" "default oversized route did not receive a timeout bound"
+  [ "$(cat "$record")" = 90 ] \
+    || fail "default oversized route needs a 90s runner tripwire, got $(cat "$record")s"
+  pass "stock Bash compatibility: oversized route keeps three-times observed runner headroom"
+}
+
 test_every_hung_consumer_is_named_and_streamed() {
   local key label tmp out rc
   while IFS='|' read -r key label; do
@@ -124,5 +158,6 @@ test_failed_learning_summary_is_named_and_later_merge_runs() {
   pass "stock Bash compatibility: failed PR 18 summary is named and later consumers run"
 }
 
+test_oversized_route_default_has_runner_headroom
 test_every_hung_consumer_is_named_and_streamed
 test_failed_learning_summary_is_named_and_later_merge_runs
