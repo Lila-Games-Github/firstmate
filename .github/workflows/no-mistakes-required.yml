@@ -1,5 +1,5 @@
 name: Require no-mistakes
-run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
+run-name: "PR #${{ github.event.pull_request.number }} no-mistakes compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
 on:
   pull_request:
@@ -20,26 +20,79 @@ concurrency:
 
 jobs:
   check:
-    name: PR must be raised via no-mistakes
+    name: PR must be raised via no-mistakes or be a proven fork sync
     runs-on: ubuntu-latest
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - name: Verify no-mistakes signature in PR body
+        id: marker
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A fork-sync merge has no no-mistakes pipeline to emit the marker.
+      # The only marker-free exception has a title beginning with the literal,
+      # case-sensitive "Sync fork with upstream/main" prefix; any suffix is
+      # allowed, but the base revision's verifier must still prove the sync from
+      # Git history. The head must be a two-parent merge of upstream/main into
+      # fork history already in the PR base; all introduced non-merge commits
+      # must be upstream-reachable; and the merge may invent content only in
+      # paths both sides touched. Every shallow, missing, unreachable,
+      # ambiguous, or indeterminate proof fails.
+      - name: Check out the trusted base revision for fork-sync verification
+        if: steps.marker.outputs.found != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: Lila-Games-Github/firstmate
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the proposed PR head read-only
+        if: steps.marker.outputs.found != 'true'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          head_ref="refs/fm-fork-sync-proof/pr-${PR_NUMBER}"
+          git fetch --no-tags --force --quiet -- \
+            https://github.com/Lila-Games-Github/firstmate \
+            "refs/pull/${PR_NUMBER}/head:${head_ref}"
+          fetched_head=$(git rev-parse --verify "${head_ref}^{commit}")
+          if [ "$fetched_head" != "$PR_HEAD_SHA" ]; then
+            echo "::error::Fetched PR head does not match the event head SHA." >&2
+            exit 1
+          fi
+
+      - name: Prove fork-sync merge exemption
+        if: steps.marker.outputs.found != 'true'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -eu
+          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+          if bin/fm-pr-fork-sync-proof.sh \
+            --title "$PR_TITLE" \
+            --head "$PR_HEAD_SHA" \
+            --base "$PR_BASE_SHA"; then
             exit 0
           fi
           {
-            echo "::error::This PR was not raised through no-mistakes."
+            echo "::error::This PR was neither raised through no-mistakes nor proved to be a fork-sync merge."
             echo
             echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
             echo "That pipeline runs the required review/test/lint/CI steps and writes a"
@@ -49,6 +102,6 @@ jobs:
             echo
             echo "See CONTRIBUTING.md for setup and the full workflow."
             echo
-            echo "PR author: ${PR_AUTHOR}"
+            echo "A marker-free fork sync must satisfy the narrow mechanical proof documented there."
           } >&2
           exit 1
