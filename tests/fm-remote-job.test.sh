@@ -320,7 +320,7 @@ TENTATIVE_STATE="$TMP_ROOT/tentative-jobs"
 TENTATIVE_RUNNING_JOB="$TENTATIVE_STATE/jobs/job-z-running"
 TENTATIVE_SIDE_EFFECT="$TMP_ROOT/tentative-side-effect"
 mkdir -p "$TENTATIVE_HOME"
-TENTATIVE_QUEUED_JOB=$(
+(
   HOME="$TENTATIVE_HOME" FM_REMOTE_JOB_STATE_ROOT="$TENTATIVE_STATE" \
     FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_QUEUE_TIMEOUT=20 FM_REMOTE_JOB_TIMEOUT=5 \
     bash -c '. "$1"; fm_remote_job_stage "$2" "$3" "$4" fm-touch-job.sh "$5" </dev/null' \
