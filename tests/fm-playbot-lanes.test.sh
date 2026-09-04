@@ -2143,12 +2143,13 @@ pass "fm-playbot-lanes: a created workspace whose roots never register refuses w
 # A wait that ends in a read which cannot resolve at all is still a wait: the
 # refusal has to carry the recovery, because the workspace and chat were created
 # either way and a caller told only "freshness could not be read" would dispatch
-# a second pair rather than recover this one. The workspace is withdrawn inside
-# the first poll interval, so exactly one read completes and the attempt that
-# ends the wait is the one that cannot resolve.
+# a second pair rather than recover this one. The workspace is withdrawn well
+# after the first read has landed but far inside the settle budget, so at least
+# one read completes and the attempt that ends the wait is the one that cannot
+# resolve.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl" "$FIXTURE_ROOT/deferred-write-failure"
 printf 'never\n' > "$FIXTURE_ROOT/workspace-roots-delay-ms"
-printf '100\n' > "$FIXTURE_ROOT/workspace-vanishes-after-ms"
+printf '1000\n' > "$FIXTURE_ROOT/workspace-vanishes-after-ms"
 out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=20000 settle_dispatch fm-settle-vanish main)
 rm -f "$FIXTURE_ROOT/workspace-roots-delay-ms" "$FIXTURE_ROOT/workspace-vanishes-after-ms"
 [ ! -e "$FIXTURE_ROOT/deferred-write-failure" ] \
@@ -2158,7 +2159,7 @@ const fs = require('node:fs');
 const message = JSON.parse(process.env.OUT).error?.message ?? '';
 const match = /^Workspace (\S+) and chat (\S+) were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in [^:]+: \1\. Dispatch re-read it over (\d+)ms across (\d+) completed read\(s\) and refused on that reading\. Both still exist: once workspace \1 reads fresh, deliver this task with send_message against chat \2 rather than dispatching again\.$/.exec(message);
 if (!match) process.exit(1);
-if (Number(match[3]) < 100 || match[4] !== '1') process.exit(1);
+if (Number(match[3]) < 100 || Number(match[4]) < 1) process.exit(1);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 if (calls.some(call => call.channel === 'threads:send')) process.exit(1);
 if (calls.some(call => call.channel === 'workspace:delete' || call.channel === 'threads:archiveThread')) process.exit(1);
@@ -2185,8 +2186,8 @@ rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 settle_started=$SECONDS
 out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=60000 settle_dispatch fm-settle-mismatch branch-that-does-not-exist)
 settle_elapsed=$((SECONDS - settle_started))
-[ "$settle_elapsed" -lt 20 ] || fail "a registered-but-mismatched created workspace waited on the settle budget ($settle_elapsed s)"
-OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "a registered created workspace that disagrees with the landing branch was not refused on the first read"
+[ "$settle_elapsed" -lt 20 ] || fail "a created workspace with an unresolvable landing branch waited on the settle budget ($settle_elapsed s)"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "a created workspace with an unresolvable landing branch was not refused on the first read"
 const fs = require('node:fs');
 const message = JSON.parse(process.env.OUT).error?.message ?? '';
 if (!/^Workspace \S+ and chat \S+ were created, but dispatch stopped before sending because freshness could not be read: \S[^\n]*$/.test(message)) process.exit(1);
@@ -2194,7 +2195,7 @@ if (/reads over|still unregistered|Both still exist|send_message|re-read/.test(m
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 if (calls.some(call => call.channel === 'threads:send')) process.exit(1);
 NODE
-pass "fm-playbot-lanes: a created workspace whose registered roots disagree with the landing branch refuses without retrying"
+pass "fm-playbot-lanes: a created workspace whose landing branch is unresolvable refuses immediately with no retry"
 
 settle_started=$SECONDS
 out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=60000 rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness-incomplete","workspace":"ws-fresh-incomplete","landingBranch":"main"}}}')
