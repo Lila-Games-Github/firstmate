@@ -837,7 +837,7 @@ test_lane_mode_drops_the_crewmate_branch_convention() {
   mkdir -p "$home/data"
   for mode in no-mistakes direct-PR local-only; do
     id="lane-drop-$mode"
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --lane \
+    FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=paused "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --lane \
       --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
       || fail "$mode: --lane brief should scaffold"
     brief="$home/data/$id/brief.md"
@@ -1230,62 +1230,19 @@ ROWS
   pass "fm-brief.sh: nonsensical lane flag combinations are refused, never emitted as a confusing brief"
 }
 
-# --landing-branch must be a plain local branch name, because the generated commands
-# qualify it as refs/heads/<branch> and a remote-tracking ref can never match that.
-# Resolution in the project's clone decides, so a real local branch is accepted even
-# where its first segment is also a remote name, and only a value that resolves
-# solely as a remote-tracking ref is refused.
-test_lane_landing_branch_must_be_a_local_branch_name() {
-  local home out status clone brief
-  home="$TMP_ROOT/lane-landing-form-home"
-  mkdir -p "$home/data" "$home/projects"
-
-  # No readable clone: a ref-safe bare name is accepted rather than guessed at.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-form-ok some-proj --mode no-mistakes --lane \
-    --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
-    || fail "a ref-safe name should scaffold when the project clone cannot be read"
-  assert_present "$home/data/landing-form-ok/brief.md" \
-    "a ref-safe name wrote no brief when the project clone cannot be read"
-
-  # A real local branch whose first segment is also a remote name must scaffold:
-  # proto/godot/frog-pile is the canonical landing-branch spelling for this system.
-  clone="$home/projects/remote-proj"
-  fm_git_identity fmtest fmtest@example.invalid
-  fm_git_init_commit "$clone"
-  git -C "$clone" remote add proto "file://$clone"
-  git -C "$clone" branch proto/godot/frog-pile
-  git -C "$clone" update-ref refs/remotes/origin/main HEAD
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-form-local remote-proj --mode no-mistakes --lane \
-    --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
-    || fail "a real local branch should scaffold even where its first segment names a remote"
-  brief="$home/data/landing-form-local/brief.md"
-  assert_grep "git rev-list --left-right --count refs/heads/proto/godot/frog-pile...HEAD" "$brief" \
-    "the accepted local branch is not the base check's comparison target"
-
-  # origin/main resolves only as a remote-tracking ref in that clone.
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-form-remote remote-proj \
-    --mode no-mistakes --lane --landing-branch origin/main 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a value that resolves only as a remote-tracking ref should be refused"
-  assert_contains "$out" "resolves only as refs/remotes/origin/main" \
-    "the refusal does not name what it found"
-  assert_contains "$out" "pass the local branch name 'main'" \
-    "the refusal does not name what to pass instead"
-  assert_absent "$home/data/landing-form-remote/brief.md" \
-    "a refused landing-branch value still wrote a brief"
-  pass "fm-brief.sh: --landing-branch resolves against the project clone instead of guessing from its shape"
-}
-
 # Both lane branch flags are rendered into commands the brief tells the worker to
-# run, so an unsafe or git-invalid value must never reach a generated brief.
+# run, so an unsafe, git-invalid or fully-qualified value must never reach a
+# generated brief. These are string checks only: fm-brief.sh cannot know which
+# clone a lane will use, so an existence judgement belongs to the brief's own step
+# 1b, and a value like origin/main is accepted here on purpose.
 test_lane_branch_values_must_be_safe_branch_names() {
-  local home out status id value flag
+  local home out status id value flag brief
   home="$TMP_ROOT/lane-branch-value-home"
   mkdir -p "$home/data"
   id=0
   for flag in --landing-branch --lane-branch; do
     # shellcheck disable=SC2016  # these are literal unsafe values under test; nothing may expand
-    for value in '$(id)' 'a`id`b' 'main;rm' 'main|tee' 'main~1' 'main..x' '.hidden' 'HEAD' 'x.lock'; do
+    for value in '$(id)' 'a`id`b' 'main;rm' 'main|tee' 'main~1' 'main..x' '.hidden' 'HEAD' 'x.lock' 'refs/heads/foo' 'refs/remotes/origin/main'; do
       id=$((id + 1))
       out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "value-$id" some-proj --mode no-mistakes --lane \
         --landing-branch main "$flag" "$value" 2>&1)
@@ -1297,12 +1254,28 @@ test_lane_branch_values_must_be_safe_branch_names() {
         "$flag '$value': a refused value still wrote a brief"
     done
   done
-  # The safe forms the refusals must not catch.
+  # The safe forms the refusals must not catch. proto/godot/frog-pile is this
+  # system's canonical landing-branch spelling, so it must scaffold and must be
+  # what the generated base check resolves.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" value-ok some-proj --mode no-mistakes --lane \
     --landing-branch proto/godot/frog-pile --lane-branch task/value-ok-2026-09-04 >/dev/null 2>&1 \
-    || fail "ordinary multi-segment branch names should scaffold"
-  assert_present "$home/data/value-ok/brief.md" \
-    "ordinary multi-segment branch names wrote no brief"
+    || fail "the canonical multi-segment landing branch should scaffold"
+  brief="$home/data/value-ok/brief.md"
+  assert_present "$brief" "the canonical multi-segment landing branch wrote no brief"
+  assert_grep "git rev-list --left-right --count refs/heads/proto/godot/frog-pile...HEAD" "$brief" \
+    "the canonical landing branch is not what the base check resolves"
+  assert_grep "run \`git reset --hard refs/heads/proto/godot/frog-pile\`" "$brief" \
+    "the canonical landing branch is not what a behind workspace resets onto"
+
+  # A remote-tracking spelling is accepted at scaffold time on purpose: only the
+  # lane worktree can say whether refs/heads/origin/main exists, and the generated
+  # step 1b stops when it does not.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" value-remote some-proj --mode no-mistakes --lane \
+    --landing-branch origin/main >/dev/null 2>&1 \
+    || fail "a ref-safe remote-tracking spelling should scaffold and be settled at step 1b"
+  assert_grep "git rev-parse --verify --quiet refs/heads/origin/main" \
+    "$home/data/value-remote/brief.md" \
+    "the accepted value is not handed to the brief's fail-closed existence guard"
   pass "fm-brief.sh: --landing-branch and --lane-branch refuse values that are not plain branch names"
 }
 
@@ -1316,7 +1289,7 @@ test_non_lane_ship_briefs_match_their_fixture() {
   home="$TMP_ROOT/fixture-home"
   mkdir -p "$home/data"
   for mode in no-mistakes direct-PR local-only; do
-    FM_HOME="$home" FM_ROOT_OVERRIDE=/FM_ROOT \
+    FM_HOME="$home" FM_ROOT_OVERRIDE=/FM_ROOT FM_CLASSIFY_PAUSED_VERB=paused \
       "$ROOT/bin/fm-brief.sh" "fixture-$mode" fixture-project --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode: fixture brief should scaffold"
     brief="$home/data/fixture-$mode/brief.md"
@@ -1367,6 +1340,5 @@ test_lane_brief_declares_its_delivery_contract_prominently
 test_lane_branch_name_is_stated_in_every_branch_instruction
 test_lane_without_a_branch_name_stays_coherent
 test_lane_flag_combinations_are_refused
-test_lane_landing_branch_must_be_a_local_branch_name
 test_lane_branch_values_must_be_safe_branch_names
 test_non_lane_ship_briefs_match_their_fixture

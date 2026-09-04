@@ -82,13 +82,12 @@
 # branch firstmate recorded for it. The value is a plain local branch name that git
 # itself accepts (git check-ref-format --branch), restricted to letters, digits,
 # '.', '_', '/', '+' and '-' because it is rendered into commands the brief tells
-# the worker to run; --lane-branch takes the same value form. refs/... ref paths are
-# refused in favour of the bare name, since the generated commands qualify it as
-# refs/heads/<branch> themselves. A value is refused as remote-tracking only when
-# the project's clone under this home resolves it as refs/remotes/<value> and has no
-# refs/heads/<value>; a real local branch such as proto/godot/frog-pile is accepted
-# even where 'proto' is also a remote name, and an unreadable clone accepts the
-# name rather than guessing (the brief's step 1b stops on a branch that is absent).
+# the worker to run, and refs/... ref paths are refused in favour of the bare name;
+# --lane-branch takes exactly the same value form. These are string checks only, so
+# a multi-segment name such as proto/godot/frog-pile is always accepted and a
+# remote-tracking spelling such as origin/main is accepted here too: whether the
+# branch actually exists is settled by the generated brief's step 1b in the real
+# lane worktree, whose missing-branch arm stops and reports.
 # --lane is refused on scout and secondmate scaffolds: a scout brief carries no
 # branch convention to replace, and a charter is not a lane.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
@@ -156,43 +155,39 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
-
-# Both lane branch flags are rendered into commands the generated brief tells a
-# worker to run, so a value that is not a plain branch name is refused here rather
-# than reaching the brief: first a conservative character set, so no shell
-# metacharacter or command substitution can ever be rendered, then git's own
+# Both lane branch flags name a branch the generated brief renders into commands a
+# worker runs, so the same screen applies to both: a conservative character set, so
+# no shell metacharacter or command substitution can ever be rendered; git's own
 # branch-name validation, which owns the leading-dash, `..`, `@{`, trailing-.lock,
-# control-character and empty-segment cases.
+# control-character and empty-segment cases; and a refusal of fully-qualified
+# refs/... spellings, which the brief's own commands qualify themselves and which
+# `git branch --show-current` never prints.
+# All three are pure string checks that need no repository, and deliberately so:
+# this scaffold cannot know which clone a lane will actually use, since the REPO
+# argument carries no reliable signal about which repository it names (recorded in
+# .agents/skills/firstmate-coding-guidelines/SKILL.md), and a Playbot workspace is
+# a worktree of Playbot's project root rather than a clone under this home. A
+# scaffold-time resolution check would therefore judge the wrong tree and could
+# refuse a valid branch, which is worse than no check. Whether the branch exists is
+# settled by the generated brief's step 1b, in the real lane worktree, where the
+# answer is knowable and the arm is fail-closed.
 reject_unsafe_branch_value() {
   local flag=$1 value=$2
   case "$value" in
     *[!A-Za-z0-9._/+-]*)
       echo "error: $flag takes a plain branch name; '$value' contains characters outside letters, digits, '.', '_', '/', '+' and '-', and this value is rendered into commands the brief tells the worker to run" >&2
       return 1 ;;
+    refs/heads/*)
+      echo "error: $flag names a branch, not a ref path; the generated brief qualifies the name itself, so pass '${value#refs/heads/}'" >&2
+      return 1 ;;
+    refs/*)
+      echo "error: $flag names a branch, not a ref path; the generated brief resolves refs/heads/<branch> only, and a tag or remote-tracking ref path can never satisfy it" >&2
+      return 1 ;;
   esac
   git check-ref-format --branch "$value" >/dev/null 2>&1 || {
     echo "error: $flag value '$value' is not a valid git branch name (git check-ref-format --branch refuses it)" >&2
     return 1
   }
-}
-
-# The generated commands qualify the landing branch as refs/heads/<branch>, so a
-# remote-tracking spelling can never match. Resolution in the project's clone
-# decides, not the shape of the name: a real local branch is accepted even when its
-# first segment happens to name a remote, and only a value that resolves solely as
-# a remote-tracking ref is refused. An unreadable or absent clone accepts a
-# ref-safe name rather than guessing - step 1b of the generated brief is
-# fail-closed on a landing branch that turns out not to be there.
-reject_remote_tracking_landing_branch() {
-  local branch=$1 project=$2 clone
-  clone="$PROJECTS/$project"
-  [ -n "$project" ] && [ -e "$clone/.git" ] || return 0
-  git -C "$clone" rev-parse --git-dir >/dev/null 2>&1 || return 0
-  git -C "$clone" show-ref --verify --quiet "refs/heads/$branch" && return 0
-  git -C "$clone" show-ref --verify --quiet "refs/remotes/$branch" || return 0
-  echo "error: --landing-branch names a local branch, not a remote-tracking ref; in $clone '$branch' resolves only as refs/remotes/$branch and there is no refs/heads/$branch, so pass the local branch name '${branch#*/}' (the generated base check compares against refs/heads/<branch>)" >&2
-  return 1
 }
 
 KIND=ship
@@ -293,16 +288,7 @@ if [ "$LANDING_BRANCH_SET" -eq 1 ]; then
     exit 1
   }
   [ -n "$LANDING_BRANCH" ] || { echo "error: --landing-branch requires a value" >&2; exit 1; }
-  case "$LANDING_BRANCH" in
-    refs/heads/*)
-      echo "error: --landing-branch names a branch, not a ref path; the generated base check qualifies it as refs/heads/<branch> itself, so pass '${LANDING_BRANCH#refs/heads/}'" >&2
-      exit 1 ;;
-    refs/*)
-      echo "error: --landing-branch names a branch, not a ref path; the generated base check compares against refs/heads/<branch> only, and a tag or remote-tracking ref can never be that comparison target" >&2
-      exit 1 ;;
-  esac
   reject_unsafe_branch_value --landing-branch "$LANDING_BRANCH" || exit 1
-  reject_remote_tracking_landing_branch "$LANDING_BRANCH" "${POS[1]:-}" || exit 1
 fi
 # The base check is the first thing a lane brief tells its worker to do, and it
 # cannot be written without the branch it compares against, so a lane brief that
