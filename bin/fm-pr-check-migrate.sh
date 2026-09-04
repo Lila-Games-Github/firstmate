@@ -24,6 +24,7 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 NONCANONICAL_PREFIX='!noncanonical'
 LEGACY_NONCANONICAL_PREFIX=_noncanonical
+MIGRATION_TASK_RETIRED_STATUS=3
 
 ALLOW_INCOMPLETE_REPAIRS=0
 if [ "$#" -eq 1 ] && [ "$1" = --checks-safe ]; then
@@ -33,7 +34,7 @@ elif [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck source=/dev/null
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
@@ -792,6 +793,21 @@ record_ambiguous_failure() {
   ensure_outcome_obligation "$id" failure-ambiguous
 }
 
+migration_task_transaction() {
+  local id=$1 identity_observed=$2 expected_spawn_gen=$3 operation=$4 status=0
+  shift 4
+  fm_pr_poll_lock_acquire "$STATE" "$id" || return 1
+  if { [ "$identity_observed" -eq 1 ] \
+      || [ -e "$STATE/$id.meta" ] || [ -L "$STATE/$id.meta" ]; } \
+    && fm_task_identity_retired "$STATE" "$id" "$expected_spawn_gen"; then
+    fm_pr_poll_cleanup
+    return "$MIGRATION_TASK_RETIRED_STATUS"
+  fi
+  "$operation" "$@" || status=$?
+  fm_pr_poll_cleanup
+  return "$status"
+}
+
 canonical_repair_from_pending() {
   local id=$1 meta data registration provider url host path number check
   meta="$STATE/$id.meta"
@@ -810,8 +826,8 @@ canonical_repair_from_pending() {
   quarantine_artifact "$registration" "$id" registration || return 1
   [ ! -e "$data" ] && [ ! -L "$data" ] || return 1
   [ ! -e "$registration" ] && [ ! -L "$registration" ] || return 1
-  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" || return 1
-  fm_pr_poll_publish_prepared || return 1
+  fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" retain || return 1
+  fm_pr_poll_publish_prepared_locked || return 1
   canonical_terminal_success "$id"
 }
 
@@ -856,8 +872,86 @@ quarantine_untrusted_replacement() {
   quarantine_artifact "$STATE/$id.pr-poll-registration" "$id" replacement-registration || return 1
 }
 
+recover_pending_outcome_locked() {
+  local prefix=$1 kind=$2 success failure replacement_failure check
+  case "$kind" in
+    pending-canonical)
+      success="$QUARANTINE/$prefix.diagnostic.canonical"
+      failure="$QUARANTINE/$prefix.diagnostic.failure-canonical"
+      if canonical_terminal_success "$prefix"; then
+        complete_canonical_outcome "$prefix"
+        return
+      fi
+      if [ -e "$success" ] || [ -L "$success" ]; then
+        remove_diagnostic_obligation "$prefix" canonical || return 1
+      fi
+      check="$STATE/$prefix.check.sh"
+      if [ ! -e "$check" ] && [ ! -L "$check" ]; then
+        if quarantined_artifact_exists "$prefix" check; then
+          ensure_outcome_obligation "$prefix" failure-canonical || return 1
+          if canonical_repair_from_pending "$prefix"; then
+            complete_canonical_outcome "$prefix" || return 1
+          else
+            migration_failed=1
+          fi
+        elif [ -e "$failure" ] || [ -L "$failure" ]; then
+          migration_failed=1
+        fi
+      fi
+      ;;
+    pending-ambiguous)
+      success="$QUARANTINE/$prefix.diagnostic.ambiguous"
+      failure="$QUARANTINE/$prefix.diagnostic.failure-ambiguous"
+      replacement_failure="$QUARANTINE/$prefix.diagnostic.failure-replacement"
+      if canonical_terminal_success "$prefix"; then
+        complete_validated_outcome "$prefix"
+        return
+      fi
+      if [ -e "$replacement_failure" ] || [ -L "$replacement_failure" ]; then
+        if replacement_artifacts_present "$prefix"; then
+          quarantine_untrusted_replacement "$prefix" || return 1
+        fi
+        migration_failed=1
+        return 0
+      fi
+      if quarantined_artifact_exists "$prefix" check \
+        && { [ -e "$STATE/$prefix.check.sh" ] || [ -L "$STATE/$prefix.check.sh" ]; } \
+        && ! live_check_matches_quarantined "$prefix"; then
+        quarantine_untrusted_replacement "$prefix" || return 1
+        migration_failed=1
+        return 0
+      fi
+      if ambiguous_terminal_success "$prefix"; then
+        complete_ambiguous_outcome "$prefix"
+        return
+      fi
+      if [ -e "$success" ] || [ -L "$success" ]; then
+        remove_diagnostic_obligation "$prefix" ambiguous || return 1
+      fi
+      check="$STATE/$prefix.check.sh"
+      if [ ! -e "$check" ] && [ ! -L "$check" ]; then
+        if quarantined_artifact_exists "$prefix" check; then
+          ensure_outcome_obligation "$prefix" failure-ambiguous || return 1
+          if ambiguous_repair_from_pending "$prefix"; then
+            complete_ambiguous_outcome "$prefix" || return 1
+          else
+            migration_failed=1
+          fi
+        elif [ -e "$failure" ] || [ -L "$failure" ]; then
+          migration_failed=1
+        fi
+      fi
+      ;;
+    pending-noncanonical)
+      if quarantined_artifact_exists "$prefix" check; then
+        complete_noncanonical_outcome "$prefix" || return 1
+      fi
+      ;;
+  esac
+}
+
 recover_pending_outcomes() {
-  local obligation basename prefix kind success failure replacement_failure check
+  local obligation basename prefix kind identity_observed expected_spawn_gen status
   [ -e "$QUARANTINE" ] || [ -L "$QUARANTINE" ] || return 0
   quarantine_tree_repair_and_validate || return 1
   for obligation in "$QUARANTINE"/*.diagnostic.pending-canonical \
@@ -868,80 +962,21 @@ recover_pending_outcomes() {
     diagnostic_obligation_message "$basename" || return 1
     prefix=$MIGRATION_DIAGNOSTIC_PREFIX
     kind=$MIGRATION_DIAGNOSTIC_KIND
-    case "$kind" in
-      pending-canonical)
-        success="$QUARANTINE/$prefix.diagnostic.canonical"
-        failure="$QUARANTINE/$prefix.diagnostic.failure-canonical"
-        if canonical_terminal_success "$prefix"; then
-          complete_canonical_outcome "$prefix" || return 1
-          continue
-        fi
-        if [ -e "$success" ] || [ -L "$success" ]; then
-          remove_diagnostic_obligation "$prefix" canonical || return 1
-        fi
-        check="$STATE/$prefix.check.sh"
-        if [ ! -e "$check" ] && [ ! -L "$check" ]; then
-          if quarantined_artifact_exists "$prefix" check; then
-            ensure_outcome_obligation "$prefix" failure-canonical || return 1
-            if canonical_repair_from_pending "$prefix"; then
-              complete_canonical_outcome "$prefix" || return 1
-            else
-              migration_failed=1
-            fi
-          elif [ -e "$failure" ] || [ -L "$failure" ]; then
-            migration_failed=1
-          fi
-        fi
-        ;;
-      pending-ambiguous)
-        success="$QUARANTINE/$prefix.diagnostic.ambiguous"
-        failure="$QUARANTINE/$prefix.diagnostic.failure-ambiguous"
-        replacement_failure="$QUARANTINE/$prefix.diagnostic.failure-replacement"
-        if canonical_terminal_success "$prefix"; then
-          complete_validated_outcome "$prefix" || return 1
-          continue
-        fi
-        if [ -e "$replacement_failure" ] || [ -L "$replacement_failure" ]; then
-          if replacement_artifacts_present "$prefix"; then
-            quarantine_untrusted_replacement "$prefix" || return 1
-          fi
-          migration_failed=1
-          continue
-        fi
-        if quarantined_artifact_exists "$prefix" check \
-          && { [ -e "$STATE/$prefix.check.sh" ] || [ -L "$STATE/$prefix.check.sh" ]; } \
-          && ! live_check_matches_quarantined "$prefix"; then
-          quarantine_untrusted_replacement "$prefix" || return 1
-          migration_failed=1
-          continue
-        fi
-        if ambiguous_terminal_success "$prefix"; then
-          complete_ambiguous_outcome "$prefix" || return 1
-          continue
-        fi
-        if [ -e "$success" ] || [ -L "$success" ]; then
-          remove_diagnostic_obligation "$prefix" ambiguous || return 1
-        fi
-        check="$STATE/$prefix.check.sh"
-        if [ ! -e "$check" ] && [ ! -L "$check" ]; then
-          if quarantined_artifact_exists "$prefix" check; then
-            ensure_outcome_obligation "$prefix" failure-ambiguous || return 1
-            if ambiguous_repair_from_pending "$prefix"; then
-              complete_ambiguous_outcome "$prefix" || return 1
-            else
-              migration_failed=1
-            fi
-          elif [ -e "$failure" ] || [ -L "$failure" ]; then
-            migration_failed=1
-          fi
-        fi
-        ;;
-      pending-noncanonical)
-        if quarantined_artifact_exists "$prefix" check; then
-          complete_noncanonical_outcome "$prefix" || return 1
-        fi
-        ;;
-    esac
+    if ! fm_pr_task_id_valid "$prefix"; then
+      recover_pending_outcome_locked "$prefix" "$kind" || return 1
+      continue
+    fi
+    identity_observed=0
+    [ -f "$STATE/$prefix.meta" ] && [ ! -L "$STATE/$prefix.meta" ] && identity_observed=1
+    expected_spawn_gen=$(fm_task_spawn_gen_capture "$STATE" "$prefix") || return 1
+    if migration_task_transaction "$prefix" "$identity_observed" "$expected_spawn_gen" \
+      recover_pending_outcome_locked "$prefix" "$kind"; then
+      continue
+    else
+      status=$?
+    fi
+    [ "$status" -ne "$MIGRATION_TASK_RETIRED_STATUS" ] || migration_failed=1
+    return 1
   done
 }
 
@@ -1014,6 +1049,56 @@ process_diagnostic_obligations() {
   done
 }
 
+migrate_task_check_locked() {
+  local check=$1 id=$2 meta data registration provider url host path number message
+  [ -e "$check" ] || [ -L "$check" ] || return 0
+  fm_custom_check_registered "$STATE" "$id" && return 0
+  fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && return 0
+  meta="$STATE/$id.meta"
+  data="$STATE/$id.pr-poll"
+  registration="$STATE/$id.pr-poll-registration"
+  if metadata_pr_is_canonical "$meta"; then
+    provider=$MIGRATION_PROVIDER
+    url=$MIGRATION_URL
+    host=$MIGRATION_HOST
+    path=$MIGRATION_PATH
+    number=$MIGRATION_NUMBER
+    message="task $id: migration outcome tracking started before legacy poll handling"
+    if ! ensure_diagnostic_obligation "$id" pending-canonical "$message" \
+      || ! process_diagnostic_obligations; then
+      diagnostics_failed=1
+      migration_failed=1
+      return 0
+    fi
+    if quarantine_artifact "$check" "$id" check \
+      && quarantine_artifact "$data" "$id" data \
+      && quarantine_artifact "$registration" "$id" registration \
+      && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" retain \
+      && fm_pr_poll_publish_prepared_locked \
+      && complete_canonical_outcome "$id"; then
+      return 0
+    fi
+    migration_failed=1
+    record_canonical_failure "$id" || diagnostics_failed=1
+    return 0
+  fi
+  message="task $id: migration outcome tracking started before legacy poll handling"
+  if ! ensure_diagnostic_obligation "$id" pending-ambiguous "$message" \
+    || ! process_diagnostic_obligations; then
+    diagnostics_failed=1
+    migration_failed=1
+    return 0
+  fi
+  if quarantine_artifact "$check" "$id" check \
+    && quarantine_artifact "$data" "$id" data \
+    && quarantine_artifact "$registration" "$id" registration \
+    && complete_ambiguous_outcome "$id"; then
+    return 0
+  fi
+  migration_failed=1
+  record_ambiguous_failure "$id" || diagnostics_failed=1
+}
+
 diagnostics_failed=0
 migration_failed=0
 if ! quarantine_tree_repair_and_validate \
@@ -1043,52 +1128,14 @@ if migration_needed; then
     fm_pr_poll_artifacts_valid "$STATE" "$id" "$TEMPLATE" && continue
 
     if fm_pr_task_id_valid "$id"; then
-      prefix=$id
-      meta="$STATE/$id.meta"
-      data="$STATE/$id.pr-poll"
-      registration="$STATE/$id.pr-poll-registration"
-      if metadata_pr_is_canonical "$meta"; then
-        provider=$MIGRATION_PROVIDER
-        url=$MIGRATION_URL
-        host=$MIGRATION_HOST
-        path=$MIGRATION_PATH
-        number=$MIGRATION_NUMBER
-        message="task $id: migration outcome tracking started before legacy poll handling"
-        if ! ensure_diagnostic_obligation "$prefix" pending-canonical "$message" \
-          || ! process_diagnostic_obligations; then
-          diagnostics_failed=1
-          migration_failed=1
-          continue
-        fi
-        if quarantine_artifact "$check" "$prefix" check \
-          && quarantine_artifact "$data" "$prefix" data \
-          && quarantine_artifact "$registration" "$prefix" registration \
-          && fm_pr_poll_prepare "$STATE" "$id" "$provider" "$url" "$host" "$path" "$number" "$TEMPLATE" \
-          && fm_pr_poll_publish_prepared \
-          && complete_canonical_outcome "$id"; then
-          :
-        else
-          migration_failed=1
-          record_canonical_failure "$id" || diagnostics_failed=1
-        fi
-      else
-        message="task $id: migration outcome tracking started before legacy poll handling"
-        if ! ensure_diagnostic_obligation "$prefix" pending-ambiguous "$message" \
-          || ! process_diagnostic_obligations; then
-          diagnostics_failed=1
-          migration_failed=1
-          continue
-        fi
-        if quarantine_artifact "$check" "$prefix" check \
-          && quarantine_artifact "$data" "$prefix" data \
-          && quarantine_artifact "$registration" "$prefix" registration \
-          && complete_ambiguous_outcome "$id"; then
-          :
-        else
-          migration_failed=1
-          record_ambiguous_failure "$id" || diagnostics_failed=1
-        fi
-      fi
+      identity_observed=0
+      [ -f "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] && identity_observed=1
+      expected_spawn_gen=$(fm_task_spawn_gen_capture "$STATE" "$id") || {
+        migration_failed=1
+        continue
+      }
+      migration_task_transaction "$id" "$identity_observed" "$expected_spawn_gen" migrate_task_check_locked "$check" "$id" \
+        || migration_failed=1
     else
       message='noncanonical task artifact: migration outcome tracking started before legacy poll handling'
       if ! ensure_diagnostic_obligation "$NONCANONICAL_PREFIX" pending-noncanonical "$message" \

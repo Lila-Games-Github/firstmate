@@ -60,6 +60,7 @@ FM_PR_POLL_EXPECT_DATA_HASH=
 FM_PR_POLL_EXPECT_TEMPLATE_HASH=
 FM_PR_POLL_EXPECT_DATA_IDENTITY=
 FM_PR_POLL_EXPECT_CHECK_IDENTITY=
+FM_PR_POLL_EXPECT_SPAWN_GEN=
 FM_PR_POLL_TEMPLATE=
 FM_PR_POLL_STATE_DEVICE=
 FM_PR_POLL_REFUSAL=
@@ -82,6 +83,7 @@ FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
 FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY=
 FM_PR_POLL_SNAPSHOT_REG_HASH=
 FM_PR_POLL_SNAPSHOT_REG_IDENTITY=
+FM_PR_POLL_SNAPSHOT_SPAWN_GEN=
 FM_PR_RETIRE_ID=
 FM_PR_RETIRE_PROVIDER=
 FM_PR_RETIRE_URL=
@@ -115,6 +117,56 @@ fm_task_id_creation_valid() {
   local id=${1-}
   fm_pr_task_id_valid "$id" || return 1
   [ "${#id}" -le 64 ]
+}
+
+fm_task_spawn_gen_capture() {
+  local state=$1 id=$2 meta count value
+  fm_pr_task_id_valid "$id" || return 1
+  meta="$state/$id.meta"
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    printf 'missing'
+    return 0
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  count=$(grep -c '^spawn_gen=' "$meta" 2>/dev/null || true)
+  case "$count" in
+    0) printf 'legacy' ;;
+    1)
+      value=$(grep '^spawn_gen=' "$meta" | cut -d= -f2-)
+      [ -n "$value" ] || return 1
+      printf 'value:%s' "$value"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_task_identity_retired() {
+  local state=$1 id=$2 expected_spawn_gen=$3 meta current_spawn_gen kind remote_host lib_dir data_dir registry
+  fm_pr_task_id_valid "$id" || return 0
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  current_spawn_gen=$(fm_task_spawn_gen_capture "$state" "$id") || return 0
+  [ "$current_spawn_gen" = "$expected_spawn_gen" ] || return 0
+  lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 0
+  if ! declare -F fm_meta_get >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-backend.sh
+    . "$lib_dir/fm-backend.sh" || return 0
+  fi
+  kind=$(fm_meta_get "$meta" kind)
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  [ "$kind" = secondmate ] && [ -n "$remote_host" ] || return 1
+  if ! declare -F secondmate_registry_line_for_id >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-secondmate-registry-lib.sh
+    . "$lib_dir/fm-secondmate-registry-lib.sh" || return 0
+  fi
+  data_dir=${FM_DATA_OVERRIDE:-${DATA:-}}
+  if [ -z "$data_dir" ]; then
+    [ -n "${FM_HOME:-}" ] || return 0
+    data_dir="$FM_HOME/data"
+  fi
+  registry="$data_dir/secondmates.md"
+  secondmate_registry_line_for_id "$registry" "$id" >/dev/null 2>&1 || return 0
+  return 1
 }
 
 # GitLab serves self-hosted instances, so the host is part of the identity
@@ -473,10 +525,11 @@ fm_pr_poll_destination_unclaimed() {
 }
 
 fm_pr_poll_cleanup() {
+  local lock_disposition=${1:-release}
   [ -z "$FM_PR_POLL_DATA_TMP" ] || rm -f -- "$FM_PR_POLL_DATA_TMP"
   [ -z "$FM_PR_POLL_CHECK_TMP" ] || rm -f -- "$FM_PR_POLL_CHECK_TMP"
   [ -z "$FM_PR_POLL_REG_TMP" ] || rm -f -- "$FM_PR_POLL_REG_TMP"
-  fm_pr_poll_lock_release || true
+  [ "$lock_disposition" = retain ] || fm_pr_poll_lock_release || true
   FM_PR_POLL_DATA_TMP=
   FM_PR_POLL_CHECK_TMP=
   FM_PR_POLL_REG_TMP=
@@ -561,6 +614,7 @@ fm_pr_poll_revoke_sidecars() {
 
 fm_pr_poll_prepare() {
   local state=$1 id=$2 provider=$3 url=$4 host=$5 path=$6 number=$7 template=$8
+  local lock_disposition=${9:-release}
   fm_pr_task_id_valid "$id" || return 1
   fm_pr_url_parse "$url" || return 1
   [ "$provider" = "$FM_PR_PROVIDER" ] || return 1
@@ -585,13 +639,14 @@ fm_pr_poll_prepare() {
   FM_PR_POLL_TEMPLATE=$template
   FM_PR_POLL_STATE_DEVICE=$(fm_pr_file_device "$state") || return 1
   [ -n "$FM_PR_POLL_STATE_DEVICE" ] || return 1
+  FM_PR_POLL_EXPECT_SPAWN_GEN=$(fm_task_spawn_gen_capture "$state" "$id") || return 1
   FM_PR_POLL_DATA_TMP=$(mktemp "$state/.fm-pr-poll-data.XXXXXX") || return 1
   FM_PR_POLL_CHECK_TMP=$(mktemp "$state/.fm-pr-poll-check.XXXXXX") || {
-    fm_pr_poll_cleanup
+    fm_pr_poll_cleanup "$lock_disposition"
     return 1
   }
   FM_PR_POLL_REG_TMP=$(mktemp "$state/.fm-pr-poll-registration.XXXXXX") || {
-    fm_pr_poll_cleanup
+    fm_pr_poll_cleanup "$lock_disposition"
     return 1
   }
 
@@ -608,13 +663,13 @@ fm_pr_poll_prepare() {
     || ! chmod 0600 "$FM_PR_POLL_CHECK_TMP" \
     || ! fm_pr_private_file_valid "$FM_PR_POLL_CHECK_TMP" 600 "$FM_PR_POLL_STATE_DEVICE" \
     || ! cmp -s "$template" "$FM_PR_POLL_CHECK_TMP"; then
-    fm_pr_poll_cleanup
+    fm_pr_poll_cleanup "$lock_disposition"
     return 1
   fi
-  FM_PR_POLL_EXPECT_DATA_HASH=$(fm_pr_sha256 "$FM_PR_POLL_DATA_TMP") || { fm_pr_poll_cleanup; return 1; }
-  FM_PR_POLL_EXPECT_TEMPLATE_HASH=$(fm_pr_sha256 "$FM_PR_POLL_CHECK_TMP") || { fm_pr_poll_cleanup; return 1; }
-  FM_PR_POLL_EXPECT_DATA_IDENTITY=$(fm_pr_file_identity "$FM_PR_POLL_DATA_TMP") || { fm_pr_poll_cleanup; return 1; }
-  FM_PR_POLL_EXPECT_CHECK_IDENTITY=$(fm_pr_file_identity "$FM_PR_POLL_CHECK_TMP") || { fm_pr_poll_cleanup; return 1; }
+  FM_PR_POLL_EXPECT_DATA_HASH=$(fm_pr_sha256 "$FM_PR_POLL_DATA_TMP") || { fm_pr_poll_cleanup "$lock_disposition"; return 1; }
+  FM_PR_POLL_EXPECT_TEMPLATE_HASH=$(fm_pr_sha256 "$FM_PR_POLL_CHECK_TMP") || { fm_pr_poll_cleanup "$lock_disposition"; return 1; }
+  FM_PR_POLL_EXPECT_DATA_IDENTITY=$(fm_pr_file_identity "$FM_PR_POLL_DATA_TMP") || { fm_pr_poll_cleanup "$lock_disposition"; return 1; }
+  FM_PR_POLL_EXPECT_CHECK_IDENTITY=$(fm_pr_file_identity "$FM_PR_POLL_CHECK_TMP") || { fm_pr_poll_cleanup "$lock_disposition"; return 1; }
   if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
       fm-pr-poll-registration-v2 "$id" "$provider" "$url" "$host" "$path" "$number" \
       "$FM_PR_POLL_EXPECT_DATA_HASH" "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" \
@@ -626,7 +681,7 @@ fm_pr_poll_prepare() {
     || [ "$FM_PR_REG_ID" != "$id" ] \
     || [ "$FM_PR_REG_DATA_HASH" != "$FM_PR_POLL_EXPECT_DATA_HASH" ] \
     || [ "$FM_PR_REG_TEMPLATE_HASH" != "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" ]; then
-    fm_pr_poll_cleanup
+    fm_pr_poll_cleanup "$lock_disposition"
     return 1
   fi
 }
@@ -634,6 +689,10 @@ fm_pr_poll_prepare() {
 fm_pr_poll_publish_prepared_locked() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
+  if fm_task_identity_retired "${FM_PR_POLL_CHECK_DEST%/*}" "$FM_PR_POLL_EXPECT_ID" \
+    "$FM_PR_POLL_EXPECT_SPAWN_GEN"; then
+    return 1
+  fi
   fm_pr_poll_destination_unclaimed "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_EXPECT_ID" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_REG_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
@@ -748,6 +807,7 @@ fm_pr_poll_artifacts_valid() {
 fm_pr_poll_snapshot_capture() {
   local state=$1 id=$2 template=$3 registration
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
+  FM_PR_POLL_SNAPSHOT_SPAWN_GEN=$(fm_task_spawn_gen_capture "$state" "$id") || return 1
   registration="$state/$id.pr-poll-registration"
   FM_PR_POLL_SNAPSHOT_REG_HASH=$(fm_pr_sha256 "$registration") || return 1
   FM_PR_POLL_SNAPSHOT_REG_IDENTITY=$(fm_pr_file_identity "$registration") || return 1
@@ -979,6 +1039,7 @@ fm_pr_poll_retirement_discard_obsolete() {
 
 fm_pr_poll_retirement_publish() {
   local state=$1 id=$2 template=$3 result=$4 receipt state_device tmp
+  local receipt_hash receipt_identity status=0
   [ "$result" = merged ] || return 1
   fm_pr_poll_snapshot_matches "$state" "$id" "$template" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -1005,15 +1066,38 @@ fm_pr_poll_retirement_publish() {
     || ! chmod 0600 "$tmp" \
     || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
     || ! fm_pr_poll_retirement_parse "$tmp" \
-    || [ "$FM_PR_RETIRE_ID" != "$id" ] \
+    || [ "$FM_PR_RETIRE_ID" != "$id" ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  receipt_hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; return 1; }
+  receipt_identity=$(fm_pr_file_identity "$tmp") || { rm -f -- "$tmp"; return 1; }
+  if ! fm_pr_poll_lock_acquire "$state" "$id"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if fm_task_identity_retired "$state" "$id" "$FM_PR_POLL_SNAPSHOT_SPAWN_GEN" \
     || ! fm_pr_poll_snapshot_matches "$state" "$id" "$template" \
     || ! fm_pr_regular_destination_on_device_or_absent "$receipt" "$state_device" \
     || [ -e "$receipt" ] || [ -L "$receipt" ] \
     || ! mv -f -- "$tmp" "$receipt"; then
-    rm -f -- "$tmp"
-    return 1
+    status=1
+  else
+    tmp=
+    if ! fm_pr_poll_retirement_receipt_valid "$state" "$id"; then
+      fm_pr_poll_retirement_remove_exact "$receipt" "$state_device" \
+        "$receipt_identity" "$receipt_hash" || true
+      status=1
+    fi
   fi
-  fm_pr_poll_retirement_receipt_valid "$state" "$id" || return 1
+  if [ "$status" -ne 0 ] && [ ! -e "$tmp" ] && [ ! -L "$tmp" ]; then
+    fm_pr_poll_retirement_remove_exact "$receipt" "$state_device" \
+      "$receipt_identity" "$receipt_hash" || true
+    tmp=
+  fi
+  [ -z "$tmp" ] || rm -f -- "$tmp"
+  fm_pr_poll_lock_release || status=1
+  return "$status"
 }
 
 fm_pr_poll_retirement_recover_one() {

@@ -4068,8 +4068,9 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
     const script = supervisionSelfScript();
     const register = path.join(path.dirname(script), "fm-check-register.sh");
     const lockHelper = path.join(path.dirname(script), "fm-check-publish-lock.sh");
-    if (!fs.existsSync(register) || !fs.existsSync(lockHelper)) {
-      supervisionRefuse(`the watcher's registration or publication-lock helper is missing beside ${script}, so no poll was armed`);
+    const identityHelper = path.join(path.dirname(script), "fm-pr-lib.sh");
+    if (!fs.existsSync(register) || !fs.existsSync(lockHelper) || !fs.existsSync(identityHelper)) {
+      supervisionRefuse(`the watcher's registration, publication-lock, or task-identity helper is missing beside ${script}, so no poll was armed`);
     }
     const generation = crypto.randomBytes(16).toString("hex");
     const desired = supervisionCheckScript({
@@ -4081,7 +4082,45 @@ async function armSupervisionPoll({ requestedTaskId, worker, baseline = null, de
       desktop: supervisionPath(desktopDir(), "the Playbot desktop directory"),
       state: supervisionPath(state, "the controller's state directory"),
     });
+    const identityEnv = {
+      ...process.env,
+      FM_HOME: controllerRoot(),
+      FM_STATE_OVERRIDE: state,
+      FM_DATA_OVERRIDE: process.env.FM_DATA_OVERRIDE || path.join(controllerRoot(), "data"),
+    };
+    let expectedSpawnGen = null;
+    if (requestedTaskId) {
+      const captured = spawnSync("bash", [
+        "-c",
+        '. "$1"; declare -F fm_task_spawn_gen_capture >/dev/null || exit 2; fm_task_spawn_gen_capture "$2" "$3"',
+        "fm-playbot-task-incarnation",
+        identityHelper,
+        state,
+        taskId,
+      ], { env: identityEnv, encoding: "utf8", timeout: 5_000, windowsHide: true });
+      if (captured.error || captured.signal || captured.status !== 0 || /[\r\n]/.test(captured.stdout ?? "") || !captured.stdout) {
+        supervisionRefuse(`firstmate task '${taskId}' incarnation could not be captured, so no task-keyed watcher poll was armed`);
+      }
+      expectedSpawnGen = captured.stdout;
+    }
     const bound = await supervisionWithCheckLock(state, taskId, () => {
+      if (requestedTaskId) {
+        const identity = spawnSync("bash", [
+          "-c",
+          '. "$1"; declare -F fm_task_identity_retired >/dev/null || exit 2; fm_task_identity_retired "$2" "$3" "$4"',
+          "fm-playbot-task-identity",
+          identityHelper,
+          state,
+          taskId,
+          expectedSpawnGen,
+        ], { env: identityEnv, encoding: "utf8", timeout: 5_000, windowsHide: true });
+        if (identity.error || identity.signal || identity.status === null || identity.status > 1) {
+          supervisionRefuse(`firstmate task '${taskId}' identity could not be validated, so no task-keyed watcher poll was armed`);
+        }
+        if (identity.status === 0) {
+          supervisionRefuse(`firstmate task '${taskId}' is retired or unavailable, so no task-keyed watcher poll was armed`);
+        }
+      }
       const target = path.join(state, `${taskId}.check.sh`);
       let previous = null;
       let existed = false;
