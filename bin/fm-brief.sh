@@ -53,10 +53,15 @@
 #   2. Base. firstmate creates a crewmate's worktree from the recorded landing
 #      branch locally, while Playbot creates a lane workspace from that branch's
 #      REMOTE tip, so an unpushed landing leaves the workspace behind. Setup step 1b
-#      makes the worker compare HEAD against the LOCAL landing branch - never
-#      origin/<branch>, which is the ref the workspace was created from and so can
-#      never reveal that drift - and act deterministically: reset only when behind
-#      with no commits of its own, stop and report whenever it carries any.
+#      makes the worker compare HEAD against the LOCAL landing branch, always
+#      spelled refs/heads/<branch> - never origin/<branch>, which is the ref the
+#      workspace was created from and so can never reveal that drift, and never a
+#      bare name, which git can resolve to a tag or a remote-tracking ref - and act
+#      on the four states an explicit ahead/behind reading distinguishes: current
+#      proceeds, behind-only resets and proceeds but only with a clean working
+#      tree, ahead-only proceeds untouched, diverged stops and reports. A behind
+#      workspace carrying uncommitted work stops and reports those paths; the
+#      generated step never resets over work that is not committed.
 #   3. Delivery contract. The mode is declared prominently after the task, above the
 #      Herdr and setup sections, repeating only the machine-readable contract line
 #      and that mode's one prohibition and pointing at the Definition of done as the
@@ -73,7 +78,9 @@
 # by Playbot's dispatch and never by bin/fm-spawn.sh, so it has no recorded
 # landing_branch= to read, and substituting a repository default is exactly what
 # docs/playbot-lanes.md forbids for a lane. It requires --lane, because a non-lane
-# worktree is already based locally on the branch firstmate recorded for it.
+# worktree is already based locally on the branch firstmate recorded for it, and it
+# must name a branch rather than a ref path: a value starting with refs/ is refused
+# because the generated commands qualify the name as refs/heads/<branch> themselves.
 # --lane is refused on scout and secondmate scaffolds: a scout brief carries no
 # branch convention to replace, and a charter is not a lane.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
@@ -238,6 +245,14 @@ if [ "$LANDING_BRANCH_SET" -eq 1 ]; then
     exit 1
   }
   [ -n "$LANDING_BRANCH" ] || { echo "error: --landing-branch requires a value" >&2; exit 1; }
+  case "$LANDING_BRANCH" in
+    refs/heads/*)
+      echo "error: --landing-branch names a branch, not a ref path; the generated base check qualifies it as refs/heads/<branch> itself, so pass '${LANDING_BRANCH#refs/heads/}'" >&2
+      exit 1 ;;
+    refs/*)
+      echo "error: --landing-branch names a branch, not a ref path; the generated base check compares against refs/heads/<branch> only, and a tag or remote-tracking ref can never be that comparison target" >&2
+      exit 1 ;;
+  esac
 fi
 
 BRIEF="$DATA/$ID/brief.md"
@@ -472,9 +487,15 @@ fi
 # from, so it can never reveal the drift, while firstmate's landings sit unpushed
 # for long stretches and a lane worktree shares the primary repository's git dir,
 # which makes the local branch both the only ref that shows the drift and a ref
-# that resolves there. The step is deterministic - reset only when behind with no
-# commits of its own, stop and report whenever the workspace carries any - so no
-# dispatch-time instruction is needed. A lane has no state/<id>.meta, since
+# that resolves there. Every generated command spells refs/heads/<branch>, because
+# git resolves a bare name through refs/tags/ and refs/remotes/ too, and a landing
+# branch whose first component is also a remote name is exactly the ambiguity
+# docs/playbot-lanes.md rejects. One explicit ahead/behind reading then decides
+# between the four real states rather than inferring them from a single log range:
+# only behind-only resets, and only with a clean working tree, so the step can
+# never discard uncommitted work; ahead-only proceeds untouched, because those
+# commits are the worker's own or the newer remote tip its workspace was created
+# from; diverged stops and reports. A lane has no state/<id>.meta, since
 # nothing outside bin/fm-spawn.sh writes one, so without --landing-branch the step
 # stops and asks firstmate instead of substituting a default branch.
 if [ "$LANE" -eq 1 ]; then
@@ -486,15 +507,15 @@ if [ "$LANE" -eq 1 ]; then
     LANE_READY_LINE="\`done: ready in branch {your workspace branch}\`"
   fi
   if [ -n "$LANDING_BRANCH" ]; then
-    LANE_LANDING_INTRO="Your landing branch is \`$LANDING_BRANCH\`."
-    LANE_LANDING_REF="$LANDING_BRANCH"
-    LANE_LANDING_ACT="If \`git rev-parse --verify --quiet $LANDING_BRANCH\` prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch $LANDING_BRANCH is missing from this repository\` to the status file and stop. Otherwise act on exactly one of these three:"
+    LANE_LANDING_INTRO="Your landing branch is \`$LANDING_BRANCH\`, and every command below names it as \`refs/heads/$LANDING_BRANCH\`."
+    LANE_LANDING_REF="refs/heads/$LANDING_BRANCH"
+    LANE_LANDING_ACT="If \`git rev-parse --verify --quiet refs/heads/$LANDING_BRANCH\` prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch $LANDING_BRANCH is missing from this repository\` to the status file and stop."
     LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
     LANE_LANDING_GUARD=""
   else
     LANE_LANDING_INTRO="This brief was generated without a landing branch, so it cannot name the branch your base must be verified against - and no substitute is acceptable: never the repository default, never \`main\`, never the branch your workspace was created on. STOP before you touch anything: append \`blocked: lane landing branch is unknown; firstmate must name it\` to the status file and stop."
-    LANE_LANDING_REF="{landing-branch}"
-    LANE_LANDING_ACT="Once firstmate names the landing branch, substitute that name for \`{landing-branch}\` below - always the local branch of that name - and act on exactly one of these three:"
+    LANE_LANDING_REF="refs/heads/{landing-branch}"
+    LANE_LANDING_ACT="Once firstmate names the landing branch, substitute that name for \`{landing-branch}\` below, keeping the \`refs/heads/\` prefix exactly as written so only a local branch can satisfy the check. If \`git rev-parse --verify --quiet refs/heads/{landing-branch}\` then prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch {landing-branch} is missing from this repository\` to the status file and stop."
     LANE_LANDING_TARGET="the landing branch firstmate supplies for this task"
     LANE_LANDING_GUARD=" Setup step 1b has you stop and ask firstmate for that branch; never guess one."
   fi
@@ -508,12 +529,15 @@ if [ "$LANE" -eq 1 ]; then
       Never run \`git checkout -b\` or \`git switch -c\`, and never switch branches: a branch of your own steps off the one your workspace owns.
 
    b. **Base.** Playbot creates a lane workspace from the REMOTE tip of the landing branch, so a landing that has not been pushed yet leaves your workspace behind and you would build on stale code.
-      Compare against the LOCAL landing branch, never \`origin/<landing branch>\`: the remote ref is the one your workspace was created from, so it can never reveal this drift, and your lane worktree shares the primary repository's git dir, so the local branch resolves here.
+      Compare against the LOCAL landing branch, always spelled \`refs/heads/<landing branch>\`: the remote ref is the one your workspace was created from, so \`origin/<landing branch>\` can never reveal this drift, a bare name is not enough because git also resolves it through \`refs/tags/\` and \`refs/remotes/\`, and your lane worktree shares the primary repository's git dir, so the local branch resolves here.
       $LANE_LANDING_INTRO
       $LANE_LANDING_ACT
-      - \`git rev-parse HEAD\` equals \`git rev-parse $LANE_LANDING_REF\`: your base is current; proceed.
-      - HEAD is not that tip and \`git log $LANE_LANDING_REF..HEAD --oneline\` prints NOTHING (your workspace is behind the landing branch and carries no commits of its own): run \`git reset --hard $LANE_LANDING_REF\` and proceed.
-      - \`git log $LANE_LANDING_REF..HEAD --oneline\` prints anything at all - your workspace carries commits of its own, whether it is only ahead of the landing branch or has diverged from it: STOP. Do not reset, rebase, merge, or guess - append \`blocked: lane workspace carries commits of its own, so its base cannot be reset\` to the status file and stop.
+      Then read both distances once with \`git rev-list --left-right --count $LANE_LANDING_REF...HEAD\` (three dots), which prints the number of commits the landing branch has that you do not - how far BEHIND you are - then the number you have that it does not - how far AHEAD you are. Act on exactly one of these:
+      - behind 0, ahead 0 - current: your base is current; proceed.
+      - behind above 0, ahead 0 - behind only - AND \`git status --porcelain\` prints NOTHING: run \`git reset --hard $LANE_LANDING_REF\` and proceed.
+      - behind above 0, ahead 0 - behind only - but \`git status --porcelain\` prints anything at all: STOP and never reset; uncommitted work is never discarded - append \`blocked: lane workspace is behind its landing branch but carries uncommitted changes: {the paths git status --porcelain printed}\` to the status file and stop.
+      - behind 0, ahead above 0 - ahead only: those commits are your own work, or the newer landing tip your workspace was created from, and nothing about your base needs fixing; proceed and do NOT reset.
+      - behind above 0, ahead above 0 - diverged: STOP. Do not reset, rebase, merge, or guess - append \`blocked: lane workspace has diverged from its landing branch\` to the status file and stop.
 EOF
   SETUP1=${SETUP1%$'\n'}
 else
