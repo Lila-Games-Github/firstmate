@@ -898,8 +898,12 @@ test_lane_brief_verifies_its_base_before_working() {
     "lane brief does not read an explicit ahead/behind distance against the local landing branch"
   assert_no_grep "git log proto/godot/frog-pile..HEAD" "$brief" \
     "lane brief still infers its state from a bare-name single log range"
-  assert_grep "behind above 0, ahead 0 - behind only - AND \`git status --porcelain\` prints NOTHING: run \`git reset --hard refs/heads/proto/godot/frog-pile\` and proceed" "$brief" \
+  assert_grep "prints anything that is NOT one of those eight paths: STOP and never reset" "$brief" \
     "lane brief resets a behind workspace without first requiring a clean working tree"
+  assert_grep "Disclosure is a PRECONDITION of the reset" "$brief" \
+    "lane brief does not make disclosure a precondition of discarding Playbot churn"
+  assert_grep "Only then run \`git reset --hard refs/heads/proto/godot/frog-pile\` and proceed" "$brief" \
+    "lane brief does not gate the reset behind its disclosure step"
   assert_grep "blocked: lane workspace is behind its landing branch but carries uncommitted changes" "$brief" \
     "lane brief does not stop and report a behind workspace that carries uncommitted work"
   assert_grep "ahead only: those commits are your own work, or the newer landing tip your workspace was created from" "$brief" \
@@ -946,7 +950,7 @@ test_lane_brief_verifies_its_base_before_working() {
 # prescribes - taking the landing ref out of the brief itself - against real
 # repositories in each of the states a lane workspace can actually be in.
 test_lane_base_check_detects_an_unpushed_landing() {
-  local home brief lane_ref repo wt stale landed outcome own dirty
+  local home brief lane_ref churn log status repo wt stale landed outcome own dirty
   home="$TMP_ROOT/lane-drift-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-drift some-proj --mode local-only --lane \
@@ -956,6 +960,11 @@ test_lane_base_check_detects_an_unpushed_landing() {
   # shellcheck disable=SC2016  # the sed script matches the brief's literal backticks; nothing may expand here
   lane_ref=$(sed -n 's/^.*run `git reset --hard \([^`]*\)` and proceed.*$/\1/p' "$brief" | head -n 1)
   [ -n "$lane_ref" ] || fail "lane brief prescribes no ref to reset a stale base onto"
+  churn=$(lane_brief_churn_pathspec "$brief")
+  log="$TMP_ROOT/lane-drift.log"
+  status="$TMP_ROOT/lane-drift.status"
+  : > "$log"
+  : > "$status"
 
   # Local landing branch at B, its origin ref still at the older A, lane worktree
   # checked out at A with no commits of its own - exactly the unpushed landing.
@@ -979,10 +988,10 @@ test_lane_base_check_detects_an_unpushed_landing() {
   # Behind with uncommitted work: reported with its paths, never reset.
   printf 'work in progress\n' > "$wt/wip.txt"
   git -C "$wt" add wip.txt
-  outcome=$(lane_base_outcome "$wt" "$lane_ref")
+  outcome=$(lane_base_outcome "$wt" "$lane_ref" "$churn" "$log" "$status")
   [ "$outcome" = dirty ] \
     || fail "the prescribed base check reported '$outcome' for a behind workspace with uncommitted work, not a stop"
-  dirty=$(lane_base_dirty_paths "$wt" "$lane_ref")
+  dirty=$(lane_base_dirty_paths "$wt" "$churn")
   case "$dirty" in
     *wip.txt*) ;;
     *) fail "the prescribed dirty-tree report does not name the uncommitted path (got '$dirty')" ;;
@@ -993,7 +1002,7 @@ test_lane_base_check_detects_an_unpushed_landing() {
 
   # Behind with a clean tree: the drift is detected and the reset lands on B.
   git -C "$wt" rm -q -f wip.txt
-  outcome=$(lane_base_outcome "$wt" "$lane_ref")
+  outcome=$(lane_base_outcome "$wt" "$lane_ref" "$churn" "$log" "$status")
   [ "$outcome" = reset ] \
     || fail "the base check the lane brief prescribes reported '$outcome' for an unpushed landing, not the drift"
   [ "$(git -C "$wt" rev-parse HEAD)" = "$landed" ] \
@@ -1007,7 +1016,7 @@ test_lane_base_check_detects_an_unpushed_landing() {
   git -C "$wt" add lane.txt
   git -C "$wt" commit -qm "lane's own commit"
   own=$(git -C "$wt" rev-parse HEAD)
-  outcome=$(lane_base_outcome "$wt" "$lane_ref")
+  outcome=$(lane_base_outcome "$wt" "$lane_ref" "$churn" "$log" "$status")
   [ "$outcome" = ahead ] \
     || fail "the prescribed base check reported '$outcome' for an ahead-only workspace, not a proceed"
   [ "$(git -C "$wt" rev-parse HEAD)" = "$own" ] \
@@ -1017,7 +1026,7 @@ test_lane_base_check_detects_an_unpushed_landing() {
   printf 'landed again\n' > "$repo/landed-2.txt"
   git -C "$repo" add landed-2.txt
   git -C "$repo" commit -qm "landing branch advanced again"
-  outcome=$(lane_base_outcome "$wt" "$lane_ref")
+  outcome=$(lane_base_outcome "$wt" "$lane_ref" "$churn" "$log" "$status")
   [ "$outcome" = diverged ] \
     || fail "the prescribed base check reported '$outcome' for a diverged workspace, not a stop"
   [ "$(git -C "$wt" rev-parse HEAD)" = "$own" ] \
@@ -1031,7 +1040,7 @@ test_lane_base_check_detects_an_unpushed_landing() {
 # base as current. The generated commands must be unsatisfiable by anything but a
 # local branch.
 test_lane_base_check_never_resolves_a_remote_or_tag_ref() {
-  local home brief lane_ref repo wt outcome
+  local home brief lane_ref churn repo wt outcome
   home="$TMP_ROOT/lane-qualified-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-qualified some-proj --mode local-only --lane \
@@ -1041,6 +1050,7 @@ test_lane_base_check_never_resolves_a_remote_or_tag_ref() {
   # shellcheck disable=SC2016  # the sed script matches the brief's literal backticks; nothing may expand here
   lane_ref=$(sed -n 's/^.*run `git reset --hard \([^`]*\)` and proceed.*$/\1/p' "$brief" | head -n 1)
   [ -n "$lane_ref" ] || fail "lane brief prescribes no landing ref"
+  churn=$(lane_brief_churn_pathspec "$brief")
 
   # A remote literally named `proto` plus a tag of the same name: nothing but a
   # local branch `proto/godot/frog-pile` may satisfy the check, and there is none.
@@ -1057,7 +1067,7 @@ test_lane_base_check_never_resolves_a_remote_or_tag_ref() {
   [ -n "$(git -C "$wt" rev-parse --verify --quiet 'proto/godot/frog-pile')" ] \
     || fail "fixture does not reproduce a bare name that resolves without a local branch"
 
-  outcome=$(lane_base_outcome "$wt" "$lane_ref")
+  outcome=$(lane_base_outcome "$wt" "$lane_ref" "$churn" "$TMP_ROOT/lane-qualified.log" "$TMP_ROOT/lane-qualified.status")
   [ "$outcome" = missing ] \
     || fail "the prescribed base check reported '$outcome' against a remote-tracking or tag ref instead of stopping for a missing local landing branch"
   pass "fm-brief.sh: the lane base check refuses to resolve its landing branch to a tag or remote ref"
@@ -1065,10 +1075,13 @@ test_lane_base_check_never_resolves_a_remote_or_tag_ref() {
 
 # The generated base check, run against a real worktree: a landing ref that is not
 # a local branch stops, then one explicit ahead/behind reading selects among
-# current, behind-only (reset, clean tree required), ahead-only and diverged.
+# current, behind-only, ahead-only and diverged. Behind-only resets only when
+# nothing outside the brief's eight Playbot churn paths is modified, and only after
+# the disclosure the brief makes a precondition: capture the churn diff into the
+# lane's log, then append one status line naming what is discarded.
 # Echoes which outcome fired; performs the reset only in the arm that prescribes it.
 lane_base_outcome() {
-  local wt=$1 ref=$2 counts behind ahead
+  local wt=$1 ref=$2 churn=$3 log=$4 status=$5 counts behind ahead dirty
   if [ -z "$(git -C "$wt" rev-parse --verify --quiet "$ref" 2>/dev/null)" ]; then
     printf 'missing\n'
     return 0
@@ -1091,17 +1104,145 @@ lane_base_outcome() {
     printf 'ahead\n'
     return 0
   fi
-  if [ -n "$(lane_base_dirty_paths "$wt" "$ref")" ]; then
+  if [ -n "$(lane_base_dirty_paths "$wt" "$churn")" ]; then
     printf 'dirty\n'
     return 0
+  fi
+  dirty=$(lane_base_churn_paths "$wt" "$churn")
+  if [ -n "$dirty" ]; then
+    # shellcheck disable=SC2086  # the brief's diff pathspec is a literal path list
+    git -C "$wt" diff -- $churn >> "$log" 2>/dev/null || true
+    printf 'working: discarding Playbot churn before base reset: %s\n' \
+      "$(printf '%s' "$dirty" | tr '\n' ' ')" >> "$status"
   fi
   git -C "$wt" reset --hard "$ref" >/dev/null 2>&1 || { printf 'reset-failed\n'; return 0; }
   printf 'reset\n'
 }
 
-# The paths the brief's dirty-tree arm reports in its blocked line.
+# The paths the brief's dirty-tree arm reports in its blocked line: everything
+# git status prints that is not one of the eight literal churn paths.
 lane_base_dirty_paths() {
-  git -C "$1" status --porcelain
+  local wt=$1 churn=$2 line path
+  git -C "$wt" status --porcelain | while IFS= read -r line; do
+    path=${line#???}
+    case " $churn " in
+      *" $path "*) continue ;;
+    esac
+    printf '%s\n' "$path"
+  done
+}
+
+# The churn paths the reset would discard, which the brief has the worker disclose.
+lane_base_churn_paths() {
+  local wt=$1 churn=$2 line path
+  git -C "$wt" status --porcelain | while IFS= read -r line; do
+    path=${line#???}
+    case " $churn " in
+      *" $path "*) printf '%s\n' "$path" ;;
+    esac
+  done
+}
+
+# The eight literal Playbot churn paths come out of the generated brief itself, so
+# these tests execute the allowlist the brief actually prescribes.
+lane_brief_churn_pathspec() {
+  # shellcheck disable=SC2016  # the sed script matches the brief's literal backticks
+  sed -n 's/^.*Before you reset, run `git diff -- \([^`]*\)`.*$/\1/p' "$1" | head -n 1
+}
+
+# Playbot's editor integration rewrites eight tracked paths across unrelated
+# worktrees, so a lane workspace carrying only those is in its documented steady
+# state and must still be resettable - but nothing may vanish unseen, so the brief
+# makes capturing their diff and naming them a precondition of the reset.
+test_lane_base_check_discloses_before_resetting_playbot_churn() {
+  local home brief lane_ref churn repo wt log status stale landed outcome dirty
+  home="$TMP_ROOT/lane-churn-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-churn some-proj --mode local-only --lane \
+    --lane-branch task/lane-churn --landing-branch landing/frog-pile >/dev/null 2>&1 \
+    || fail "lane brief for the churn case should scaffold"
+  brief="$home/data/lane-churn/brief.md"
+  # shellcheck disable=SC2016  # the sed script matches the brief's literal backticks
+  lane_ref=$(sed -n 's/^.*run `git reset --hard \([^`]*\)` and proceed.*$/\1/p' "$brief" | head -n 1)
+  churn=$(lane_brief_churn_pathspec "$brief")
+  [ -n "$churn" ] || fail "lane brief prescribes no churn pathspec to disclose"
+  [ "$(printf '%s\n' "$churn" | wc -w | tr -d ' ')" = 8 ] \
+    || fail "lane brief's churn pathspec is not the eight literal paths: $churn"
+  case "$churn" in
+    *prototype-game/project.godot*) ;;
+    *) fail "lane brief's churn pathspec omits prototype-game/project.godot" ;;
+  esac
+
+  repo="$TMP_ROOT/lane-churn-repo"
+  fm_git_identity fmtest fmtest@example.invalid
+  fm_git_init_commit "$repo"
+  mkdir -p "$repo/prototype-game/addons/playbot"
+  printf 'config_version=5\n' > "$repo/prototype-game/project.godot"
+  printf 'uid://original\n' > "$repo/prototype-game/addons/playbot/plugin.gd.uid"
+  printf 'game code\n' > "$repo/app.txt"
+  git -C "$repo" add prototype-game app.txt
+  git -C "$repo" commit -qm "playbot addon plus game code"
+  git -C "$repo" branch -M landing/frog-pile
+  stale=$(git -C "$repo" rev-parse HEAD)
+  printf 'landed\n' > "$repo/landed.txt"
+  git -C "$repo" add landed.txt
+  git -C "$repo" commit -qm "landed locally, not pushed"
+  landed=$(git -C "$repo" rev-parse landing/frog-pile)
+
+  # Behind, with only allowlisted churn modified: the reset proceeds, but the diff
+  # is captured and the discarded paths named first.
+  wt="$TMP_ROOT/lane-churn-wt"
+  log="$TMP_ROOT/lane-churn.log"
+  status="$TMP_ROOT/lane-churn.status"
+  : > "$log"
+  : > "$status"
+  git -C "$repo" worktree add -q -b task/lane-churn "$wt" "$stale"
+  printf 'config_version=5\nfolder_colors={"res://scenes":"red"}\n' > "$wt/prototype-game/project.godot"
+  printf 'uid://rewritten\n' > "$wt/prototype-game/addons/playbot/plugin.gd.uid"
+  outcome=$(lane_base_outcome "$wt" "$lane_ref" "$churn" "$log" "$status")
+  [ "$outcome" = reset ] \
+    || fail "the prescribed base check reported '$outcome' for a workspace carrying only Playbot churn, not a reset"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$landed" ] \
+    || fail "the prescribed reset did not move a churn-only workspace onto the landing branch"
+  assert_grep "folder_colors" "$log" \
+    "the discarded hand-editable settings content was not captured before the reset"
+  assert_grep "uid://rewritten" "$log" \
+    "the discarded churn content was not captured before the reset"
+  assert_grep "working: discarding Playbot churn before base reset:" "$status" \
+    "no status line disclosed the discarded Playbot churn"
+  assert_grep "prototype-game/project.godot" "$status" \
+    "the status line does not name the discarded hand-editable settings file"
+  assert_grep "prototype-game/addons/playbot/plugin.gd.uid" "$status" \
+    "the status line does not name every discarded churn path"
+  assert_no_grep "folder_colors" "$wt/prototype-game/project.godot" \
+    "the reset left the churn in place, so the captured diff describes nothing"
+
+  # Behind, with churn AND a real edit outside the eight paths: stop, report only
+  # the offending path, reset nothing.
+  wt="$TMP_ROOT/lane-churn-mixed-wt"
+  git -C "$repo" worktree add -q -b task/lane-churn-mixed "$wt" "$stale"
+  printf 'uid://rewritten\n' > "$wt/prototype-game/addons/playbot/plugin.gd.uid"
+  printf 'real work\n' > "$wt/app.txt"
+  outcome=$(lane_base_outcome "$wt" "$lane_ref" "$churn" "$log" "$status")
+  [ "$outcome" = dirty ] \
+    || fail "the prescribed base check reported '$outcome' for churn plus a real edit, not a stop"
+  dirty=$(lane_base_dirty_paths "$wt" "$churn")
+  assert_contains "$dirty" "app.txt" "the report does not name the offending path outside the allowlist"
+  assert_not_contains "$dirty" "plugin.gd.uid" "the report blames Playbot churn for the block"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$stale" ] \
+    || fail "the prescribed base check reset a workspace carrying work outside the allowlist"
+  assert_grep "real work" "$wt/app.txt" "the prescribed base check discarded work outside the allowlist"
+
+  # A modification elsewhere under the addons directory is not churn: the list is
+  # eight literal paths, not a directory prefix.
+  wt="$TMP_ROOT/lane-churn-neighbour-wt"
+  git -C "$repo" worktree add -q -b task/lane-churn-neighbour "$wt" "$stale"
+  printf 'uid://neighbour\n' > "$wt/prototype-game/addons/playbot/plugin.gd"
+  git -C "$wt" add prototype-game/addons/playbot/plugin.gd
+  outcome=$(lane_base_outcome "$wt" "$lane_ref" "$churn" "$log" "$status")
+  [ "$outcome" = dirty ] \
+    || fail "the prescribed base check treated a neighbouring addons path as churn (got '$outcome')"
+  pass "fm-brief.sh: the lane base check discloses Playbot churn before resetting and still stops on real work"
 }
 
 # Firstmate began restating the delivery mode in every lane dispatch after lanes ran
@@ -1171,6 +1312,11 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
   assert_grep "push only your workspace branch \`task/lane-named-pr-2026-09-04\`; never create or switch branches" \
     "$home/data/lane-named-pr/brief.md" \
     "named direct-PR lane brief does not push the workspace branch"
+  # A lane's PR must target its landing branch: gh pr create with no --base opens
+  # against the repository default, which is not where a lane lands.
+  assert_grep "passing \`--base proto/godot/frog-pile\` explicitly so the PR targets your landing branch" \
+    "$home/data/lane-named-pr/brief.md" \
+    "direct-PR lane brief does not name the landing branch as the PR base"
   pass "fm-brief.sh: an explicit lane branch is stated in every branch instruction"
 }
 
@@ -1336,6 +1482,7 @@ test_lane_mode_drops_the_crewmate_branch_convention
 test_lane_brief_verifies_its_base_before_working
 test_lane_base_check_detects_an_unpushed_landing
 test_lane_base_check_never_resolves_a_remote_or_tag_ref
+test_lane_base_check_discloses_before_resetting_playbot_churn
 test_lane_brief_declares_its_delivery_contract_prominently
 test_lane_branch_name_is_stated_in_every_branch_instruction
 test_lane_without_a_branch_name_stays_coherent

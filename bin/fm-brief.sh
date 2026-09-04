@@ -61,7 +61,10 @@
 #      proceeds, behind-only resets and proceeds but only with a clean working
 #      tree, ahead-only proceeds untouched, diverged stops and reports. A behind
 #      workspace carrying uncommitted work stops and reports those paths; the
-#      generated step never resets over work that is not committed.
+#      generated step never resets over work that is not committed, except the
+#      eight tracked paths docs/playbot-lanes.md records as Playbot editor churn.
+#      Those it may reset, but only after capturing their diff into the lane's log
+#      and naming them in a status line, so nothing is discarded unseen.
 #   3. Delivery contract. The mode is declared prominently after the task, above the
 #      Herdr and setup sections, repeating only the machine-readable contract line
 #      and that mode's one prohibition and pointing at the Definition of done as the
@@ -553,6 +556,15 @@ if [ "$LANE" -eq 1 ]; then
   LANE_LANDING_REF="refs/heads/$LANDING_BRANCH"
   LANE_LANDING_ACT="If \`git rev-parse --verify --quiet refs/heads/$LANDING_BRANCH\` prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch $LANDING_BRANCH is missing from this repository\` to the status file and stop."
   LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
+  # Playbot's editor integration rewrites exactly these eight tracked paths across
+  # unrelated worktrees (docs/playbot-lanes.md owns the list and its boundary: no
+  # directory, extension or basename is churn), so a lane workspace carrying them
+  # is in its documented steady state and must still be resettable. Nothing is
+  # discarded unseen: the generated step captures their diff and names them in a
+  # status line before the reset, and prototype-game/project.godot is called out
+  # because it is hand-editable rather than generated.
+  LANE_CHURN_LIST="\`prototype-game/addons/playbot/playbot_common.gd.uid\`, \`prototype-game/addons/playbot/playbot_export_plugin.gd\`, \`prototype-game/addons/playbot/playbot_export_plugin.gd.uid\`, \`prototype-game/addons/playbot/playbot_log_capture.gd.source\`, \`prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid\`, \`prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid\`, \`prototype-game/addons/playbot/plugin.gd.uid\` and \`prototype-game/project.godot\`"
+  LANE_CHURN_ARGS="prototype-game/addons/playbot/playbot_common.gd.uid prototype-game/addons/playbot/playbot_export_plugin.gd prototype-game/addons/playbot/playbot_export_plugin.gd.uid prototype-game/addons/playbot/playbot_log_capture.gd.source prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid prototype-game/addons/playbot/plugin.gd.uid prototype-game/project.godot"
   SETUP_PREAMBLE="You are in a Playbot lane workspace: an isolated git worktree of $REPO that Playbot created and already checked out on the branch that workspace owns."
   IFS= read -r -d '' SETUP1 <<EOF || true
 1. First action: verify your starting point before you touch anything. Both checks below are mandatory; this brief is complete, so nothing outside it will tell you to run them.
@@ -568,10 +580,17 @@ if [ "$LANE" -eq 1 ]; then
       $LANE_LANDING_ACT
       Then read both distances once with \`git rev-list --left-right --count $LANE_LANDING_REF...HEAD\` (three dots), which prints the number of commits the landing branch has that you do not - how far BEHIND you are - then the number you have that it does not - how far AHEAD you are. Act on exactly one of these:
       - behind 0, ahead 0 - current: your base is current; proceed.
-      - behind above 0, ahead 0 - behind only - AND \`git status --porcelain\` prints NOTHING: run \`git reset --hard $LANE_LANDING_REF\` and proceed.
-      - behind above 0, ahead 0 - behind only - but \`git status --porcelain\` prints anything at all: STOP and never reset; uncommitted work is never discarded - append \`blocked: lane workspace is behind its landing branch but carries uncommitted changes: {the paths git status --porcelain printed}\` to the status file and stop.
+      - behind above 0, ahead 0 - behind only - AND every line \`git status --porcelain\` prints names one of the eight Playbot churn paths listed below (including the case where it prints nothing at all): reset, but only after the disclosure step below.
+      - behind above 0, ahead 0 - behind only - and \`git status --porcelain\` prints anything that is NOT one of those eight paths: STOP and never reset; uncommitted work is never discarded - append \`blocked: lane workspace is behind its landing branch but carries uncommitted changes: {the printed paths that are not Playbot churn}\` to the status file and stop.
       - behind 0, ahead above 0 - ahead only: those commits are your own work, or the newer landing tip your workspace was created from, and nothing about your base needs fixing; proceed and do NOT reset.
       - behind above 0, ahead above 0 - diverged: STOP. Do not reset, rebase, merge, or guess - append \`blocked: lane workspace has diverged from its landing branch\` to the status file and stop.
+
+      Playbot's editor integration rewrites eight tracked paths across unrelated worktrees, so a modification to one of those - and to nothing else - is that workspace's documented steady state rather than work of yours. Those eight exact paths are $LANE_CHURN_LIST.
+      That list is eight literal paths: no directory, extension, or basename near them is churn, so a modification to any other path under \`prototype-game/addons/playbot/\` still makes your workspace dirty.
+      Disclosure is a PRECONDITION of the reset, not a follow-up: a reset destroys whatever those paths currently hold, and \`prototype-game/project.godot\` is a hand-editable settings file rather than a generated one, so it can carry real human edits.
+      Before you reset, run \`git diff -- $LANE_CHURN_ARGS\` and leave its complete output in your log, untruncated and unsummarized - that output is the only record of what the reset discards.
+      Then append \`working: discarding Playbot churn before base reset: {the allowlisted paths you are about to discard}\` to the status file, naming exactly the paths \`git status --porcelain\` printed.
+      Only then run \`git reset --hard $LANE_LANDING_REF\` and proceed. If you have not captured that diff and appended that line, do not reset.
 EOF
   SETUP1=${SETUP1%$'\n'}
 else
@@ -584,10 +603,19 @@ case "$MODE" in
     SETUP2=""
     if [ "$LANE" -eq 1 ]; then
       RULE1="1. Never push to the default branch (push only $LANE_BRANCH_DESC; never create or switch branches). Never merge a PR."
+      IFS= read -r -d '' DOD <<EOF || true
+# Definition of done
+Delivery contract: mode=direct-PR
+This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+The task is complete only when committed on your branch.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, passing \`--base $LANDING_BRANCH\` explicitly so the PR targets your landing branch.
+That base is not optional: your work is based on \`$LANDING_BRANCH\`, and a PR opened without it targets the repository's default branch instead - a branch this lane must not touch, carrying every commit on the landing branch that the default branch does not have.
+Then append \`done: PR {url}\` to the status file and stop.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
     else
       RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-    fi
-    IFS= read -r -d '' DOD <<EOF || true
+      IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
@@ -595,6 +623,7 @@ The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
+    fi
     ;;
   local-only)
     SETUP2=""
@@ -681,14 +710,13 @@ if [ "$LANE" -eq 1 ]; then
     *)
       LANE_CONTRACT_RULE="Implement and commit, then report done and WAIT: firstmate tells you when to run /no-mistakes. Do not start the pipeline before it does." ;;
   esac
-  LANE_CONTRACT_BLOCK=$(printf '\n%s\n%s\n%s\n%s\n' \
-    '# Delivery contract - READ THIS BEFORE YOU SHIP ANYTHING' \
-    "Delivery contract: mode=$MODE" \
-    "$LANE_CONTRACT_RULE" \
-    "\`# Definition of done\` at the end of this brief is the full contract and the only delivery authority. Do not infer a different path from habit, from what another lane did, or from anything said when this task was handed to you: this brief is complete and needs no dispatch-time override.")
-  # $(...) strips trailing newlines, so restore the blank line that separates this
-  # block from the section after it.
-  LANE_CONTRACT_BLOCK="$LANE_CONTRACT_BLOCK"$'\n'
+  IFS= read -r -d '' LANE_CONTRACT_BLOCK <<EOF || true
+
+# Delivery contract - READ THIS BEFORE YOU SHIP ANYTHING
+Delivery contract: mode=$MODE
+$LANE_CONTRACT_RULE
+\`# Definition of done\` at the end of this brief is the full contract and the only delivery authority. Do not infer a different path from habit, from what another lane did, or from anything said when this task was handed to you: this brief is complete and needs no dispatch-time override.
+EOF
 fi
 
 cat > "$BRIEF" <<EOF
