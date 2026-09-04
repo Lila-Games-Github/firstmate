@@ -884,30 +884,139 @@ test_lane_brief_verifies_its_base_before_working() {
     "lane brief does not explain why its base can start stale"
   assert_grep "Your landing branch is \`proto/godot/frog-pile\`." "$brief" \
     "lane brief does not name the explicit landing branch it must verify against"
-  assert_grep "prefer the remote-tracking ref \`origin/proto/godot/frog-pile\`" "$brief" \
-    "lane brief does not resolve the landing tip from the remote it was created from"
-  assert_grep "\`git rev-parse HEAD\` equals \`git rev-parse {landing-tip}\`" "$brief" \
-    "lane brief does not have the worker compare HEAD with the landing tip"
-  assert_grep "run \`git reset --hard {landing-tip}\` and proceed" "$brief" \
+  # The comparison target is the LOCAL landing branch: Playbot built the workspace
+  # from the remote tip, so origin/<landing> can never reveal an unpushed landing.
+  assert_grep "Compare against the LOCAL landing branch, never \`origin/<landing branch>\`" "$brief" \
+    "lane brief does not name the local landing branch as its comparison target"
+  assert_no_grep "origin/proto/godot/frog-pile" "$brief" \
+    "lane brief still compares its base against the remote ref it was created from"
+  assert_grep "\`git rev-parse HEAD\` equals \`git rev-parse proto/godot/frog-pile\`" "$brief" \
+    "lane brief does not have the worker compare HEAD with the local landing branch"
+  assert_grep "run \`git reset --hard proto/godot/frog-pile\` and proceed" "$brief" \
     "lane brief does not reset a behind workspace that carries no commits of its own"
-  assert_grep "prints anything at all: STOP. Do not reset, rebase, merge, or guess" "$brief" \
-    "lane brief lets a lane guess when its workspace already carries commits"
-  assert_grep "blocked: lane workspace is behind its landing branch and carries commits of its own" "$brief" \
-    "lane brief does not report the ambiguous base case instead of acting on it"
+  assert_grep "prints anything at all - your workspace carries commits of its own, whether it is only ahead of the landing branch or has diverged from it: STOP" "$brief" \
+    "lane brief does not stop on both the ahead-only and the diverged shape"
+  assert_grep "blocked: lane workspace carries commits of its own, so its base cannot be reset" "$brief" \
+    "lane brief mislabels a workspace that carries its own commits"
+  assert_no_grep "blocked: lane workspace is behind its landing branch and carries commits of its own" "$brief" \
+    "lane brief still calls an ahead-only workspace behind its landing branch"
   # The base check is part of the first action, before any task work.
   assert_grep "1. First action: verify your starting point before you touch anything." "$brief" \
     "lane brief does not make starting-point verification the first action"
 
-  # Without an explicit landing branch the brief points at the recorded value
-  # rather than inventing a branch name.
+  # A lane never goes through bin/fm-spawn.sh, so there is no state/<id>.meta to
+  # read and no default branch to fall back to: with no landing branch supplied the
+  # brief must stop and ask firstmate rather than guess a branch.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-base-implicit some-proj --mode no-mistakes --lane >/dev/null 2>&1 \
     || fail "lane brief without a landing branch should scaffold"
   brief="$home/data/lane-base-implicit/brief.md"
-  assert_grep "Your landing branch is your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`'$home/state/lane-base-implicit.meta'\`" "$brief" \
-    "lane brief without an explicit landing branch does not point at the recorded one"
-  assert_grep "run \`git reset --hard {landing-tip}\` and proceed" "$brief" \
-    "lane brief without an explicit landing branch lost its deterministic reset action"
-  pass "fm-brief.sh: a lane brief verifies its base against the landing tip before working"
+  assert_grep "blocked: lane landing branch is unknown; firstmate must name it" "$brief" \
+    "lane brief without a landing branch does not stop and ask firstmate for it"
+  assert_grep "never the repository default, never \`main\`, never the branch your workspace was created on" "$brief" \
+    "lane brief without a landing branch does not forbid substituting a branch"
+  assert_no_grep "landing_branch=" "$brief" \
+    "lane brief points at a state/<id>.meta field a Playbot lane never has"
+  assert_no_grep "falling back to the default branch" "$brief" \
+    "lane brief falls back to the default branch docs/playbot-lanes.md forbids for a lane"
+
+  # local-only is where the landing branch decides the merge, so its definition of
+  # done must use the same branch the base check verified against - and must not
+  # send the lane to a state/<id>.meta or a default branch either.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-base-dod some-proj --mode local-only --lane \
+    --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "local-only lane brief with an explicit landing branch should scaffold"
+  brief="$home/data/lane-base-dod/brief.md"
+  assert_grep "clean fast-forward onto your landing branch \`proto/godot/frog-pile\`" "$brief" \
+    "local-only lane brief does not keep its branch a fast-forward onto the landing branch it was given"
+  assert_grep "firstmate merges it into your landing branch \`proto/godot/frog-pile\` through the guarded fast-forward path" "$brief" \
+    "local-only lane brief does not land on the landing branch it was given"
+  assert_no_grep "landing_branch=" "$brief" \
+    "local-only lane brief still reads a state/<id>.meta field a Playbot lane never has"
+  assert_no_grep "falling back to the default branch" "$brief" \
+    "local-only lane brief still falls back to the default branch"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-base-dod-implicit some-proj --mode local-only --lane >/dev/null 2>&1 \
+    || fail "local-only lane brief without a landing branch should scaffold"
+  brief="$home/data/lane-base-dod-implicit/brief.md"
+  assert_grep "the landing branch firstmate supplies for this task" "$brief" \
+    "local-only lane brief without a landing branch does not defer to firstmate for it"
+  assert_no_grep "landing_branch=" "$brief" \
+    "local-only lane brief without a landing branch reads a meta field a lane never has"
+  pass "fm-brief.sh: a lane brief verifies its base against the local landing branch before working"
+}
+
+# The whole point of the base check is the landing that firstmate merged locally
+# and has not pushed: the workspace was created from the remote tip, so only the
+# local branch can show the drift. This executes the comparison the generated brief
+# prescribes - taking the ref out of the brief itself - against a real repository
+# whose local landing branch is ahead of its own origin ref.
+test_lane_base_check_detects_an_unpushed_landing() {
+  local home brief lane_ref repo wt stale landed outcome own
+  home="$TMP_ROOT/lane-drift-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-drift some-proj --mode local-only --lane \
+    --lane-branch task/lane-drift --landing-branch landing/frog-pile >/dev/null 2>&1 \
+    || fail "lane brief for the drift case should scaffold"
+  brief="$home/data/lane-drift/brief.md"
+  # shellcheck disable=SC2016  # the sed script matches the brief's literal backticks; nothing may expand here
+  lane_ref=$(sed -n 's/^.*run `git reset --hard \([^`]*\)` and proceed.*$/\1/p' "$brief" | head -n 1)
+  [ -n "$lane_ref" ] || fail "lane brief prescribes no ref to reset a stale base onto"
+
+  # Local landing branch at B, its origin ref still at the older A, lane worktree
+  # checked out at A with no commits of its own - exactly the unpushed landing.
+  repo="$TMP_ROOT/lane-drift-repo"
+  wt="$TMP_ROOT/lane-drift-wt"
+  fm_git_identity fmtest fmtest@example.invalid
+  fm_git_init_commit "$repo"
+  git -C "$repo" branch -M landing/frog-pile
+  fm_git_add_origin "$repo" "$repo.origin.git"
+  git -C "$repo" push -q origin landing/frog-pile
+  stale=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" worktree add -q -b task/lane-drift "$wt" "$stale"
+  printf 'landed\n' > "$repo/landed.txt"
+  git -C "$repo" add landed.txt
+  git -C "$repo" commit -qm "sibling lane landed locally, not pushed"
+  landed=$(git -C "$repo" rev-parse landing/frog-pile)
+  [ "$landed" != "$stale" ] || fail "drift fixture did not advance the local landing branch"
+  [ "$(git -C "$wt" rev-parse "origin/landing/frog-pile")" = "$stale" ] \
+    || fail "drift fixture pushed the landing commit, so the remote ref is not stale"
+
+  outcome=$(lane_base_outcome "$wt" "$lane_ref")
+  [ "$outcome" = reset ] \
+    || fail "the base check the lane brief prescribes reported '$outcome' for an unpushed landing, not the drift"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$landed" ] \
+    || fail "the prescribed reset did not move the lane worktree onto the local landing branch"
+
+  # Ahead-only: a workspace carrying its own commit must be reported, never reset.
+  wt="$TMP_ROOT/lane-drift-ahead-wt"
+  git -C "$repo" worktree add -q -b task/lane-drift-ahead "$wt" landing/frog-pile
+  printf 'lane work\n' > "$wt/lane.txt"
+  git -C "$wt" add lane.txt
+  git -C "$wt" commit -qm "lane's own commit"
+  own=$(git -C "$wt" rev-parse HEAD)
+  outcome=$(lane_base_outcome "$wt" "$lane_ref")
+  [ "$outcome" = blocked ] \
+    || fail "the prescribed base check reported '$outcome' for a workspace ahead with its own commit, not a stop"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$own" ] \
+    || fail "the prescribed base check discarded a lane's own commit"
+  pass "fm-brief.sh: the lane base check detects an unpushed landing and refuses to reset a lane's own commits"
+}
+
+# The three arms of the generated base check, run against a real worktree:
+# equal tip -> current, behind with nothing of its own -> reset, any commit of its
+# own -> blocked. Echoes which arm fired; performs the reset when that arm fires.
+lane_base_outcome() {
+  local wt=$1 ref=$2
+  if [ "$(git -C "$wt" rev-parse HEAD)" = "$(git -C "$wt" rev-parse "$ref")" ]; then
+    printf 'current\n'
+    return 0
+  fi
+  if [ -n "$(git -C "$wt" log "$ref..HEAD" --oneline)" ]; then
+    printf 'blocked\n'
+    return 0
+  fi
+  git -C "$wt" reset --hard "$ref" >/dev/null 2>&1 || { printf 'reset-failed\n'; return 0; }
+  printf 'reset\n'
 }
 
 # Firstmate began restating the delivery mode in every lane dispatch after lanes ran
@@ -1087,6 +1196,7 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_lane_mode_drops_the_crewmate_branch_convention
 test_lane_brief_verifies_its_base_before_working
+test_lane_base_check_detects_an_unpushed_landing
 test_lane_brief_declares_its_delivery_contract_prominently
 test_lane_branch_name_is_stated_in_every_branch_instruction
 test_lane_without_a_branch_name_stays_coherent

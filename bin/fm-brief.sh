@@ -53,8 +53,10 @@
 #   2. Base. firstmate creates a crewmate's worktree from the recorded landing
 #      branch locally, while Playbot creates a lane workspace from that branch's
 #      REMOTE tip, so an unpushed landing leaves the workspace behind. Setup step 1b
-#      makes the worker verify HEAD against the landing tip and act deterministically:
-#      reset when behind with no commits of its own, stop and report when it has any.
+#      makes the worker compare HEAD against the LOCAL landing branch - never
+#      origin/<branch>, which is the ref the workspace was created from and so can
+#      never reveal that drift - and act deterministically: reset only when behind
+#      with no commits of its own, stop and report whenever it carries any.
 #   3. Delivery contract. The mode is declared prominently after the task, above the
 #      Herdr and setup sections, repeating only the machine-readable contract line
 #      and that mode's one prohibition and pointing at the Definition of done as the
@@ -65,10 +67,13 @@
 # --lane-branch <branch> names the workspace branch exactly (Playbot's generated
 # task/<task-id>-<date>, for example); without it the brief refers to the branch the
 # workspace was created on rather than inventing a name. It requires --lane.
-# --landing-branch <branch> names the branch the base check compares against;
-# without it the brief points the worker at the landing_branch= recorded in the
-# task's metadata, falling back to the default branch. It requires --lane, because a
-# non-lane worktree is already based on that branch locally.
+# --landing-branch <branch> names the branch the base check compares against. It
+# stays optional: without it the generated brief has the worker stop and ask
+# firstmate for the landing branch rather than guess one, because a lane is created
+# by Playbot's dispatch and never by bin/fm-spawn.sh, so it has no recorded
+# landing_branch= to read, and substituting a repository default is exactly what
+# docs/playbot-lanes.md forbids for a lane. It requires --lane, because a non-lane
+# worktree is already based locally on the branch firstmate recorded for it.
 # --lane is refused on scout and secondmate scaffolds: a scout brief carries no
 # branch convention to replace, and a charter is not a lane.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
@@ -461,9 +466,17 @@ fi
 # A lane also needs its base verified before it works, which an ordinary crewmate
 # does not: firstmate creates a crewmate's worktree from the recorded landing
 # branch locally, while Playbot creates a lane workspace from that branch's REMOTE
-# tip, so a landing that has not been pushed yet leaves the workspace behind. The
-# generated step is deterministic - reset when behind with no commits of its own,
-# stop and report when it has any - so no dispatch-time instruction is needed.
+# tip, so a landing that has not been pushed yet leaves the workspace behind.
+# The generated check compares HEAD against the LOCAL landing branch and never
+# against origin/<branch>: the remote ref is the one Playbot built the workspace
+# from, so it can never reveal the drift, while firstmate's landings sit unpushed
+# for long stretches and a lane worktree shares the primary repository's git dir,
+# which makes the local branch both the only ref that shows the drift and a ref
+# that resolves there. The step is deterministic - reset only when behind with no
+# commits of its own, stop and report whenever the workspace carries any - so no
+# dispatch-time instruction is needed. A lane has no state/<id>.meta, since
+# nothing outside bin/fm-spawn.sh writes one, so without --landing-branch the step
+# stops and asks firstmate instead of substituting a default branch.
 if [ "$LANE" -eq 1 ]; then
   if [ -n "$LANE_BRANCH" ]; then
     LANE_BRANCH_DESC="your workspace branch \`$LANE_BRANCH\`"
@@ -473,11 +486,17 @@ if [ "$LANE" -eq 1 ]; then
     LANE_READY_LINE="\`done: ready in branch {your workspace branch}\`"
   fi
   if [ -n "$LANDING_BRANCH" ]; then
-    LANE_LANDING_DESC="\`$LANDING_BRANCH\`"
-    LANE_LANDING_RESOLVE="Resolve its current tip into the ref you use below, written \`{landing-tip}\`: prefer the remote-tracking ref \`origin/$LANDING_BRANCH\` when it exists, else the local \`$LANDING_BRANCH\`."
+    LANE_LANDING_INTRO="Your landing branch is \`$LANDING_BRANCH\`."
+    LANE_LANDING_REF="$LANDING_BRANCH"
+    LANE_LANDING_ACT="If \`git rev-parse --verify --quiet $LANDING_BRANCH\` prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch $LANDING_BRANCH is missing from this repository\` to the status file and stop. Otherwise act on exactly one of these three:"
+    LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
+    LANE_LANDING_GUARD=""
   else
-    LANE_LANDING_DESC="your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$META_FILE\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded"
-    LANE_LANDING_RESOLVE="Resolve that branch name once, then resolve its current tip into the ref you use below, written \`{landing-tip}\`: prefer its remote-tracking ref under \`origin/\` when one exists, else the local branch."
+    LANE_LANDING_INTRO="This brief was generated without a landing branch, so it cannot name the branch your base must be verified against - and no substitute is acceptable: never the repository default, never \`main\`, never the branch your workspace was created on. STOP before you touch anything: append \`blocked: lane landing branch is unknown; firstmate must name it\` to the status file and stop."
+    LANE_LANDING_REF="{landing-branch}"
+    LANE_LANDING_ACT="Once firstmate names the landing branch, substitute that name for \`{landing-branch}\` below - always the local branch of that name - and act on exactly one of these three:"
+    LANE_LANDING_TARGET="the landing branch firstmate supplies for this task"
+    LANE_LANDING_GUARD=" Setup step 1b has you stop and ask firstmate for that branch; never guess one."
   fi
   SETUP_PREAMBLE="You are in a Playbot lane workspace: an isolated git worktree of $REPO that Playbot created and already checked out on the branch that workspace owns."
   IFS= read -r -d '' SETUP1 <<EOF || true
@@ -489,12 +508,12 @@ if [ "$LANE" -eq 1 ]; then
       Never run \`git checkout -b\` or \`git switch -c\`, and never switch branches: a branch of your own steps off the one your workspace owns.
 
    b. **Base.** Playbot creates a lane workspace from the REMOTE tip of the landing branch, so a landing that has not been pushed yet leaves your workspace behind and you would build on stale code.
-      Your landing branch is $LANE_LANDING_DESC.
-      $LANE_LANDING_RESOLVE
-      Run \`git fetch --all --prune\`, then act on exactly one of these:
-      - \`git rev-parse HEAD\` equals \`git rev-parse {landing-tip}\`: your base is current; proceed.
-      - HEAD is not that tip and \`git log {landing-tip}..HEAD --oneline\` prints NOTHING (your workspace is behind and carries no commits of its own): run \`git reset --hard {landing-tip}\` and proceed.
-      - \`git log {landing-tip}..HEAD --oneline\` prints anything at all: STOP. Do not reset, rebase, merge, or guess - append \`blocked: lane workspace is behind its landing branch and carries commits of its own\` to the status file and stop.
+      Compare against the LOCAL landing branch, never \`origin/<landing branch>\`: the remote ref is the one your workspace was created from, so it can never reveal this drift, and your lane worktree shares the primary repository's git dir, so the local branch resolves here.
+      $LANE_LANDING_INTRO
+      $LANE_LANDING_ACT
+      - \`git rev-parse HEAD\` equals \`git rev-parse $LANE_LANDING_REF\`: your base is current; proceed.
+      - HEAD is not that tip and \`git log $LANE_LANDING_REF..HEAD --oneline\` prints NOTHING (your workspace is behind the landing branch and carries no commits of its own): run \`git reset --hard $LANE_LANDING_REF\` and proceed.
+      - \`git log $LANE_LANDING_REF..HEAD --oneline\` prints anything at all - your workspace carries commits of its own, whether it is only ahead of the landing branch or has diverged from it: STOP. Do not reset, rebase, merge, or guess - append \`blocked: lane workspace carries commits of its own, so its base cannot be reset\` to the status file and stop.
 EOF
   SETUP1=${SETUP1%$'\n'}
 else
@@ -521,31 +540,34 @@ EOF
     ;;
   local-only)
     SETUP2=""
+    # One rendering for both modes: the branch phrase, the ready line and the
+    # landing-branch phrases are the only differences, and a lane resolves its
+    # landing branch from --landing-branch rather than from a state/<id>.meta it
+    # never has.
     if [ "$LANE" -eq 1 ]; then
-      RULE1="1. Never push to any remote and never open a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches. Firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
-      IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-Delivery contract: mode=local-only
-This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on $LANE_BRANCH_DESC. Do NOT push, do NOT open a PR, do NOT merge.
-Keep that branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$META_FILE\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.
-If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append $LANE_READY_LINE to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path.
-EOF
+      RULE1="1. Never push to any remote and never open a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches. Firstmate handles the merge into $LANE_LANDING_TARGET."
+      DOD_BRANCH_DESC="$LANE_BRANCH_DESC"
+      DOD_READY_LINE="$LANE_READY_LINE"
+      DOD_LANDING_RULE="Keep that branch a clean fast-forward onto $LANE_LANDING_TARGET.$LANE_LANDING_GUARD
+If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward."
+      DOD_LANDING_MERGE="The configured merge authority approves the ready branch, then firstmate merges it into $LANE_LANDING_TARGET through the guarded fast-forward path."
     else
       RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
-      IFS= read -r -d '' DOD <<EOF || true
+      DOD_BRANCH_DESC="your branch \`fm/$ID\`"
+      DOD_READY_LINE="\`done: ready in branch fm/$ID\`"
+      DOD_LANDING_RULE="Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$META_FILE\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.
+If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward."
+      DOD_LANDING_MERGE="The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path."
+    fi
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$META_FILE\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.
-If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path.
+The task is complete only when committed on $DOD_BRANCH_DESC. Do NOT push, do NOT open a PR, do NOT merge.
+$DOD_LANDING_RULE
+When it is implemented and committed, append $DOD_READY_LINE to the status file and stop.
+$DOD_LANDING_MERGE
 EOF
-    fi
     ;;
   *)  # no-mistakes
     SETUP2="
