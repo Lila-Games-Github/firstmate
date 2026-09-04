@@ -1659,10 +1659,13 @@ function settlePause(ms) {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
-// A settle record exists only when a re-read actually happened, so its absence
-// is what says the first read answered and nothing waited.
-function settleRecord(reads, startedAt, timeoutMs, outcome) {
-  if (reads < 2) return null;
+// A settle record exists only when a re-read was actually attempted, so its
+// absence is what says the first read answered and nothing waited. The gate is
+// attempts rather than completed reads because an attempt that throws while
+// resolving is still a wait the caller has to be told about; reads stays the
+// reported count of readings that produced a verdict.
+function settleRecord(attempts, reads, startedAt, timeoutMs, outcome) {
+  if (attempts < 2) return null;
   return { reads, waitedMs: Date.now() - startedAt, timeoutMs, outcome };
 }
 
@@ -1673,11 +1676,13 @@ function settleRecord(reads, startedAt, timeoutMs, outcome) {
 // all, so an existing workspace is never waited on.
 async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, timeoutMs) {
   const startedAt = Date.now();
+  let attempts = 0;
   let reads = 0;
   for (;;) {
     let project;
     let workspace;
     let coverage;
+    attempts += 1;
     try {
       project = resolveProject(projectId, topology());
       workspace = resolveWorkspace(project, workspaceId);
@@ -1687,7 +1692,7 @@ async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, 
       return {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
-        settle: settleRecord(reads, startedAt, timeoutMs, "unreadable"),
+        settle: settleRecord(attempts, reads, startedAt, timeoutMs, "unreadable"),
       };
     }
     const waitedMs = Date.now() - startedAt;
@@ -1696,7 +1701,7 @@ async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, 
       await settlePause(WORKSPACE_ROOTS_SETTLE_POLL_INTERVAL_MS);
       continue;
     }
-    const settle = settleRecord(reads, startedAt, timeoutMs, unregistered ? "unregistered" : "registered");
+    const settle = settleRecord(attempts, reads, startedAt, timeoutMs, unregistered ? "unregistered" : "registered");
     try {
       return { ok: true, freshness: workspaceFreshness(project, workspace, landingBranch), settle };
     } catch (error) {
@@ -5117,7 +5122,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         if (!settled.settle) throw new Error(refusal);
         const waited = settled.settle.outcome === "unregistered"
           ? `Its roots were still unregistered after ${settled.settle.reads} reads over ${settled.settle.waitedMs}ms.`
-          : `Dispatch re-read it ${settled.settle.reads} times over ${settled.settle.waitedMs}ms and refused on that reading.`;
+          : `Dispatch re-read it over ${settled.settle.waitedMs}ms across ${settled.settle.reads} completed read(s) and refused on that reading.`;
         const stop = refusal.endsWith(".") ? "" : ".";
         throw new Error(`${refusal}${stop} ${waited} Both still exist: once workspace ${worker.workspace_id} reads fresh, deliver this task with send_message against chat ${worker.thread_id} rather than dispatching again.`);
       }

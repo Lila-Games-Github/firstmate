@@ -671,15 +671,20 @@ ok - fm-playbot-lanes: landing branches require current resolvable remote eviden
 ok - fm-playbot-lanes: retirement inventory reports a malformed remote Git timeout as configuration, not landing evidence
 ```
 
-On 2026-09-04, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 173 checks on base commit `86e402c` after making `dispatch` settle a created workspace whose roots Playbot has not registered yet.
+On 2026-09-04, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 reached 174 of 174 checks on this branch, whose base is `86e402c`, after making `dispatch` settle a created workspace whose roots Playbot has not registered yet.
+Unmodified `86e402c` is not green.
+The three behaviour-changing settle checks - the late registration that settles, the never-registered refusal with its recovery, and the malformed settle budget - were each run against the unmodified `bin/fm-playbot-lanes.mjs` at base `86e402c`, and each fails there.
+The fourth behaviour-changing check, the wait that ends in an unresolvable read, was run against this branch with `settleRecord` gated on completed reads rather than on attempts, which is the one shape that drops the wait clause and the recovery sentence from that refusal, and it fails there.
+The three no-regression guards - the registered-but-mismatched refusal, the caller-supplied workspace, and the already-registered happy path - pass both on base and with the fix.
 The fixture endpoint withholds the `workspace_roots` rows of a workspace it just created, either for a set number of milliseconds or permanently, so the race is reproduced against real Playbot-shaped state rather than asserted from the source.
-That base run first reproduced a pre-existing failure unrelated to the settle work: three `home_dispatch` calls added with the remote-teardown lock tests passed `newWorkspace` without the `landingBranch` that [playbot-lanes.md](../playbot-lanes.md#lane-lifecycle) has required since the freshness surface landed, so each dispatch refused before reaching the lock behavior under test and the suite aborted at the first of them.
-Adding the missing `landingBranch` to those three calls is what makes the whole suite reach 173.
+Running the suite on base also reproduced a pre-existing failure unrelated to the settle work: three `home_dispatch` calls added with the remote-teardown lock tests passed `newWorkspace` without the `landingBranch` that [playbot-lanes.md](../playbot-lanes.md#lane-lifecycle) has required since the freshness surface landed, so each dispatch refused before reaching the lock behavior under test and the suite aborted at the first of them.
+Adding the missing `landingBranch` to those three calls is what makes the whole suite reach 174.
 The exact settle-specific output was:
 
 ```text
 ok - fm-playbot-lanes: dispatch settles a created workspace whose roots are registered late and reports the wait
 ok - fm-playbot-lanes: a created workspace whose roots never register refuses with both ids and the send_message recovery
+ok - fm-playbot-lanes: a wait that ends in an unresolvable read still refuses with the recovery
 ok - fm-playbot-lanes: a created workspace whose registered roots disagree with the landing branch refuses without retrying
 ok - fm-playbot-lanes: a caller-supplied workspace is never waited on for its own root registration
 ok - fm-playbot-lanes: a created workspace whose roots are already registered is dispatched with no wait and an unchanged result
