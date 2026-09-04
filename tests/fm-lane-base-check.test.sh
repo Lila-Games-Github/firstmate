@@ -170,6 +170,34 @@ test_modifications_outside_the_allowlist_block() {
   pass "fm-lane-base-check.sh: modifications outside the allowlist block the reset"
 }
 
+# Allowlist membership is a whole-string comparison of the pathname `git status`
+# reported, not a pattern or a line match. A pathname may legitimately contain a
+# newline, so a path whose SECOND line equals an allowlisted entry is not that
+# entry, and treating it as one would authorise discarding a file nobody owns.
+test_allowlist_membership_is_a_literal_path_not_a_pattern() {
+  local dir out sneaky
+  dir=$(make_case behind-newline-path)
+  sneaky=$'scratch\nprototype-game/project.godot'
+  mkdir -p "$dir/repo/$(dirname -- "$sneaky")"
+  printf 'work nobody has committed yet\n' > "$dir/repo/$sneaky"
+  git -C "$dir/repo" add -- "$sneaky"
+  git -C "$dir/repo" commit -qm "a tracked path whose name contains a newline"
+  git -C "$dir/wt" reset --hard refs/heads/landing/frog-pile >/dev/null 2>&1
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  printf 'edited by the lane\n' > "$dir/wt/$sneaky"
+  [ "$(git -C "$dir/wt" status --porcelain -z | tr -d '\0' | wc -l)" -gt 0 ] \
+    || fail "the fixture did not leave the newline path modified"
+
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "a path that merely contains an allowlisted entry must not be treated as churn"
+  assert_contains "$out" "outside the Playbot churn allowlist" \
+    "the block does not name why the path is not discardable"
+  assert_grep "edited by the lane" "$dir/wt/$sneaky" \
+    "the check discarded a modification it had no authority over"
+  pass "fm-lane-base-check.sh: allowlist membership is a literal path, not a pattern"
+}
+
 test_diverged_and_absent_landing_branch_block() {
   local dir out
   dir=$(make_case diverged)
@@ -508,6 +536,7 @@ test_current_and_ahead_only_proceed_untouched
 test_behind_only_with_a_clean_tree_requires_a_reset
 test_behind_with_allowlisted_churn_names_it_for_disclosure
 test_modifications_outside_the_allowlist_block
+test_allowlist_membership_is_a_literal_path_not_a_pattern
 test_diverged_and_absent_landing_branch_block
 test_publishing_lane_requires_a_published_landing_branch
 test_unresolvable_remote_tip_blocks_only_a_publishing_lane

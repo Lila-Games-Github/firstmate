@@ -1015,6 +1015,20 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
   assert_grep "passing \`--base proto/godot/frog-pile\` explicitly so the PR targets your landing branch" \
     "$home/data/lane-named-pr/brief.md" \
     "direct-PR lane brief does not name the landing branch as the PR base"
+
+  # A no-mistakes lane cannot establish that base - `no-mistakes axi run` has no
+  # base flag - so its definition of done must say who chooses it and make a
+  # mismatch a report, never something the worker tries to repair.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named-nm some-proj --mode no-mistakes --lane \
+    --lane-branch task/lane-named-nm-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "no-mistakes lane brief should scaffold"
+  brief="$home/data/lane-named-nm/brief.md"
+  assert_grep "base is whatever no-mistakes is configured to target" "$brief" \
+    "no-mistakes lane brief does not say who chooses its PR base"
+  assert_grep "blocked: no-mistakes targets {the configured target}, not landing branch proto/godot/frog-pile" \
+    "$brief" "no-mistakes lane brief does not make a base mismatch a reported block"
+  assert_grep "Never pass a base, edit no-mistakes configuration, or work around it" "$brief" \
+    "no-mistakes lane brief does not forbid repairing the base itself"
   pass "fm-brief.sh: an explicit lane branch is stated in every branch instruction"
 }
 

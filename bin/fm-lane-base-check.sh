@@ -116,6 +116,24 @@ churn_allowlist() {
   node "$owner" tracked-churn-allowlist 2>/dev/null || return 0
 }
 
+# Whether one changed path IS an allowlisted path, compared as whole literal
+# strings. This is the only test that authorises a discard, so it must never treat
+# the pathname as a pattern or as a list of lines: `git status --porcelain -z`
+# preserves a newline inside a pathname exactly, and a matcher that split on
+# newlines would call `scratch<newline>prototype-game/project.godot` churn because
+# one of its lines is an allowlisted entry. The `churn-paths:` line is
+# space-separated, which is safe only because the owned paths carry no whitespace;
+# an exact-match test is what keeps that a property of the data rather than luck.
+is_allowlisted_churn() {
+  local candidate=$1 entry
+  for entry in ${CHURN_ALLOWLIST[@]+"${CHURN_ALLOWLIST[@]}"}; do
+    if [ "$candidate" = "$entry" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Every path `git status` reports, into CHANGED_PATHS, NUL-separated on the way so
 # a pathname with a space or a newline keeps its exact Git identity. A rename or
 # copy record is followed by its source path, which is a change of that path too.
@@ -240,13 +258,20 @@ if [ "$AHEAD" -gt 0 ]; then
   current "the tip of $LANDING ($LOCAL_TIP) is an ancestor of HEAD, which is $AHEAD commit(s) ahead of it"
 fi
 
-CHURN=$(churn_allowlist)
+CHURN_ALLOWLIST=()
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  CHURN_ALLOWLIST+=("$entry")
+done <<EOF
+$(churn_allowlist)
+EOF
+
 CHURN_MODIFIED=
 OUTSIDE=
 collect_changed_paths
 for path in ${CHANGED_PATHS[@]+"${CHANGED_PATHS[@]}"}; do
   [ -n "$path" ] || continue
-  if printf '%s\n' "$CHURN" | grep -qxF -- "$path"; then
+  if is_allowlisted_churn "$path"; then
     CHURN_MODIFIED="${CHURN_MODIFIED:+$CHURN_MODIFIED }$path"
   else
     OUTSIDE="${OUTSIDE:+$OUTSIDE, }$path"

@@ -627,17 +627,26 @@ EOF
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    # A direct-PR lane establishes its own PR base with `gh-axi --base`, but
+    # `no-mistakes axi run` takes no base flag, so this mode cannot. The lane is
+    # still held to the publication precondition, whose whole premise is that the
+    # PR base is the landing branch - so say plainly who chooses that base here,
+    # and make a mismatch a report rather than something the worker may repair.
     if [ "$LANE" -eq 1 ]; then
       RULE1="1. Never push to the default branch. Never merge a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches."
+      NM_LANE_PR_BASE="
+That PR's base is whatever no-mistakes is configured to target; \`no-mistakes axi run\` takes no base flag, so neither this brief nor you can set it.
+Before you start no-mistakes, confirm its configured target is \`$LANDING_BRANCH\`. If it is anything else, STOP and REPORT: append \`blocked: no-mistakes targets {the configured target}, not landing branch $LANDING_BRANCH\` to the status file and stop. Never pass a base, edit no-mistakes configuration, or work around it - reporting the mismatch is the whole of your job here."
     else
       RULE1='1. Never push to the default branch. Never merge a PR.'
+      NM_LANE_PR_BASE=""
     fi
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.$NM_LANE_PR_BASE
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
