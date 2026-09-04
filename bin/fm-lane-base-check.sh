@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Answer one question about the current git worktree: is this landing branch safe
+# to start lane work from, and if not, why not.
+# Usage: fm-lane-base-check.sh <landing-branch> [--publishes]
+#   Runs in the current worktree and WRITES NOTHING: no reset, no fetch, no ref
+#   update, no index change. It reports a verdict and the caller acts on it.
+#   bin/fm-brief.sh --lane renders this invocation as a lane brief's first action,
+#   because Playbot creates a lane workspace from the REMOTE tip of the landing
+#   branch, so a landing that has not been pushed yet leaves the workspace behind.
+#   <landing-branch> is a plain local branch name. It is always compared as
+#   refs/heads/<branch>: the remote ref is the one the workspace was created from
+#   and so can never reveal that drift, and a bare name would also resolve through
+#   refs/tags/ and refs/remotes/.
+#   --publishes declares that this lane ships through a PR. A PR's base is the
+#   landing branch AS PUBLISHED, so a commit that is on the local landing branch
+#   but not on its remote tip would ride along in the PR as if it were the lane's
+#   own work. Only with this flag is the local landing branch required to carry
+#   nothing its remote tip lacks; a local-only lane publishes nothing, so its local
+#   landing branch is the whole truth and no remote comparison applies.
+# Verdicts are exit codes, so a caller branches on the code and never parses prose:
+#   0   current: <evidence>          base is safe; proceed untouched
+#   10  reset-required: <ref>        safe to reset, onto exactly that ref
+#       churn-paths: <paths...>      allowlisted Playbot churn the reset would
+#                                    discard, empty when the working tree is clean
+#   20  blocked: <evidence>          not safe; one line naming the evidence
+#   2   usage error (message on stderr)
+# The named states, all of them:
+#   current            HEAD is the landing tip.
+#   ahead only         the landing tip is an ancestor of HEAD, which is what
+#                      docs/playbot-lanes.md calls current: the lane's own commits,
+#                      or the newer landing tip its workspace was created from.
+#   behind only, clean tree                      reset-required, no churn paths.
+#   behind only, allowlisted churn only          reset-required, naming those paths
+#                                                (staged churn included).
+#   behind only, anything outside the allowlist  blocked; uncommitted work outside
+#                                                the allowlist is never discarded.
+#   diverged                                     blocked.
+#   absent local landing branch                  blocked.
+#   --publishes and the local landing branch carries commits its remote tip lacks
+#                      blocked, naming both commits: one push of the landing branch
+#                      clears it. A remote tip that is AHEAD of the local landing
+#                      branch is not blocked - that is the state right after a PR
+#                      merges, it carries no ride-along risk, and pushing could not
+#                      fix it anyway.
+#   --publishes and no remote tip resolvable     blocked; absence of evidence
+#                      cannot prove nothing rides along.
+# The tracked-churn allowlist is NOT defined here. It is read at run time from its
+# owner, `bin/fm-playbot-lanes.mjs tracked-churn-allowlist`, so this script cannot
+# drift from the list Playbot's own retirement inspection allows. When that list
+# cannot be read, NO path is treated as churn: any modification then makes the
+# workspace dirty and the verdict is blocked, because an unreadable owner must
+# never widen what a reset is allowed to discard.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  awk '
+    NR == 1 { next }
+    /^#/ { sub(/^# ?/, ""); print; next }
+    { exit }
+  ' "$0"
+}
+
+EXIT_CURRENT=0
+EXIT_RESET_REQUIRED=10
+EXIT_BLOCKED=20
+
+LANDING=
+PUBLISHES=0
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) usage; exit 0 ;;
+    --publishes) PUBLISHES=1 ;;
+    --*) echo "error: unknown option $arg" >&2; exit 2 ;;
+    *)
+      [ -z "$LANDING" ] || {
+        echo "error: one landing branch only (got '$LANDING' and '$arg')" >&2
+        exit 2
+      }
+      LANDING=$arg ;;
+  esac
+done
+[ -n "$LANDING" ] || {
+  echo "error: fm-lane-base-check.sh requires a landing branch" >&2
+  exit 2
+}
+
+current() { printf 'current: %s\n' "$1"; exit "$EXIT_CURRENT"; }
+blocked() { printf 'blocked: %s\n' "$1"; exit "$EXIT_BLOCKED"; }
+
+# The allowlist's owner publishes it through its own command, so nothing here
+# parses that file. A read failure yields an empty list, which is the safe
+# direction: every modification then counts against the workspace.
+churn_allowlist() {
+  local owner="$SCRIPT_DIR/fm-playbot-lanes.mjs"
+  command -v node >/dev/null 2>&1 || return 0
+  [ -f "$owner" ] || return 0
+  node "$owner" tracked-churn-allowlist 2>/dev/null || return 0
+}
+
+# Every path `git status` reports, NUL-separated so a pathname with a space or a
+# newline keeps its exact Git identity. A rename or copy record is followed by its
+# source path, which is a change of that path too.
+changed_paths() {
+  local record pending=0
+  while IFS= read -r -d '' record; do
+    if [ "$pending" -eq 1 ]; then
+      pending=0
+      printf '%s\n' "$record"
+      continue
+    fi
+    case "${record:0:2}" in
+      R?|C?|?R|?C) pending=1 ;;
+    esac
+    printf '%s\n' "${record:3}"
+  done < <(git status --porcelain -z)
+}
+
+git rev-parse --git-dir >/dev/null 2>&1 || blocked "not a git worktree: $(pwd -P)"
+
+LOCAL_REF="refs/heads/$LANDING"
+LOCAL_TIP=$(git rev-parse --verify --quiet "$LOCAL_REF") || LOCAL_TIP=
+[ -n "$LOCAL_TIP" ] || blocked "local landing branch $LANDING is missing from this repository"
+
+if [ "$PUBLISHES" -eq 1 ]; then
+  REMOTE_TIP=$(git rev-parse --verify --quiet "$LANDING@{upstream}" 2>/dev/null) || REMOTE_TIP=
+  if [ -z "$REMOTE_TIP" ]; then
+    REMOTE_MATCHES=0
+    while IFS= read -r remote; do
+      [ -n "$remote" ] || continue
+      candidate=$(git rev-parse --verify --quiet "refs/remotes/$remote/$LANDING") || candidate=
+      [ -n "$candidate" ] || continue
+      REMOTE_MATCHES=$((REMOTE_MATCHES + 1))
+      REMOTE_TIP=$candidate
+    done < <(git remote)
+    [ "$REMOTE_MATCHES" -eq 1 ] || blocked "remote tip of landing branch $LANDING could not be resolved: it has no upstream and $REMOTE_MATCHES remote-tracking refs are named refs/remotes/<remote>/$LANDING; run git branch --set-upstream-to=<remote>/$LANDING $LANDING so a lane that opens a PR can prove nothing rides along"
+  fi
+  RIDE_ALONG=$(git rev-list --count "$REMOTE_TIP..$LOCAL_REF")
+  [ "$RIDE_ALONG" -eq 0 ] || blocked "landing branch $LANDING is not published: local $LOCAL_TIP carries $RIDE_ALONG commit(s) its remote tip $REMOTE_TIP does not, and a PR based on that remote tip would present them as this task's work; push $LANDING before this lane proceeds"
+fi
+
+COUNTS=$(git rev-list --left-right --count "$LOCAL_REF...HEAD") \
+  || blocked "ahead/behind distance between $LOCAL_REF and HEAD could not be read"
+read -r BEHIND AHEAD <<EOF
+$COUNTS
+EOF
+
+if [ "$BEHIND" -eq 0 ] && [ "$AHEAD" -eq 0 ]; then
+  current "HEAD is the tip of $LANDING ($LOCAL_TIP)"
+fi
+if [ "$BEHIND" -gt 0 ] && [ "$AHEAD" -gt 0 ]; then
+  blocked "lane workspace has diverged from landing branch $LANDING: $BEHIND commit(s) behind, $AHEAD of its own"
+fi
+if [ "$AHEAD" -gt 0 ]; then
+  current "the tip of $LANDING ($LOCAL_TIP) is an ancestor of HEAD, which is $AHEAD commit(s) ahead of it"
+fi
+
+CHURN=$(churn_allowlist)
+CHURN_MODIFIED=
+OUTSIDE=
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  if printf '%s\n' "$CHURN" | grep -qxF -- "$path"; then
+    CHURN_MODIFIED="${CHURN_MODIFIED:+$CHURN_MODIFIED }$path"
+  else
+    OUTSIDE="${OUTSIDE:+$OUTSIDE, }$path"
+  fi
+done < <(changed_paths)
+
+[ -z "$OUTSIDE" ] || blocked "lane workspace is behind landing branch $LANDING but carries uncommitted changes outside the Playbot churn allowlist: $OUTSIDE"
+
+printf 'reset-required: %s\n' "$LOCAL_REF"
+printf 'churn-paths: %s\n' "$CHURN_MODIFIED"
+exit "$EXIT_RESET_REQUIRED"

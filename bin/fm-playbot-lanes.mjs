@@ -6,7 +6,7 @@
 // caller without one is an external terminal that dispatches without a lane
 // and supervises by polling.
 //
-// This executable has eight entry points:
+// This executable has nine entry points:
 //   serve             Run the stdio MCP server.
 //   call              Invoke one MCP tool from a terminal and print the same
 //                     result object the stdio transport returns.
@@ -17,6 +17,10 @@
 //                     firstmate watcher check that dispatch armed for it.
 //   setup             Install, reload, and verify the complete integration.
 //   doctor            Print bounded local integration diagnostics.
+//   tracked-churn-allowlist
+//                     Print the tracked-churn allowlist this file owns, one
+//                     path per line, so other tools read it here instead of
+//                     keeping a copy. Starts no server and touches no state.
 //
 // The server talks to Playbot through its local Electron DevTools socket and
 // invokes Playbot's own IPC handlers: threads:launch for chat and workspace
@@ -5424,6 +5428,7 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs call <tool> -  # read arguments JSON from stdin",
     "  fm-playbot-lanes.mjs serve",
     "  fm-playbot-lanes.mjs setup|doctor|install",
+    "  fm-playbot-lanes.mjs tracked-churn-allowlist",
     "",
     `MCP tools: ${toolDefinitions().map((tool) => tool.name).join(", ")}`,
   ].join("\n");
@@ -5563,6 +5568,7 @@ async function main() {
     return;
   }
   if (command === "doctor") return console.log(JSON.stringify(await doctor(), null, 2));
+  if (command === "tracked-churn-allowlist") return console.log(PLAYBOT_TRACKED_CHURN_PATHS.join("\n"));
   if (command === "supervision-poll") return await supervisionPoll(process.argv.slice(3));
   if (command === "hook-pretool") {
     try {

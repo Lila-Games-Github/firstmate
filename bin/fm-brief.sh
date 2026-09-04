@@ -53,24 +53,12 @@
 #   2. Base. firstmate creates a crewmate's worktree from the recorded landing
 #      branch locally, while Playbot creates a lane workspace from that branch's
 #      REMOTE tip, so an unpushed landing leaves the workspace behind. Setup step 1b
-#      makes the worker compare HEAD against the LOCAL landing branch, always
-#      spelled refs/heads/<branch> - never origin/<branch>, which is the ref the
-#      workspace was created from and so can never reveal that drift, and never a
-#      bare name, which git can resolve to a tag or a remote-tracking ref - and act
-#      on the four states an explicit ahead/behind reading distinguishes: current
-#      proceeds, behind-only resets and proceeds but only with a clean working
-#      tree, ahead-only proceeds untouched, diverged stops and reports. A behind
-#      workspace carrying uncommitted work stops and reports those paths; the
-#      generated step never resets over work that is not committed, except the
-#      eight tracked paths docs/playbot-lanes.md records as Playbot editor churn.
-#      Those it may reset, but only after capturing their diff into the lane's log
-#      and naming them in a status line, so nothing is discarded unseen; a clean
-#      tree discloses nothing and resets directly. In the two PR-producing modes
-#      the same step first requires the landing branch to be PUBLISHED - local ref
-#      equal to its remote tip - and stops naming both commits when it is not,
-#      because a PR based on the remote tip would otherwise carry the landing
-#      branch's unpushed commits as this task's work. local-only publishes nothing,
-#      so it keeps the plain local comparison.
+#      runs bin/fm-lane-base-check.sh, whose own header and --help own that check's
+#      contract and exit codes, and the generated brief carries only its invocation
+#      plus the three arms of that exit code: proceed, reset to the ref it names
+#      after disclosing any Playbot churn it names, or stop with the line it
+#      reported. The two PR-producing modes pass its --publishes flag, because a
+#      PR's base is the landing branch as published; local-only does not.
 #   3. Delivery contract. The mode is declared prominently after the task, above the
 #      Herdr and setup sections, repeating only the machine-readable contract line
 #      and that mode's one prohibition and pointing at the Definition of done as the
@@ -534,22 +522,11 @@ fi
 # does not: firstmate creates a crewmate's worktree from the recorded landing
 # branch locally, while Playbot creates a lane workspace from that branch's REMOTE
 # tip, so a landing that has not been pushed yet leaves the workspace behind.
-# The generated check compares HEAD against the LOCAL landing branch and never
-# against origin/<branch>: the remote ref is the one Playbot built the workspace
-# from, so it can never reveal the drift, while firstmate's landings sit unpushed
-# for long stretches and a lane worktree shares the primary repository's git dir,
-# which makes the local branch both the only ref that shows the drift and a ref
-# that resolves there. Every generated command spells refs/heads/<branch>, because
-# git resolves a bare name through refs/tags/ and refs/remotes/ too, and a landing
-# branch whose first component is also a remote name is exactly the ambiguity
-# docs/playbot-lanes.md rejects. One explicit ahead/behind reading then decides
-# between the four real states rather than inferring them from a single log range:
-# only behind-only resets, and only with a clean working tree, so the step can
-# never discard uncommitted work; ahead-only proceeds untouched, because those
-# commits are the worker's own or the newer remote tip its workspace was created
-# from; diverged stops and reports. --landing-branch is validated as required
-# before anything is written, so every lane brief names one concrete branch here,
-# in rule 1 and in the definition of done.
+# That verdict is bin/fm-lane-base-check.sh's to give - it names every state and
+# is tested per state - so nothing here re-derives it; the generated step carries
+# the invocation and branches on its exit code. --landing-branch is validated as
+# required before anything is written, so every lane brief names one concrete
+# branch here, in rule 1 and in the definition of done.
 if [ "$LANE" -eq 1 ]; then
   if [ -n "$LANE_BRANCH" ]; then
     LANE_BRANCH_DESC="your workspace branch \`$LANE_BRANCH\`"
@@ -558,35 +535,21 @@ if [ "$LANE" -eq 1 ]; then
     LANE_BRANCH_DESC="the branch your workspace was created on"
     LANE_READY_LINE="\`done: ready in branch {your workspace branch}\`"
   fi
-  LANE_LANDING_INTRO="Your landing branch is \`$LANDING_BRANCH\`, and every command below names it as \`refs/heads/$LANDING_BRANCH\`."
-  LANE_LANDING_REF="refs/heads/$LANDING_BRANCH"
-  LANE_LANDING_ACT="If \`git rev-parse --verify --quiet refs/heads/$LANDING_BRANCH\` prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch $LANDING_BRANCH is missing from this repository\` to the status file and stop."
   LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
-  # A lane that ships through a PR has that PR based on the landing branch as
-  # PUBLISHED, while the base check below resets onto the LOCAL landing branch,
-  # which by this feature's premise can carry unpushed commits. Resetting onto an
-  # unpushed local landing and then opening a PR against the remote base would
-  # present a sibling lane's unlanded commits as this task's work, so a PR-producing
-  # lane stops until the landing branch is pushed. local-only publishes nothing, so
-  # its local landing branch is the whole truth and no comparison applies.
+  # Whether this landing branch is safe to start from is one question with many
+  # states, and prose in a generated document cannot be tested, so the procedure
+  # lives in bin/fm-lane-base-check.sh and the brief carries only its invocation
+  # and the three arms of its exit code. That script also reads the tracked-churn
+  # allowlist from its owner, so no copy of those paths is rendered here.
+  # --publishes is passed only by the modes that ship through a PR: a PR's base is
+  # the landing branch as published, so those lanes may not start from a local
+  # landing branch carrying commits the remote tip lacks. local-only publishes
+  # nothing and makes no remote comparison.
+  LANE_BASE_CHECK=$(shell_quote "$FM_ROOT/bin/fm-lane-base-check.sh")" $LANDING_BRANCH"
   case "$MODE" in
     local-only) ;;
-    *)
-      LANE_LANDING_ACT="$LANE_LANDING_ACT
-      Your PR's base is the landing branch as PUBLISHED, so before anything else in this check the local landing branch must match its remote tip: a commit that is on \`refs/heads/$LANDING_BRANCH\` but not on its remote tip would ride along in your PR as if it were your work.
-      Resolve the remote tip once with \`git rev-parse '$LANDING_BRANCH@{upstream}'\` - that suffix takes the bare branch name because it resolves branches only, so nothing else can satisfy it - or with \`git rev-parse refs/remotes/<remote>/$LANDING_BRANCH\` for the remote this repository pushes to when the branch has no upstream configured.
-      If \`git rev-parse refs/heads/$LANDING_BRANCH\` and that remote tip are equal, carry on with this check.
-      If they differ, STOP before you reset, push, or open anything - append \`blocked: landing branch $LANDING_BRANCH is not published: local {the local sha} vs remote {the remote sha}; push $LANDING_BRANCH before this lane proceeds\` to the status file and stop. One \`git push\` of $LANDING_BRANCH clears it." ;;
+    *) LANE_BASE_CHECK="$LANE_BASE_CHECK --publishes" ;;
   esac
-  # Playbot's editor integration rewrites exactly these eight tracked paths across
-  # unrelated worktrees (docs/playbot-lanes.md owns the list and its boundary: no
-  # directory, extension or basename is churn), so a lane workspace carrying them
-  # is in its documented steady state and must still be resettable. Nothing is
-  # discarded unseen: the generated step captures their diff and names them in a
-  # status line before the reset, and prototype-game/project.godot is called out
-  # because it is hand-editable rather than generated.
-  LANE_CHURN_LIST="\`prototype-game/addons/playbot/playbot_common.gd.uid\`, \`prototype-game/addons/playbot/playbot_export_plugin.gd\`, \`prototype-game/addons/playbot/playbot_export_plugin.gd.uid\`, \`prototype-game/addons/playbot/playbot_log_capture.gd.source\`, \`prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid\`, \`prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid\`, \`prototype-game/addons/playbot/plugin.gd.uid\` and \`prototype-game/project.godot\`"
-  LANE_CHURN_ARGS="prototype-game/addons/playbot/playbot_common.gd.uid prototype-game/addons/playbot/playbot_export_plugin.gd prototype-game/addons/playbot/playbot_export_plugin.gd.uid prototype-game/addons/playbot/playbot_log_capture.gd.source prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid prototype-game/addons/playbot/plugin.gd.uid prototype-game/project.godot"
   SETUP_PREAMBLE="You are in a Playbot lane workspace: an isolated git worktree of $REPO that Playbot created and already checked out on the branch that workspace owns."
   IFS= read -r -d '' SETUP1 <<EOF || true
 1. First action: verify your starting point before you touch anything. Both checks below are mandatory; this brief is complete, so nothing outside it will tell you to run them.
@@ -596,24 +559,12 @@ if [ "$LANE" -eq 1 ]; then
       If it is not, STOP - append \`blocked: lane is not on its workspace branch\` to the status file and stop.
       Never run \`git checkout -b\` or \`git switch -c\`, and never switch branches: a branch of your own steps off the one your workspace owns.
 
-   b. **Base.** Playbot creates a lane workspace from the REMOTE tip of the landing branch, so a landing that has not been pushed yet leaves your workspace behind and you would build on stale code.
-      Compare against the LOCAL landing branch, always spelled \`refs/heads/<landing branch>\`: the remote ref is the one your workspace was created from, so \`origin/<landing branch>\` can never reveal this drift, a bare name is not enough because git also resolves it through \`refs/tags/\` and \`refs/remotes/\`, and your lane worktree shares the primary repository's git dir, so the local branch resolves here.
-      $LANE_LANDING_INTRO
-      $LANE_LANDING_ACT
-      Then read both distances once with \`git rev-list --left-right --count $LANE_LANDING_REF...HEAD\` (three dots), which prints the number of commits the landing branch has that you do not - how far BEHIND you are - then the number you have that it does not - how far AHEAD you are. Act on exactly one of these:
-      - behind 0, ahead 0 - current: your base is current; proceed.
-      - behind above 0, ahead 0 - behind only - AND \`git status --porcelain\` prints nothing: run \`git reset --hard $LANE_LANDING_REF\` and proceed. There is nothing to disclose, so the disclosure step below does not apply.
-      - behind above 0, ahead 0 - behind only - AND every line \`git status --porcelain\` prints names one of the eight Playbot churn paths listed below: reset, but only after the disclosure step below.
-      - behind above 0, ahead 0 - behind only - and \`git status --porcelain\` prints anything that is NOT one of those eight paths: STOP and never reset; uncommitted work is never discarded - append \`blocked: lane workspace is behind its landing branch but carries uncommitted changes: {the printed paths that are not Playbot churn}\` to the status file and stop.
-      - behind 0, ahead above 0 - ahead only: those commits are your own work, or the newer landing tip your workspace was created from, and nothing about your base needs fixing; proceed and do NOT reset.
-      - behind above 0, ahead above 0 - diverged: STOP. Do not reset, rebase, merge, or guess - append \`blocked: lane workspace has diverged from its landing branch\` to the status file and stop.
-
-      Playbot's editor integration rewrites eight tracked paths across unrelated worktrees, so a modification to one of those - and to nothing else - is that workspace's documented steady state rather than work of yours. Those eight exact paths are $LANE_CHURN_LIST.
-      That list is eight literal paths: no directory, extension, or basename near them is churn, so a modification to any other path under \`prototype-game/addons/playbot/\` still makes your workspace dirty.
-      The disclosure below applies ONLY when \`git status --porcelain\` actually printed one or more of those eight paths. A clean working tree discloses nothing and resets directly; when churn IS present, disclosure is a PRECONDITION of the reset, not a follow-up, because the reset destroys whatever those paths currently hold - and \`prototype-game/project.godot\` is a hand-editable settings file rather than a generated one, so it can carry real human edits.
-      Before you reset, run \`git diff HEAD -- $LANE_CHURN_ARGS\` and leave its complete output in your log, untruncated and unsummarized - that output is the only record of what the reset discards. Name \`HEAD\` in that command: a bare \`git diff\` compares the working tree against the index, so a churn change that is already staged would not appear, while \`git reset --hard\` discards index and working tree alike.
-      Then append \`working: discarding Playbot churn before base reset: {the allowlisted paths you are about to discard}\` to the status file, naming exactly the paths \`git status --porcelain\` printed.
-      Only then run \`git reset --hard $LANE_LANDING_REF\` and proceed. With churn present and that diff uncaptured or that line unappended, do not reset.
+   b. **Base.** Playbot creates a lane workspace from the REMOTE tip of the landing branch, so a landing that has not been pushed yet leaves your workspace behind and you would build on stale code. One command decides whether your base is safe to start from; act on its EXIT CODE, never on your own reading of the repository.
+      Run \`$LANE_BASE_CHECK\` from the top of your workspace. It writes nothing - no reset, no fetch, no ref update - it only reports.
+      - exit 0 (\`current: ...\`): your base is safe; proceed.
+      - exit 10: it printed \`reset-required: <ref>\` and \`churn-paths: <paths>\`. When \`churn-paths\` names any path, DISCLOSE BEFORE YOU RESET: run \`git diff HEAD -- <exactly those paths>\` and leave its complete output in your log, untruncated and unsummarized - \`prototype-game/project.godot\` may be among them, and it is a hand-editable settings file rather than a generated one, so it can carry real human edits - then append \`working: discarding Playbot churn before base reset: {those paths}\` to the status file. With paths named and that diff uncaptured or that line unappended, do not reset. Then run \`git reset --hard <the ref it printed>\` and proceed. When \`churn-paths\` is empty there is nothing to disclose: reset to that ref and proceed.
+      - exit 20: it printed one \`blocked: ...\` line naming the evidence. STOP - append that exact line to the status file and stop.
+      - any other exit code is itself a blocker: append \`blocked: lane base check failed: {its output}\` to the status file and stop.
 EOF
   SETUP1=${SETUP1%$'\n'}
 else
