@@ -3,8 +3,9 @@
 # header: current, ahead-only, behind-only (clean tree, allowlisted churn -
 # staged included, an untracked file at an allowlisted path, a rename, and
 # modifications outside the allowlist), diverged, an absent local landing branch,
-# an unreadable working tree, and for a --publishes lane the
-# unpublished-local state, each unresolvable-remote cause - no upstream, a local
+# an unreadable working tree, and for a --publishes lane the unpublished-local
+# state - strictly ahead and diverged, which get different remedies - plus each
+# unresolvable-remote cause: no upstream, a local
 # upstream, a configured upstream whose remote-tracking ref is gone, and an
 # ambiguous name, and an upstream naming a different remote branch - plus the
 # remote-ahead state and the ambiguous name an upstream resolves, which must NOT
@@ -242,6 +243,61 @@ test_an_untracked_allowlisted_path_blocks_while_a_tracked_one_is_churn() {
   pass "fm-lane-base-check.sh: an untracked allowlisted path blocks, a tracked one is churn"
 }
 
+# The blocked line is what a human and firstmate act on, so it must name the true
+# reason. An untracked file AT an allowlisted path is not "outside the allowlist" -
+# the path is one the owner publishes - and a workspace carrying one of each has
+# to report both, or one of the two paths goes unexplained.
+test_the_block_names_the_true_reason_for_each_path() {
+  local dir out churn_path
+  churn_path=prototype-game/addons/playbot/playbot_common.gd.uid
+  dir=$(make_case reason-untracked)
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  printf 'uid://playbot-rewrote-this-locally\n' > "$dir/wt/$churn_path"
+
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "an untracked file at an allowlisted path must block"
+  assert_contains "$out" "untracked" "the block does not say the path is untracked"
+  assert_not_contains "$out" "outside the Playbot churn allowlist" \
+    "the block claims an allowlisted path is outside the allowlist"
+
+  # A path genuinely outside the allowlist keeps the outside reason.
+  printf 'real work\n' > "$dir/wt/app.txt"
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "one of each kind must still block"
+  assert_contains "$out" "outside the Playbot churn allowlist: app.txt" \
+    "the block does not name the tracked modification's own reason"
+  assert_contains "$out" "untracked" "the block dropped the untracked reason"
+  assert_contains "$out" "$churn_path" "the block dropped the untracked path"
+  pass "fm-lane-base-check.sh: the block names the true reason for each path"
+}
+
+# `status.showUntrackedFiles` lives in the shared config of the common git dir, so
+# one setting in the primary repository would otherwise silence the untracked half
+# of this gate in every lane worktree - and a silent gate reads as a clean tree,
+# which is exactly what authorises the reset.
+test_the_untracked_gate_does_not_depend_on_ambient_git_config() {
+  local dir out churn_path
+  churn_path=prototype-game/addons/playbot/playbot_common.gd.uid
+  dir=$(make_case untracked-config-off)
+  git -C "$dir/repo" config status.showUntrackedFiles no
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  printf 'uid://playbot-rewrote-this-locally\n' > "$dir/wt/$churn_path"
+  printf 'work nobody has committed yet\n' > "$dir/wt/untracked-work.txt"
+  [ -z "$(git -C "$dir/wt" status --porcelain)" ] \
+    || fail "the fixture did not actually silence untracked reporting"
+
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "the untracked gate must hold regardless of status.showUntrackedFiles"
+  assert_contains "$out" "$churn_path" "the block does not name the untracked allowlisted path"
+  assert_contains "$out" "untracked-work.txt" "the block does not name the untracked file"
+  assert_grep "work nobody has committed yet" "$dir/wt/untracked-work.txt" \
+    "the check authorised a reset over uncommitted content"
+  pass "fm-lane-base-check.sh: the untracked gate does not depend on ambient git config"
+}
+
 # A rename record is `XY <path>NUL<origPath>NUL` - the source path arrives with no
 # status field of its own. If the reader misaligned there, the status carried by
 # the next record would be attributed to the wrong path, so a rename standing next
@@ -328,6 +384,46 @@ test_publishing_lane_requires_a_published_landing_branch() {
   assert_not_contains "$out" "push landing/frog-pile" \
     "the remote-ahead state prescribes a push that could not succeed"
   pass "fm-lane-base-check.sh: a publishing lane blocks only on an unpublished local landing branch"
+}
+
+# Blocking a diverged landing branch is right; prescribing a push for it is not,
+# because that push is rejected as a non-fast-forward. The remedy has to follow
+# from what was actually observed, so the two states are checked side by side.
+test_a_diverged_landing_branch_is_not_told_to_push() {
+  local dir out
+  dir=$(make_case publish-diverged)
+  # Ahead only first, from the same fixture: pushing IS the right advice there.
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  assert_contains "$out" "push landing/frog-pile before this lane proceeds" \
+    "a strictly-ahead local landing branch must still be told to push it"
+  assert_not_contains "$out" "diverged from its remote tip" \
+    "a strictly-ahead local landing branch was reported as diverged"
+
+  # Now diverge them: the remote gains a commit the local branch does not have,
+  # while the local branch keeps the one the remote lacks.
+  git -C "$dir/repo" worktree add -q --detach "$dir/pusher" refs/remotes/origin/landing/frog-pile
+  printf 'landed upstream by someone else\n' > "$dir/pusher/upstream.txt"
+  git -C "$dir/pusher" add upstream.txt
+  git -C "$dir/pusher" commit -qm "an upstream commit the local landing lacks"
+  git -C "$dir/pusher" push -q origin HEAD:landing/frog-pile
+  git -C "$dir/repo" fetch -q origin
+  [ "$(git -C "$dir/repo" rev-list --count refs/remotes/origin/landing/frog-pile..refs/heads/landing/frog-pile)" -gt 0 ] \
+    || fail "the fixture left no local-only commit"
+  [ "$(git -C "$dir/repo" rev-list --count refs/heads/landing/frog-pile..refs/remotes/origin/landing/frog-pile)" -gt 0 ] \
+    || fail "the fixture did not actually diverge the two refs"
+
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "a diverged landing branch must still block a publishing lane"
+  assert_contains "$out" "diverged from its remote tip" \
+    "the block does not name the diverged state it observed"
+  assert_contains "$out" "reconcile landing/frog-pile with its remote tip" \
+    "the block does not prescribe reconciling before pushing"
+  assert_not_contains "$out" "push landing/frog-pile before this lane proceeds" \
+    "the diverged block prescribes a push that would be rejected"
+  assert_not_contains "$out" "--force" "the block prescribes rewriting published history"
+  pass "fm-lane-base-check.sh: a diverged landing branch is told to reconcile, not to push"
 }
 
 # Absence of remote evidence cannot prove nothing rides along, so a publishing
@@ -608,9 +704,12 @@ test_behind_with_allowlisted_churn_names_it_for_disclosure
 test_modifications_outside_the_allowlist_block
 test_allowlist_membership_is_a_literal_path_not_a_pattern
 test_an_untracked_allowlisted_path_blocks_while_a_tracked_one_is_churn
+test_the_block_names_the_true_reason_for_each_path
+test_the_untracked_gate_does_not_depend_on_ambient_git_config
 test_a_rename_record_does_not_misalign_the_status_field
 test_diverged_and_absent_landing_branch_block
 test_publishing_lane_requires_a_published_landing_branch
+test_a_diverged_landing_branch_is_not_told_to_push
 test_unresolvable_remote_tip_blocks_only_a_publishing_lane
 test_a_local_upstream_is_not_evidence_of_publication
 test_an_upstream_for_a_different_branch_is_not_the_published_tip

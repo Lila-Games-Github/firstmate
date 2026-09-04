@@ -35,19 +35,31 @@
 #   behind only, anything outside the allowlist  blocked; uncommitted work outside
 #                                                the allowlist is never discarded.
 #   behind only, an UNTRACKED file at an allowlisted path
-#                                                blocked. Churn is a tracked
-#                      change: the allowlist's owner infers no untracked file to
-#                      be churn, and `git diff HEAD` records nothing for content
-#                      git does not track, so discarding one could only ever be
-#                      announced with an empty record.
+#                                                blocked, under its OWN reason and
+#                      not the one above: the path is one the owner publishes, so
+#                      what disqualifies it is that it is untracked. Churn is a
+#                      tracked change - the allowlist's owner infers no untracked
+#                      file to be churn, and `git diff HEAD` records nothing for
+#                      content git does not track, so discarding one could only
+#                      ever be announced with an empty record. A workspace holding
+#                      both kinds is reported with both reasons.
+#                      The untracked half of this gate is read with an explicit
+#                      `--untracked-files=all`, so no `status.showUntrackedFiles`
+#                      in the shared config can silence it: a verdict of this
+#                      script never depends on operator configuration.
 #   diverged                                     blocked.
 #   absent local landing branch                  blocked.
 #   --publishes and the local landing branch carries commits its remote tip lacks
-#                      blocked, naming both commits: one push of the landing branch
-#                      clears it. A remote tip that is AHEAD of the local landing
-#                      branch is not blocked - that is the state right after a PR
-#                      merges, it carries no ride-along risk, and pushing could not
-#                      fix it anyway.
+#                      blocked, naming both commits. Strictly ahead: one push of
+#                      the landing branch clears it. DIVERGED, each side carrying
+#                      commits the other lacks: still blocked, but the remedy is to
+#                      reconcile the landing branch with its remote tip first,
+#                      because a plain push would be rejected as a non-fast-forward
+#                      - the two states are told apart so neither is prescribed the
+#                      other's command. A remote tip that is AHEAD ONLY of the local
+#                      landing branch is not blocked - that is the state right after
+#                      a PR merges, it carries no ride-along risk, and pushing could
+#                      not fix it anyway.
 #   --publishes and no remote tip resolvable     blocked; absence of evidence
 #                      cannot prove nothing rides along. The ONLY evidence is a
 #                      remote-tracking ref of the landing branch's own name, since
@@ -133,21 +145,36 @@ churn_allowlist() {
 # space-separated, which is safe only because the owned paths carry no whitespace;
 # an exact-match test is what keeps that a property of the data rather than luck.
 # The allowlist names TRACKED paths Playbot's editor rewrites, and its owner is
-# explicit that no untracked file is inferred to be churn - so the status field
-# decides before the pathname is even looked at. An untracked path also cannot be
-# disclosed: `git diff HEAD -- <path>` shows nothing for content git does not
-# track, so calling one churn would announce a discard with an empty record.
-is_allowlisted_churn() {
-  local status=$1 candidate=$2 entry
-  case "$status" in
-    '??'|'!!') return 1 ;;
-  esac
+# explicit that no untracked file is inferred to be churn. An untracked path also
+# cannot be disclosed: `git diff HEAD -- <path>` shows nothing for content git does
+# not track, so calling one churn would announce a discard with an empty record.
+# Being untracked AT an allowlisted path is therefore its own outcome, not the same
+# as being outside the list - the path IS one the owner publishes, and a blocked
+# line that claimed otherwise would send its reader to check the allowlist, find it
+# there, and conclude the check is broken.
+CLASSIFICATION=
+classify_changed_path() {
+  local status=$1 candidate=$2 entry listed=0
   for entry in ${CHURN_ALLOWLIST[@]+"${CHURN_ALLOWLIST[@]}"}; do
     if [ "$candidate" = "$entry" ]; then
-      return 0
+      listed=1
+      break
     fi
   done
-  return 1
+  case "$status" in
+    '??'|'!!')
+      if [ "$listed" -eq 1 ]; then
+        CLASSIFICATION=untracked-at-allowlisted-path
+      else
+        CLASSIFICATION=outside
+      fi
+      return 0 ;;
+  esac
+  if [ "$listed" -eq 1 ]; then
+    CLASSIFICATION=churn
+  else
+    CLASSIFICATION=outside
+  fi
 }
 
 # Every path `git status` reports, into CHANGED_PATHS with its two-letter status
@@ -162,13 +189,22 @@ is_allowlisted_churn() {
 # failure would be read as a CLEAN tree - the state that authorises the reset. So
 # it fails closed like every other read here, and the caller runs it in the main
 # shell so that block takes effect.
+# `--untracked-files=all` is passed EXPLICITLY, and that is load-bearing rather
+# than decorative. Bare `git status` honours `status.showUntrackedFiles`, which
+# lives in the shared config of the common git dir, so one `git config
+# status.showUntrackedFiles no` in the primary repository would silence the
+# untracked half of this gate in every lane worktree it hosts - and a silent gate
+# reads as a clean tree, which is what authorises the reset. The flag overrides any
+# ambient setting, and `all` rather than `normal` names each untracked file instead
+# of collapsing it into its parent directory, so the evidence line can name the
+# actual path. No verdict of this script may depend on operator configuration.
 CHANGED_PATHS=()
 CHANGED_STATUS=()
 collect_changed_paths() {
   local record pending=0 status='' spool
   spool=$(mktemp) \
     || blocked "working-tree state of this lane workspace could not be read: no temporary file could be created to read it into"
-  if ! git status --porcelain -z > "$spool" 2>/dev/null; then
+  if ! git status --porcelain --untracked-files=all -z > "$spool" 2>/dev/null; then
     rm -f "$spool"
     blocked "working-tree state of this lane workspace could not be read, so no uncommitted work can be shown to be absent and nothing here is safe to discard"
   fi
@@ -261,8 +297,18 @@ EOF
     blocked "remote tip of landing branch $LANDING could not be resolved: $UNRESOLVED_CAUSE, and no remote-tracking ref refs/remotes/<remote>/$LANDING exists; $UNRESOLVED_REMEDY, so a lane that opens a PR can prove nothing rides along"
   fi
 
-  RIDE_ALONG=$(git rev-list --count "$REMOTE_TIP..$LOCAL_REF") \
+  # Both directions in one read, because the remedy depends on the other one: a
+  # local landing branch that is strictly AHEAD is fixed by pushing it, but one
+  # that has DIVERGED cannot be - that push is rejected as a non-fast-forward, and
+  # prescribing it would send the operator to a command that cannot work.
+  PUBLISH_COUNTS=$(git rev-list --left-right --count "$LOCAL_REF...$REMOTE_TIP") \
     || blocked "distance between $LOCAL_REF and the remote tip $REMOTE_TIP_REF of landing branch $LANDING could not be read"
+  read -r RIDE_ALONG REMOTE_ONLY <<EOF
+$PUBLISH_COUNTS
+EOF
+  if [ "$RIDE_ALONG" -gt 0 ] && [ "$REMOTE_ONLY" -gt 0 ]; then
+    blocked "landing branch $LANDING has diverged from its remote tip: local $LOCAL_TIP carries $RIDE_ALONG commit(s) its remote tip $REMOTE_TIP_REF ($REMOTE_TIP) does not while that tip carries $REMOTE_ONLY it lacks, and a PR based on that remote tip would present the local-only commits as this task's work; reconcile $LANDING with its remote tip and push the result before this lane proceeds - a plain push of $LANDING would be rejected as a non-fast-forward"
+  fi
   [ "$RIDE_ALONG" -eq 0 ] || blocked "landing branch $LANDING is not published: local $LOCAL_TIP carries $RIDE_ALONG commit(s) its remote tip $REMOTE_TIP_REF ($REMOTE_TIP) does not, and a PR based on that remote tip would present them as this task's work; push $LANDING before this lane proceeds"
 fi
 
@@ -292,18 +338,28 @@ EOF
 
 CHURN_MODIFIED=
 OUTSIDE=
+UNTRACKED_LISTED=
 collect_changed_paths
 for ((i = 0; i < ${#CHANGED_PATHS[@]}; i++)); do
   path=${CHANGED_PATHS[$i]}
   [ -n "$path" ] || continue
-  if is_allowlisted_churn "${CHANGED_STATUS[$i]}" "$path"; then
-    CHURN_MODIFIED="${CHURN_MODIFIED:+$CHURN_MODIFIED }$path"
-  else
-    OUTSIDE="${OUTSIDE:+$OUTSIDE, }$path"
-  fi
+  classify_changed_path "${CHANGED_STATUS[$i]}" "$path"
+  case "$CLASSIFICATION" in
+    churn) CHURN_MODIFIED="${CHURN_MODIFIED:+$CHURN_MODIFIED }$path" ;;
+    untracked-at-allowlisted-path)
+      UNTRACKED_LISTED="${UNTRACKED_LISTED:+$UNTRACKED_LISTED, }$path" ;;
+    *) OUTSIDE="${OUTSIDE:+$OUTSIDE, }$path" ;;
+  esac
 done
 
-[ -z "$OUTSIDE" ] || blocked "lane workspace is behind landing branch $LANDING but carries uncommitted changes outside the Playbot churn allowlist: $OUTSIDE"
+# Both reasons are reported, because a workspace can carry one of each and the
+# verdict is one line of evidence a human and firstmate act on directly.
+EVIDENCE=
+[ -z "$OUTSIDE" ] || EVIDENCE="uncommitted changes outside the Playbot churn allowlist: $OUTSIDE"
+if [ -n "$UNTRACKED_LISTED" ]; then
+  EVIDENCE="${EVIDENCE:+$EVIDENCE; and }untracked files at allowlisted churn paths, which are never classified as churn because git diff HEAD records nothing for content git does not track, so they could only be discarded unseen: $UNTRACKED_LISTED (commit or remove them)"
+fi
+[ -z "$EVIDENCE" ] || blocked "lane workspace is behind landing branch $LANDING but carries $EVIDENCE"
 
 printf 'reset-required: %s\n' "$LOCAL_REF"
 printf 'churn-paths: %s\n' "$CHURN_MODIFIED"
