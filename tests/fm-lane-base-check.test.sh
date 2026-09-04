@@ -5,7 +5,9 @@
 # local landing branch, an unreadable working tree, and for a --publishes lane the
 # unpublished-local state, each unresolvable-remote cause - no upstream, a local
 # upstream, a configured upstream whose remote-tracking ref is gone, and an
-# ambiguous name - plus the remote-ahead state that must NOT block.
+# ambiguous name, and an upstream naming a different remote branch - plus the
+# remote-ahead state and the ambiguous name an upstream resolves, which must NOT
+# block.
 # Every case runs the real script against a real temporary repository and asserts
 # its exit code and reported line; the verdict contract is the exit code, so these
 # assert the code first and read the line only for the evidence it must name.
@@ -17,6 +19,10 @@ set -u
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
+# The script reads its churn allowlist from its owner through Node, so a missing
+# runtime would surface as an unrelated churn-classification failure. Guarded once
+# here, before any case runs, as every other Node-dependent suite does.
+fm_test_require_node "fm-lane-base-check"
 
 CHECK="$ROOT/bin/fm-lane-base-check.sh"
 OWNER="$ROOT/bin/fm-playbot-lanes.mjs"
@@ -294,6 +300,76 @@ test_a_local_upstream_is_not_evidence_of_publication() {
   pass "fm-lane-base-check.sh: an upstream naming a local branch is not evidence of publication"
 }
 
+# A PR's base is the landing branch BY NAME, so the only ref that is evidence
+# about what a PR would build on is refs/remotes/<remote>/<landing>. An upstream
+# tracking a DIFFERENT remote branch - what `git branch --set-upstream-to=origin/main`
+# leaves behind - says nothing about that ref and must not be taken as its tip.
+test_an_upstream_for_a_different_branch_is_not_the_published_tip() {
+  local dir out
+  dir=$(make_case publish-foreign-upstream)
+  # origin/main is pushed at the same commit the landing branch will reach, so
+  # comparing against it finds nothing riding along while the real PR base -
+  # origin/landing/frog-pile - is left a commit behind.
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  git -C "$dir/repo" branch main refs/heads/landing/frog-pile
+  git -C "$dir/repo" push -q origin main
+  git -C "$dir/repo" config branch.landing/frog-pile.merge refs/heads/main
+  [ "$(git -C "$dir/repo" rev-parse --symbolic-full-name 'landing/frog-pile@{upstream}')" \
+    = "refs/remotes/origin/main" ] || fail "the fixture did not configure a foreign upstream"
+  [ "$(git -C "$dir/repo" rev-list --count refs/remotes/origin/landing/frog-pile..refs/heads/landing/frog-pile)" \
+    = "1" ] || fail "the fixture left nothing riding along against the real PR base"
+
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "an upstream for a different branch must not satisfy a publishing lane's precondition"
+  assert_contains "$out" "is not published" \
+    "the block does not name the state the real PR base is actually in"
+  assert_contains "$out" "refs/remotes/origin/landing/frog-pile" \
+    "the block does not name the ref a PR would actually build on"
+
+  # With no ref of the landing branch's own name to fall back on, there is no
+  # evidence at all, and the block has to name that cause.
+  dir=$(make_case publish-foreign-upstream-only)
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  git -C "$dir/repo" branch main refs/heads/landing/frog-pile
+  git -C "$dir/repo" push -q origin main
+  git -C "$dir/repo" config branch.landing/frog-pile.merge refs/heads/main
+  git -C "$dir/repo" update-ref -d refs/remotes/origin/landing/frog-pile
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "a foreign upstream with no ref of the landing branch's name must block a publishing lane"
+  assert_contains "$out" "could not be resolved" "the block does not name the missing evidence"
+  assert_contains "$out" "names a different remote branch" \
+    "the block does not name the cause it observed"
+
+  # A local-only lane makes no remote comparison, so neither state affects it.
+  expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "a local-only lane must be unaffected by a foreign upstream"
+  pass "fm-lane-base-check.sh: an upstream for a different branch is not the published tip"
+}
+
+# An upstream that DOES name the landing branch's own ref still resolves it, and
+# is what picks between candidates when more than one remote carries that name.
+test_an_upstream_naming_the_landing_ref_resolves_an_ambiguous_name() {
+  local dir out
+  dir=$(make_case publish-ambiguous-with-upstream)
+  git clone -q --bare "$dir/repo" "$dir/second.git"
+  git -C "$dir/repo" remote add second "file://$dir/second.git"
+  git -C "$dir/repo" fetch -q second
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  [ "$(git -C "$dir/repo" rev-parse --symbolic-full-name 'landing/frog-pile@{upstream}')" \
+    = "refs/remotes/origin/landing/frog-pile" ] || fail "the fixture lost its upstream"
+
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "the named upstream's tip must still be compared against the local landing branch"
+  assert_contains "$out" "is not published" \
+    "the upstream that names the landing ref was not used as the published tip"
+  assert_not_contains "$out" "ambiguous" \
+    "an upstream naming one of the candidates was still called ambiguous"
+  pass "fm-lane-base-check.sh: an upstream naming the landing ref resolves an ambiguous name"
+}
+
 # An upstream IS configured and the remote-tracking ref it names is gone: deleted
 # upstream and then pruned, or never fetched. The evidence must name that cause,
 # and the remedy must be a command that works in that state - telling the operator
@@ -361,7 +437,6 @@ test_an_unreadable_working_tree_blocks_instead_of_authorizing_a_reset() {
 # matches, so a future edit to the owner's list flows through with no edit here.
 test_churn_classification_comes_from_its_owner() {
   local dir published path out paths count
-  fm_test_require_node || return 0
   published=$(node "$OWNER" tracked-churn-allowlist) \
     || fail "the allowlist owner does not publish its list"
   count=$(printf '%s\n' "$published" | grep -c .)
@@ -437,6 +512,8 @@ test_diverged_and_absent_landing_branch_block
 test_publishing_lane_requires_a_published_landing_branch
 test_unresolvable_remote_tip_blocks_only_a_publishing_lane
 test_a_local_upstream_is_not_evidence_of_publication
+test_an_upstream_for_a_different_branch_is_not_the_published_tip
+test_an_upstream_naming_the_landing_ref_resolves_an_ambiguous_name
 test_a_configured_upstream_with_no_remote_ref_names_its_own_cause
 test_an_unreadable_working_tree_blocks_instead_of_authorizing_a_reset
 test_churn_classification_comes_from_its_owner

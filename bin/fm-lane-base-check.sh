@@ -43,16 +43,21 @@
 #                      merges, it carries no ride-along risk, and pushing could not
 #                      fix it anyway.
 #   --publishes and no remote tip resolvable     blocked; absence of evidence
-#                      cannot prove nothing rides along. Only a remote-tracking
-#                      ref counts as that evidence, so an upstream pointing at a
-#                      LOCAL branch resolves nothing. Each cause gets its own
-#                      line, because each has its own remedy: no upstream and no
-#                      matching remote-tracking ref (fetch it, or push a landing
-#                      branch never published); an upstream configured whose
-#                      remote-tracking ref does not exist, deleted upstream and
-#                      pruned or never fetched (fetch that branch); a local
-#                      upstream; and more than one remote carrying the name, which
-#                      is ambiguous (name the one, with --set-upstream-to).
+#                      cannot prove nothing rides along. The ONLY evidence is a
+#                      remote-tracking ref of the landing branch's own name, since
+#                      that is the ref a PR would build on, so the candidates are
+#                      refs/remotes/<remote>/<landing> and the configured upstream
+#                      only picks between them - an upstream naming a local branch
+#                      or a DIFFERENT remote branch resolves nothing. Each cause
+#                      gets its own line, because each has its own remedy: no
+#                      upstream and no such remote-tracking ref (fetch it, or push
+#                      a landing branch never published); an upstream configured
+#                      whose remote-tracking ref does not exist, deleted upstream
+#                      and pruned or never fetched (fetch that branch); a local
+#                      upstream; an upstream naming a different remote branch; and
+#                      more than one remote carrying the landing branch's name
+#                      with no upstream choosing one, which is ambiguous (name the
+#                      one, with --set-upstream-to).
 #   working tree unreadable                      blocked; a tree whose state
 #                      cannot be read must never be reported as clean, because a
 #                      clean tree is what authorises the reset.
@@ -149,59 +154,74 @@ LOCAL_TIP=$(git rev-parse --verify --quiet "$LOCAL_REF") || LOCAL_TIP=
 [ -n "$LOCAL_TIP" ] || blocked "local landing branch $LANDING is missing from this repository"
 
 if [ "$PUBLISHES" -eq 1 ]; then
-  # Only a REMOTE-TRACKING ref is evidence of publication. `<branch>@{upstream}`
-  # resolves an upstream that names a local branch just as happily - which is what
-  # `branch.autoSetupMerge = always` configures routinely - and a local branch
-  # proves nothing was pushed anywhere, so that spelling is checked symbolically
-  # and only refs/remotes/... is taken.
+  # The whole question is about ONE ref pair: does refs/remotes/<remote>/<landing>
+  # exist, and does refs/heads/<landing> carry any commit it lacks. A PR's base is
+  # the landing branch BY NAME - bin/fm-brief.sh renders it as --base - so only a
+  # remote-tracking ref of that same name is evidence about what a PR would build
+  # on. So the candidate tips are found by scanning the remotes for that exact
+  # name, and NOTHING else can become the remote tip: the configured upstream is
+  # consulted only to choose between candidates, because an upstream is free to
+  # name a local branch (`branch.autoSetupMerge = always` does that routinely) or
+  # a different remote branch, and neither says anything about this ref pair.
   UPSTREAM_REF=$(git rev-parse --symbolic-full-name --verify --quiet "$LANDING@{upstream}") \
     || UPSTREAM_REF=
+  REMOTES=$(git remote) || blocked "the remotes of this repository could not be listed, so the published tip of landing branch $LANDING cannot be found"
   REMOTE_TIP=
-  UNRESOLVED_CAUSE=
-  case "$UPSTREAM_REF" in
-    refs/remotes/*)
-      REMOTE_TIP=$(git rev-parse --verify --quiet "$UPSTREAM_REF") || REMOTE_TIP= ;;
-    refs/heads/*)
-      UNRESOLVED_CAUSE="its upstream $UPSTREAM_REF is a local branch, which publishes nothing" ;;
-    *)
-      # `@{upstream}` resolves nothing at all in two different states, and they
-      # need different remedies: no upstream is configured, or one IS configured
-      # and the remote-tracking ref it names is gone - deleted upstream and then
-      # pruned, or never fetched. Only the config distinguishes them.
-      UPSTREAM_REMOTE=$(git config --get "branch.$LANDING.remote") || UPSTREAM_REMOTE=
-      UPSTREAM_MERGE=$(git config --get "branch.$LANDING.merge") || UPSTREAM_MERGE=
-      UPSTREAM_BRANCH=${UPSTREAM_MERGE#refs/heads/}
-      [ -n "$UPSTREAM_BRANCH" ] || UPSTREAM_BRANCH=$LANDING
-      if [ -n "$UPSTREAM_REMOTE" ] && [ "$UPSTREAM_REMOTE" != "." ]; then
-        blocked "remote tip of landing branch $LANDING could not be resolved: an upstream of $UPSTREAM_REMOTE/$UPSTREAM_BRANCH is configured but the remote-tracking ref it names does not exist in this repository, so it was deleted upstream and pruned, or never fetched; run git fetch $UPSTREAM_REMOTE $UPSTREAM_BRANCH to pick it up, or push $LANDING if it has never been published, so a lane that opens a PR can prove nothing rides along"
-      fi
-      UNRESOLVED_CAUSE="it has no upstream configured" ;;
-  esac
-  if [ -z "$REMOTE_TIP" ]; then
-    REMOTES=$(git remote) || blocked "the remotes of this repository could not be listed, so the published tip of landing branch $LANDING cannot be found"
-    REMOTE_MATCHES=0
-    while IFS= read -r remote; do
-      [ -n "$remote" ] || continue
-      candidate=$(git rev-parse --verify --quiet "refs/remotes/$remote/$LANDING") || candidate=
-      [ -n "$candidate" ] || continue
-      REMOTE_MATCHES=$((REMOTE_MATCHES + 1))
+  REMOTE_TIP_REF=
+  REMOTE_MATCHES=0
+  UPSTREAM_IS_CANDIDATE=0
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    candidate_ref="refs/remotes/$remote/$LANDING"
+    candidate=$(git rev-parse --verify --quiet "$candidate_ref") || candidate=
+    [ -n "$candidate" ] || continue
+    REMOTE_MATCHES=$((REMOTE_MATCHES + 1))
+    if [ "$candidate_ref" = "$UPSTREAM_REF" ]; then
+      UPSTREAM_IS_CANDIDATE=1
       REMOTE_TIP=$candidate
-    done <<EOF
+      REMOTE_TIP_REF=$candidate_ref
+    elif [ "$UPSTREAM_IS_CANDIDATE" -eq 0 ]; then
+      REMOTE_TIP=$candidate
+      REMOTE_TIP_REF=$candidate_ref
+    fi
+  done <<EOF
 $REMOTES
 EOF
-    if [ "$REMOTE_MATCHES" -gt 1 ]; then
-      # Every candidate ref exists here, so naming one is the remedy.
-      blocked "remote tip of landing branch $LANDING could not be resolved: $UNRESOLVED_CAUSE and $REMOTE_MATCHES remotes carry a ref named refs/remotes/<remote>/$LANDING, so which published tip a PR would build on is ambiguous; run git branch --set-upstream-to=<remote>/$LANDING $LANDING to name the one this lane lands on, so a lane that opens a PR can prove nothing rides along"
-    fi
-    if [ "$REMOTE_MATCHES" -eq 0 ]; then
-      # No such ref exists, so --set-upstream-to would fatal here rather than fix
-      # anything: the branch has to be fetched, or pushed if it is new.
-      blocked "remote tip of landing branch $LANDING could not be resolved: $UNRESOLVED_CAUSE and no remote-tracking ref refs/remotes/<remote>/$LANDING exists; run git fetch --all to pick it up, or push $LANDING if it has never been published, so a lane that opens a PR can prove nothing rides along"
-    fi
+
+  if [ "$REMOTE_MATCHES" -gt 1 ] && [ "$UPSTREAM_IS_CANDIDATE" -eq 0 ]; then
+    # Every candidate ref exists here, so naming one is a remedy that works.
+    blocked "remote tip of landing branch $LANDING could not be resolved: $REMOTE_MATCHES remotes carry a ref named refs/remotes/<remote>/$LANDING and no upstream of this branch names one of them, so which published tip a PR would build on is ambiguous; run git branch --set-upstream-to=<remote>/$LANDING $LANDING to name the one this lane lands on, so a lane that opens a PR can prove nothing rides along"
   fi
+
+  if [ "$REMOTE_MATCHES" -eq 0 ]; then
+    # No such ref exists, so --set-upstream-to would only fatal here: the branch
+    # has to be fetched, or pushed if it was never published. Each cause is named
+    # separately because a wrongly configured upstream is a different repair from
+    # a missing one, and one of them has a more precise fetch to prescribe.
+    UNRESOLVED_REMEDY="run git fetch --all to pick it up, or push $LANDING if it has never been published"
+    case "$UPSTREAM_REF" in
+      refs/remotes/*)
+        UNRESOLVED_CAUSE="its upstream $UPSTREAM_REF names a different remote branch, which says nothing about the ref a PR would target" ;;
+      refs/heads/*)
+        UNRESOLVED_CAUSE="its upstream $UPSTREAM_REF is a local branch, which publishes nothing" ;;
+      *)
+        UPSTREAM_REMOTE=$(git config --get "branch.$LANDING.remote") || UPSTREAM_REMOTE=
+        UPSTREAM_MERGE=$(git config --get "branch.$LANDING.merge") || UPSTREAM_MERGE=
+        UPSTREAM_BRANCH=${UPSTREAM_MERGE#refs/heads/}
+        [ -n "$UPSTREAM_BRANCH" ] || UPSTREAM_BRANCH=$LANDING
+        if [ -n "$UPSTREAM_REMOTE" ] && [ "$UPSTREAM_REMOTE" != "." ]; then
+          UNRESOLVED_CAUSE="an upstream of $UPSTREAM_REMOTE/$UPSTREAM_BRANCH is configured but the remote-tracking ref it names does not exist in this repository, so it was deleted upstream and pruned, or never fetched"
+          UNRESOLVED_REMEDY="run git fetch $UPSTREAM_REMOTE $UPSTREAM_BRANCH to pick it up, or push $LANDING if it has never been published"
+        else
+          UNRESOLVED_CAUSE="it has no upstream configured"
+        fi ;;
+    esac
+    blocked "remote tip of landing branch $LANDING could not be resolved: $UNRESOLVED_CAUSE, and no remote-tracking ref refs/remotes/<remote>/$LANDING exists; $UNRESOLVED_REMEDY, so a lane that opens a PR can prove nothing rides along"
+  fi
+
   RIDE_ALONG=$(git rev-list --count "$REMOTE_TIP..$LOCAL_REF") \
-    || blocked "distance between $LOCAL_REF and the remote tip $REMOTE_TIP of landing branch $LANDING could not be read"
-  [ "$RIDE_ALONG" -eq 0 ] || blocked "landing branch $LANDING is not published: local $LOCAL_TIP carries $RIDE_ALONG commit(s) its remote tip $REMOTE_TIP does not, and a PR based on that remote tip would present them as this task's work; push $LANDING before this lane proceeds"
+    || blocked "distance between $LOCAL_REF and the remote tip $REMOTE_TIP_REF of landing branch $LANDING could not be read"
+  [ "$RIDE_ALONG" -eq 0 ] || blocked "landing branch $LANDING is not published: local $LOCAL_TIP carries $RIDE_ALONG commit(s) its remote tip $REMOTE_TIP_REF ($REMOTE_TIP) does not, and a PR based on that remote tip would present them as this task's work; push $LANDING before this lane proceeds"
 fi
 
 COUNTS=$(git rev-list --left-right --count "$LOCAL_REF...HEAD") \
