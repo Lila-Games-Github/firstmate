@@ -632,23 +632,20 @@ EOF
     # still held to the publication precondition, whose whole premise is that the
     # PR base is the landing branch - so say plainly who chooses that base here,
     # and make a mismatch a report rather than something the worker may repair.
-    # The confirmation lands on the OPENED PR rather than before the run, because
-    # nothing the installed no-mistakes exposes reports its configured target:
-    # `doctor` prints System/Agents health and `status` prints repo, remote, gate
-    # path and daemon state, neither a base. A precondition the worker has no way
-    # to read is worse than none, because it reads as a guarantee while the only
-    # failure-free reading left is "nothing contradicts it, carry on".
+    # A plain statement of fact and nothing more. Every attempt to make the worker
+    # VERIFY that base failed: no-mistakes exposes no way to read its configured
+    # target before a run (`doctor` prints System/Agents health, `status` prints
+    # repo, remote, gate path and daemon state), and an on-PR check has no gate to
+    # attach to that always has a PR. A statement that promises nothing is the
+    # honest state of affairs; the publication precondition at step 1b is what
+    # actually protects this lane, and it is unchanged.
     if [ "$LANE" -eq 1 ]; then
       RULE1="1. Never push to the default branch. Never merge a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches."
       NM_LANE_PR_BASE="
-That PR's base is whatever no-mistakes is configured to target; \`no-mistakes axi run\` takes no base flag, so neither this brief nor you can set it, and no-mistakes exposes no way to read that target in advance - so you confirm the base on the PR itself, at the end of this section."
-      NM_LANE_PR_BASE_CHECK="Before you report anything as done, confirm the base of the PR no-mistakes opened. Read it with \`gh-axi api /repos/{owner}/{repo}/pulls/{number} --jq .base.ref\`.
-If that base is not \`$LANDING_BRANCH\`, STOP and REPORT: append \`blocked: no-mistakes opened {url} against base {the base you read}, not landing branch $LANDING_BRANCH\` to the status file and stop. Never pass a base, edit no-mistakes configuration, retarget or edit the PR, or work around it - reporting the mismatch is the whole of your job here.
-"
+That PR's base is whatever no-mistakes is configured to target; \`no-mistakes axi run\` takes no base flag, so this brief can neither set nor read it."
     else
       RULE1='1. Never push to the default branch. Never merge a PR.'
       NM_LANE_PR_BASE=""
-      NM_LANE_PR_BASE_CHECK=""
     fi
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
@@ -668,7 +665,7 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
 
-${NM_LANE_PR_BASE_CHECK}After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
     ;;
 esac

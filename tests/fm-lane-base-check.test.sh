@@ -720,28 +720,55 @@ EOF
 
 # With the owner unreadable the discard set must not widen: no path counts as
 # churn, so the same modification blocks instead of authorizing a reset.
+# Failing safe is the verdict, but the REASON matters as much: the path it names is
+# one the owner publishes, so reporting it as outside the allowlist would be the
+# opposite of the truth and would send the reader hunting a stray file instead of a
+# missing allowlist. Each distinct way the read can fail has its own remedy, so
+# more than one is exercised to prove they are actually distinguished.
 test_unreadable_allowlist_owner_fails_safe() {
-  local dir out fake
+  local dir out rc fake lone
   dir=$(make_case churn-owner-unreadable)
   land_locally "$dir" "sibling lane landed locally, not pushed"
   printf 'config_version=5\nfolder_colors={"res://scenes":"red"}\n' > "$dir/wt/prototype-game/project.godot"
   expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" \
     "allowlisted churn must allow a reset while the owner is readable"
 
-  # A node that fails makes the owner unreadable exactly as a missing runtime or a
-  # broken owner would, without touching the repository's own files.
+  # Failure one: the owner command itself fails, without touching the repository.
   fake=$(fm_fakebin "$dir")
   cat > "$fake/node" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
   chmod +x "$fake/node"
-  out=$(cd "$dir/wt" && PATH="$fake:$PATH" "$CHECK" landing/frog-pile 2>&1)
+  out=$(cd "$dir/wt" && PATH="$fake:$PATH" "$CHECK" landing/frog-pile 2>&1) || rc=$?
   (cd "$dir/wt" && PATH="$fake:$PATH" "$CHECK" landing/frog-pile >/dev/null 2>&1)
   expect_code 20 "$?" "an unreadable allowlist owner must block rather than widen the discard set"
   assert_contains "$out" "prototype-game/project.godot" \
     "the fail-safe block does not name the modification it refused to discard"
-  pass "fm-lane-base-check.sh: an unreadable allowlist owner fails safe and blocks"
+  assert_contains "$out" "allowlist could not be read" \
+    "the fail-safe block does not name the unreadable allowlist as its cause"
+  assert_contains "$out" "tracked-churn-allowlist\` failed" \
+    "the fail-safe block does not name which read failed, so no remedy follows"
+  assert_not_contains "$out" "outside the Playbot churn allowlist" \
+    "the fail-safe block claims a path the owner publishes is outside its allowlist"
+  assert_grep "folder_colors" "$dir/wt/prototype-game/project.godot" \
+    "the fail-safe path discarded the churn it refused to classify"
+
+  # Failure two: the owner file is absent. A copy of the script alone has no
+  # sibling owner to read, which is a different cause with a different remedy.
+  lone="$dir/lone-bin"
+  mkdir -p "$lone"
+  cp "$CHECK" "$lone/"
+  out=$(cd "$dir/wt" && "$lone/$(basename "$CHECK")" landing/frog-pile 2>&1) || rc=$?
+  (cd "$dir/wt" && "$lone/$(basename "$CHECK")" landing/frog-pile >/dev/null 2>&1)
+  expect_code 20 "$?" "a missing allowlist owner must block too"
+  assert_contains "$out" "allowlist could not be read" \
+    "the missing-owner block does not name the unreadable allowlist as its cause"
+  assert_contains "$out" "is missing" \
+    "the missing-owner block reports the same cause as a failing owner command"
+  assert_not_contains "$out" "outside the Playbot churn allowlist" \
+    "the missing-owner block claims a published path is outside the allowlist"
+  pass "fm-lane-base-check.sh: an unreadable allowlist owner fails safe and names its cause"
 }
 
 test_usage_is_refused_without_a_landing_branch

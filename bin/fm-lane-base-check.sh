@@ -87,9 +87,13 @@
 # drift from the list Playbot's own retirement inspection allows. When that list
 # cannot be read, NO path is treated as churn: any modification then makes the
 # workspace dirty and the verdict is blocked, because an unreadable owner must
-# never widen what a reset is allowed to discard. Membership is a whole-string
-# comparison of a TRACKED change's pathname against those entries: no pattern, no
-# line matching, no untracked file, and no prefix, extension or basename.
+# never widen what a reset is allowed to discard. That block names the unreadable
+# allowlist as its cause and the remedy for the failure it hit - node absent, the
+# owner file missing, or the owner command failing - and explicitly does NOT claim
+# the paths are outside the allowlist, since nothing was compared.
+# Membership is a whole-string comparison of a TRACKED change's pathname against
+# those entries: no pattern, no line matching, no untracked file, and no prefix,
+# extension or basename.
 set -eu
 
 # The contract above says this script changes no index, and `git status` is the
@@ -140,13 +144,34 @@ current() { printf 'current: %s\n' "$1"; exit "$EXIT_CURRENT"; }
 blocked() { printf 'blocked: %s\n' "$1"; exit "$EXIT_BLOCKED"; }
 
 # The allowlist's owner publishes it through its own command, so nothing here
-# parses that file. A read failure yields an empty list, which is the safe
-# direction: every modification then counts against the workspace.
-churn_allowlist() {
-  local owner="$SCRIPT_DIR/fm-playbot-lanes.mjs"
-  command -v node >/dev/null 2>&1 || return 0
-  [ -f "$owner" ] || return 0
-  node "$owner" tracked-churn-allowlist 2>/dev/null || return 0
+# parses that file. A read failure leaves the list empty, which is the safe
+# direction: every modification then counts against the workspace. But "the list
+# is empty because it could not be read" is a different fact from "this path is
+# not on the list", and only the first has a remedy, so each failure records which
+# one it was. Runs in the main shell, not a command substitution, so that record
+# survives.
+CHURN_OWNER_UNREADABLE=
+CHURN_ALLOWLIST=()
+read_churn_allowlist() {
+  local owner="$SCRIPT_DIR/fm-playbot-lanes.mjs" raw entry
+  if ! command -v node >/dev/null 2>&1; then
+    CHURN_OWNER_UNREADABLE="node is not on PATH, so its owner $owner could not be run; make node available"
+    return 0
+  fi
+  if [ ! -f "$owner" ]; then
+    CHURN_OWNER_UNREADABLE="its owner $owner is missing; restore that file"
+    return 0
+  fi
+  if ! raw=$(node "$owner" tracked-churn-allowlist 2>/dev/null); then
+    CHURN_OWNER_UNREADABLE="its owner command \`node $owner tracked-churn-allowlist\` failed; repair the owner so it prints the list"
+    return 0
+  fi
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    CHURN_ALLOWLIST+=("$entry")
+  done <<EOF
+$raw
+EOF
 }
 
 # Whether one changed path IS an allowlisted path, compared as whole literal
@@ -341,13 +366,7 @@ if [ "$AHEAD" -gt 0 ]; then
   current "the tip of $LANDING ($LOCAL_TIP) is an ancestor of HEAD, which is $AHEAD commit(s) ahead of it"
 fi
 
-CHURN_ALLOWLIST=()
-while IFS= read -r entry; do
-  [ -n "$entry" ] || continue
-  CHURN_ALLOWLIST+=("$entry")
-done <<EOF
-$(churn_allowlist)
-EOF
+read_churn_allowlist
 
 CHURN_MODIFIED=
 OUTSIDE=
@@ -368,6 +387,11 @@ done
 # Both reasons are reported, because a workspace can carry one of each and the
 # verdict is one line of evidence a human and firstmate act on directly.
 EVIDENCE=
+if [ -n "$OUTSIDE" ] && [ -n "$CHURN_OWNER_UNREADABLE" ]; then
+  # Nothing was compared against anything, so claiming these paths are outside the
+  # allowlist would be the opposite of the truth - some of them may well be on it.
+  blocked "lane workspace is behind landing branch $LANDING and carries uncommitted changes, but the Playbot churn allowlist could not be read, so nothing here can be shown to be safe to discard and none of these paths is claimed to be outside that allowlist: $OUTSIDE; $CHURN_OWNER_UNREADABLE"
+fi
 [ -z "$OUTSIDE" ] || EVIDENCE="uncommitted changes outside the Playbot churn allowlist: $OUTSIDE"
 if [ -n "$UNTRACKED_LISTED" ]; then
   EVIDENCE="${EVIDENCE:+$EVIDENCE; and }untracked files at allowlisted churn paths, which are never classified as churn because git diff HEAD records nothing for content git does not track, so they could only be discarded unseen: $UNTRACKED_LISTED (commit or remove them)"
