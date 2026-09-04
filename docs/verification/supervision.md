@@ -671,6 +671,21 @@ ok - fm-playbot-lanes: landing branches require current resolvable remote eviden
 ok - fm-playbot-lanes: retirement inventory reports a malformed remote Git timeout as configuration, not landing evidence
 ```
 
+On 2026-09-04, `bash tests/fm-playbot-lanes.test.sh` with Node v26.7.0 passed all 173 checks on base commit `86e402c` after making `dispatch` settle a created workspace whose roots Playbot has not registered yet.
+The fixture endpoint withholds the `workspace_roots` rows of a workspace it just created, either for a set number of milliseconds or permanently, so the race is reproduced against real Playbot-shaped state rather than asserted from the source.
+That base run first reproduced a pre-existing failure unrelated to the settle work: three `home_dispatch` calls added with the remote-teardown lock tests passed `newWorkspace` without the `landingBranch` that [playbot-lanes.md](../playbot-lanes.md#lane-lifecycle) has required since the freshness surface landed, so each dispatch refused before reaching the lock behavior under test and the suite aborted at the first of them.
+Adding the missing `landingBranch` to those three calls is what makes the whole suite reach 173.
+The exact settle-specific output was:
+
+```text
+ok - fm-playbot-lanes: dispatch settles a created workspace whose roots are registered late and reports the wait
+ok - fm-playbot-lanes: a created workspace whose roots never register refuses with both ids and the send_message recovery
+ok - fm-playbot-lanes: a created workspace whose registered roots disagree with the landing branch refuses without retrying
+ok - fm-playbot-lanes: a caller-supplied workspace is never waited on for its own root registration
+ok - fm-playbot-lanes: a created workspace whose roots are already registered is dispatched with no wait and an unchanged result
+ok - fm-playbot-lanes: a malformed settle budget is a configuration error before any workspace is created
+```
+
 On 2026-08-24, Playbot 0.95.0 on Linux was verified to expose the question-card, snapshot, and pending-queue channels the card tools use, and to have kept the composer mounted while a card is displayed.
 `app:metadata` returned `{name: "Playbot", version: "0.95.0"}`, matching the extracted `resources/app.asar` `/package.json` and the crashpad `--annotation=_version=0.95.0`.
 The channel names and payload shapes were confirmed from the running app's extracted `.vite/build/main.js`, where `threads:respondToUserInput` takes `{threadId, requestId, response, composerContext?}` and resolves the pending Codex `item/tool/requestUserInput` request, `threads:getSnapshot` takes `{threadId}` and returns `userInputRequests`, `pendingMessages`, and `outboundMessages` among its fields, `threads:recallMessage` takes `{threadId, messageId}` and returns `{outcome, message?, snapshot}`, and `threads:send` returns that same thread snapshot.
