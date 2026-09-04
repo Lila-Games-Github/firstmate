@@ -1309,6 +1309,21 @@ const sendNonObjectFile = path.join(process.env.FIXTURE_ROOT, 'send-non-object')
 // it: the adapter refuses to guess which API it is talking to, so the detection
 // itself throws while the send that came before it already succeeded.
 const probeAcceptedFile = path.join(process.env.FIXTURE_ROOT, 'launch-accepts-probe');
+// Playbot's own creation race: the workspaces row can be readable before its
+// workspace_roots rows are committed. "never" leaves them uncommitted forever;
+// a millisecond count commits them from a later tick of this long-lived server,
+// so a reader genuinely watches them appear rather than being told they did.
+const workspaceRootsDelayFile = path.join(process.env.FIXTURE_ROOT, 'workspace-roots-delay-ms');
+// The other half of the same creation race: the workspaces row of a workspace
+// this dispatch just created can stop resolving while a reader is still
+// re-reading it, so a later read throws where it resolves rather than reporting
+// coverage at all.
+const workspaceVanishesAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-vanishes-after-ms');
+// Where a deferred write that never won the write lock records itself. The
+// reader under test polls this same database file, the fixture is not in WAL
+// mode, and a throw out of a deferred timer would kill this long-lived server
+// and every later check with it, so exhaustion is written here instead.
+const deferredWriteFailureFile = path.join(process.env.FIXTURE_ROOT, 'deferred-write-failure');
 const workspaceDeleteFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-fail-after');
 const workspaceDeleteRootRowFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-root-row-fail-after');
 const workspaceDeleteSucceedsWithoutRemovalFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-succeeds-without-removal');
@@ -1380,6 +1395,42 @@ function snapshotFor(threadId) {
   return store[threadId] ?? emptySnapshot(threadId);
 }
 
+// A write from a later tick of this long-lived server, through its own handle,
+// against a database the reader under test is polling read-only. The fixture is
+// deliberately not in WAL mode, so a contended write can raise SQLITE_BUSY; it
+// waits for the lock, retries on a bounded schedule, and on exhaustion records
+// itself so the check that needed the write fails instead of the server dying
+// and taking every later check with it. One transaction per attempt keeps a
+// retry from applying a partial write twice.
+function scheduleDeferredWrite(mutate, delayMs, attemptsLeft = 20) {
+  setTimeout(() => {
+    let later;
+    try {
+      later = new DatabaseSync(path.join(desktop, 'playbot.db'), { timeout: 5000 });
+      later.exec('BEGIN IMMEDIATE');
+      try {
+        mutate(later);
+        later.exec('COMMIT');
+      } catch (error) {
+        try {
+          later.exec('ROLLBACK');
+        } catch {
+          // Nothing to roll back when the transaction never opened.
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (attemptsLeft > 0) {
+        scheduleDeferredWrite(mutate, 50, attemptsLeft - 1);
+        return;
+      }
+      fs.appendFileSync(deferredWriteFailureFile, `${error instanceof Error ? error.message : String(error)}\n`);
+    } finally {
+      later?.close();
+    }
+  }, delayMs);
+}
+
 function createWorkspaceRows(db, spec) {
   if (spec.strategy !== 'project') throw new Error('fixture implements only the project strategy');
   const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(spec.projectId);
@@ -1394,12 +1445,27 @@ function createWorkspaceRows(db, spec) {
     SELECT pr.id AS root_id, r.path AS repo_path FROM project_roots pr
     JOIN repositories r ON r.id = pr.repository_id WHERE pr.project_id = ?
   `).all(spec.projectId);
+  const rows = [];
   for (const root of roots) {
     const worktreePath = path.join(root.repo_path, '.worktrees', branch);
     const created = spawnSync('git', ['-C', root.repo_path, 'worktree', 'add', '--detach', worktreePath, 'main'], { encoding: 'utf8' });
     if (created.status !== 0) throw new Error((created.stderr || created.stdout || 'git worktree add failed').trim());
-    db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
-      .run(id, root.root_id, worktreePath, branch);
+    rows.push([id, root.root_id, worktreePath, branch]);
+  }
+  const rootsDelay = readFileOr(workspaceRootsDelayFile, '');
+  const commitRoots = (handle) => {
+    for (const row of rows) handle.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)').run(...row);
+  };
+  if (!rootsDelay) {
+    commitRoots(db);
+  } else if (rootsDelay !== 'never') {
+    scheduleDeferredWrite(commitRoots, Number(rootsDelay));
+  }
+  const vanishesAfter = readFileOr(workspaceVanishesAfterFile, '');
+  if (vanishesAfter) {
+    scheduleDeferredWrite((handle) => {
+      handle.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
+    }, Number(vanishesAfter));
   }
   return { id, name: spec.name ?? null };
 }
@@ -2004,6 +2070,166 @@ NODE
 pass "fm-playbot-lanes: dispatch falls back to the pre-0.94 channels on a legacy Playbot"
 
 printf 'modern\n' > "$FIXTURE_ROOT/ipc-mode"
+
+# ---------------------------------------------------------------------------
+# The post-creation freshness read races Playbot's registration of the very
+# workspace roots it just created, so dispatch re-reads that ONE shape on a
+# bounded schedule instead of orphaning the workspace and chat it made. Every
+# other refusal, and every caller-supplied workspace, still refuses on the
+# first read.
+# ---------------------------------------------------------------------------
+
+settle_dispatch() {
+  PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" \
+    rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"$2\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$1\"},\"title\":\"Settle $1\",\"message\":\"Do the $1 work\"}}}"
+}
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl" "$FIXTURE_ROOT/deferred-write-failure"
+printf '600\n' > "$FIXTURE_ROOT/workspace-roots-delay-ms"
+out=$(settle_dispatch fm-settle-late main)
+rm -f "$FIXTURE_ROOT/workspace-roots-delay-ms"
+[ ! -e "$FIXTURE_ROOT/deferred-write-failure" ] \
+  || fail "the fixture never managed to register the withheld roots: $(cat "$FIXTURE_ROOT/deferred-write-failure")"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "dispatch did not wait for the created workspace's roots to be registered"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (!value) process.exit(1);
+if (!value.freshness?.current || value.freshness.roots[0].commitsBehind !== 0) process.exit(1);
+const settle = value.workspaceSettle;
+if (!settle || settle.reads < 2 || settle.outcome !== 'registered') process.exit(1);
+if (!(settle.waitedMs > 0) || settle.timeoutMs !== 5000) process.exit(1);
+if (!settle.note.includes('re-read')) process.exit(1);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const sent = calls.filter(call => call.channel === 'threads:send');
+if (sent.length !== 1 || sent[0].payload.text !== 'Do the fm-settle-late work') process.exit(1);
+NODE
+pass "fm-playbot-lanes: dispatch settles a created workspace whose roots are registered late and reports the wait"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'never\n' > "$FIXTURE_ROOT/workspace-roots-delay-ms"
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=900 settle_dispatch fm-settle-never main)
+rm -f "$FIXTURE_ROOT/workspace-roots-delay-ms"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" ORPHAN_FILE="$FIXTURE_ROOT/settle-orphan.json" node --no-warnings <<'NODE' || fail "a created workspace whose roots never appeared was not refused with its recovery"
+const fs = require('node:fs');
+const message = JSON.parse(process.env.OUT).error?.message ?? '';
+const match = /^Workspace (\S+) and chat (\S+) were created, but dispatch stopped before sending because freshness could not be read: workspace \1 root coverage mismatch: missing project root id\(s\): root-worker\. Its roots were still unregistered after (\d+) reads over (\d+)ms\. Both still exist: once workspace \1 reads fresh, deliver this task with send_message against chat \2 rather than dispatching again\.$/.exec(message);
+if (!match) process.exit(1);
+if (Number(match[3]) < 2 || Number(match[4]) < 900) process.exit(1);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.some(call => call.channel === 'threads:send')) process.exit(1);
+if (calls.some(call => call.channel === 'workspace:delete' || call.channel === 'threads:archiveThread')) process.exit(1);
+fs.writeFileSync(process.env.ORPHAN_FILE, JSON.stringify({ workspace: match[1], thread: match[2] }));
+NODE
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "the refused dispatch did not leave its created workspace and chat in place"
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const orphan = JSON.parse(fs.readFileSync(path.join(process.env.FIXTURE_ROOT, 'settle-orphan.json'), 'utf8'));
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+try {
+  if (!db.prepare('SELECT id FROM workspaces WHERE id = ?').get(orphan.workspace)) process.exit(1);
+  if (!db.prepare('SELECT id FROM workspace_threads WHERE id = ?').get(orphan.thread)) process.exit(1);
+  if (db.prepare('SELECT COUNT(*) AS n FROM workspace_roots WHERE workspace_id = ?').get(orphan.workspace).n !== 0) process.exit(1);
+  // Register the roots the fixture withheld, so the rest of the suite sees an
+  // ordinary created workspace rather than this test's frozen race.
+  db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
+    .run(orphan.workspace, 'root-worker', path.join(process.env.FIXTURE_ROOT, 'worker', '.worktrees', 'fm-settle-never'), 'fm-settle-never');
+} finally {
+  db.close();
+}
+NODE
+pass "fm-playbot-lanes: a created workspace whose roots never register refuses with both ids and the send_message recovery"
+
+# A wait that ends in a read which cannot resolve at all is still a wait: the
+# refusal has to carry the recovery, because the workspace and chat were created
+# either way and a caller told only "freshness could not be read" would dispatch
+# a second pair rather than recover this one. The workspace is withdrawn well
+# after the first read has landed but far inside the settle budget, so at least
+# one read completes and the attempt that ends the wait is the one that cannot
+# resolve.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl" "$FIXTURE_ROOT/deferred-write-failure"
+printf 'never\n' > "$FIXTURE_ROOT/workspace-roots-delay-ms"
+printf '1000\n' > "$FIXTURE_ROOT/workspace-vanishes-after-ms"
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=20000 settle_dispatch fm-settle-vanish main)
+rm -f "$FIXTURE_ROOT/workspace-roots-delay-ms" "$FIXTURE_ROOT/workspace-vanishes-after-ms"
+[ ! -e "$FIXTURE_ROOT/deferred-write-failure" ] \
+  || fail "the fixture never managed to withdraw the created workspace: $(cat "$FIXTURE_ROOT/deferred-write-failure")"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" ORPHAN_FILE="$FIXTURE_ROOT/settle-vanish-orphan.json" node --no-warnings <<'NODE' || fail "a re-read that failed to resolve lost the wait and its recovery"
+const fs = require('node:fs');
+const message = JSON.parse(process.env.OUT).error?.message ?? '';
+const match = /^Workspace (\S+) and chat (\S+) were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in [^:]+: \1\. Dispatch re-read it over (\d+)ms across (\d+) completed read\(s\) and refused on that reading\. Both still exist: once workspace \1 reads fresh, deliver this task with send_message against chat \2 rather than dispatching again\.$/.exec(message);
+if (!match) process.exit(1);
+if (Number(match[3]) < 100 || Number(match[4]) < 1) process.exit(1);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.some(call => call.channel === 'threads:send')) process.exit(1);
+if (calls.some(call => call.channel === 'workspace:delete' || call.channel === 'threads:archiveThread')) process.exit(1);
+fs.writeFileSync(process.env.ORPHAN_FILE, JSON.stringify({ workspace: match[1], thread: match[2] }));
+NODE
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "the withdrawn workspace's chat was not left behind for recovery"
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const orphan = JSON.parse(fs.readFileSync(path.join(process.env.FIXTURE_ROOT, 'settle-vanish-orphan.json'), 'utf8'));
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+try {
+  if (!db.prepare('SELECT id FROM workspace_threads WHERE id = ?').get(orphan.thread)) process.exit(1);
+  // Drop the chat the fixture's withdrawn workspace left dangling, so the rest
+  // of the suite reads ordinary state rather than this test's frozen race.
+  db.prepare('DELETE FROM workspace_threads WHERE id = ?').run(orphan.thread);
+} finally {
+  db.close();
+}
+NODE
+pass "fm-playbot-lanes: a wait that ends in an unresolvable read still refuses with the recovery"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+settle_started=$SECONDS
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=60000 settle_dispatch fm-settle-mismatch branch-that-does-not-exist)
+settle_elapsed=$((SECONDS - settle_started))
+[ "$settle_elapsed" -lt 20 ] || fail "a created workspace with an unresolvable landing branch waited on the settle budget ($settle_elapsed s)"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "a created workspace with an unresolvable landing branch was not refused on the first read"
+const fs = require('node:fs');
+const message = JSON.parse(process.env.OUT).error?.message ?? '';
+if (!/^Workspace \S+ and chat \S+ were created, but dispatch stopped before sending because freshness could not be read: \S[^\n]*$/.test(message)) process.exit(1);
+if (/reads over|still unregistered|Both still exist|send_message|re-read/.test(message)) process.exit(1);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.some(call => call.channel === 'threads:send')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a created workspace whose landing branch is unresolvable refuses immediately with no retry"
+
+settle_started=$SECONDS
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=60000 rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_workspace_freshness","arguments":{"project":"project-freshness-incomplete","workspace":"ws-fresh-incomplete","landingBranch":"main"}}}')
+settle_elapsed=$((SECONDS - settle_started))
+[ "$settle_elapsed" -lt 20 ] || fail "a caller-supplied workspace with incomplete coverage was waited on ($settle_elapsed s)"
+OUT="$out" node --no-warnings <<'NODE' || fail "a caller-supplied workspace with incomplete coverage was not refused unchanged"
+const message = JSON.parse(process.env.OUT).error?.message ?? '';
+if (message !== 'workspace ws-fresh-incomplete root coverage mismatch: missing project root id(s): root-freshness-incomplete-two') process.exit(1);
+NODE
+pass "fm-playbot-lanes: a caller-supplied workspace is never waited on for its own root registration"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+settle_started=$SECONDS
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=60000 settle_dispatch fm-settle-immediate main)
+settle_elapsed=$((SECONDS - settle_started))
+[ "$settle_elapsed" -lt 20 ] || fail "a dispatch whose roots were already registered still waited ($settle_elapsed s)"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "the already-registered dispatch result changed"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (!value?.freshness?.current) process.exit(1);
+if (Object.hasOwn(value, 'workspaceSettle')) process.exit(1);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.filter(call => call.channel === 'threads:send').length !== 1) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a created workspace whose roots are already registered is dispatched with no wait and an unchanged result"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=abc settle_dispatch fm-settle-bad-budget main)
+OUT="$out" node --no-warnings <<'NODE' || fail "a malformed settle budget was not reported as a configuration error"
+const message = JSON.parse(process.env.OUT).error?.message ?? '';
+if (!message.includes('configuration error: PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS must be a positive integer')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a workspace before validating the settle budget"
+pass "fm-playbot-lanes: a malformed settle budget is a configuration error before any workspace is created"
 
 # ---------------------------------------------------------------------------
 # Question cards, answering, and the pending-message queue.
@@ -4591,7 +4817,7 @@ env -u NO_MISTAKES_GATE FM_HOME="$FM_HOME_FIXTURE" FM_ROOT_OVERRIDE="$ROOT" \
 retired_teardown_pid=$!
 wait_for_file "$retire_entered" || fail "remote teardown never reached registry retirement under the publication lock"
 FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch \
-  "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$retired_task_id\"},\"title\":\"Retired publisher\",\"message\":\"Do not republish this task\",\"taskId\":\"$retired_task_id\"}" \
+  "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$retired_task_id\"},\"title\":\"Retired publisher\",\"message\":\"Do not republish this task\",\"taskId\":\"$retired_task_id\"}" \
   > "$FIXTURE_ROOT/retired-publisher.out" &
 retired_publisher_pid=$!
 sleep 0.5
@@ -4699,7 +4925,7 @@ FM_TEST_PRESERVE_TASK_IDENTITY=1 FM_TEST_REAL_LN="$real_ln" \
   FM_TEST_BLOCKED_PUBLISH_ENTERED="$reuse_publish_entered" \
   FM_TEST_BLOCKED_PUBLISH_RELEASE="$reuse_publish_release" \
   PATH="$retired_writer_bin:$PATH" home_dispatch \
-  "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$reuse_task_id\"},\"title\":\"Reused task publisher\",\"message\":\"Do not bind this old worker to a replacement task\",\"taskId\":\"$reuse_task_id\"}" \
+  "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$reuse_task_id\"},\"title\":\"Reused task publisher\",\"message\":\"Do not bind this old worker to a replacement task\",\"taskId\":\"$reuse_task_id\"}" \
   > "$FIXTURE_ROOT/reuse-publisher.out" &
 reuse_publisher_pid=$!
 wait_for_file "$reuse_publish_entered" \
@@ -5068,7 +5294,7 @@ env -u NO_MISTAKES_GATE FM_HOME="$FM_HOME_FIXTURE" FM_ROOT_OVERRIDE="$ROOT" \
 partial_teardown_pid=$!
 wait_for_file "$retire_entered" || fail "partial remote teardown never reached registry retirement under the publication lock"
 FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch \
-  "{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$partial_task_id\"},\"title\":\"Partial retirement publisher\",\"message\":\"Do not republish this task\",\"taskId\":\"$partial_task_id\"}" \
+  "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$partial_task_id\"},\"title\":\"Partial retirement publisher\",\"message\":\"Do not republish this task\",\"taskId\":\"$partial_task_id\"}" \
   > "$FIXTURE_ROOT/partial-publisher.out" &
 partial_publisher_pid=$!
 sleep 0.5

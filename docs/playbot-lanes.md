@@ -135,7 +135,14 @@ If Playbot rejects the deletion after removing anything, the tool compares every
 `dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x through 0.95.x.
 With `newWorkspace`, it requires an explicit `landingBranch`, creates the isolated workspace and worker chat, reads the workspace's `freshness`, and returns that evidence with the dispatch result.
 `landingBranch` is valid only together with `newWorkspace`; passing it when dispatching into an existing workspace or thread is rejected before any chat is created or message sent, because freshness for an existing workspace is read with `get_workspace_freshness` or `get_thread_status`.
-The landing branch is validated before any workspace is created, and an unreadable post-creation workspace stops dispatch before the task is sent with an error naming the workspace and chat that were already created.
+The landing branch and the root-settle budget are both validated before any workspace is created, and an unreadable post-creation workspace stops dispatch before the task is sent with an error naming the workspace and chat that were already created.
+Playbot can make that new workspace's row readable before it commits the workspace's root rows, so exactly one shape is re-read on a bounded schedule: incomplete root coverage of the workspace this call just created, meaning rows that have not arrived yet.
+Each attempt is a real read of current Playbot state, and the verdict is always that read's, never an assumption that enough time passed.
+The budget defaults to 5 seconds, is overridable through `PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS` as a positive integer of milliseconds up to 300000, and a malformed value is an explicit configuration error before anything is created rather than a refusal that already left a workspace behind.
+When a re-read happened, the result carries `workspaceSettle` with the milliseconds waited, the number of reads, and the budget, so the race is visible rather than inferred from silence.
+Nothing else is ever waited on: registered roots that are extra or duplicated, an unreadable root, an unresolvable landing branch, and every other blocker refuse on the first read exactly as they always have, and a caller-supplied existing workspace is never re-read because its state is not this call's to wait on.
+Once a re-read has happened, any refusal that follows it - the budget spent with the rows still missing, or a later read that could not be resolved at all - names both created ids, says how long it waited, and states the recovery: the workspace and chat both still exist, so once that workspace reads fresh the task is delivered with `send_message` against that chat rather than by dispatching again.
+Dispatch never deletes either one; workspace deletion is destructive and belongs only to the guarded retirement path above.
 The message can enter a non-selected project and does not require changing UI focus.
 For a Playbot-chat caller, `dispatch` also records a durable worker-to-controller route.
 

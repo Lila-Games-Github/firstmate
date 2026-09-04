@@ -66,6 +66,17 @@ const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
 const DEFAULT_REMOTE_GIT_TIMEOUT_MS = 15_000;
 const MAX_REMOTE_GIT_TIMEOUT_MS = 300_000;
 
+// Playbot can make a just-created workspace row readable before it has
+// committed that workspace's workspace_roots rows, so the first freshness read
+// of a workspace THIS call created can report incomplete root coverage for a
+// workspace that is in fact fine. The default budget is deliberately short: the
+// rows land within a moment of creation, and a caller that is holding a real
+// dispatch open must not be made to wait on a workspace whose registration is
+// genuinely wrong rather than merely late.
+const DEFAULT_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS = 5_000;
+const MAX_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS = 300_000;
+const WORKSPACE_ROOTS_SETTLE_POLL_INTERVAL_MS = 150;
+
 // This exact list is the one allowance shared by retirement inventory and
 // retirement itself. Playbot's Godot editor integration rewrites these eight
 // tracked paths across unrelated worktrees. No directory prefix, extension,
@@ -1614,6 +1625,99 @@ function workspaceFreshness(project, workspace, landingBranch) {
     }
   });
   return workspaceFreshnessReading(project, workspace, landingBranch, roots);
+}
+
+let resolvedWorkspaceRootsSettleTimeoutMs = null;
+
+function workspaceRootsSettleTimeoutMs() {
+  if (resolvedWorkspaceRootsSettleTimeoutMs !== null) return resolvedWorkspaceRootsSettleTimeoutMs;
+  const configured = process.env.PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS;
+  let timeout = DEFAULT_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS;
+  if (configured !== undefined) {
+    if (!/^[1-9]\d*$/.test(configured)) {
+      throw new Error("configuration error: PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS must be a positive integer");
+    }
+    timeout = Number(configured);
+    if (!Number.isSafeInteger(timeout) || timeout > MAX_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS) {
+      throw new Error(`configuration error: PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS must not exceed ${MAX_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS}`);
+    }
+  }
+  resolvedWorkspaceRootsSettleTimeoutMs = timeout;
+  return timeout;
+}
+
+// The one shape unpersisted roots can take: rows that have not arrived yet.
+// An extra or duplicated project root is registered evidence that disagrees
+// with the project, and no amount of waiting turns that into a pass.
+function workspaceRootsNotRegisteredYet(coverage) {
+  return coverage.missingProjectRootIds.length > 0
+    && coverage.extraProjectRootIds.length === 0
+    && coverage.duplicateProjectRootIds.length === 0;
+}
+
+function settlePause(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+// A settle record exists only when a re-read was actually attempted, so its
+// absence is what says the first read answered and nothing waited. The gate is
+// attempts rather than completed reads because an attempt that throws while
+// resolving is still a wait the caller has to be told about; reads stays the
+// reported count of readings that produced a verdict.
+function settleRecord(attempts, reads, startedAt, timeoutMs, outcome) {
+  if (attempts < 2) return null;
+  return { reads, waitedMs: Date.now() - startedAt, timeoutMs, outcome };
+}
+
+// Freshness for a workspace THIS call just created. Every verdict returned here
+// comes from a real topology read; the loop decides only whether to read again,
+// never what the answer is. Nothing but the not-yet-registered coverage shape is
+// retried, and the caller-supplied-workspace paths never come through here at
+// all, so an existing workspace is never waited on.
+async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, timeoutMs) {
+  const startedAt = Date.now();
+  let attempts = 0;
+  let reads = 0;
+  for (;;) {
+    let project;
+    let workspace;
+    let coverage;
+    attempts += 1;
+    try {
+      project = resolveProject(projectId, topology());
+      workspace = resolveWorkspace(project, workspaceId);
+      reads += 1;
+      coverage = workspaceRootCoverage(project, workspace);
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        settle: settleRecord(attempts, reads, startedAt, timeoutMs, "unreadable"),
+      };
+    }
+    const waitedMs = Date.now() - startedAt;
+    const unregistered = workspaceRootsNotRegisteredYet(coverage);
+    if (unregistered && waitedMs < timeoutMs) {
+      await settlePause(WORKSPACE_ROOTS_SETTLE_POLL_INTERVAL_MS);
+      continue;
+    }
+    const settle = settleRecord(attempts, reads, startedAt, timeoutMs, unregistered ? "unregistered" : "registered");
+    try {
+      return { ok: true, freshness: workspaceFreshness(project, workspace, landingBranch), settle };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error), settle };
+    }
+  }
+}
+
+function createdWorkspaceSettleReport(settle) {
+  return {
+    waitedMs: settle.waitedMs,
+    reads: settle.reads,
+    timeoutMs: settle.timeoutMs,
+    outcome: settle.outcome,
+    note: "Playbot had not registered the created workspace's roots on the first read; dispatch re-read until they appeared.",
+  };
 }
 
 function gitWorktreePaths(projectRootPath) {
@@ -4971,6 +5075,10 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       throw new Error("dispatch landingBranch is only valid together with newWorkspace; an existing workspace's freshness is read with get_workspace_freshness or get_thread_status");
     }
     const landingBranch = wantsNewWorkspace ? explicitLandingBranch(name, args.landingBranch) : null;
+    // Resolved here rather than at the read, so a malformed settle budget is a
+    // configuration error before anything is created instead of a refusal that
+    // has already left a workspace and chat behind.
+    const settleTimeoutMs = wantsNewWorkspace ? workspaceRootsSettleTimeoutMs() : null;
     // Validated before anything is created or sent: a taskId that cannot key a
     // check would otherwise be discovered only after the worker was already
     // working, which is the unwatched-worker case this arming exists to remove.
@@ -5000,14 +5108,26 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
     let freshness = null;
+    let workspaceSettle = null;
     if (wantsNewWorkspace) {
-      try {
-        const freshProject = resolveProject(project.id, topology());
-        const createdWorkspace = resolveWorkspace(freshProject, worker.workspace_id);
-        freshness = workspaceFreshness(freshProject, createdWorkspace, landingBranch);
-      } catch (error) {
-        throw new Error(`Workspace ${worker.workspace_id} and chat ${worker.thread_id} were created, but dispatch stopped before sending because freshness could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      const settled = await createdWorkspaceFreshness(project.id, worker.workspace_id, landingBranch, settleTimeoutMs);
+      if (!settled.ok) {
+        // A refusal that never waited keeps its exact wording, because nothing
+        // about it changed. A refusal that did wait says so and states the
+        // recovery, because the workspace and chat are already real and
+        // dispatching again would create a second pair rather than reach this
+        // one. Deleting either is destructive and belongs to the guarded
+        // retirement path, never to a failed dispatch.
+        const refusal = `Workspace ${worker.workspace_id} and chat ${worker.thread_id} were created, but dispatch stopped before sending because freshness could not be read: ${settled.error}`;
+        if (!settled.settle) throw new Error(refusal);
+        const waited = settled.settle.outcome === "unregistered"
+          ? `Its roots were still unregistered after ${settled.settle.reads} reads over ${settled.settle.waitedMs}ms.`
+          : `Dispatch re-read it over ${settled.settle.waitedMs}ms across ${settled.settle.reads} completed read(s) and refused on that reading.`;
+        const stop = refusal.endsWith(".") ? "" : ".";
+        throw new Error(`${refusal}${stop} ${waited} Both still exist: once workspace ${worker.workspace_id} reads fresh, deliver this task with send_message against chat ${worker.thread_id} rather than dispatching again.`);
       }
+      freshness = settled.freshness;
+      workspaceSettle = settled.settle ? createdWorkspaceSettleReport(settled.settle) : null;
     }
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
@@ -5018,6 +5138,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
           lane,
           ...sent,
           ...(freshness ? { freshness } : {}),
+          ...(workspaceSettle ? { workspaceSettle } : {}),
           supervision: {
             mode: "routed-wake",
             laneId: lane.id,
@@ -5035,7 +5156,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         baseline: acceptedBaseline ?? { ...armingBaseline, acceptanceMs: null },
         delivery: acceptedBaseline ? sent.delivery : null,
       });
-      const result = { lane: null, ...sent, ...(freshness ? { freshness } : {}), supervision };
+      const result = { lane: null, ...sent, ...(freshness ? { freshness } : {}), ...(workspaceSettle ? { workspaceSettle } : {}), supervision };
       if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
       return result;
     } catch (error) {
