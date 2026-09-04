@@ -236,6 +236,20 @@ test_an_untracked_allowlisted_path_blocks_while_a_tracked_one_is_churn() {
   assert_contains "$out" "$churn_path" "the block does not name the untracked path"
   assert_grep "playbot-rewrote-this-locally" "$dir/wt/$churn_path" \
     "the check discarded an untracked file it could not have disclosed"
+  # This arm is only reachable when the workspace is strictly behind, so a commit
+  # of its own would make it diverged and block again: committing cannot be the
+  # remedy, and prescribing it sends the reader in a circle.
+  assert_contains "$out" "move them out of this workspace" \
+    "the block does not prescribe moving the untracked files aside"
+  assert_not_contains "$out" "commit" \
+    "the block still prescribes committing, which only makes the workspace diverged"
+  # Follow the prescribed remedy and prove it actually reaches a verdict that is
+  # not blocked, rather than merely being better-worded advice.
+  mv "$dir/wt/$churn_path" "$dir/moved-aside.uid"
+  expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "following the prescribed remedy did not clear the block"
+  assert_grep "playbot-rewrote-this-locally" "$dir/moved-aside.uid" \
+    "the remedy lost the content it told the reader to move aside"
 
   # Tracked and modified at the very same path: still churn, still disclosable.
   dir=$(make_case behind-tracked-churn)
@@ -508,6 +522,14 @@ test_unresolvable_remote_tip_blocks_only_a_publishing_lane() {
   assert_contains "$out" "could not be resolved" "the ambiguous block does not name the missing evidence"
   # Here every candidate ref does exist, so naming one is a remedy that works.
   assert_contains "$out" "set-upstream-to" "the ambiguous block does not say how to fix it"
+  # A count is not evidence: the candidate loop confirmed each ref, so the block
+  # must name them and prescribe a command against those names.
+  assert_contains "$out" "refs/remotes/origin/landing/frog-pile" \
+    "the ambiguous block does not name the origin candidate it found"
+  assert_contains "$out" "refs/remotes/second/landing/frog-pile" \
+    "the ambiguous block does not name the second candidate it found"
+  assert_not_contains "$out" "<remote>" \
+    "the ambiguous block leaves a literal placeholder in the command it prescribes"
   pass "fm-lane-base-check.sh: an unresolvable or ambiguous remote tip blocks only a publishing lane"
 }
 

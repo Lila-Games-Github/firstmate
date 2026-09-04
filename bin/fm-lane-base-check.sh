@@ -45,7 +45,11 @@
 #                      file to be churn, and `git diff HEAD` records nothing for
 #                      content git does not track, so discarding one could only
 #                      ever be announced with an empty record. A workspace holding
-#                      both kinds is reported with both reasons.
+#                      both kinds is reported with both reasons. The remedy is to
+#                      move those files out of the workspace, or delete them -
+#                      never to commit them: this arm is reachable only when the
+#                      workspace is strictly behind, so a commit of its own would
+#                      make it DIVERGED and block again for another reason.
 #                      The untracked half of this gate is read with an explicit
 #                      `--untracked-files=all`, so no `status.showUntrackedFiles`
 #                      in the shared config can silence it: a verdict of this
@@ -77,8 +81,10 @@
 #                      and pruned or never fetched (fetch that branch); a local
 #                      upstream; an upstream naming a different remote branch; and
 #                      more than one remote carrying the landing branch's name
-#                      with no upstream choosing one, which is ambiguous (name the
-#                      one, with --set-upstream-to).
+#                      with no upstream choosing one, which is ambiguous - that
+#                      line names every candidate ref it found and prescribes
+#                      --set-upstream-to against those names, choosing none, since
+#                      which remote this lane lands on is the operator's call.
 #   working tree unreadable                      blocked; a tree whose state
 #                      cannot be read must never be reported as clean, because a
 #                      clean tree is what authorises the reset.
@@ -286,12 +292,18 @@ if [ "$PUBLISHES" -eq 1 ]; then
   REMOTE_TIP_REF=
   REMOTE_MATCHES=0
   UPSTREAM_IS_CANDIDATE=0
+  CANDIDATE_REFS=
+  CANDIDATE_SHORTS=
   while IFS= read -r remote; do
     [ -n "$remote" ] || continue
     candidate_ref="refs/remotes/$remote/$LANDING"
     candidate=$(git rev-parse --verify --quiet "$candidate_ref") || candidate=
     [ -n "$candidate" ] || continue
     REMOTE_MATCHES=$((REMOTE_MATCHES + 1))
+    # Kept so an ambiguous verdict can name what it actually found rather than a
+    # count, and prescribe a command against those names rather than a placeholder.
+    CANDIDATE_REFS="${CANDIDATE_REFS:+$CANDIDATE_REFS, }$candidate_ref"
+    CANDIDATE_SHORTS="${CANDIDATE_SHORTS:+$CANDIDATE_SHORTS, }$remote/$LANDING"
     if [ "$candidate_ref" = "$UPSTREAM_REF" ]; then
       UPSTREAM_IS_CANDIDATE=1
       REMOTE_TIP=$candidate
@@ -305,8 +317,10 @@ $REMOTES
 EOF
 
   if [ "$REMOTE_MATCHES" -gt 1 ] && [ "$UPSTREAM_IS_CANDIDATE" -eq 0 ]; then
-    # Every candidate ref exists here, so naming one is a remedy that works.
-    blocked "remote tip of landing branch $LANDING could not be resolved: $REMOTE_MATCHES remotes carry a ref named refs/remotes/<remote>/$LANDING and no upstream of this branch names one of them, so which published tip a PR would build on is ambiguous; run git branch --set-upstream-to=<remote>/$LANDING $LANDING to name the one this lane lands on, so a lane that opens a PR can prove nothing rides along"
+    # Every candidate ref exists here, so naming one is a remedy that works. Which
+    # one this lane lands on is the operator's call, so all of them are named and
+    # none is chosen here.
+    blocked "remote tip of landing branch $LANDING could not be resolved: $REMOTE_MATCHES remote-tracking refs carry that branch name and no upstream of $LANDING names any of them, so which published tip a PR would build on is ambiguous; the candidates are $CANDIDATE_REFS, so run git branch --set-upstream-to=<one of: $CANDIDATE_SHORTS> $LANDING to name the one this lane lands on, so a lane that opens a PR can prove nothing rides along"
   fi
 
   if [ "$REMOTE_MATCHES" -eq 0 ]; then
@@ -394,7 +408,7 @@ if [ -n "$OUTSIDE" ] && [ -n "$CHURN_OWNER_UNREADABLE" ]; then
 fi
 [ -z "$OUTSIDE" ] || EVIDENCE="uncommitted changes outside the Playbot churn allowlist: $OUTSIDE"
 if [ -n "$UNTRACKED_LISTED" ]; then
-  EVIDENCE="${EVIDENCE:+$EVIDENCE; and }untracked files at allowlisted churn paths, which are never classified as churn because git diff HEAD records nothing for content git does not track, so they could only be discarded unseen: $UNTRACKED_LISTED (commit or remove them)"
+  EVIDENCE="${EVIDENCE:+$EVIDENCE; and }untracked files at allowlisted churn paths, which are never classified as churn because git diff HEAD records nothing for content git does not track, so they could only be discarded unseen: $UNTRACKED_LISTED (move them out of this workspace, or delete them if they are unwanted - git is not holding this content, so moving them aside is the option that keeps it)"
 fi
 [ -z "$EVIDENCE" ] || blocked "lane workspace is behind landing branch $LANDING but carries $EVIDENCE"
 
