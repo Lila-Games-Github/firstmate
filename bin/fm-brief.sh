@@ -64,7 +64,13 @@
 #      generated step never resets over work that is not committed, except the
 #      eight tracked paths docs/playbot-lanes.md records as Playbot editor churn.
 #      Those it may reset, but only after capturing their diff into the lane's log
-#      and naming them in a status line, so nothing is discarded unseen.
+#      and naming them in a status line, so nothing is discarded unseen; a clean
+#      tree discloses nothing and resets directly. In the two PR-producing modes
+#      the same step first requires the landing branch to be PUBLISHED - local ref
+#      equal to its remote tip - and stops naming both commits when it is not,
+#      because a PR based on the remote tip would otherwise carry the landing
+#      branch's unpushed commits as this task's work. local-only publishes nothing,
+#      so it keeps the plain local comparison.
 #   3. Delivery contract. The mode is declared prominently after the task, above the
 #      Herdr and setup sections, repeating only the machine-readable contract line
 #      and that mode's one prohibition and pointing at the Definition of done as the
@@ -556,6 +562,22 @@ if [ "$LANE" -eq 1 ]; then
   LANE_LANDING_REF="refs/heads/$LANDING_BRANCH"
   LANE_LANDING_ACT="If \`git rev-parse --verify --quiet refs/heads/$LANDING_BRANCH\` prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch $LANDING_BRANCH is missing from this repository\` to the status file and stop."
   LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
+  # A lane that ships through a PR has that PR based on the landing branch as
+  # PUBLISHED, while the base check below resets onto the LOCAL landing branch,
+  # which by this feature's premise can carry unpushed commits. Resetting onto an
+  # unpushed local landing and then opening a PR against the remote base would
+  # present a sibling lane's unlanded commits as this task's work, so a PR-producing
+  # lane stops until the landing branch is pushed. local-only publishes nothing, so
+  # its local landing branch is the whole truth and no comparison applies.
+  case "$MODE" in
+    local-only) ;;
+    *)
+      LANE_LANDING_ACT="$LANE_LANDING_ACT
+      Your PR's base is the landing branch as PUBLISHED, so before anything else in this check the local landing branch must match its remote tip: a commit that is on \`refs/heads/$LANDING_BRANCH\` but not on its remote tip would ride along in your PR as if it were your work.
+      Resolve the remote tip once with \`git rev-parse '$LANDING_BRANCH@{upstream}'\` - that suffix takes the bare branch name because it resolves branches only, so nothing else can satisfy it - or with \`git rev-parse refs/remotes/<remote>/$LANDING_BRANCH\` for the remote this repository pushes to when the branch has no upstream configured.
+      If \`git rev-parse refs/heads/$LANDING_BRANCH\` and that remote tip are equal, carry on with this check.
+      If they differ, STOP before you reset, push, or open anything - append \`blocked: landing branch $LANDING_BRANCH is not published: local {the local sha} vs remote {the remote sha}; push $LANDING_BRANCH before this lane proceeds\` to the status file and stop. One \`git push\` of $LANDING_BRANCH clears it." ;;
+  esac
   # Playbot's editor integration rewrites exactly these eight tracked paths across
   # unrelated worktrees (docs/playbot-lanes.md owns the list and its boundary: no
   # directory, extension or basename is churn), so a lane workspace carrying them
@@ -580,17 +602,18 @@ if [ "$LANE" -eq 1 ]; then
       $LANE_LANDING_ACT
       Then read both distances once with \`git rev-list --left-right --count $LANE_LANDING_REF...HEAD\` (three dots), which prints the number of commits the landing branch has that you do not - how far BEHIND you are - then the number you have that it does not - how far AHEAD you are. Act on exactly one of these:
       - behind 0, ahead 0 - current: your base is current; proceed.
-      - behind above 0, ahead 0 - behind only - AND every line \`git status --porcelain\` prints names one of the eight Playbot churn paths listed below (including the case where it prints nothing at all): reset, but only after the disclosure step below.
+      - behind above 0, ahead 0 - behind only - AND \`git status --porcelain\` prints nothing: run \`git reset --hard $LANE_LANDING_REF\` and proceed. There is nothing to disclose, so the disclosure step below does not apply.
+      - behind above 0, ahead 0 - behind only - AND every line \`git status --porcelain\` prints names one of the eight Playbot churn paths listed below: reset, but only after the disclosure step below.
       - behind above 0, ahead 0 - behind only - and \`git status --porcelain\` prints anything that is NOT one of those eight paths: STOP and never reset; uncommitted work is never discarded - append \`blocked: lane workspace is behind its landing branch but carries uncommitted changes: {the printed paths that are not Playbot churn}\` to the status file and stop.
       - behind 0, ahead above 0 - ahead only: those commits are your own work, or the newer landing tip your workspace was created from, and nothing about your base needs fixing; proceed and do NOT reset.
       - behind above 0, ahead above 0 - diverged: STOP. Do not reset, rebase, merge, or guess - append \`blocked: lane workspace has diverged from its landing branch\` to the status file and stop.
 
       Playbot's editor integration rewrites eight tracked paths across unrelated worktrees, so a modification to one of those - and to nothing else - is that workspace's documented steady state rather than work of yours. Those eight exact paths are $LANE_CHURN_LIST.
       That list is eight literal paths: no directory, extension, or basename near them is churn, so a modification to any other path under \`prototype-game/addons/playbot/\` still makes your workspace dirty.
-      Disclosure is a PRECONDITION of the reset, not a follow-up: a reset destroys whatever those paths currently hold, and \`prototype-game/project.godot\` is a hand-editable settings file rather than a generated one, so it can carry real human edits.
-      Before you reset, run \`git diff -- $LANE_CHURN_ARGS\` and leave its complete output in your log, untruncated and unsummarized - that output is the only record of what the reset discards.
+      The disclosure below applies ONLY when \`git status --porcelain\` actually printed one or more of those eight paths. A clean working tree discloses nothing and resets directly; when churn IS present, disclosure is a PRECONDITION of the reset, not a follow-up, because the reset destroys whatever those paths currently hold - and \`prototype-game/project.godot\` is a hand-editable settings file rather than a generated one, so it can carry real human edits.
+      Before you reset, run \`git diff HEAD -- $LANE_CHURN_ARGS\` and leave its complete output in your log, untruncated and unsummarized - that output is the only record of what the reset discards. Name \`HEAD\` in that command: a bare \`git diff\` compares the working tree against the index, so a churn change that is already staged would not appear, while \`git reset --hard\` discards index and working tree alike.
       Then append \`working: discarding Playbot churn before base reset: {the allowlisted paths you are about to discard}\` to the status file, naming exactly the paths \`git status --porcelain\` printed.
-      Only then run \`git reset --hard $LANE_LANDING_REF\` and proceed. If you have not captured that diff and appended that line, do not reset.
+      Only then run \`git reset --hard $LANE_LANDING_REF\` and proceed. With churn present and that diff uncaptured or that line unappended, do not reset.
 EOF
   SETUP1=${SETUP1%$'\n'}
 else
@@ -603,27 +626,21 @@ case "$MODE" in
     SETUP2=""
     if [ "$LANE" -eq 1 ]; then
       RULE1="1. Never push to the default branch (push only $LANE_BRANCH_DESC; never create or switch branches). Never merge a PR."
-      IFS= read -r -d '' DOD <<EOF || true
-# Definition of done
-Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, passing \`--base $LANDING_BRANCH\` explicitly so the PR targets your landing branch.
+      DOD_PR_STEP="When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, passing \`--base $LANDING_BRANCH\` explicitly so the PR targets your landing branch.
 That base is not optional: your work is based on \`$LANDING_BRANCH\`, and a PR opened without it targets the repository's default branch instead - a branch this lane must not touch, carrying every commit on the landing branch that the default branch does not have.
-Then append \`done: PR {url}\` to the status file and stop.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
+Then append \`done: PR {url}\` to the status file and stop."
     else
       RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
-      IFS= read -r -d '' DOD <<EOF || true
+      DOD_PR_STEP="When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop."
+    fi
+    IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+$DOD_PR_STEP
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
-    fi
     ;;
   local-only)
     SETUP2=""
