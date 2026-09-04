@@ -1,0 +1,285 @@
+
+===============================================================
+CASE 1  roots registered late -> dispatch waits, settles, sends the task, reports the wait
+wall clock: 2549 ms
+---------------------------------------------------------------
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"lane\": null,\n  \"thread\": {\n    \"id\": \"thread-created-6\",\n    \"title\": \"Settle fm-settle-late\",\n    \"projectId\": \"project-worker\",\n    \"project\": \"prototype-game\",\n    \"workspaceId\": \"ws-created-7\",\n    \"workspace\": \"ws-created-7\",\n    \"sessionId\": null,\n    \"status\": \"ready\",\n    \"queuedCount\": 0,\n    \"hasUnread\": false,\n    \"isActive\": true,\n    \"archived\": false,\n    \"updatedAt\": \"2026-08-25T08:00:04.000Z\",\n    \"url\": \"playbot://workspace/ws-created-7/thread/thread-created-6\"\n  },\n  \"delivery\": {\n    \"state\": \"sending\",\n    \"messageId\": \"msg-sent-4\",\n    \"queuedTotal\": 0\n  },\n  \"freshness\": {\n    \"workspace\": {\n      \"id\": \"ws-created-7\",\n      \"name\": \"ws-created-7\",\n      \"kind\": \"worktree\",\n      \"projectId\": \"project-worker\",\n      \"project\": \"prototype-game\"\n    },\n    \"landingBranch\": \"main\",\n    \"current\": true,\n    \"roots\": [\n      {\n        \"projectRootId\": \"root-worker\",\n        \"worktreePath\": \"/tmp/fm-playbot-lanes.Fq4dUh/fixture/worker/.worktrees/fm-settle-late\",\n        \"head\": {\n          \"commit\": \"633eda7ac4e799df31fd3a6583882ae0be44563b\",\n          \"subject\": \"fixture baseline\"\n        },\n        \"landingBranch\": \"main\",\n        \"landingBranchTip\": {\n          \"requested\": \"main\",\n          \"remote\": \"origin\",\n          \"branch\": \"main\",\n          \"remoteRef\": \"refs/heads/main\",\n          \"commit\": \"633eda7ac4e799df31fd3a6583882ae0be44563b\",\n          \"observedAt\": \"2026-09-04T07:24:12.287Z\",\n          \"presentLocally\": true\n        },\n        \"relation\": \"equal\",\n        \"distanceKnown\": true,\n        \"commitsAhead\": 0,\n        \"commitsBehind\": 0,\n        \"current\": true,\n        \"headIsCleanFastForwardOfLandingTip\": true,\n        \"unlandedCommits\": []\n      }\n    ]\n  },\n  \"workspaceSettle\": {\n    \"waitedMs\": 604,\n    \"reads\": 5,\n    \"timeoutMs\": 5000,\n    \"outcome\": \"registered\",\n    \"note\": \"Playbot had not registered the created workspace's roots on the first read; dispatch re-read until they appeared.\"\n  },\n  \"supervision\": {\n    \"mode\": \"poll\",\n    \"tools\": [\n      \"get_thread_status\",\n      \"read_thread\",\n      \"get_thread_card\"\n    ],\n    \"taskId\": \"ws-created-7\",\n    \"taskIdSource\": \"workspace-id\",\n    \"thread\": \"thread-created-6\",\n    \"check\": \"state/ws-created-7.check.sh\",\n    \"armed\": false,\n    \"problem\": \"/tmp/fm-playbot-lanes.Fq4dUh/fixture/not-a-playbot-project/state does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll\"\n  },\n  \"warnings\": [\n    \"SUPERVISION NOT ARMED: this worker was dispatched and nothing is polling it. /tmp/fm-playbot-lanes.Fq4dUh/fixture/not-a-playbot-project/state does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll Arm a poll before relying on a wake, or supervise it by hand with get_thread_status, read_thread, get_thread_card.\"\n  ]\n}"
+      }
+    ],
+    "structuredContent": {
+      "lane": null,
+      "thread": {
+        "id": "thread-created-6",
+        "title": "Settle fm-settle-late",
+        "projectId": "project-worker",
+        "project": "prototype-game",
+        "workspaceId": "ws-created-7",
+        "workspace": "ws-created-7",
+        "sessionId": null,
+        "status": "ready",
+        "queuedCount": 0,
+        "hasUnread": false,
+        "isActive": true,
+        "archived": false,
+        "updatedAt": "2026-08-25T08:00:04.000Z",
+        "url": "playbot://workspace/ws-created-7/thread/thread-created-6"
+      },
+      "delivery": {
+        "state": "sending",
+        "messageId": "msg-sent-4",
+        "queuedTotal": 0
+      },
+      "freshness": {
+        "workspace": {
+          "id": "ws-created-7",
+          "name": "ws-created-7",
+          "kind": "worktree",
+          "projectId": "project-worker",
+          "project": "prototype-game"
+        },
+        "landingBranch": "main",
+        "current": true,
+        "roots": [
+          {
+            "projectRootId": "root-worker",
+            "worktreePath": "/tmp/fm-playbot-lanes.Fq4dUh/fixture/worker/.worktrees/fm-settle-late",
+            "head": {
+              "commit": "633eda7ac4e799df31fd3a6583882ae0be44563b",
+              "subject": "fixture baseline"
+            },
+            "landingBranch": "main",
+            "landingBranchTip": {
+              "requested": "main",
+              "remote": "origin",
+              "branch": "main",
+              "remoteRef": "refs/heads/main",
+              "commit": "633eda7ac4e799df31fd3a6583882ae0be44563b",
+              "observedAt": "2026-09-04T07:24:12.287Z",
+              "presentLocally": true
+            },
+            "relation": "equal",
+            "distanceKnown": true,
+            "commitsAhead": 0,
+            "commitsBehind": 0,
+            "current": true,
+            "headIsCleanFastForwardOfLandingTip": true,
+            "unlandedCommits": []
+          }
+        ]
+      },
+      "workspaceSettle": {
+        "waitedMs": 604,
+        "reads": 5,
+        "timeoutMs": 5000,
+        "outcome": "registered",
+        "note": "Playbot had not registered the created workspace's roots on the first read; dispatch re-read until they appeared."
+      },
+      "supervision": {
+        "mode": "poll",
+        "tools": [
+          "get_thread_status",
+          "read_thread",
+          "get_thread_card"
+        ],
+        "taskId": "ws-created-7",
+        "taskIdSource": "workspace-id",
+        "thread": "thread-created-6",
+        "check": "state/ws-created-7.check.sh",
+        "armed": false,
+        "problem": "/tmp/fm-playbot-lanes.Fq4dUh/fixture/not-a-playbot-project/state does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll"
+      },
+      "warnings": [
+        "SUPERVISION NOT ARMED: this worker was dispatched and nothing is polling it. /tmp/fm-playbot-lanes.Fq4dUh/fixture/not-a-playbot-project/state does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll Arm a poll before relying on a wake, or supervise it by hand with get_thread_status, read_thread, get_thread_card."
+      ]
+    }
+  }
+}
+--- playbot IPC channels invoked by this dispatch -------------
+  threads:launch
+  threads:launch
+  threads:send
+
+===============================================================
+CASE 2  roots never registered within a 900ms budget -> refusal names both ids and the send_message recovery
+wall clock: 1003 ms
+---------------------------------------------------------------
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Workspace ws-created-8 and chat thread-created-7 were created, but dispatch stopped before sending because freshness could not be read: workspace ws-created-8 root coverage mismatch: missing project root id(s): root-worker. Its roots were still unregistered after 7 reads over 907ms. Both still exist: once workspace ws-created-8 reads fresh, deliver this task with send_message against chat thread-created-7 rather than dispatching again."
+  }
+}
+--- playbot IPC channels invoked by this dispatch -------------
+  threads:launch
+  threads:launch
+--- persisted playbot state after the refusal -----------------
+  workspaces row:        {"id":"ws-created-8","project_id":"project-worker","archive_state":"active"}
+  workspace_threads row: {"id":"thread-created-7","workspace_id":"ws-created-8","title":"Settle fm-settle-never"}
+  workspace_roots rows:  0
+
+===============================================================
+CASE 3  the wait ends in a read that cannot resolve at all -> refusal still carries the wait clause and the recovery
+wall clock: 1154 ms
+---------------------------------------------------------------
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Workspace ws-created-9 and chat thread-created-8 were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in project-worker: ws-created-9. Dispatch re-read it over 1059ms across 7 completed read(s) and refused on that reading. Both still exist: once workspace ws-created-9 reads fresh, deliver this task with send_message against chat thread-created-8 rather than dispatching again."
+  }
+}
+--- playbot IPC channels invoked by this dispatch -------------
+  threads:launch
+  threads:launch
+
+===============================================================
+CASE 4  unresolvable landing branch -> immediate refusal, no retry, none of the retry wording
+wall clock: 134 ms
+---------------------------------------------------------------
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Workspace ws-created-10 and chat thread-created-9 were created, but dispatch stopped before sending because freshness could not be read: freshness is unreadable for workspace ws-created-10 root root-worker: git exited 2"
+  }
+}
+--- playbot IPC channels invoked by this dispatch -------------
+  threads:launch
+  threads:launch
+
+===============================================================
+CASE 5  caller-supplied existing workspace with incomplete coverage -> unchanged immediate refusal, never waited on (60s budget configured)
+wall clock: 49 ms
+---------------------------------------------------------------
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "workspace ws-fresh-incomplete root coverage mismatch: missing project root id(s): root-freshness-incomplete-two"
+  }
+}
+
+===============================================================
+CASE 6  roots already registered -> happy path: no wait, no workspaceSettle key, result byte-shape unchanged
+wall clock: 160 ms
+---------------------------------------------------------------
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"lane\": null,\n  \"thread\": {\n    \"id\": \"thread-created-10\",\n    \"title\": \"Settle fm-settle-immediate\",\n    \"projectId\": \"project-worker\",\n    \"project\": \"prototype-game\",\n    \"workspaceId\": \"ws-created-11\",\n    \"workspace\": \"ws-created-11\",\n    \"sessionId\": null,\n    \"status\": \"ready\",\n    \"queuedCount\": 0,\n    \"hasUnread\": false,\n    \"isActive\": true,\n    \"archived\": false,\n    \"updatedAt\": \"2026-08-25T08:00:05.000Z\",\n    \"url\": \"playbot://workspace/ws-created-11/thread/thread-created-10\"\n  },\n  \"delivery\": {\n    \"state\": \"sending\",\n    \"messageId\": \"msg-sent-5\",\n    \"queuedTotal\": 0\n  },\n  \"freshness\": {\n    \"workspace\": {\n      \"id\": \"ws-created-11\",\n      \"name\": \"ws-created-11\",\n      \"kind\": \"worktree\",\n      \"projectId\": \"project-worker\",\n      \"project\": \"prototype-game\"\n    },\n    \"landingBranch\": \"main\",\n    \"current\": true,\n    \"roots\": [\n      {\n        \"projectRootId\": \"root-worker\",\n        \"worktreePath\": \"/tmp/fm-playbot-lanes.Fq4dUh/fixture/worker/.worktrees/fm-settle-immediate\",\n        \"head\": {\n          \"commit\": \"633eda7ac4e799df31fd3a6583882ae0be44563b\",\n          \"subject\": \"fixture baseline\"\n        },\n        \"landingBranch\": \"main\",\n        \"landingBranchTip\": {\n          \"requested\": \"main\",\n          \"remote\": \"origin\",\n          \"branch\": \"main\",\n          \"remoteRef\": \"refs/heads/main\",\n          \"commit\": \"633eda7ac4e799df31fd3a6583882ae0be44563b\",\n          \"observedAt\": \"2026-09-04T07:24:17.057Z\",\n          \"presentLocally\": true\n        },\n        \"relation\": \"equal\",\n        \"distanceKnown\": true,\n        \"commitsAhead\": 0,\n        \"commitsBehind\": 0,\n        \"current\": true,\n        \"headIsCleanFastForwardOfLandingTip\": true,\n        \"unlandedCommits\": []\n      }\n    ]\n  },\n  \"supervision\": {\n    \"mode\": \"poll\",\n    \"tools\": [\n      \"get_thread_status\",\n      \"read_thread\",\n      \"get_thread_card\"\n    ],\n    \"taskId\": \"ws-created-11\",\n    \"taskIdSource\": \"workspace-id\",\n    \"thread\": \"thread-created-10\",\n    \"check\": \"state/ws-created-11.check.sh\",\n    \"armed\": false,\n    \"problem\": \"/tmp/fm-playbot-lanes.Fq4dUh/fixture/not-a-playbot-project/state does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll\"\n  },\n  \"warnings\": [\n    \"SUPERVISION NOT ARMED: this worker was dispatched and nothing is polling it. /tmp/fm-playbot-lanes.Fq4dUh/fixture/not-a-playbot-project/state does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll Arm a poll before relying on a wake, or supervise it by hand with get_thread_status, read_thread, get_thread_card.\"\n  ]\n}"
+      }
+    ],
+    "structuredContent": {
+      "lane": null,
+      "thread": {
+        "id": "thread-created-10",
+        "title": "Settle fm-settle-immediate",
+        "projectId": "project-worker",
+        "project": "prototype-game",
+        "workspaceId": "ws-created-11",
+        "workspace": "ws-created-11",
+        "sessionId": null,
+        "status": "ready",
+        "queuedCount": 0,
+        "hasUnread": false,
+        "isActive": true,
+        "archived": false,
+        "updatedAt": "2026-08-25T08:00:05.000Z",
+        "url": "playbot://workspace/ws-created-11/thread/thread-created-10"
+      },
+      "delivery": {
+        "state": "sending",
+        "messageId": "msg-sent-5",
+        "queuedTotal": 0
+      },
+      "freshness": {
+        "workspace": {
+          "id": "ws-created-11",
+          "name": "ws-created-11",
+          "kind": "worktree",
+          "projectId": "project-worker",
+          "project": "prototype-game"
+        },
+        "landingBranch": "main",
+        "current": true,
+        "roots": [
+          {
+            "projectRootId": "root-worker",
+            "worktreePath": "/tmp/fm-playbot-lanes.Fq4dUh/fixture/worker/.worktrees/fm-settle-immediate",
+            "head": {
+              "commit": "633eda7ac4e799df31fd3a6583882ae0be44563b",
+              "subject": "fixture baseline"
+            },
+            "landingBranch": "main",
+            "landingBranchTip": {
+              "requested": "main",
+              "remote": "origin",
+              "branch": "main",
+              "remoteRef": "refs/heads/main",
+              "commit": "633eda7ac4e799df31fd3a6583882ae0be44563b",
+              "observedAt": "2026-09-04T07:24:17.057Z",
+              "presentLocally": true
+            },
+            "relation": "equal",
+            "distanceKnown": true,
+            "commitsAhead": 0,
+            "commitsBehind": 0,
+            "current": true,
+            "headIsCleanFastForwardOfLandingTip": true,
+            "unlandedCommits": []
+          }
+        ]
+      },
+      "supervision": {
+        "mode": "poll",
+        "tools": [
+          "get_thread_status",
+          "read_thread",
+          "get_thread_card"
+        ],
+        "taskId": "ws-created-11",
+        "taskIdSource": "workspace-id",
+        "thread": "thread-created-10",
+        "check": "state/ws-created-11.check.sh",
+        "armed": false,
+        "problem": "/tmp/fm-playbot-lanes.Fq4dUh/fixture/not-a-playbot-project/state does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll"
+      },
+      "warnings": [
+        "SUPERVISION NOT ARMED: this worker was dispatched and nothing is polling it. /tmp/fm-playbot-lanes.Fq4dUh/fixture/not-a-playbot-project/state does not exist, so PLAYBOT_LANES_CONTROLLER_ROOT is not a firstmate home that can hold a watcher poll Arm a poll before relying on a wake, or supervise it by hand with get_thread_status, read_thread, get_thread_card."
+      ]
+    }
+  }
+}
+--- playbot IPC channels invoked by this dispatch -------------
+  threads:launch
+  threads:launch
+  threads:send
+
+===============================================================
+CASE 7  malformed settle budget -> configuration error before anything is created
+wall clock: 51 ms
+---------------------------------------------------------------
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "configuration error: PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS must be a positive integer"
+  }
+}

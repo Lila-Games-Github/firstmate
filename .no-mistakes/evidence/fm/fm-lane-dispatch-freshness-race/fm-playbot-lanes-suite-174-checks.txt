@@ -1,0 +1,174 @@
+ok - fm-playbot-lanes: node 26.7.0 resolved at /home/sanchith/.local/bin/node
+ok - fm-playbot-lanes: node syntax is valid
+ok - fm-playbot-lanes: global project discovery is project-id and path aware
+ok - fm-playbot-lanes: workspace freshness reports Git evidence without remote URLs
+ok - fm-playbot-lanes: landing upstream lookup matches the exact local branch
+ok - fm-playbot-lanes: partial-clone freshness disables lazy object fetching
+ok - fm-playbot-lanes: freshness rejects incomplete multi-root workspace coverage
+ok - fm-playbot-lanes: workspace freshness requires explicit selectors and complete readable Git state
+ok - fm-playbot-lanes: retirement fallback keeps head subjects snapshot-consistent
+ok - fm-playbot-lanes: successful workspace freshness pins one head snapshot
+ok - fm-playbot-lanes: workspace freshness bounds remote Git operations
+ok - fm-playbot-lanes: a malformed remote Git timeout is an explicit configuration error
+ok - fm-playbot-lanes: failed remote freshness redacts URL credentials
+ok - fm-playbot-lanes: freshness and retirement verify repository identity
+ok - fm-playbot-lanes: list_threads groups every active workspace deterministically without filtering on selected
+ok - fm-playbot-lanes: list_threads workspace filtering is explicit, archived-safe, and fail-closed
+ok - fm-playbot-lanes: terminal call returns the same result object as MCP
+ok - fm-playbot-lanes: terminal calls stay external without consuming Playbot caller identity
+ok - fm-playbot-lanes: normal-terminal callers need no Playbot controller project
+ok - fm-playbot-lanes: duplicate project names fail closed
+ok - fm-playbot-lanes: caller identity comes from the exact Codex session marker
+ok - fm-playbot-lanes: identity stays readable for chats outside the controller project
+ok - fm-playbot-lanes: cross-project tools are restricted to the configured controller project
+ok - fm-playbot-lanes: thread reads are bounded and non-resuming
+ok - fm-playbot-lanes: normal-terminal callers can poll thread status
+ok - fm-playbot-lanes: a named thread resolves project-wide, and an explicit workspace still narrows it
+ok - fm-playbot-lanes: an archived workspace's chats stay out of the default thread scope
+ok - fm-playbot-lanes: normal-terminal callers can read worker conversations
+ok - fm-playbot-lanes: normal-terminal register_lane fails closed toward polling supervision
+ok - fm-playbot-lanes: Stop wake delivery is routed, durable, and turn-deduplicated
+ok - fm-playbot-lanes: dead route-lock owners recover without wedging mutations
+ok - fm-playbot-lanes: PID reuse cannot preserve another route-lock generation
+ok - fm-playbot-lanes: concurrent dead-owner reapers preserve one lock generation
+ok - fm-playbot-lanes: route-lock owner publication completes short writes
+ok - fm-playbot-lanes: route-lock release serializes with recovery
+ok - fm-playbot-lanes: route-lock release preserves another owner generation
+ok - fm-playbot-lanes: route-lock ownership publishes atomically before acquisition
+ok - fm-playbot-lanes: route-lock identity ignores caller timezone and locale
+ok - fm-playbot-lanes: installer merges one MCP server and one hook of each kind
+ok - fm-playbot-lanes: hook readiness requires one owned hook of each kind
+ok - fm-playbot-lanes: setup repairs only when needed and never creates a startup chat
+ok - fm-playbot-lanes: workspace root branches are visible in the global topology
+ok - fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project
+ok - fm-playbot-lanes: setup reloads stale MCP schemas exactly once
+ok - fm-playbot-lanes: doctor detects the 0.94.0 threads:launch API from the safe capability probe
+ok - fm-playbot-lanes: create_workspace launches the 0.94.0 new-workspace payload and archives its setup chat
+ok - fm-playbot-lanes: create_workspace omits blank optional fields so Playbot's strict schema accepts the payload
+ok - fm-playbot-lanes: create_chat launches with the Playbot-generated thread id and no UI activation
+ok - fm-playbot-lanes: dispatch creates a workspace, creates the worker chat inside it, and delivers the task
+ok - fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision
+ok - fm-playbot-lanes: new-workspace dispatch requires landingBranch before creation
+ok - fm-playbot-lanes: new-workspace dispatch rejects malformed landingBranch before creation
+ok - fm-playbot-lanes: dispatch rejects landingBranch without newWorkspace before any side effect
+ok - fm-playbot-lanes: ambiguous workspace targeting fails closed
+ok - fm-playbot-lanes: existing-workspace selection is unchanged
+ok - fm-playbot-lanes: doctor detects the pre-0.94 chat-creation API on a legacy Playbot
+ok - fm-playbot-lanes: create_workspace falls back to workspace:create on a legacy Playbot
+ok - fm-playbot-lanes: dispatch falls back to the pre-0.94 channels on a legacy Playbot
+ok - fm-playbot-lanes: dispatch settles a created workspace whose roots are registered late and reports the wait
+ok - fm-playbot-lanes: a created workspace whose roots never register refuses with both ids and the send_message recovery
+ok - fm-playbot-lanes: a wait that ends in an unresolvable read still refuses with the recovery
+ok - fm-playbot-lanes: a created workspace whose landing branch is unresolvable refuses immediately with no retry
+ok - fm-playbot-lanes: a caller-supplied workspace is never waited on for its own root registration
+ok - fm-playbot-lanes: a created workspace whose roots are already registered is dispatched with no wait and an unchanged result
+ok - fm-playbot-lanes: a malformed settle budget is a configuration error before any workspace is created
+ok - fm-playbot-lanes: list_parked_threads detects candidates from persisted state without touching Playbot
+ok - fm-playbot-lanes: parked detection uses only explicit per-project landing targets
+ok - fm-playbot-lanes: absent remote tips return unknown distance without repository writes
+ok - fm-playbot-lanes: retirement reuses the full workspace freshness shape
+ok - fm-playbot-lanes: remote-prefixed landing branches require unambiguous refs
+ok - fm-playbot-lanes: the parked detector exposes only its scoped target inputs
+ok - fm-playbot-lanes: get_thread_card enumerates a named chat's card without focusing it
+ok - fm-playbot-lanes: answer_thread_card refuses a borrowed request id, an unknown question, a moved turn, and an implicit skip
+ok - fm-playbot-lanes: answer_thread_card answers the card once and reports a second attempt as already answered
+ok - fm-playbot-lanes: get_thread_card contradicts a persisted pending_input that holds no live card
+ok - fm-playbot-lanes: queued messages are listable and one can be dropped instead of resent
+ok - fm-playbot-lanes: a renamed channel or changed snapshot shape refuses and names what is missing
+ok - fm-playbot-lanes: a version read that failed or carried no version recovers instead of sticking at unreadable
+ok - fm-playbot-lanes: send_message reports held, in-flight, and delivered separately
+ok - fm-playbot-lanes: force steers the exact queued message without interrupting or retargeting another chat
+ok - fm-playbot-lanes: local refresh failures cannot prevent or hide exact-message steering
+ok - fm-playbot-lanes: force never claims delivery without Playbot confirmation
+ok - fm-playbot-lanes: a send snapshot whose queue projection is missing or unreadable refuses by name
+ok - fm-playbot-lanes: an unreadable verdict refuses without deactivating the lane it was dispatched on
+ok - fm-playbot-lanes: a dispatch whose send never reached Playbot deactivates the lane
+ok - fm-playbot-lanes: dispatch onto a parked worker reports the task as held, not delivered
+ok - fm-playbot-lanes: a Playbot that returns no send snapshot leaves delivery explicitly unconfirmed
+ok - fm-playbot-lanes: an unreadable persisted queue reads as unknown, never as empty
+ok - fm-playbot-lanes: a partial answer sends its option label verbatim and reports what went unanswered
+ok - fm-playbot-lanes: a completed answer or recall reports an unreadable projection as null, never as empty
+ok - fm-playbot-lanes: a post-action warning never contradicts the payload it ships with
+ok - fm-playbot-lanes: a rejected lane wake stays eligible for retry and is recorded, then lands on retry
+ok - fm-playbot-lanes: an accepted wake with an unreadable verdict counts as notified and is never resent
+ok - fm-playbot-lanes: an unconfirmed wake advances only on a Playbot whose send path cannot report a verdict
+ok - fm-playbot-lanes: a chat-creation probe that fails after the send does not mislabel the wake as undelivered
+ok - fm-playbot-lanes: a worker in a project Playbot no longer marks active still wakes its supervisor
+ok - fm-playbot-lanes: an external-terminal dispatch arms and registers that worker's watcher poll
+ok - fm-playbot-lanes: task acceptance boundaries preserve fast completion without crossing turns
+ok - fm-playbot-lanes: forced exact-message delivery retires after terminal completion
+ok - fm-playbot-lanes: retirement distinguishes an armed check from orphaned cleanup
+ok - fm-playbot-lanes: the armed poll keeps the real watcher silent while the worker is working
+ok - fm-playbot-lanes: the armed poll wakes the real watcher when the worker parks, naming the task
+ok - fm-playbot-lanes: missing post-send acceptance stays unconfirmed and armed
+ok - fm-playbot-lanes: a fired poll reports held messages and keeps firing while the worker stays parked
+ok - fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new worker
+ok - fm-playbot-lanes: failed restoration re-registration is loud even for identical check bytes
+ok - fm-playbot-lanes: the armed poll reports a stopped worker once and then retires itself
+ok - fm-playbot-lanes: rollout acceptance advances the terminal boundary before retirement
+ok - fm-playbot-lanes: delivered transitions require exact acceptance timestamps
+ok - fm-playbot-lanes: exact acceptance recovers supervision after recall failure
+ok - fm-playbot-lanes: exact-thread delivery and recall evidence stay ownership-safe
+ok - fm-playbot-lanes: delivered unreadability retires while restored unknown delivery stays armed
+ok - fm-playbot-lanes: a dispatch without a taskId still arms a poll, keyed on the workspace
+ok - fm-playbot-lanes: null and non-string taskIds take the workspace fallback
+ok - fm-playbot-lanes: an unusable taskId is refused before any worker is created or sent to
+ok - fm-playbot-lanes: a dispatch whose arming failed says so instead of looking supervised
+ok - fm-playbot-lanes: arming never replaces a check this server did not generate
+ok - fm-playbot-lanes: arming a merged-PR poll over a lane poll refuses by name and leaves it intact
+ok - fm-playbot-lanes: concurrent owners serialize and dead or PID-reused publication locks recover
+ok - fm-playbot-lanes: remote teardown retires identity before a blocked task publisher can publish
+ok - fm-playbot-lanes: remote teardown blocks prepared PR poll republication
+ok - fm-playbot-lanes: blocked publishers reject replacement task incarnations
+ok - fm-playbot-lanes: remote teardown blocks migration quarantine republication
+ok - fm-playbot-lanes: remote teardown blocks retirement receipt republication
+ok - fm-playbot-lanes: failed retirement receipt validation rolls publication back
+ok - fm-playbot-lanes: migration failure publication retains its task lock
+ok - fm-playbot-lanes: local teardown blocks prepared PR poll republication
+ok - fm-playbot-lanes: publication honors independent state and data overrides
+ok - fm-playbot-lanes: route-absent remote metadata cannot republish after partial teardown
+ok - fm-playbot-lanes: a Playbot-chat dispatch keeps its routed wake and arms no poll
+ok - fm-playbot-lanes: create_chat arms nothing, because it starts no worker
+ok - fm-playbot-lanes: retirement exposes inspection plus one confirmed exact-workspace call
+ok - fm-playbot-lanes: inventory is non-destructive and reports Local, thread, root, and Git refusals with evidence
+ok - fm-playbot-lanes: landing branches require current resolvable remote evidence
+ok - fm-playbot-lanes: retirement inventory reports a malformed remote Git timeout as configuration, not landing evidence
+ok - fm-playbot-lanes: explicit inputs, confirmation, Local, missing-root, and unreadable-Git refusals never reach IPC
+ok - fm-playbot-lanes: explicit landing names and encoded commit subjects remain exact
+ok - fm-playbot-lanes: all and only eight exact tracked Playbot churn paths are allowed
+ok - fm-playbot-lanes: POSIX backslashes remain literal blocking path characters
+ok - fm-playbot-lanes: tracked, untracked, and ignored work block by exact path
+ok - fm-playbot-lanes: untracked inventory bypasses Git cache shortcuts
+ok - fm-playbot-lanes: assume-unchanged and skip-worktree paths block with exact index evidence
+ok - fm-playbot-lanes: tracked content comparison bypasses Git stat-cache shortcuts
+ok - fm-playbot-lanes: tracked symlink targets compare against index blobs
+ok - fm-playbot-lanes: tracked content comparison honors Git clean filters
+ok - fm-playbot-lanes: executable mode changes block despite core.fileMode false
+ok - fm-playbot-lanes: inherited Git repository overrides cannot hide tracked work
+ok - fm-playbot-lanes: commit subjects block retirement until current remote evidence proves them landed
+ok - fm-playbot-lanes: replacement refs are explicit blocking evidence
+ok - fm-playbot-lanes: repository graft metadata blocks retirement evidence
+ok - fm-playbot-lanes: initialized submodules expose nested ignored work before retirement
+ok - fm-playbot-lanes: persisted removed-submodule storage exposes stash and unpushed commits
+ok - fm-playbot-lanes: fresh submodule remote evidence rejects stale tracking refs
+ok - fm-playbot-lanes: persisted submodule reflogs expose reset unpushed commits
+ok - fm-playbot-lanes: persisted submodule pseudorefs expose reset unpushed commits
+ok - fm-playbot-lanes: malformed persisted pseudorefs fail closed
+ok - fm-playbot-lanes: persisted irregular pseudoref objects block retirement
+ok - fm-playbot-lanes: persisted FETCH_HEAD exposes deleted remote commits
+ok - fm-playbot-lanes: persisted submodule unpublished and symbolic refs block
+ok - fm-playbot-lanes: persisted submodule operations and index state block
+ok - fm-playbot-lanes: clean-looking merge, cherry-pick, and rebase states block retirement
+ok - fm-playbot-lanes: every root resolves its own worktree-specific remote evidence
+ok - fm-playbot-lanes: missing and unknown thread states block retirement
+ok - fm-playbot-lanes: immediate recheck returns exact thread and path blockers
+ok - fm-playbot-lanes: retirement rejects unregistered clones from another repository
+ok - fm-playbot-lanes: rejected multi-root deletion reconciles and audits exact partial state
+ok - fm-playbot-lanes: exact root-row deltas report partial deletion
+ok - fm-playbot-lanes: audit append completes short writes and syncs creation
+ok - fm-playbot-lanes: audit appends serialize and recover incomplete tails
+ok - fm-playbot-lanes: successful IPC cannot label incomplete removal deleted
+ok - fm-playbot-lanes: invalid route objects make post-action cleanup incomplete
+ok - fm-playbot-lanes: concurrent Stop notification cannot reactivate retired routes
+ok - fm-playbot-lanes: confirmed retirement uses exact IPC and verifies audit, routes, database, directory, and Git removal
+ok - fm-playbot-lanes: an unusable FM_TEST_NODE is refused by path and reason

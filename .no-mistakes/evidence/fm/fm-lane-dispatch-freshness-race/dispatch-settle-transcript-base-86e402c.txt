@@ -1,0 +1,23 @@
+===============================================================
+CASE 1  roots registered late -> dispatch waits, settles, sends the task, reports the wait
+wall clock: 104 ms
+---------------------------------------------------------------
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Workspace ws-created-7 and chat thread-created-6 were created, but dispatch stopped before sending because freshness could not be read: workspace ws-created-7 root coverage mismatch: missing project root id(s): root-worker"
+  }
+}
+--- persisted playbot state left behind by the refusal ---------
+  workspaces row:        {"id":"ws-created-7","project_id":"project-worker","archive_state":"active"}
+  workspace_threads row: {"id":"thread-created-6","workspace_id":"ws-created-7","title":"Settle fm-settle-late"}
+  workspace_roots rows:  0  (the task was never sent; both objects are orphaned)
+--- the same workspace re-read 1.5s later ----------------------
+  {"project_root_id":"root-worker","branch":"fm-settle-late","path":"/tmp/fm-playbot-lanes.VMNJzA/fixture/worker/.worktrees/fm-settle-late"}
+  the root Playbot had not yet registered is present, on the right branch;
+  base dispatch had already refused and orphaned the pair on its single read.
+--- playbot IPC channels invoked by this dispatch -------------
+  threads:launch
+  threads:launch
