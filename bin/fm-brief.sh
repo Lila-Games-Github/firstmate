@@ -79,12 +79,16 @@
 # what docs/playbot-lanes.md forbids for a lane - so a brief that could not name the
 # branch is refused at scaffold time rather than emitted for a worker to stop on.
 # It requires --lane, because a non-lane worktree is already based locally on the
-# branch firstmate recorded for it. The value must be a plain local branch name:
-# refs/... ref paths and remote-tracking spellings such as origin/<branch> are
-# refused, because the generated commands qualify the name as refs/heads/<branch>
-# themselves and a remote-tracking spelling can never match that. Remote names come
-# from the project's clone under this home when it is readable, else from the
-# conventional ones; a branch name that merely contains a slash is unaffected.
+# branch firstmate recorded for it. The value is a plain local branch name that git
+# itself accepts (git check-ref-format --branch), restricted to letters, digits,
+# '.', '_', '/', '+' and '-' because it is rendered into commands the brief tells
+# the worker to run; --lane-branch takes the same value form. refs/... ref paths are
+# refused in favour of the bare name, since the generated commands qualify it as
+# refs/heads/<branch> themselves. A value is refused as remote-tracking only when
+# the project's clone under this home resolves it as refs/remotes/<value> and has no
+# refs/heads/<value>; a real local branch such as proto/godot/frog-pile is accepted
+# even where 'proto' is also a remote name, and an unreadable clone accepts the
+# name rather than guessing (the brief's step 1b stops on a branch that is absent).
 # --lane is refused on scout and secondmate scaffolds: a scout brief carries no
 # branch convention to replace, and a charter is not a lane.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
@@ -154,23 +158,40 @@ else
 fi
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 
-# A remote-tracking spelling renders a refs/heads/origin/<branch> guard that can
-# never match, so the caller learns about it here instead of through a blocked
-# worker. The project's own clone is authoritative for remote names when this home
-# has one; otherwise the conventional names are refused. A first segment that is
-# not a remote name - `proto/godot/frog-pile` and the like - is untouched.
+# Both lane branch flags are rendered into commands the generated brief tells a
+# worker to run, so a value that is not a plain branch name is refused here rather
+# than reaching the brief: first a conservative character set, so no shell
+# metacharacter or command substitution can ever be rendered, then git's own
+# branch-name validation, which owns the leading-dash, `..`, `@{`, trailing-.lock,
+# control-character and empty-segment cases.
+reject_unsafe_branch_value() {
+  local flag=$1 value=$2
+  case "$value" in
+    *[!A-Za-z0-9._/+-]*)
+      echo "error: $flag takes a plain branch name; '$value' contains characters outside letters, digits, '.', '_', '/', '+' and '-', and this value is rendered into commands the brief tells the worker to run" >&2
+      return 1 ;;
+  esac
+  git check-ref-format --branch "$value" >/dev/null 2>&1 || {
+    echo "error: $flag value '$value' is not a valid git branch name (git check-ref-format --branch refuses it)" >&2
+    return 1
+  }
+}
+
+# The generated commands qualify the landing branch as refs/heads/<branch>, so a
+# remote-tracking spelling can never match. Resolution in the project's clone
+# decides, not the shape of the name: a real local branch is accepted even when its
+# first segment happens to name a remote, and only a value that resolves solely as
+# a remote-tracking ref is refused. An unreadable or absent clone accepts a
+# ref-safe name rather than guessing - step 1b of the generated brief is
+# fail-closed on a landing branch that turns out not to be there.
 reject_remote_tracking_landing_branch() {
-  local branch=$1 project=$2 first clone remotes
-  first=${branch%%/*}
-  [ "$first" != "$branch" ] || return 0
-  remotes=
+  local branch=$1 project=$2 clone
   clone="$PROJECTS/$project"
-  if [ -n "$project" ] && [ -e "$clone/.git" ]; then
-    remotes=$(git -C "$clone" remote 2>/dev/null) || remotes=
-  fi
-  [ -n "$remotes" ] || remotes=$'origin\nupstream\nfork'
-  printf '%s\n' "$remotes" | grep -qxF -- "$first" || return 0
-  echo "error: --landing-branch names a local branch, not a remote-tracking ref; '$first' is a remote name, so pass the bare branch name '${branch#*/}' (the generated base check compares against refs/heads/<branch>, which a remote-tracking spelling can never match)" >&2
+  [ -n "$project" ] && [ -e "$clone/.git" ] || return 0
+  git -C "$clone" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git -C "$clone" show-ref --verify --quiet "refs/heads/$branch" && return 0
+  git -C "$clone" show-ref --verify --quiet "refs/remotes/$branch" || return 0
+  echo "error: --landing-branch names a local branch, not a remote-tracking ref; in $clone '$branch' resolves only as refs/remotes/$branch and there is no refs/heads/$branch, so pass the local branch name '${branch#*/}' (the generated base check compares against refs/heads/<branch>)" >&2
   return 1
 }
 
@@ -264,6 +285,7 @@ if [ "$LANE_BRANCH_SET" -eq 1 ]; then
     exit 1
   }
   [ -n "$LANE_BRANCH" ] || { echo "error: --lane-branch requires a value" >&2; exit 1; }
+  reject_unsafe_branch_value --lane-branch "$LANE_BRANCH" || exit 1
 fi
 if [ "$LANDING_BRANCH_SET" -eq 1 ]; then
   [ "$LANE" -eq 1 ] || {
@@ -279,6 +301,7 @@ if [ "$LANDING_BRANCH_SET" -eq 1 ]; then
       echo "error: --landing-branch names a branch, not a ref path; the generated base check compares against refs/heads/<branch> only, and a tag or remote-tracking ref can never be that comparison target" >&2
       exit 1 ;;
   esac
+  reject_unsafe_branch_value --landing-branch "$LANDING_BRANCH" || exit 1
   reject_remote_tracking_landing_branch "$LANDING_BRANCH" "${POS[1]:-}" || exit 1
 fi
 # The base check is the first thing a lane brief tells its worker to do, and it
