@@ -3,7 +3,10 @@
 # to start lane work from, and if not, why not.
 # Usage: fm-lane-base-check.sh <landing-branch> [--publishes]
 #   Runs in the current worktree and WRITES NOTHING: no reset, no fetch, no ref
-#   update, no index change. It reports a verdict and the caller acts on it.
+#   update, no index change, and no lock taken - every git read here runs with
+#   git's optional locks disabled, so not even `git status` can refresh the index
+#   underneath a workspace Playbot is concurrently rewriting. It reports a verdict
+#   and the caller acts on it.
 #   bin/fm-brief.sh --lane renders this invocation as a lane brief's first action,
 #   because Playbot creates a lane workspace from the REMOTE tip of the landing
 #   branch, so a landing that has not been pushed yet leaves the workspace behind.
@@ -88,6 +91,16 @@
 # comparison of a TRACKED change's pathname against those entries: no pattern, no
 # line matching, no untracked file, and no prefix, extension or basename.
 set -eu
+
+# The contract above says this script changes no index, and `git status` is the
+# one read that could: it may refresh the index's stat cache, rewrite .git/index
+# opportunistically, and contend for .git/index.lock while doing so. A lane
+# workspace is by this feature's own premise being rewritten concurrently by
+# Playbot's editor, so that is the worst place to take a lock. Setting this once
+# for the whole script rather than per call means the claim holds for every git
+# invocation here, including any added later: git performs no optional
+# sub-operation that would require a lock, and the verdicts are unchanged.
+export GIT_OPTIONAL_LOCKS=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -204,7 +217,7 @@ collect_changed_paths() {
   local record pending=0 status='' spool
   spool=$(mktemp) \
     || blocked "working-tree state of this lane workspace could not be read: no temporary file could be created to read it into"
-  if ! git status --porcelain --untracked-files=all -z > "$spool" 2>/dev/null; then
+  if ! git --no-optional-locks status --porcelain --untracked-files=all -z > "$spool" 2>/dev/null; then
     rm -f "$spool"
     blocked "working-tree state of this lane workspace could not be read, so no uncommitted work can be shown to be absent and nothing here is safe to discard"
   fi

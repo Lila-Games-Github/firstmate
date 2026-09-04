@@ -986,7 +986,7 @@ test_lane_brief_declares_its_delivery_contract_prominently() {
 # An explicit workspace branch must be stated in all four places that used to name
 # fm/<task-id>: the setup step, rule 1, the definition of done, and the ready line.
 test_lane_branch_name_is_stated_in_every_branch_instruction() {
-  local home brief
+  local home brief base_check_line done_line
   home="$TMP_ROOT/lane-named-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named some-proj --mode local-only --lane \
@@ -1018,17 +1018,29 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
 
   # A no-mistakes lane cannot establish that base - `no-mistakes axi run` has no
   # base flag - so its definition of done must say who chooses it and make a
-  # mismatch a report, never something the worker tries to repair.
+  # mismatch a report, never something the worker tries to repair. The
+  # confirmation has to be one the worker can actually perform: no-mistakes
+  # exposes no way to read its configured target, so it is read off the opened PR,
+  # and that step must come BEFORE the terminal done report or a mismatched PR
+  # would be announced as success.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named-nm some-proj --mode no-mistakes --lane \
     --lane-branch task/lane-named-nm-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
     || fail "no-mistakes lane brief should scaffold"
   brief="$home/data/lane-named-nm/brief.md"
   assert_grep "base is whatever no-mistakes is configured to target" "$brief" \
     "no-mistakes lane brief does not say who chooses its PR base"
-  assert_grep "blocked: no-mistakes targets {the configured target}, not landing branch proto/godot/frog-pile" \
+  assert_grep "gh-axi api /repos/{owner}/{repo}/pulls/{number} --jq .base.ref" "$brief" \
+    "no-mistakes lane brief does not name a command that reads the PR's base"
+  assert_grep "blocked: no-mistakes opened {url} against base {the base you read}, not landing branch proto/godot/frog-pile" \
     "$brief" "no-mistakes lane brief does not make a base mismatch a reported block"
-  assert_grep "Never pass a base, edit no-mistakes configuration, or work around it" "$brief" \
-    "no-mistakes lane brief does not forbid repairing the base itself"
+  assert_grep "Never pass a base, edit no-mistakes configuration, retarget or edit the PR, or work around it" \
+    "$brief" "no-mistakes lane brief does not forbid repairing the base itself"
+  assert_no_grep "confirm its configured target" "$brief" \
+    "no-mistakes lane brief still demands a pre-start confirmation nothing can read"
+  base_check_line=$(grep -n "confirm the base of the PR no-mistakes opened" "$brief" | head -1 | cut -d: -f1)
+  done_line=$(grep -n "done: PR {url} checks green" "$brief" | head -1 | cut -d: -f1)
+  [ -n "$base_check_line" ] && [ -n "$done_line" ] && [ "$base_check_line" -lt "$done_line" ] \
+    || fail "the PR base confirmation does not precede the terminal done report"
   pass "fm-brief.sh: an explicit lane branch is stated in every branch instruction"
 }
 

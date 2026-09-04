@@ -74,6 +74,19 @@ check_code() {  # <worktree> [args...] -> echoes exit code
   printf '%s\n' "$rc"
 }
 
+# Every byte of both git dirs - the worktree's own and the shared common one -
+# hashed together, so any ref update, index rewrite or leftover lock file shows up
+# as a difference. The script's contract is that it writes nothing at all.
+git_dirs_fingerprint() {  # <worktree>
+  local wt=$1 gd common
+  gd=$(git -C "$wt" rev-parse --absolute-git-dir)
+  common=$(cd "$gd" && git rev-parse --path-format=absolute --git-common-dir)
+  find "$gd" "$common" -type f -print0 2>/dev/null \
+    | LC_ALL=C sort -z \
+    | xargs -0 sha256sum 2>/dev/null \
+    | sha256sum
+}
+
 test_usage_is_refused_without_a_landing_branch() {
   local out rc
   out=$("$CHECK" 2>&1); rc=$?
@@ -296,6 +309,40 @@ test_the_untracked_gate_does_not_depend_on_ambient_git_config() {
   assert_grep "work nobody has committed yet" "$dir/wt/untracked-work.txt" \
     "the check authorised a reset over uncommitted content"
   pass "fm-lane-base-check.sh: the untracked gate does not depend on ambient git config"
+}
+
+# The contract is that this script writes nothing and takes no lock, and the
+# generated brief repeats that claim to the worker deciding it is safe to run on a
+# workspace holding uncommitted work. A lane workspace is concurrently rewritten
+# by Playbot's editor, so an index refresh here would race it.
+test_the_check_leaves_both_git_dirs_untouched() {
+  local dir gd before after state
+  for state in clean churn; do
+    dir=$(make_case "readonly-$state")
+    land_locally "$dir" "sibling lane landed locally, not pushed"
+    if [ "$state" = churn ]; then
+      printf 'config_version=5\nfolder_colors={"res://scenes":"red"}\n' > "$dir/wt/prototype-game/project.godot"
+      git -C "$dir/wt" add prototype-game/project.godot
+      printf 'uid://rewritten\n' > "$dir/wt/prototype-game/addons/playbot/plugin.gd.uid"
+    fi
+    gd=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+    # Settle every stat cache first, then make it stale again, so the run is the
+    # only thing that could want to refresh the index.
+    git -C "$dir/wt" status --porcelain >/dev/null
+    before=$(git_dirs_fingerprint "$dir/wt")
+    touch "$dir/wt/app.txt" "$dir/wt/prototype-game/project.godot"
+
+    expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" \
+      "the $state case must still reach its verdict"
+    # The publishing path adds the remote-tip and containment reads; it blocks on
+    # this fixture's unpushed landing branch, and must write nothing either.
+    check_code "$dir/wt" landing/frog-pile --publishes >/dev/null
+    after=$(git_dirs_fingerprint "$dir/wt")
+    [ "$before" = "$after" ] \
+      || fail "the $state run changed the git dirs it only reads: $before vs $after"
+    [ ! -e "$gd/index.lock" ] || fail "the $state run left an index lock behind"
+  done
+  pass "fm-lane-base-check.sh: a full run leaves both git dirs byte-identical"
 }
 
 # A rename record is `XY <path>NUL<origPath>NUL` - the source path arrives with no
@@ -706,6 +753,7 @@ test_allowlist_membership_is_a_literal_path_not_a_pattern
 test_an_untracked_allowlisted_path_blocks_while_a_tracked_one_is_churn
 test_the_block_names_the_true_reason_for_each_path
 test_the_untracked_gate_does_not_depend_on_ambient_git_config
+test_the_check_leaves_both_git_dirs_untouched
 test_a_rename_record_does_not_misalign_the_status_field
 test_diverged_and_absent_landing_branch_block
 test_publishing_lane_requires_a_published_landing_branch
