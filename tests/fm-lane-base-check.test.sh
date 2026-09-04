@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-lane-base-check.sh, one case per named state in its
 # header: current, ahead-only, behind-only (clean tree, allowlisted churn -
-# staged included - and modifications outside the allowlist), diverged, an absent
-# local landing branch, an unreadable working tree, and for a --publishes lane the
+# staged included, an untracked file at an allowlisted path, a rename, and
+# modifications outside the allowlist), diverged, an absent local landing branch,
+# an unreadable working tree, and for a --publishes lane the
 # unpublished-local state, each unresolvable-remote cause - no upstream, a local
 # upstream, a configured upstream whose remote-tracking ref is gone, and an
 # ambiguous name, and an upstream naming a different remote branch - plus the
@@ -196,6 +197,75 @@ test_allowlist_membership_is_a_literal_path_not_a_pattern() {
   assert_grep "edited by the lane" "$dir/wt/$sneaky" \
     "the check discarded a modification it had no authority over"
   pass "fm-lane-base-check.sh: allowlist membership is a literal path, not a pattern"
+}
+
+# Churn is a TRACKED change. The allowlist's owner infers no untracked file to be
+# churn, and `git diff HEAD` records nothing for content git does not track, so an
+# untracked file at an allowlisted path must block - otherwise the reset would
+# discard it and the disclosure line would name it with an empty record behind it.
+# The same path, tracked and modified, must still be churn, so the distinction is
+# proven from both sides rather than assumed.
+test_an_untracked_allowlisted_path_blocks_while_a_tracked_one_is_churn() {
+  local dir out churn_path
+  churn_path=prototype-game/addons/playbot/playbot_common.gd.uid
+  dir=$(make_case behind-untracked-churn)
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  # Playbot's editor writes the path into a workspace whose HEAD does not track
+  # it, so git sees `?? <path>` rather than a modification.
+  printf 'uid://playbot-rewrote-this-locally\n' > "$dir/wt/$churn_path"
+  [ -z "$(git -C "$dir/wt" diff HEAD -- "$churn_path")" ] \
+    || fail "the fixture's path is tracked, so it could still be disclosed"
+
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "an untracked file at an allowlisted path must block, not count as churn"
+  assert_contains "$out" "$churn_path" "the block does not name the untracked path"
+  assert_grep "playbot-rewrote-this-locally" "$dir/wt/$churn_path" \
+    "the check discarded an untracked file it could not have disclosed"
+
+  # Tracked and modified at the very same path: still churn, still disclosable.
+  dir=$(make_case behind-tracked-churn)
+  printf 'uid://committed\n' > "$dir/repo/$churn_path"
+  git -C "$dir/repo" add -- "$churn_path"
+  git -C "$dir/repo" commit -qm "the addon uid becomes tracked"
+  git -C "$dir/wt" reset --hard refs/heads/landing/frog-pile >/dev/null 2>&1
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  printf 'uid://playbot-rewrote-this-locally\n' > "$dir/wt/$churn_path"
+  [ -n "$(git -C "$dir/wt" diff HEAD -- "$churn_path")" ] \
+    || fail "the fixture left nothing for the disclosure record to capture"
+
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "a tracked modification at an allowlisted path must still require a reset"
+  assert_contains "$(printf '%s\n' "$out" | sed -n 's/^churn-paths: //p')" "$churn_path" \
+    "the tracked churn path is not named for disclosure"
+  pass "fm-lane-base-check.sh: an untracked allowlisted path blocks, a tracked one is churn"
+}
+
+# A rename record is `XY <path>NUL<origPath>NUL` - the source path arrives with no
+# status field of its own. If the reader misaligned there, the status carried by
+# the next record would be attributed to the wrong path, so a rename standing next
+# to real churn is what proves it does not.
+test_a_rename_record_does_not_misalign_the_status_field() {
+  local dir out outside
+  dir=$(make_case behind-rename)
+  printf 'game code\n' > "$dir/repo/moved.txt"
+  git -C "$dir/repo" add moved.txt
+  git -C "$dir/repo" commit -qm "a file that a lane will rename"
+  git -C "$dir/wt" reset --hard refs/heads/landing/frog-pile >/dev/null 2>&1
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  git -C "$dir/wt" mv moved.txt renamed.txt
+  printf 'uid://rewritten\n' > "$dir/wt/prototype-game/addons/playbot/plugin.gd.uid"
+
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "a rename outside the allowlist must block even beside allowlisted churn"
+  outside=$(printf '%s\n' "$out" | sed -n 's/.*outside the Playbot churn allowlist: //p')
+  assert_contains "$outside" "renamed.txt" "the block does not name the rename destination"
+  assert_contains "$outside" "moved.txt" "the block does not name the rename source"
+  assert_not_contains "$outside" "plugin.gd.uid" \
+    "the rename record misaligned the status onto the allowlisted churn path"
+  pass "fm-lane-base-check.sh: a rename record does not misalign the status field"
 }
 
 test_diverged_and_absent_landing_branch_block() {
@@ -537,6 +607,8 @@ test_behind_only_with_a_clean_tree_requires_a_reset
 test_behind_with_allowlisted_churn_names_it_for_disclosure
 test_modifications_outside_the_allowlist_block
 test_allowlist_membership_is_a_literal_path_not_a_pattern
+test_an_untracked_allowlisted_path_blocks_while_a_tracked_one_is_churn
+test_a_rename_record_does_not_misalign_the_status_field
 test_diverged_and_absent_landing_branch_block
 test_publishing_lane_requires_a_published_landing_branch
 test_unresolvable_remote_tip_blocks_only_a_publishing_lane

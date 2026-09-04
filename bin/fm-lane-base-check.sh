@@ -34,6 +34,12 @@
 #                                                (staged churn included).
 #   behind only, anything outside the allowlist  blocked; uncommitted work outside
 #                                                the allowlist is never discarded.
+#   behind only, an UNTRACKED file at an allowlisted path
+#                                                blocked. Churn is a tracked
+#                      change: the allowlist's owner infers no untracked file to
+#                      be churn, and `git diff HEAD` records nothing for content
+#                      git does not track, so discarding one could only ever be
+#                      announced with an empty record.
 #   diverged                                     blocked.
 #   absent local landing branch                  blocked.
 #   --publishes and the local landing branch carries commits its remote tip lacks
@@ -66,7 +72,9 @@
 # drift from the list Playbot's own retirement inspection allows. When that list
 # cannot be read, NO path is treated as churn: any modification then makes the
 # workspace dirty and the verdict is blocked, because an unreadable owner must
-# never widen what a reset is allowed to discard.
+# never widen what a reset is allowed to discard. Membership is a whole-string
+# comparison of a TRACKED change's pathname against those entries: no pattern, no
+# line matching, no untracked file, and no prefix, extension or basename.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -124,8 +132,16 @@ churn_allowlist() {
 # one of its lines is an allowlisted entry. The `churn-paths:` line is
 # space-separated, which is safe only because the owned paths carry no whitespace;
 # an exact-match test is what keeps that a property of the data rather than luck.
+# The allowlist names TRACKED paths Playbot's editor rewrites, and its owner is
+# explicit that no untracked file is inferred to be churn - so the status field
+# decides before the pathname is even looked at. An untracked path also cannot be
+# disclosed: `git diff HEAD -- <path>` shows nothing for content git does not
+# track, so calling one churn would announce a discard with an empty record.
 is_allowlisted_churn() {
-  local candidate=$1 entry
+  local status=$1 candidate=$2 entry
+  case "$status" in
+    '??'|'!!') return 1 ;;
+  esac
   for entry in ${CHURN_ALLOWLIST[@]+"${CHURN_ALLOWLIST[@]}"}; do
     if [ "$candidate" = "$entry" ]; then
       return 0
@@ -134,17 +150,22 @@ is_allowlisted_churn() {
   return 1
 }
 
-# Every path `git status` reports, into CHANGED_PATHS, NUL-separated on the way so
-# a pathname with a space or a newline keeps its exact Git identity. A rename or
-# copy record is followed by its source path, which is a change of that path too.
+# Every path `git status` reports, into CHANGED_PATHS with its two-letter status
+# field alongside in CHANGED_STATUS, NUL-separated on the way so a pathname with a
+# space or a newline keeps its exact Git identity. The status is kept because what
+# a path may be discarded for depends on it, not only on its name.
+# A rename or copy record is `XY <path>NUL<origPath>NUL`: the source path follows
+# as a bare record with no status field of its own, so it is taken whole and given
+# the same status as the record that introduced it - it is that same change.
 # The records go through a file rather than a pipeline or a process substitution
 # because those discard `git status`'s exit status, and this is the one read whose
 # failure would be read as a CLEAN tree - the state that authorises the reset. So
 # it fails closed like every other read here, and the caller runs it in the main
 # shell so that block takes effect.
 CHANGED_PATHS=()
+CHANGED_STATUS=()
 collect_changed_paths() {
-  local record pending=0 spool
+  local record pending=0 status='' spool
   spool=$(mktemp) \
     || blocked "working-tree state of this lane workspace could not be read: no temporary file could be created to read it into"
   if ! git status --porcelain -z > "$spool" 2>/dev/null; then
@@ -154,12 +175,15 @@ collect_changed_paths() {
   while IFS= read -r -d '' record; do
     if [ "$pending" -eq 1 ]; then
       pending=0
+      CHANGED_STATUS+=("$status")
       CHANGED_PATHS+=("$record")
       continue
     fi
-    case "${record:0:2}" in
+    status=${record:0:2}
+    case "$status" in
       R?|C?|?R|?C) pending=1 ;;
     esac
+    CHANGED_STATUS+=("$status")
     CHANGED_PATHS+=("${record:3}")
   done < "$spool"
   rm -f "$spool"
@@ -269,9 +293,10 @@ EOF
 CHURN_MODIFIED=
 OUTSIDE=
 collect_changed_paths
-for path in ${CHANGED_PATHS[@]+"${CHANGED_PATHS[@]}"}; do
+for ((i = 0; i < ${#CHANGED_PATHS[@]}; i++)); do
+  path=${CHANGED_PATHS[$i]}
   [ -n "$path" ] || continue
-  if is_allowlisted_churn "$path"; then
+  if is_allowlisted_churn "${CHANGED_STATUS[$i]}" "$path"; then
     CHURN_MODIFIED="${CHURN_MODIFIED:+$CHURN_MODIFIED }$path"
   else
     OUTSIDE="${OUTSIDE:+$OUTSIDE, }$path"
