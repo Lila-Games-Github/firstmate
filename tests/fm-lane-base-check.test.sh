@@ -2,8 +2,10 @@
 # Behavior tests for bin/fm-lane-base-check.sh, one case per named state in its
 # header: current, ahead-only, behind-only (clean tree, allowlisted churn -
 # staged included - and modifications outside the allowlist), diverged, an absent
-# local landing branch, and for a --publishes lane the unpublished-local and
-# unresolvable-remote states plus the remote-ahead state that must NOT block.
+# local landing branch, an unreadable working tree, and for a --publishes lane the
+# unpublished-local state, each unresolvable-remote cause - no upstream, a local
+# upstream, a configured upstream whose remote-tracking ref is gone, and an
+# ambiguous name - plus the remote-ahead state that must NOT block.
 # Every case runs the real script against a real temporary repository and asserts
 # its exit code and reported line; the verdict contract is the exit code, so these
 # assert the code first and read the line only for the evidence it must name.
@@ -236,7 +238,12 @@ test_unresolvable_remote_tip_blocks_only_a_publishing_lane() {
   expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
     "an unresolvable remote tip must block a publishing lane"
   assert_contains "$out" "could not be resolved" "the block does not name the missing evidence"
-  assert_contains "$out" "set-upstream-to" "the block does not say how to fix it"
+  assert_contains "$out" "no upstream configured" "the block does not name the cause it observed"
+  # No refs/remotes/<remote>/<landing> exists in this state, so --set-upstream-to
+  # would fatal rather than fix anything; the remedy has to be a fetch or a push.
+  assert_not_contains "$out" "set-upstream-to" \
+    "the block prescribes naming an upstream ref that does not exist"
+  assert_contains "$out" "git fetch" "the block does not say how to fix it"
   expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" \
     "a local-only lane must be unaffected by an unresolvable remote tip"
 
@@ -252,7 +259,101 @@ test_unresolvable_remote_tip_blocks_only_a_publishing_lane() {
   expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
     "an ambiguous remote-tracking name must block a publishing lane"
   assert_contains "$out" "could not be resolved" "the ambiguous block does not name the missing evidence"
+  # Here every candidate ref does exist, so naming one is a remedy that works.
+  assert_contains "$out" "set-upstream-to" "the ambiguous block does not say how to fix it"
   pass "fm-lane-base-check.sh: an unresolvable or ambiguous remote tip blocks only a publishing lane"
+}
+
+# `<branch>@{upstream}` resolves an upstream that names a LOCAL branch - what
+# `branch.autoSetupMerge = always` configures routinely - just as happily as a
+# remote-tracking one. A local branch publishes nothing, so it is no evidence at
+# all and must not satisfy the publishing precondition.
+test_a_local_upstream_is_not_evidence_of_publication() {
+  local dir out
+  dir=$(make_case publish-local-upstream)
+  git -C "$dir/repo" update-ref -d refs/remotes/origin/landing/frog-pile
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  # A local upstream that already contains the landing tip: comparing against it
+  # finds nothing riding along, so taking it as the remote tip passes the
+  # precondition while nothing whatever has been published.
+  git -C "$dir/repo" branch local-superset refs/heads/landing/frog-pile
+  git -C "$dir/repo" config branch.landing/frog-pile.remote .
+  git -C "$dir/repo" config branch.landing/frog-pile.merge refs/heads/local-superset
+  [ "$(git -C "$dir/repo" rev-parse --symbolic-full-name 'landing/frog-pile@{upstream}')" \
+    = "refs/heads/local-superset" ] || fail "the fixture did not configure a local upstream"
+
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "a local upstream must not satisfy a publishing lane's precondition"
+  assert_contains "$out" "could not be resolved" "the block does not name the missing evidence"
+  assert_contains "$out" "is a local branch" "the block does not name the cause it observed"
+
+  # A local-only lane makes no remote comparison, so it is unaffected.
+  expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "a local-only lane must be unaffected by a local upstream"
+  pass "fm-lane-base-check.sh: an upstream naming a local branch is not evidence of publication"
+}
+
+# An upstream IS configured and the remote-tracking ref it names is gone: deleted
+# upstream and then pruned, or never fetched. The evidence must name that cause,
+# and the remedy must be a command that works in that state - telling the operator
+# to point --set-upstream-to at a ref that does not exist only fatals.
+test_a_configured_upstream_with_no_remote_ref_names_its_own_cause() {
+  local dir out remedy rc
+  dir=$(make_case publish-pruned-upstream)
+  git -C "$dir/repo" update-ref -d refs/remotes/origin/landing/frog-pile
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  [ "$(git -C "$dir/repo" config --get branch.landing/frog-pile.remote)" = "origin" ] \
+    || fail "the fixture did not leave an upstream configured"
+
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "a configured upstream whose remote-tracking ref is absent must block a publishing lane"
+  assert_contains "$out" "could not be resolved" "the block does not name the missing evidence"
+  assert_contains "$out" "an upstream of origin/landing/frog-pile is configured" \
+    "the block does not name the upstream it actually observed"
+  assert_not_contains "$out" "set-upstream-to" \
+    "the block prescribes naming an upstream ref that does not exist, which fatals"
+
+  # Run the remedy it printed: the point of naming a cause is that its command works.
+  remedy=$(printf '%s\n' "$out" | sed -n 's/.*; run \(git fetch [^ ]* [^ ]*\) to pick it up.*/\1/p')
+  [ -n "$remedy" ] || fail "the block did not prescribe a fetch of the branch: $out"
+  (cd "$dir/repo" && $remedy >/dev/null 2>&1); rc=$?
+  expect_code 0 "$rc" "the prescribed remedy '$remedy' failed in the state that prescribed it"
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "the remedy must restore the comparison, leaving only the unpushed-landing block"
+  assert_contains "$(run_check "$dir/wt" landing/frog-pile --publishes)" "is not published" \
+    "after the remedy the lane no longer blocks on the state it is actually in"
+  pass "fm-lane-base-check.sh: a pruned upstream names its own cause and prescribes a working remedy"
+}
+
+# A working tree whose state cannot be read must never be reported as clean: a
+# clean tree is exactly what authorises the reset, so this read is the one that
+# fails open into destruction if its exit status is dropped.
+test_an_unreadable_working_tree_blocks_instead_of_authorizing_a_reset() {
+  local dir out gitdir
+  dir=$(make_case unreadable-tree)
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  printf 'work nobody has committed yet\n' > "$dir/wt/app.txt"
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "the fixture must start from real uncommitted work that already blocks"
+
+  # Corrupting the worktree's index makes `git status` fail for real, exactly as a
+  # damaged or concurrently written index would; the ref reads it does not touch.
+  gitdir=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+  printf 'not an index\n' > "$gitdir/index"
+  git -C "$dir/wt" status --porcelain >/dev/null 2>&1 \
+    && fail "the fixture did not actually make git status fail"
+
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "an unreadable working tree must block rather than report a reset as safe"
+  assert_contains "$out" "could not be read" "the block does not name what it could not read"
+  assert_not_contains "$out" "reset-required" \
+    "an unreadable working tree was reported as safe to reset"
+  assert_grep "work nobody has committed yet" "$dir/wt/app.txt" \
+    "the check discarded work it could not even read"
+  pass "fm-lane-base-check.sh: an unreadable working tree blocks instead of authorizing a reset"
 }
 
 # The allowlist has one owner. This proves the script classifies exactly the paths
@@ -335,5 +436,8 @@ test_modifications_outside_the_allowlist_block
 test_diverged_and_absent_landing_branch_block
 test_publishing_lane_requires_a_published_landing_branch
 test_unresolvable_remote_tip_blocks_only_a_publishing_lane
+test_a_local_upstream_is_not_evidence_of_publication
+test_a_configured_upstream_with_no_remote_ref_names_its_own_cause
+test_an_unreadable_working_tree_blocks_instead_of_authorizing_a_reset
 test_churn_classification_comes_from_its_owner
 test_unreadable_allowlist_owner_fails_safe
