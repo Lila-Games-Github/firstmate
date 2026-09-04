@@ -87,6 +87,62 @@ git_dirs_fingerprint() {  # <worktree>
     | sha256sum
 }
 
+# With NO configured remote at all, the two prescriptions the other no-candidate
+# causes carry are both dead ends: `git fetch --all` exits 0 having contacted
+# nothing, and a push has no remote to name. A stop-and-report whose remedy cannot
+# clear the state it names is worse than no remedy, because a human acts on it, so
+# that shape reports its own cause and the only action that can change it.
+test_a_repository_with_no_remote_names_that_cause_and_a_workable_remedy() {
+  local dir out
+  dir=$(make_case publish-no-remote)
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  git -C "$dir/repo" branch --unset-upstream landing/frog-pile
+  git -C "$dir/repo" remote remove origin
+  git -C "$dir/repo" update-ref -d refs/remotes/origin/landing/frog-pile
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "a repository with no configured remote must block a publishing lane"
+  assert_contains "$out" "has no configured remote" \
+    "the block does not name the absence of any remote as the cause it observed"
+  # Both of these are provably inert in this state, so neither may be prescribed.
+  assert_not_contains "$out" "git fetch" \
+    "the block prescribes a fetch that contacts nothing when no remote is configured"
+  assert_not_contains "$out" "set-upstream-to" \
+    "the block prescribes naming an upstream when no remote exists to name"
+  assert_contains "$out" "add the remote" \
+    "the block does not prescribe the one action that can clear this state"
+  assert_not_contains "$out" "<remote>" \
+    "the block leaves a literal placeholder in the text it prints"
+  expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" \
+    "a local-only lane must be unaffected by the absence of a remote"
+
+  # Follow the prescribed remedy - add the remote and publish the branch - and
+  # prove it actually reaches a different verdict, so the advice is executable
+  # rather than merely reworded.
+  git -C "$dir/repo" remote add origin "$dir/origin.git"
+  git -C "$dir/repo" push -q origin landing/frog-pile
+  git -C "$dir/repo" fetch -q origin
+  expect_code 10 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "following the prescribed remedy did not clear the block"
+
+  # The distinct case must keep its own cause and remedy: remotes ARE configured,
+  # but none carries a ref for this branch. A fetch or a push can still fix that.
+  dir=$(make_case publish-remote-without-ref)
+  land_locally "$dir" "sibling lane landed locally, not pushed"
+  git -C "$dir/repo" branch --unset-upstream landing/frog-pile
+  git -C "$dir/repo" update-ref -d refs/remotes/origin/landing/frog-pile
+  out=$(run_check "$dir/wt" landing/frog-pile --publishes)
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile --publishes)" \
+    "a configured remote carrying no ref for the branch must block a publishing lane"
+  # The two causes must not read alike: this state HAS remotes, they just carry no
+  # ref for this branch, so it must not borrow the no-remote-at-all wording.
+  assert_not_contains "$out" "has no configured remote" \
+    "the configured-remote case is reported as if no remote existed at all"
+  assert_contains "$out" "git fetch" \
+    "the configured-remote case lost the remedy that works for it"
+  pass "fm-lane-base-check.sh: a repository with no remote is distinguished from one whose remote carries no ref"
+}
+
 test_usage_is_refused_without_a_landing_branch() {
   local out rc
   out=$("$CHECK" 2>&1); rc=$?
@@ -808,6 +864,7 @@ test_diverged_and_absent_landing_branch_block
 test_publishing_lane_requires_a_published_landing_branch
 test_a_diverged_landing_branch_is_not_told_to_push
 test_unresolvable_remote_tip_blocks_only_a_publishing_lane
+test_a_repository_with_no_remote_names_that_cause_and_a_workable_remedy
 test_a_local_upstream_is_not_evidence_of_publication
 test_an_upstream_for_a_different_branch_is_not_the_published_tip
 test_an_upstream_naming_the_landing_ref_resolves_an_ambiguous_name

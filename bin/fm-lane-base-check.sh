@@ -328,6 +328,15 @@ EOF
     # has to be fetched, or pushed if it was never published. Each cause is named
     # separately because a wrongly configured upstream is a different repair from
     # a missing one, and one of them has a more precise fetch to prescribe.
+    #
+    # With NO configured remote at all, both of those prescriptions are dead ends:
+    # git fetch --all exits 0 having contacted nothing, and a push has no remote to
+    # name. So that shape gets its own verdict, naming the only action that can
+    # change it. It is checked first because every cause below assumes a remote
+    # exists to have fetched from or published to.
+    if [ -z "$(printf '%s' "$REMOTES" | tr -d '[:space:]')" ]; then
+      blocked "remote tip of landing branch $LANDING could not be resolved: this repository has no configured remote, so $LANDING is published nowhere and no remote-tracking ref for it can exist; add the remote this lane lands on and publish $LANDING to it, so a lane that opens a PR can prove nothing rides along"
+    fi
     UNRESOLVED_REMEDY="run git fetch --all to pick it up, or push $LANDING if it has never been published"
     case "$UPSTREAM_REF" in
       refs/remotes/*)
@@ -346,7 +355,7 @@ EOF
           UNRESOLVED_CAUSE="it has no upstream configured"
         fi ;;
     esac
-    blocked "remote tip of landing branch $LANDING could not be resolved: $UNRESOLVED_CAUSE, and no remote-tracking ref refs/remotes/<remote>/$LANDING exists; $UNRESOLVED_REMEDY, so a lane that opens a PR can prove nothing rides along"
+    blocked "remote tip of landing branch $LANDING could not be resolved: $UNRESOLVED_CAUSE, and none of this repository's remotes carries a ref named $LANDING; $UNRESOLVED_REMEDY, so a lane that opens a PR can prove nothing rides along"
   fi
 
   # Both directions in one read, because the remedy depends on the other one: a
