@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--lane [--lane-branch <branch>] [--landing-branch <branch>]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -72,15 +72,19 @@
 # --lane-branch <branch> names the workspace branch exactly (Playbot's generated
 # task/<task-id>-<date>, for example); without it the brief refers to the branch the
 # workspace was created on rather than inventing a name. It requires --lane.
-# --landing-branch <branch> names the branch the base check compares against. It
-# stays optional: without it the generated brief has the worker stop and ask
-# firstmate for the landing branch rather than guess one, because a lane is created
-# by Playbot's dispatch and never by bin/fm-spawn.sh, so it has no recorded
-# landing_branch= to read, and substituting a repository default is exactly what
-# docs/playbot-lanes.md forbids for a lane. It requires --lane, because a non-lane
-# worktree is already based locally on the branch firstmate recorded for it, and it
-# must name a branch rather than a ref path: a value starting with refs/ is refused
-# because the generated commands qualify the name as refs/heads/<branch> themselves.
+# --landing-branch <branch> names the branch the base check compares against and is
+# REQUIRED with --lane: the base check is what a lane cannot be dispatched without,
+# a lane is created by Playbot's dispatch and never by bin/fm-spawn.sh so it has no
+# recorded landing_branch= to read, and substituting a repository default is exactly
+# what docs/playbot-lanes.md forbids for a lane - so a brief that could not name the
+# branch is refused at scaffold time rather than emitted for a worker to stop on.
+# It requires --lane, because a non-lane worktree is already based locally on the
+# branch firstmate recorded for it. The value must be a plain local branch name:
+# refs/... ref paths and remote-tracking spellings such as origin/<branch> are
+# refused, because the generated commands qualify the name as refs/heads/<branch>
+# themselves and a remote-tracking spelling can never match that. Remote names come
+# from the project's clone under this home when it is readable, else from the
+# conventional ones; a branch name that merely contains a slash is unaffected.
 # --lane is refused on scout and secondmate scaffolds: a scout brief carries no
 # branch convention to replace, and a charter is not a lane.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
@@ -148,6 +152,28 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+
+# A remote-tracking spelling renders a refs/heads/origin/<branch> guard that can
+# never match, so the caller learns about it here instead of through a blocked
+# worker. The project's own clone is authoritative for remote names when this home
+# has one; otherwise the conventional names are refused. A first segment that is
+# not a remote name - `proto/godot/frog-pile` and the like - is untouched.
+reject_remote_tracking_landing_branch() {
+  local branch=$1 project=$2 first clone remotes
+  first=${branch%%/*}
+  [ "$first" != "$branch" ] || return 0
+  remotes=
+  clone="$PROJECTS/$project"
+  if [ -n "$project" ] && [ -e "$clone/.git" ]; then
+    remotes=$(git -C "$clone" remote 2>/dev/null) || remotes=
+  fi
+  [ -n "$remotes" ] || remotes=$'origin\nupstream\nfork'
+  printf '%s\n' "$remotes" | grep -qxF -- "$first" || return 0
+  echo "error: --landing-branch names a local branch, not a remote-tracking ref; '$first' is a remote name, so pass the bare branch name '${branch#*/}' (the generated base check compares against refs/heads/<branch>, which a remote-tracking spelling can never match)" >&2
+  return 1
+}
+
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -253,6 +279,14 @@ if [ "$LANDING_BRANCH_SET" -eq 1 ]; then
       echo "error: --landing-branch names a branch, not a ref path; the generated base check compares against refs/heads/<branch> only, and a tag or remote-tracking ref can never be that comparison target" >&2
       exit 1 ;;
   esac
+  reject_remote_tracking_landing_branch "$LANDING_BRANCH" "${POS[1]:-}" || exit 1
+fi
+# The base check is the first thing a lane brief tells its worker to do, and it
+# cannot be written without the branch it compares against, so a lane brief that
+# could not name one is never generated.
+if [ "$LANE" -eq 1 ] && [ "$LANDING_BRANCH_SET" -ne 1 ]; then
+  echo "error: --lane requires --landing-branch <branch>: a lane verifies its base against that branch as its first action, and a Playbot lane has no recorded landing branch to fall back on" >&2
+  exit 1
 fi
 
 BRIEF="$DATA/$ID/brief.md"
@@ -495,9 +529,9 @@ fi
 # only behind-only resets, and only with a clean working tree, so the step can
 # never discard uncommitted work; ahead-only proceeds untouched, because those
 # commits are the worker's own or the newer remote tip its workspace was created
-# from; diverged stops and reports. A lane has no state/<id>.meta, since
-# nothing outside bin/fm-spawn.sh writes one, so without --landing-branch the step
-# stops and asks firstmate instead of substituting a default branch.
+# from; diverged stops and reports. --landing-branch is validated as required
+# before anything is written, so every lane brief names one concrete branch here,
+# in rule 1 and in the definition of done.
 if [ "$LANE" -eq 1 ]; then
   if [ -n "$LANE_BRANCH" ]; then
     LANE_BRANCH_DESC="your workspace branch \`$LANE_BRANCH\`"
@@ -506,19 +540,10 @@ if [ "$LANE" -eq 1 ]; then
     LANE_BRANCH_DESC="the branch your workspace was created on"
     LANE_READY_LINE="\`done: ready in branch {your workspace branch}\`"
   fi
-  if [ -n "$LANDING_BRANCH" ]; then
-    LANE_LANDING_INTRO="Your landing branch is \`$LANDING_BRANCH\`, and every command below names it as \`refs/heads/$LANDING_BRANCH\`."
-    LANE_LANDING_REF="refs/heads/$LANDING_BRANCH"
-    LANE_LANDING_ACT="If \`git rev-parse --verify --quiet refs/heads/$LANDING_BRANCH\` prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch $LANDING_BRANCH is missing from this repository\` to the status file and stop."
-    LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
-    LANE_LANDING_GUARD=""
-  else
-    LANE_LANDING_INTRO="This brief was generated without a landing branch, so it cannot name the branch your base must be verified against - and no substitute is acceptable: never the repository default, never \`main\`, never the branch your workspace was created on. STOP before you touch anything: append \`blocked: lane landing branch is unknown; firstmate must name it\` to the status file and stop."
-    LANE_LANDING_REF="refs/heads/{landing-branch}"
-    LANE_LANDING_ACT="Once firstmate names the landing branch, substitute that name for \`{landing-branch}\` below, keeping the \`refs/heads/\` prefix exactly as written so only a local branch can satisfy the check. If \`git rev-parse --verify --quiet refs/heads/{landing-branch}\` then prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch {landing-branch} is missing from this repository\` to the status file and stop."
-    LANE_LANDING_TARGET="the landing branch firstmate supplies for this task"
-    LANE_LANDING_GUARD=" Setup step 1b has you stop and ask firstmate for that branch; never guess one."
-  fi
+  LANE_LANDING_INTRO="Your landing branch is \`$LANDING_BRANCH\`, and every command below names it as \`refs/heads/$LANDING_BRANCH\`."
+  LANE_LANDING_REF="refs/heads/$LANDING_BRANCH"
+  LANE_LANDING_ACT="If \`git rev-parse --verify --quiet refs/heads/$LANDING_BRANCH\` prints nothing, that local branch is missing here: STOP - append \`blocked: local landing branch $LANDING_BRANCH is missing from this repository\` to the status file and stop."
+  LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
   SETUP_PREAMBLE="You are in a Playbot lane workspace: an isolated git worktree of $REPO that Playbot created and already checked out on the branch that workspace owns."
   IFS= read -r -d '' SETUP1 <<EOF || true
 1. First action: verify your starting point before you touch anything. Both checks below are mandatory; this brief is complete, so nothing outside it will tell you to run them.
@@ -572,7 +597,7 @@ EOF
       RULE1="1. Never push to any remote and never open a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches. Firstmate handles the merge into $LANE_LANDING_TARGET."
       DOD_BRANCH_DESC="$LANE_BRANCH_DESC"
       DOD_READY_LINE="$LANE_READY_LINE"
-      DOD_LANDING_RULE="Keep that branch a clean fast-forward onto $LANE_LANDING_TARGET.$LANE_LANDING_GUARD
+      DOD_LANDING_RULE="Keep that branch a clean fast-forward onto $LANE_LANDING_TARGET.
 If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward."
       DOD_LANDING_MERGE="The configured merge authority approves the ready branch, then firstmate merges it into $LANE_LANDING_TARGET through the guarded fast-forward path."
     else

@@ -149,7 +149,7 @@ test_brief_assertion_precedes_branch() {
   # A Playbot lane brief creates no branch, but the same ordering must hold for
   # the step that replaced it: the lane verifies its worktree before it verifies
   # (or resets) the branch and base it was handed.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-lane-cc3 alpha --mode no-mistakes --lane >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-lane-cc3 alpha --mode no-mistakes --lane --landing-branch proto/godot/frog-pile >/dev/null 2>&1
   brief="$home/data/tangle-brief-lane-cc3/brief.md"
   assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
     "lane brief is missing the isolation blocked-status contract"

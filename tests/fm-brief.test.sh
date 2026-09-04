@@ -837,7 +837,8 @@ test_lane_mode_drops_the_crewmate_branch_convention() {
   mkdir -p "$home/data"
   for mode in no-mistakes direct-PR local-only; do
     id="lane-drop-$mode"
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --lane >/dev/null 2>&1 \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --lane \
+      --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
       || fail "$mode: --lane brief should scaffold"
     brief="$home/data/$id/brief.md"
     assert_no_grep "fm/$id" "$brief" \
@@ -914,23 +915,12 @@ test_lane_brief_verifies_its_base_before_working() {
     "lane brief does not make starting-point verification the first action"
 
   # A lane never goes through bin/fm-spawn.sh, so there is no state/<id>.meta to
-  # read and no default branch to fall back to: with no landing branch supplied the
-  # brief must stop and ask firstmate rather than guess a branch.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-base-implicit some-proj --mode no-mistakes --lane >/dev/null 2>&1 \
-    || fail "lane brief without a landing branch should scaffold"
-  brief="$home/data/lane-base-implicit/brief.md"
-  assert_grep "blocked: lane landing branch is unknown; firstmate must name it" "$brief" \
-    "lane brief without a landing branch does not stop and ask firstmate for it"
-  assert_grep "never the repository default, never \`main\`, never the branch your workspace was created on" "$brief" \
-    "lane brief without a landing branch does not forbid substituting a branch"
+  # read and no default branch to fall back to; --landing-branch is required
+  # instead, so nothing in a lane brief may point at either.
   assert_no_grep "landing_branch=" "$brief" \
     "lane brief points at a state/<id>.meta field a Playbot lane never has"
   assert_no_grep "falling back to the default branch" "$brief" \
     "lane brief falls back to the default branch docs/playbot-lanes.md forbids for a lane"
-  assert_grep "keeping the \`refs/heads/\` prefix exactly as written so only a local branch can satisfy the check" "$brief" \
-    "lane brief without a landing branch lets the substituted name resolve to a tag or a remote ref"
-  assert_grep "git rev-list --left-right --count refs/heads/{landing-branch}...HEAD" "$brief" \
-    "lane brief without a landing branch lost its qualified ahead/behind reading"
 
   # local-only is where the landing branch decides the merge, so its definition of
   # done must use the same branch the base check verified against - and must not
@@ -947,14 +937,6 @@ test_lane_brief_verifies_its_base_before_working() {
     "local-only lane brief still reads a state/<id>.meta field a Playbot lane never has"
   assert_no_grep "falling back to the default branch" "$brief" \
     "local-only lane brief still falls back to the default branch"
-
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-base-dod-implicit some-proj --mode local-only --lane >/dev/null 2>&1 \
-    || fail "local-only lane brief without a landing branch should scaffold"
-  brief="$home/data/lane-base-dod-implicit/brief.md"
-  assert_grep "the landing branch firstmate supplies for this task" "$brief" \
-    "local-only lane brief without a landing branch does not defer to firstmate for it"
-  assert_no_grep "landing_branch=" "$brief" \
-    "local-only lane brief without a landing branch reads a meta field a lane never has"
   pass "fm-brief.sh: a lane brief verifies its base against the local landing branch before working"
 }
 
@@ -1133,7 +1115,7 @@ test_lane_brief_declares_its_delivery_contract_prominently() {
   mkdir -p "$home/data"
   for mode in no-mistakes direct-PR local-only; do
     id="lane-contract-$mode"
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --lane >/dev/null 2>&1
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --lane --landing-branch proto/godot/frog-pile >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
     assert_grep "# Delivery contract - READ THIS BEFORE YOU SHIP ANYTHING" "$brief" \
       "$mode lane brief does not declare its delivery contract prominently"
@@ -1169,7 +1151,7 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
   home="$TMP_ROOT/lane-named-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named some-proj --mode local-only --lane \
-    --lane-branch task/lane-named-2026-09-04 >/dev/null 2>&1 \
+    --lane-branch task/lane-named-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
     || fail "lane brief with an explicit branch should scaffold"
   brief="$home/data/lane-named/brief.md"
   assert_grep "verify it is your workspace branch \`task/lane-named-2026-09-04\`" "$brief" \
@@ -1185,7 +1167,7 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
 
   # direct-PR pushes the workspace branch, and no-mistakes works on it.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named-pr some-proj --mode direct-PR --lane \
-    --lane-branch task/lane-named-pr-2026-09-04 >/dev/null 2>&1
+    --lane-branch task/lane-named-pr-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1
   assert_grep "push only your workspace branch \`task/lane-named-pr-2026-09-04\`; never create or switch branches" \
     "$home/data/lane-named-pr/brief.md" \
     "named direct-PR lane brief does not push the workspace branch"
@@ -1199,7 +1181,8 @@ test_lane_without_a_branch_name_stays_coherent() {
   local home brief
   home="$TMP_ROOT/lane-unnamed-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-unnamed some-proj --mode local-only --lane >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-unnamed some-proj --mode local-only --lane \
+    --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
     || fail "lane brief without a branch name should scaffold"
   brief="$home/data/lane-unnamed/brief.md"
   assert_grep "verify it is the branch your workspace was created on" "$brief" \
@@ -1242,8 +1225,49 @@ empty landing branch|lane-refused-c8 some-proj --mode no-mistakes --lane --landi
 landing branch as a remote ref path|lane-refused-c10 some-proj --mode no-mistakes --lane --landing-branch refs/remotes/origin/main|--landing-branch names a branch, not a ref path
 landing branch as a qualified branch ref|lane-refused-c11 some-proj --mode no-mistakes --lane --landing-branch refs/heads/main|--landing-branch names a branch, not a ref path
 lane still needs a mode|lane-refused-c9 some-proj --lane|ship briefs require --mode
+lane without a landing branch|lane-refused-c12 some-proj --mode no-mistakes --lane|--lane requires --landing-branch
+lane with a remote-tracking landing branch|lane-refused-c13 some-proj --mode no-mistakes --lane --landing-branch origin/main|--landing-branch names a local branch, not a remote-tracking ref
 ROWS
   pass "fm-brief.sh: nonsensical lane flag combinations are refused, never emitted as a confusing brief"
+}
+
+# --landing-branch must be a plain local branch name, because the generated commands
+# qualify it as refs/heads/<branch> and a remote-tracking spelling can never match
+# that. The refusal reads the project clone's own remote names when this home has
+# one, so a branch whose name merely contains slashes keeps working.
+test_lane_landing_branch_must_be_a_local_branch_name() {
+  local home out status clone
+  home="$TMP_ROOT/lane-landing-form-home"
+  mkdir -p "$home/data" "$home/projects"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-form-ok some-proj --mode no-mistakes --lane \
+    --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "a multi-segment local branch name should scaffold"
+  assert_present "$home/data/landing-form-ok/brief.md" \
+    "a multi-segment local branch name wrote no brief"
+
+  # With the project's clone readable, its configured remote names decide: `proto`
+  # is a remote here, so proto/<branch> is a remote-tracking spelling.
+  clone="$home/projects/remote-proj"
+  fm_git_init_commit "$clone"
+  git -C "$clone" remote add proto "file://$clone"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-form-remote remote-proj \
+    --mode no-mistakes --lane --landing-branch proto/godot/frog-pile 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a remote-tracking landing branch should be refused for a project whose remote is named proto"
+  assert_contains "$out" "'proto' is a remote name" \
+    "the refusal does not name the remote it recognized"
+  assert_contains "$out" "pass the bare branch name 'godot/frog-pile'" \
+    "the refusal does not say which name to pass instead"
+  assert_absent "$home/data/landing-form-remote/brief.md" \
+    "a refused landing-branch form still wrote a brief"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-form-local remote-proj --mode no-mistakes --lane \
+    --landing-branch godot/frog-pile >/dev/null 2>&1 \
+    || fail "a slashed branch name whose first segment is not a remote should scaffold"
+  assert_present "$home/data/landing-form-local/brief.md" \
+    "a slashed non-remote branch name wrote no brief"
+  pass "fm-brief.sh: --landing-branch takes a local branch name and refuses remote-tracking spellings"
 }
 
 # Lane mode must not change a non-lane brief at all. Comparing each mode's whole
@@ -1307,4 +1331,5 @@ test_lane_brief_declares_its_delivery_contract_prominently
 test_lane_branch_name_is_stated_in_every_branch_instruction
 test_lane_without_a_branch_name_stays_coherent
 test_lane_flag_combinations_are_refused
+test_lane_landing_branch_must_be_a_local_branch_name
 test_non_lane_ship_briefs_match_their_fixture
