@@ -1,0 +1,148 @@
+==================================================================
+ A Playbot lane worker in /tmp/lane-e2e-work/lane, following its generated brief.
+==================================================================
+
+STEP 1a - Branch: 'verify it is the branch your workspace was created on'
+$ git branch --show-current
+lane/frog-pile-42
+[exit 0]
+
+STEP 1b - ARM 1 (exit 0, 'current'): base is safe, proceed.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+current: HEAD is the tip of proto/godot/frog-pile (2523012b0a24d092c019b3bc275739dcf9528496)
+[exit 0]
+
+--- Firstmate lands a sibling lane's commit on the LOCAL landing branch and does not push it.
+
+--- Playbot also rewrote two allowlisted churn files in this lane workspace.
+
+STEP 1b - ARM 3 (exit 20) for a PUBLISHING lane: the landing branch is not published.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+blocked: landing branch proto/godot/frog-pile is not published: local cdef49f8829372eca681fb21f5fd680eec4deb9a carries 1 commit(s) its remote tip refs/remotes/origin/proto/godot/frog-pile (2523012b0a24d092c019b3bc275739dcf9528496) does not, and a PR based on that remote tip would present them as this task's work; push proto/godot/frog-pile before this lane proceeds
+[exit 20]
+
+--- Firstmate follows the remedy the block printed, then the worker re-runs.
+$ git push -q origin proto/godot/frog-pile && echo pushed
+pushed
+[exit 0]
+
+STEP 1b - ARM 2 (exit 10): reset required, and the churn it would discard is named.
+$ '$CHECK' proto/godot/frog-pile --publishes
+reset-required: refs/heads/proto/godot/frog-pile
+churn-paths: prototype-game/addons/playbot/plugin.gd.uid prototype-game/project.godot
+[exit 10]
+
+The brief says: DISCLOSE BEFORE YOU RESET. Worker runs git diff HEAD on exactly those paths.
+$ git diff HEAD -- prototype-game/addons/playbot/plugin.gd.uid prototype-game/project.godot
+diff --git a/prototype-game/addons/playbot/plugin.gd.uid b/prototype-game/addons/playbot/plugin.gd.uid
+index 009c500..88d9cfa 100644
+--- a/prototype-game/addons/playbot/plugin.gd.uid
++++ b/prototype-game/addons/playbot/plugin.gd.uid
+@@ -1 +1 @@
+-uid://abc
++uid://rewritten
+diff --git a/prototype-game/project.godot b/prototype-game/project.godot
+index 2e48d32..a7c2d41 100644
+--- a/prototype-game/project.godot
++++ b/prototype-game/project.godot
+@@ -1 +1,2 @@
+ config_version=5
++run/main_scene="res://Boot.tscn"
+[exit 0]
+working: discarding Playbot churn before base reset: prototype-game/addons/playbot/plugin.gd.uid prototype-game/project.godot
+
+Then, and only then, the reset onto the ref the check named.
+$ git reset --hard refs/heads/proto/godot/frog-pile
+HEAD is now at cdef49f sibling lane landed
+[exit 0]
+
+STEP 1b re-run after following the brief: the lane is now current and proceeds.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+current: HEAD is the tip of proto/godot/frog-pile (cdef49f8829372eca681fb21f5fd680eec4deb9a)
+[exit 0]
+
+=== Other blocked states an end user can hit, with their remedies ===
+
+(a) An UNTRACKED file at an allowlisted path is never churn - never told to commit it.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+blocked: lane workspace is behind landing branch proto/godot/frog-pile but carries untracked files at allowlisted churn paths, which are never classified as churn because git diff HEAD records nothing for content git does not track, so they could only be discarded unseen: prototype-game/addons/playbot/playbot_common.gd.uid (move them out of this workspace, or delete them if they are unwanted - git is not holding this content, so moving them aside is the option that keeps it)
+[exit 20]
+
+Worker follows the remedy: move it aside (NOT commit), then re-runs.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+reset-required: refs/heads/proto/godot/frog-pile
+churn-paths: 
+[exit 10]
+$ git reset --hard refs/heads/proto/godot/frog-pile >/dev/null && echo reset-done
+reset-done
+[exit 0]
+
+(b) A modification OUTSIDE the allowlist is never discarded.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+blocked: lane workspace is behind landing branch proto/godot/frog-pile but carries uncommitted changes outside the Playbot churn allowlist: game.gd
+[exit 20]
+$ git checkout -- game.gd && git reset --hard refs/heads/proto/godot/frog-pile >/dev/null && echo restored
+restored
+[exit 0]
+
+(c) NO configured remote at all: told to ADD a remote, since a fetch would contact nothing.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+blocked: remote tip of landing branch proto/godot/frog-pile could not be resolved: this repository has no configured remote, so proto/godot/frog-pile is published nowhere and no remote-tracking ref for it can exist; add the remote this lane lands on and publish proto/godot/frog-pile to it, so a lane that opens a PR can prove nothing rides along
+[exit 20]
+
+(d) Remotes ARE configured but none carries a ref for this branch: keeps the fetch-or-push remedy.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+blocked: remote tip of landing branch proto/godot/frog-pile could not be resolved: it has no upstream configured, and none of this repository's remotes carries a ref named proto/godot/frog-pile; run git fetch --all to pick it up, or push proto/godot/frog-pile if it has never been published, so a lane that opens a PR can prove nothing rides along
+[exit 20]
+
+(e) A LOCAL-ONLY lane is exempt from the publishing precondition: same repo state, no --publishes.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile
+current: HEAD is the tip of proto/godot/frog-pile (d603bd46e6ac4a5ba566a7a79043bb72fe32e859)
+[exit 0]
+
+(f) An absent landing branch, and a usage error.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' branch/that/does/not/exist
+blocked: local landing branch branch/that/does/not/exist is missing from this repository
+[exit 20]
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh'
+error: fm-lane-base-check.sh requires a landing branch
+[exit 2]
+
+=== The script WRITES NOTHING: git dirs are byte-identical across a run ===
+git dir unchanged after a full run: OK
+no index.lock left behind: OK
+==================================================================
+ APPENDIX - two safety claims a lane worker depends on
+==================================================================
+
+(g) Two remotes carry a ref of the landing branch's name and no upstream picks one.
+
+    The block must NAME its candidate refs, not report a count and a placeholder.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+blocked: remote tip of landing branch proto/godot/frog-pile could not be resolved: 2 remote-tracking refs carry that branch name and no upstream of proto/godot/frog-pile names any of them, so which published tip a PR would build on is ambiguous; the candidates are refs/remotes/alpha/proto/godot/frog-pile, refs/remotes/beta/proto/godot/frog-pile, so run git branch --set-upstream-to=<one of: alpha/proto/godot/frog-pile, beta/proto/godot/frog-pile> proto/godot/frog-pile to name the one this lane lands on, so a lane that opens a PR can prove nothing rides along
+[exit 20]
+
+    Worker follows the prescribed remedy with one of the named candidates:
+$ git branch --set-upstream-to=alpha/proto/godot/frog-pile proto/godot/frog-pile
+branch 'proto/godot/frog-pile' set up to track 'alpha/proto/godot/frog-pile'.
+[exit 0]
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes
+current: HEAD is the tip of proto/godot/frog-pile (32083a270348912e751a3036537b00f28c249ec6)
+[exit 0]
+
+(h) The churn allowlist's owner cannot be read. Nothing may be treated as
+
+    churn, so an otherwise-resettable workspace must BLOCK and name the cause.
+
+    Baseline: allowlisted path modified, workspace one commit behind ->
+
+    the owner IS readable, so this is churn and the reset is authorised.
+$ '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile
+reset-required: refs/heads/proto/godot/frog-pile
+churn-paths: prototype-game/project.godot
+[exit 10]
+
+    Same workspace, but the owner cannot be read (a node that fails):
+$ env PATH='/tmp/lane-e2e-appendix-work/shim:/home/sanchith/.local/bin:/home/sanchith/go/bin:/home/sanchith/.cargo/bin:/home/sanchith/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:/home/sanchith/.claude/plugins/cache/lila-skills/lila-skills/a58f77af3d5d/bin' '/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' proto/godot/frog-pile
+blocked: lane workspace is behind landing branch proto/godot/frog-pile and carries uncommitted changes, but the Playbot churn allowlist could not be read, so nothing here can be shown to be safe to discard and none of these paths is claimed to be outside that allowlist: prototype-game/project.godot; its owner command `node /home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-playbot-lanes.mjs tracked-churn-allowlist` failed; repair the owner so it prints the list
+[exit 20]

@@ -1,0 +1,25 @@
+==================================================================
+ (1) The prominent Delivery-contract block is the FIRST such line,
+     so bin/fm-spawn.sh's brief-and-spawn agreement check reads it,
+     and both renderings of the line agree (they cannot drift).
+==================================================================
+  lane-brief-direct-PR.md                  fm-spawn reads -> mode=direct-PR
+     occurrences in brief: 2 | distinct values: Delivery contract: mode=direct-PR
+  lane-brief-no-mistakes.md                fm-spawn reads -> mode=no-mistakes
+     occurrences in brief: 2 | distinct values: Delivery contract: mode=no-mistakes
+  lane-brief-local-only-named-branch.md    fm-spawn reads -> mode=local-only
+     occurrences in brief: 2 | distinct values: Delivery contract: mode=local-only
+
+==================================================================
+ (2) An UNFLAGGED brief keeps prior behaviour byte-for-byte:
+     regenerated live and compared with the committed golden
+     fixtures for all three ship modes (same normalization the
+     regeneration path uses: FM_ROOT_OVERRIDE=/FM_ROOT, FM_HOME).
+==================================================================
+  no-mistakes   byte-identical to tests/fixtures/fm-brief/ship-no-mistakes.md (8070 bytes)
+  direct-PR     byte-identical to tests/fixtures/fm-brief/ship-direct-PR.md (6568 bytes)
+  local-only    byte-identical to tests/fixtures/fm-brief/ship-local-only.md (7153 bytes)
+
+  An ambient FM_CLASSIFY_PAUSED_VERB cannot contaminate that comparison:
+    ambient verb=holding renders: Use `holding: {why}` - distinct
+    pinned fixture renders:      Use `paused: {why}` - distinct

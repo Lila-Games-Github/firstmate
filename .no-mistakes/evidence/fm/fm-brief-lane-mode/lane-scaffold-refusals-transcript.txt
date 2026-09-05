@@ -1,0 +1,77 @@
+==================================================================
+ Scaffold-time refusals: nothing is written when a lane brief
+ could not be followed. (fm-brief.sh, FM_HOME=/tmp/lane-refusal-work/home)
+==================================================================
+
+--- REQUIRED: --landing-branch with --lane ---
+
+[1] $ fm-brief.sh lane-a proj --mode direct-PR --lane
+error: --lane requires --landing-branch <branch>: a lane verifies its base against that branch as its first action, and a Playbot lane has no recorded landing branch to fall back on
+[exit 1]
+
+--- REFUSED: lane flags without --lane ---
+
+[2] $ fm-brief.sh lane-b proj --mode direct-PR --landing-branch main
+error: --landing-branch requires --lane; a non-lane worktree is already based on the landing branch firstmate recorded for the task
+[exit 1]
+
+[3] $ fm-brief.sh lane-c proj --mode direct-PR --lane-branch feat/x
+error: --lane-branch requires --lane; a non-lane brief works on its own fm/<task-id> branch
+[exit 1]
+
+--- REFUSED: --lane on a scout / secondmate scaffold ---
+
+[4] $ fm-brief.sh lane-d proj --scout --lane --landing-branch main
+error: --lane applies only to ship briefs; a scout brief creates no branch to replace and a secondmate charter is not a lane
+[exit 1]
+
+[5] $ fm-brief.sh lane-e --secondmate --no-projects --lane --landing-branch main
+error: --lane applies only to ship briefs; a scout brief creates no branch to replace and a secondmate charter is not a lane
+[exit 1]
+
+--- REFUSED: a flag with no value ---
+
+[6] $ fm-brief.sh lane-f proj --mode direct-PR --lane --landing-branch
+error: --landing-branch requires a value
+[exit 1]
+
+--- REF-SAFETY: command substitution in a branch value is refused ---
+    (these values render into a 'git reset --hard' the worker executes)
+
+[7] $ fm-brief.sh lane-g proj --mode direct-PR --lane --landing-branch $(id)
+error: --landing-branch takes a plain branch name; '$(id)' contains characters outside letters, digits, '.', '_', '/', '+' and '-', and this value is rendered into commands the brief tells the worker to run
+[exit 1]
+
+[8] $ fm-brief.sh lane-h proj --mode direct-PR --lane --landing-branch main; rm -rf /tmp/x
+error: --landing-branch takes a plain branch name; 'main; rm -rf /tmp/x' contains characters outside letters, digits, '.', '_', '/', '+' and '-', and this value is rendered into commands the brief tells the worker to run
+[exit 1]
+
+[9] $ fm-brief.sh lane-i proj --mode direct-PR --lane --landing-branch main..HEAD
+error: --landing-branch value 'main..HEAD' is not a valid git branch name (git check-ref-format --branch refuses it)
+[exit 1]
+
+[10] $ fm-brief.sh lane-j proj --mode direct-PR --lane --landing-branch ok/branch --lane-branch `id`
+error: --lane-branch takes a plain branch name; '`id`' contains characters outside letters, digits, '.', '_', '/', '+' and '-', and this value is rendered into commands the brief tells the worker to run
+[exit 1]
+
+--- REF-SAFETY: fully-qualified refs/... spellings are refused on both flags ---
+
+[11] $ fm-brief.sh lane-k proj --mode direct-PR --lane --landing-branch refs/heads/main
+error: --landing-branch names a branch, not a ref path; the generated brief qualifies the name itself, so pass 'main'
+[exit 1]
+
+[12] $ fm-brief.sh lane-l proj --mode direct-PR --lane --landing-branch ok/branch --lane-branch refs/heads/x
+error: --lane-branch names a branch, not a ref path; the generated brief qualifies the name itself, so pass 'x'
+[exit 1]
+
+--- ACCEPTED at scaffold time: 'origin/main' is ref-safe; the base check
+    catches it later, where the answer is knowable ---
+
+[13] $ fm-brief.sh lane-m proj --mode direct-PR --lane --landing-branch origin/main
+scaffolded: /tmp/lane-refusal-work/home/data/lane-m/brief.md (ship lane, mode=direct-PR; replace {TASK})
+[exit 0]
+      52:      Run `'/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M1R1ZKYZERKQJ73S7B34YGMQ/bin/fm-lane-base-check.sh' origin/main --publishes` from the top of your workspace. It writes nothing - no reset, no fetch, no ref update - it only reports.
+
+--- Nothing was written for any refusal: only the accepted scaffold exists ---
+$ ls /tmp/lane-refusal-work/home/data
+lane-m
