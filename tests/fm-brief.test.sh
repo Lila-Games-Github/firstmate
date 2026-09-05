@@ -818,6 +818,360 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# --- Playbot lane mode ------------------------------------------------------
+# A lane's workspace is created by Playbot, which owns its branch and bases it on
+# the landing branch's REMOTE tip. Firstmate used to countermand the scaffold's
+# crewmate branch convention in the dispatch message and restate the delivery mode
+# there; a brief that must be countermanded on delivery is a defect in the brief,
+# and the override only works while firstmate remembers to send it. These tests pin
+# the three things that had to move into the generated brief: the branch
+# instructions, the base verification, and the prominent delivery contract.
+
+# Every mode's lane brief must be free of the `fm/<task-id>` convention. It cannot
+# be free of the string `git checkout -b`, because the brief now forbids that
+# command by name - so this asserts the difference that matters: no instruction to
+# create a branch, and no fm/<id> ref anywhere.
+test_lane_mode_drops_the_crewmate_branch_convention() {
+  local home id mode brief
+  home="$TMP_ROOT/lane-branch-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="lane-drop-$mode"
+    FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=paused "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --lane \
+      --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+      || fail "$mode: --lane brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_no_grep "fm/$id" "$brief" \
+      "$mode lane brief still names the crewmate fm/<task-id> branch"
+    assert_no_grep "checkout -b fm/" "$brief" \
+      "$mode lane brief still tells the lane to create an fm/ branch"
+    assert_no_grep "First action: create your branch" "$brief" \
+      "$mode lane brief still opens by creating a branch"
+    assert_grep "Never run \`git checkout -b\` or \`git switch -c\`, and never switch branches" "$brief" \
+      "$mode lane brief does not forbid creating or switching branches"
+    assert_grep "Your workspace already owns its branch" "$brief" \
+      "$mode lane brief does not state that the workspace owns the branch"
+    assert_grep "Run \`git branch --show-current\` and verify it is" "$brief" \
+      "$mode lane brief does not have the worker verify its branch before working"
+    assert_grep "never create or switch branches" "$brief" \
+      "$mode lane brief rule 1 does not carry branch ownership"
+    # The safety contract a lane shares with every other ship brief must survive.
+    grep -qx "Delivery contract: mode=$mode" "$brief" \
+      || fail "$mode lane brief lost its machine-readable delivery contract line"
+    assert_grep "**Verify isolation before anything else.**" "$brief" \
+      "$mode lane brief lost the worktree-isolation assertion"
+    assert_grep "{TASK}" "$brief" "$mode lane brief lost the {TASK} placeholder"
+    assert_grep "Never stop, restart, or update the shared \`no-mistakes\` daemon" "$brief" \
+      "$mode lane brief lost the shared-daemon rule"
+    assert_grep "States: working, needs-decision, blocked, paused, done, failed." "$brief" \
+      "$mode lane brief lost the status protocol"
+  done
+  pass "fm-brief.sh: lane mode drops the fm/<task-id> branch convention and keeps every safety rule"
+}
+
+# Playbot creates a lane workspace from the landing branch's REMOTE tip, so an
+# unpushed local landing leaves the workspace stale. The verdict on that base is
+# bin/fm-lane-base-check.sh's - tests/fm-lane-base-check.test.sh owns every state
+# it distinguishes - so what the brief owes is the invocation and the three arms
+# of that exit code, which is what these assert.
+test_lane_brief_verifies_its_base_before_working() {
+  local home brief mode
+  home="$TMP_ROOT/lane-base-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE=/FM_ROOT "$ROOT/bin/fm-brief.sh" lane-base some-proj \
+    --mode no-mistakes --lane --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "lane brief with an explicit landing branch should scaffold"
+  brief="$home/data/lane-base/brief.md"
+  assert_grep "Playbot creates a lane workspace from the REMOTE tip of the landing branch" "$brief" \
+    "lane brief does not explain why its base can start stale"
+  # The base check is part of the first action, before any task work.
+  assert_grep "1. First action: verify your starting point before you touch anything." "$brief" \
+    "lane brief does not make starting-point verification the first action"
+  assert_grep "Run \`'/FM_ROOT/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes\`" "$brief" \
+    "lane brief does not run the base check with its landing branch"
+  assert_grep "act on its EXIT CODE" "$brief" \
+    "lane brief does not bind the worker to the check's exit code"
+  assert_grep "- exit 0" "$brief" "lane brief has no proceed arm"
+  assert_grep "- exit 10" "$brief" "lane brief has no reset arm"
+  assert_grep "- exit 20" "$brief" "lane brief has no stop arm"
+  assert_grep "DISCLOSE BEFORE YOU RESET" "$brief" \
+    "lane brief does not make disclosure a precondition of discarding Playbot churn"
+  assert_grep "git diff HEAD -- <exactly those paths>" "$brief" \
+    "lane brief's churn record misses staged content because it omits HEAD"
+  assert_grep "working: discarding Playbot churn before base reset:" "$brief" \
+    "lane brief does not have the worker name what it discards"
+  assert_grep "prototype-game/project.godot" "$brief" \
+    "lane brief does not call out the hand-editable settings file by name"
+  # The brief carries no procedure of its own: no allowlist copy, no ahead/behind
+  # arithmetic, and no state/<id>.meta or default-branch substitution.
+  assert_no_grep "git rev-list --left-right --count" "$brief" \
+    "lane brief re-derives the base verdict instead of running the check"
+  assert_no_grep "prototype-game/addons/playbot/plugin.gd.uid" "$brief" \
+    "lane brief carries a second copy of the tracked-churn allowlist"
+  assert_no_grep "landing_branch=" "$brief" \
+    "lane brief points at a state/<id>.meta field a Playbot lane never has"
+  assert_no_grep "falling back to the default branch" "$brief" \
+    "lane brief falls back to the default branch docs/playbot-lanes.md forbids for a lane"
+
+  # Only the modes that ship through a PR pass --publishes.
+  for mode in direct-PR no-mistakes; do
+    FM_HOME="$home" FM_ROOT_OVERRIDE=/FM_ROOT "$ROOT/bin/fm-brief.sh" "publishes-$mode" some-proj \
+      --mode "$mode" --lane --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+      || fail "$mode lane brief should scaffold"
+    assert_grep "fm-lane-base-check.sh' proto/godot/frog-pile --publishes" \
+      "$home/data/publishes-$mode/brief.md" \
+      "$mode lane brief does not declare that it publishes through a PR"
+  done
+  FM_HOME="$home" FM_ROOT_OVERRIDE=/FM_ROOT "$ROOT/bin/fm-brief.sh" publishes-local-only some-proj \
+    --mode local-only --lane --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "local-only lane brief should scaffold"
+  assert_no_grep "--publishes" "$home/data/publishes-local-only/brief.md" \
+    "local-only lane brief claims to publish through a PR"
+
+  # local-only is where the landing branch decides the merge, so its definition of
+  # done must use the same branch the base check verified against.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-base-dod some-proj --mode local-only --lane \
+    --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "local-only lane brief with an explicit landing branch should scaffold"
+  brief="$home/data/lane-base-dod/brief.md"
+  assert_grep "clean fast-forward onto your landing branch \`proto/godot/frog-pile\`" "$brief" \
+    "local-only lane brief does not keep its branch a fast-forward onto the landing branch it was given"
+  assert_grep "firstmate merges it into your landing branch \`proto/godot/frog-pile\` through the guarded fast-forward path" "$brief" \
+    "local-only lane brief does not land on the landing branch it was given"
+  assert_no_grep "landing_branch=" "$brief" \
+    "local-only lane brief still reads a state/<id>.meta field a Playbot lane never has"
+  pass "fm-brief.sh: a lane brief runs the base check and acts on its exit code"
+}
+
+# Firstmate began restating the delivery mode in every lane dispatch after lanes ran
+# the no-mistakes pipeline on a local-only project. The brief must declare the mode
+# prominently enough that no dispatch-time restatement is needed, while keeping the
+# Definition of done the single authority, and bin/fm-spawn.sh's first-match read of
+# the contract line must still see this task's mode.
+test_lane_brief_declares_its_delivery_contract_prominently() {
+  local home id mode brief first
+  home="$TMP_ROOT/lane-contract-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="lane-contract-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --lane --landing-branch proto/godot/frog-pile >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Delivery contract - READ THIS BEFORE YOU SHIP ANYTHING" "$brief" \
+      "$mode lane brief does not declare its delivery contract prominently"
+    assert_grep "the full contract and the only delivery authority" "$brief" \
+      "$mode lane brief does not keep the Definition of done as the single authority"
+    assert_grep "this brief is complete and needs no dispatch-time override" "$brief" \
+      "$mode lane brief does not tell the worker it needs no dispatch-time override"
+    # The prominent block must sit above the setup and rules, not after them.
+    [ "$(grep -n -F -m1 '# Delivery contract - READ THIS BEFORE YOU SHIP ANYTHING' "$brief" | cut -d: -f1)" \
+      -lt "$(grep -n -F -m1 '# Setup' "$brief" | cut -d: -f1)" ] \
+      || fail "$mode lane brief buries its delivery contract below the setup section"
+    # fm-spawn.sh reads the FIRST contract line; it must be this task's mode.
+    first=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$brief" | head -n 1)
+    [ "$first" = "$mode" ] \
+      || fail "$mode lane brief's first delivery contract line reads '$first', which fm-spawn.sh would refuse"
+  done
+  assert_grep "never run /no-mistakes. Firstmate lands your branch." \
+    "$home/data/lane-contract-local-only/brief.md" \
+    "local-only lane brief does not forbid the pipeline where it is most often run by mistake"
+  assert_grep "Never run /no-mistakes on this task." \
+    "$home/data/lane-contract-direct-PR/brief.md" \
+    "direct-PR lane brief does not forbid the pipeline prominently"
+  assert_grep "firstmate tells you when to run /no-mistakes" \
+    "$home/data/lane-contract-no-mistakes/brief.md" \
+    "no-mistakes lane brief does not say who starts the pipeline"
+  pass "fm-brief.sh: a lane brief declares its delivery contract prominently and keeps one authority"
+}
+
+# An explicit workspace branch must be stated in all four places that used to name
+# fm/<task-id>: the setup step, rule 1, the definition of done, and the ready line.
+test_lane_branch_name_is_stated_in_every_branch_instruction() {
+  local home brief demand
+  home="$TMP_ROOT/lane-named-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named some-proj --mode local-only --lane \
+    --lane-branch task/lane-named-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "lane brief with an explicit branch should scaffold"
+  brief="$home/data/lane-named/brief.md"
+  assert_grep "verify it is your workspace branch \`task/lane-named-2026-09-04\`" "$brief" \
+    "named lane brief does not state the branch in its setup step"
+  assert_grep "Work only on your workspace branch \`task/lane-named-2026-09-04\`; never create or switch branches." "$brief" \
+    "named lane brief does not state the branch in rule 1"
+  assert_grep "complete only when committed on your workspace branch \`task/lane-named-2026-09-04\`" "$brief" \
+    "named lane brief does not state the branch in its definition of done"
+  assert_grep "append \`done: ready in branch task/lane-named-2026-09-04\` to the status file" "$brief" \
+    "named lane brief does not report readiness on its workspace branch"
+  assert_no_grep "ready in branch fm/" "$brief" \
+    "named lane brief still reports readiness on an fm/ branch"
+
+  # direct-PR pushes the workspace branch, and no-mistakes works on it.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named-pr some-proj --mode direct-PR --lane \
+    --lane-branch task/lane-named-pr-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1
+  assert_grep "push only your workspace branch \`task/lane-named-pr-2026-09-04\`; never create or switch branches" \
+    "$home/data/lane-named-pr/brief.md" \
+    "named direct-PR lane brief does not push the workspace branch"
+  # A lane's PR must target its landing branch: gh pr create with no --base opens
+  # against the repository default, which is not where a lane lands.
+  assert_grep "passing \`--base proto/godot/frog-pile\` explicitly so the PR targets your landing branch" \
+    "$home/data/lane-named-pr/brief.md" \
+    "direct-PR lane brief does not name the landing branch as the PR base"
+
+  # A no-mistakes lane cannot establish OR read that base - `no-mistakes axi run`
+  # has no base flag and no-mistakes exposes no way to read its configured target -
+  # so its definition of done states the fact and asks nothing of the worker. Every
+  # verification variant was unsatisfiable in some placement, so none may return:
+  # an instruction the worker cannot perform reads as a guarantee.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named-nm some-proj --mode no-mistakes --lane \
+    --lane-branch task/lane-named-nm-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "no-mistakes lane brief should scaffold"
+  brief="$home/data/lane-named-nm/brief.md"
+  assert_grep "base is whatever no-mistakes is configured to target" "$brief" \
+    "no-mistakes lane brief does not state who chooses its PR base"
+  assert_grep "this brief can neither set nor read it" "$brief" \
+    "no-mistakes lane brief does not admit it cannot set or read that base"
+  for demand in "confirm its configured target" "confirm the base" "gh-axi api" \
+    "blocked: no-mistakes opened" "blocked: no-mistakes targets" "--jq .base.ref"; do
+    assert_no_grep "$demand" "$brief" \
+      "no-mistakes lane brief still asks the worker to verify its PR base ('$demand')"
+  done
+  pass "fm-brief.sh: an explicit lane branch is stated in every branch instruction"
+}
+
+# A lane brief must stay coherent with no branch name available: it refers to the
+# branch the workspace was created on rather than inventing one, and the readiness
+# line tells the worker to name its own branch.
+test_lane_without_a_branch_name_stays_coherent() {
+  local home brief
+  home="$TMP_ROOT/lane-unnamed-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-unnamed some-proj --mode local-only --lane \
+    --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
+    || fail "lane brief without a branch name should scaffold"
+  brief="$home/data/lane-unnamed/brief.md"
+  assert_grep "verify it is the branch your workspace was created on" "$brief" \
+    "unnamed lane brief does not refer to the branch the workspace was created on"
+  assert_grep "Work only on the branch your workspace was created on; never create or switch branches." "$brief" \
+    "unnamed lane brief lost branch ownership in rule 1"
+  assert_grep "complete only when committed on the branch your workspace was created on" "$brief" \
+    "unnamed lane brief lost branch ownership in its definition of done"
+  assert_grep "append \`done: ready in branch {your workspace branch}\` to the status file" "$brief" \
+    "unnamed lane brief does not have the worker name its own branch when reporting ready"
+  assert_no_grep "fm/lane-unnamed" "$brief" \
+    "unnamed lane brief fell back to the crewmate branch convention"
+  pass "fm-brief.sh: a lane brief without a branch name stays coherent"
+}
+
+# Every lane flag combination that cannot mean anything must fail with a clear
+# message and write nothing, rather than emitting a brief whose lane wording
+# contradicts its own kind.
+test_lane_flag_combinations_are_refused() {
+  local home out status label args expect
+  home="$TMP_ROOT/lane-refused-home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain why"
+    assert_absent "$home/data/${args%% *}/brief.md" "$label: refused scaffold still wrote a brief"
+  done <<'ROWS'
+lane on a scout brief|lane-refused-c1 some-proj --scout --lane|--lane applies only to ship briefs
+lane on a secondmate charter|lane-refused-c2 --secondmate --no-projects --lane|--lane applies only to ship briefs
+lane branch without lane|lane-refused-c3 some-proj --mode no-mistakes --lane-branch task/x|--lane-branch requires --lane
+lane branch with no value|lane-refused-c4 some-proj --mode no-mistakes --lane --lane-branch|--lane-branch requires a value
+empty lane branch|lane-refused-c5 some-proj --mode no-mistakes --lane --lane-branch=|--lane-branch requires a value
+landing branch without lane|lane-refused-c6 some-proj --mode no-mistakes --landing-branch main|--landing-branch requires --lane
+landing branch with no value|lane-refused-c7 some-proj --mode no-mistakes --lane --landing-branch|--landing-branch requires a value
+empty landing branch|lane-refused-c8 some-proj --mode no-mistakes --lane --landing-branch=|--landing-branch requires a value
+landing branch as a remote ref path|lane-refused-c10 some-proj --mode no-mistakes --lane --landing-branch refs/remotes/origin/main|--landing-branch names a branch, not a ref path
+landing branch as a qualified branch ref|lane-refused-c11 some-proj --mode no-mistakes --lane --landing-branch refs/heads/main|--landing-branch names a branch, not a ref path
+lane still needs a mode|lane-refused-c9 some-proj --lane|ship briefs require --mode
+lane without a landing branch|lane-refused-c12 some-proj --mode no-mistakes --lane|--lane requires --landing-branch
+ROWS
+  pass "fm-brief.sh: nonsensical lane flag combinations are refused, never emitted as a confusing brief"
+}
+
+# Both lane branch flags are rendered into commands the brief tells the worker to
+# run, so an unsafe, git-invalid or fully-qualified value must never reach a
+# generated brief. These are string checks only: fm-brief.sh cannot know which
+# clone a lane will use, so an existence judgement belongs to the brief's own step
+# 1b, and a value like origin/main is accepted here on purpose.
+test_lane_branch_values_must_be_safe_branch_names() {
+  local home out status id value flag brief
+  home="$TMP_ROOT/lane-branch-value-home"
+  mkdir -p "$home/data"
+  id=0
+  for flag in --landing-branch --lane-branch; do
+    # shellcheck disable=SC2016  # these are literal unsafe values under test; nothing may expand
+    for value in '$(id)' 'a`id`b' 'main;rm' 'main|tee' 'main~1' 'main..x' '.hidden' 'HEAD' 'x.lock' 'refs/heads/foo' 'refs/remotes/origin/main'; do
+      id=$((id + 1))
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "value-$id" some-proj --mode no-mistakes --lane \
+        --landing-branch main "$flag" "$value" 2>&1)
+      status=$?
+      [ "$status" -ne 0 ] \
+        || fail "$flag '$value' scaffolded instead of being refused"
+      assert_contains "$out" "$flag" "$flag '$value': refusal does not name the flag"
+      assert_absent "$home/data/value-$id/brief.md" \
+        "$flag '$value': a refused value still wrote a brief"
+    done
+  done
+  # The safe forms the refusals must not catch. proto/godot/frog-pile is this
+  # system's canonical landing-branch spelling, so it must scaffold and must be
+  # what the generated base check resolves.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" value-ok some-proj --mode no-mistakes --lane \
+    --landing-branch proto/godot/frog-pile --lane-branch task/value-ok-2026-09-04 >/dev/null 2>&1 \
+    || fail "the canonical multi-segment landing branch should scaffold"
+  brief="$home/data/value-ok/brief.md"
+  assert_present "$brief" "the canonical multi-segment landing branch wrote no brief"
+  assert_grep "fm-lane-base-check.sh' proto/godot/frog-pile" "$brief" \
+    "the canonical landing branch is not what the base check is given"
+
+  # A remote-tracking spelling is accepted at scaffold time on purpose: only the
+  # lane worktree can say whether refs/heads/origin/main exists, and the base
+  # check stops there when it does not.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" value-remote some-proj --mode no-mistakes --lane \
+    --landing-branch origin/main >/dev/null 2>&1 \
+    || fail "a ref-safe remote-tracking spelling should scaffold and be settled by the base check"
+  assert_grep "fm-lane-base-check.sh' origin/main" \
+    "$home/data/value-remote/brief.md" \
+    "the accepted value is not the branch the base check is given"
+  pass "fm-brief.sh: --landing-branch and --lane-branch refuse values that are not plain branch names"
+}
+
+# Lane mode must not change a non-lane brief at all. Comparing each mode's whole
+# generated brief against a committed fixture catches any drift, including drift a
+# targeted assertion would not think to look for. Regenerate deliberately with
+# FM_BRIEF_FIXTURE_UPDATE=1 and review the diff; never regenerate to silence a
+# failure you did not intend.
+test_non_lane_ship_briefs_match_their_fixture() {
+  local home mode brief fixture normalized
+  home="$TMP_ROOT/fixture-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    FM_HOME="$home" FM_ROOT_OVERRIDE=/FM_ROOT FM_CLASSIFY_PAUSED_VERB=paused \
+      "$ROOT/bin/fm-brief.sh" "fixture-$mode" fixture-project --mode "$mode" >/dev/null 2>&1 \
+      || fail "$mode: fixture brief should scaffold"
+    brief="$home/data/fixture-$mode/brief.md"
+    fixture="$ROOT/tests/fixtures/fm-brief/ship-$mode.md"
+    normalized="$home/normalized-$mode.md"
+    sed -e "s|$home|/FM_HOME|g" -e "s|$ROOT|/FM_ROOT|g" "$brief" > "$normalized"
+    if [ -n "${FM_BRIEF_FIXTURE_UPDATE:-}" ]; then
+      cp "$normalized" "$fixture"
+      continue
+    fi
+    assert_present "$fixture" "$mode: missing committed brief fixture"
+    cmp -s "$fixture" "$normalized" \
+      || fail "$mode: non-lane brief drifted from tests/fixtures/fm-brief/ship-$mode.md - $(diff -u "$fixture" "$normalized" | head -n 20)"
+  done
+  if [ -n "${FM_BRIEF_FIXTURE_UPDATE:-}" ]; then
+    pass "fm-brief.sh: non-lane ship brief fixtures regenerated (FM_BRIEF_FIXTURE_UPDATE)"
+    return 0
+  fi
+  pass "fm-brief.sh: non-lane ship briefs are byte-identical to their committed fixtures"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -839,3 +1193,11 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_lane_mode_drops_the_crewmate_branch_convention
+test_lane_brief_verifies_its_base_before_working
+test_lane_brief_declares_its_delivery_contract_prominently
+test_lane_branch_name_is_stated_in_every_branch_instruction
+test_lane_without_a_branch_name_stays_coherent
+test_lane_flag_combinations_are_refused
+test_lane_branch_values_must_be_safe_branch_names
+test_non_lane_ship_briefs_match_their_fixture

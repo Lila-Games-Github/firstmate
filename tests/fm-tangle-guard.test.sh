@@ -145,7 +145,23 @@ test_brief_assertion_precedes_branch() {
     fail "brief missing assertion ($iso) or branch step ($br)"
   fi
   [ "$iso" -lt "$br" ] || fail "isolation assertion (line $iso) must precede the branch step (line $br)"
-  pass "fm-brief: ship brief asserts worktree isolation before the branch step"
+
+  # A Playbot lane brief creates no branch, but the same ordering must hold for
+  # the step that replaced it: the lane verifies its worktree before it verifies
+  # (or resets) the branch and base it was handed.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-lane-cc3 alpha --mode no-mistakes --lane --landing-branch proto/godot/frog-pile >/dev/null 2>&1
+  brief="$home/data/tangle-brief-lane-cc3/brief.md"
+  assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
+    "lane brief is missing the isolation blocked-status contract"
+  assert_no_grep "git checkout -b fm/" "$brief" \
+    "lane brief must not carry the crewmate branch step"
+  iso=$(grep -n 'launched in primary checkout, not an isolated worktree' "$brief" | head -1 | cut -d: -f1)
+  br=$(grep -n 'First action: verify your starting point' "$brief" | head -1 | cut -d: -f1)
+  if [ -z "$iso" ] || [ -z "$br" ]; then
+    fail "lane brief missing assertion ($iso) or starting-point step ($br)"
+  fi
+  [ "$iso" -lt "$br" ] || fail "isolation assertion (line $iso) must precede the lane starting-point step (line $br)"
+  pass "fm-brief: ship and lane briefs assert worktree isolation before the branch step"
 }
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------

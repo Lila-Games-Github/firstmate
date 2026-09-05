@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -41,6 +41,52 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# --lane writes the same ship contract for a Playbot lane. A lane brief is designed
+# to need ZERO dispatch-time overrides: a caller hands it over with nothing but
+# "read the brief at <path> and follow it exactly" plus a one-line task summary, so
+# every lane-specific instruction firstmate used to send by hand is generated here.
+# Three differences from a crewmate brief carry that:
+#   1. Branch. A lane's workspace already owns its branch, so every crewmate
+#      `fm/<task-id>` instruction - the setup step, rule 1, the definition of done,
+#      and the ready status line - becomes "verify and stay on the workspace's own
+#      branch, and create or switch none".
+#   2. Base. firstmate creates a crewmate's worktree from the recorded landing
+#      branch locally, while Playbot creates a lane workspace from that branch's
+#      REMOTE tip, so an unpushed landing leaves the workspace behind. Setup step 1b
+#      runs bin/fm-lane-base-check.sh, whose own header and --help own that check's
+#      contract and exit codes, and the generated brief carries only its invocation
+#      plus the three arms of that exit code: proceed, reset to the ref it names
+#      after disclosing any Playbot churn it names, or stop with the line it
+#      reported. The two PR-producing modes pass its --publishes flag, because a
+#      PR's base is the landing branch as published; local-only does not.
+#   3. Delivery contract. The mode is declared prominently after the task, above the
+#      Herdr and setup sections, repeating only the machine-readable contract line
+#      and that mode's one prohibition and pointing at the Definition of done as the
+#      only authority, so firstmate never needs to restate the mode on dispatch.
+# Everything else, including the worktree-isolation assertion, the status protocol,
+# the shared-daemon rule, and the {TASK} placeholder, is identical to a non-lane
+# brief of the same mode. Task-specific content still belongs in {TASK}.
+# --lane-branch <branch> names the workspace branch exactly (Playbot's generated
+# task/<task-id>-<date>, for example); without it the brief refers to the branch the
+# workspace was created on rather than inventing a name. It requires --lane.
+# --landing-branch <branch> names the branch the base check compares against and is
+# REQUIRED with --lane: the base check is what a lane cannot be dispatched without,
+# a lane is created by Playbot's dispatch and never by bin/fm-spawn.sh so it has no
+# recorded landing_branch= to read, and substituting a repository default is exactly
+# what docs/playbot-lanes.md forbids for a lane - so a brief that could not name the
+# branch is refused at scaffold time rather than emitted for a worker to stop on.
+# It requires --lane, because a non-lane worktree is already based locally on the
+# branch firstmate recorded for it. The value is a plain local branch name that git
+# itself accepts (git check-ref-format --branch), restricted to letters, digits,
+# '.', '_', '/', '+' and '-' because it is rendered into commands the brief tells
+# the worker to run, and refs/... ref paths are refused in favour of the bare name;
+# --lane-branch takes exactly the same value form. These are string checks only, so
+# a multi-segment name such as proto/godot/frog-pile is always accepted and a
+# remote-tracking spelling such as origin/main is accepted here too: whether the
+# branch actually exists is settled by the generated brief's step 1b in the real
+# lane worktree, whose missing-branch arm stops and reports.
+# --lane is refused on scout and secondmate scaffolds: a scout brief carries no
+# branch convention to replace, and a charter is not a lane.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns approval decisions, so yolo is
@@ -106,11 +152,51 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+# Both lane branch flags name a branch the generated brief renders into commands a
+# worker runs, so the same screen applies to both: a conservative character set, so
+# no shell metacharacter or command substitution can ever be rendered; git's own
+# branch-name validation, which owns the leading-dash, `..`, `@{`, trailing-.lock,
+# control-character and empty-segment cases; and a refusal of fully-qualified
+# refs/... spellings, which the brief's own commands qualify themselves and which
+# `git branch --show-current` never prints.
+# All three are pure string checks that need no repository, and deliberately so:
+# this scaffold cannot know which clone a lane will actually use, since the REPO
+# argument carries no reliable signal about which repository it names (recorded in
+# .agents/skills/firstmate-coding-guidelines/SKILL.md), and a Playbot workspace is
+# a worktree of Playbot's project root rather than a clone under this home. A
+# scaffold-time resolution check would therefore judge the wrong tree and could
+# refuse a valid branch, which is worse than no check. Whether the branch exists is
+# settled by the generated brief's step 1b, in the real lane worktree, where the
+# answer is knowable and the arm is fail-closed.
+reject_unsafe_branch_value() {
+  local flag=$1 value=$2
+  case "$value" in
+    *[!A-Za-z0-9._/+-]*)
+      echo "error: $flag takes a plain branch name; '$value' contains characters outside letters, digits, '.', '_', '/', '+' and '-', and this value is rendered into commands the brief tells the worker to run" >&2
+      return 1 ;;
+    refs/heads/*)
+      echo "error: $flag names a branch, not a ref path; the generated brief qualifies the name itself, so pass '${value#refs/heads/}'" >&2
+      return 1 ;;
+    refs/*)
+      echo "error: $flag names a branch, not a ref path; the generated brief resolves refs/heads/<branch> only, and a tag or remote-tracking ref path can never satisfy it" >&2
+      return 1 ;;
+  esac
+  git check-ref-format --branch "$value" >/dev/null 2>&1 || {
+    echo "error: $flag value '$value' is not a valid git branch name (git check-ref-format --branch refuses it)" >&2
+    return 1
+  }
+}
+
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+LANE=0
+LANE_BRANCH=
+LANE_BRANCH_SET=0
+LANDING_BRANCH=
+LANDING_BRANCH_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -120,6 +206,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      lane-branch) LANE_BRANCH=$a; LANE_BRANCH_SET=1 ;;
+      landing-branch) LANDING_BRANCH=$a; LANDING_BRANCH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -132,6 +220,11 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --lane) LANE=1 ;;
+    --lane-branch) want_value=lane-branch ;;
+    --lane-branch=*) LANE_BRANCH=${a#--lane-branch=}; LANE_BRANCH_SET=1 ;;
+    --landing-branch) want_value=landing-branch ;;
+    --landing-branch=*) LANDING_BRANCH=${a#--landing-branch=}; LANDING_BRANCH_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -168,6 +261,37 @@ fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
+  exit 1
+fi
+
+# A lane brief replaces the crewmate branch convention, so it only means anything
+# where that convention exists: a ship scaffold. Refuse the other combinations
+# rather than emitting a brief whose lane wording contradicts its own kind.
+if [ "$LANE" -eq 1 ] && [ "$KIND" != ship ]; then
+  echo "error: --lane applies only to ship briefs; a scout brief creates no branch to replace and a secondmate charter is not a lane" >&2
+  exit 1
+fi
+if [ "$LANE_BRANCH_SET" -eq 1 ]; then
+  [ "$LANE" -eq 1 ] || {
+    echo "error: --lane-branch requires --lane; a non-lane brief works on its own fm/<task-id> branch" >&2
+    exit 1
+  }
+  [ -n "$LANE_BRANCH" ] || { echo "error: --lane-branch requires a value" >&2; exit 1; }
+  reject_unsafe_branch_value --lane-branch "$LANE_BRANCH" || exit 1
+fi
+if [ "$LANDING_BRANCH_SET" -eq 1 ]; then
+  [ "$LANE" -eq 1 ] || {
+    echo "error: --landing-branch requires --lane; a non-lane worktree is already based on the landing branch firstmate recorded for the task" >&2
+    exit 1
+  }
+  [ -n "$LANDING_BRANCH" ] || { echo "error: --landing-branch requires a value" >&2; exit 1; }
+  reject_unsafe_branch_value --landing-branch "$LANDING_BRANCH" || exit 1
+fi
+# The base check is the first thing a lane brief tells its worker to do, and it
+# cannot be written without the branch it compares against, so a lane brief that
+# could not name one is never generated.
+if [ "$LANE" -eq 1 ] && [ "$LANDING_BRANCH_SET" -ne 1 ]; then
+  echo "error: --lane requires --landing-branch <branch>: a lane verifies its base against that branch as its first action, and a Playbot lane has no recorded landing branch to fall back on" >&2
   exit 1
 fi
 
@@ -388,43 +512,147 @@ fi
 # delivery mode, validated above. The generated DOD opens with the fixed
 # "Delivery contract: mode=<mode>" line that bin/fm-spawn.sh checks against its own
 # explicit --mode before launching.
+#
+# A lane's workspace already owns its branch, so every branch instruction below
+# becomes "stay on the branch you are already on". LANE_BRANCH_DESC names that
+# branch exactly when the caller supplied it and otherwise refers to the branch the
+# workspace was created on; nothing here ever invents a branch name.
+#
+# A lane also needs its base verified before it works, which an ordinary crewmate
+# does not: firstmate creates a crewmate's worktree from the recorded landing
+# branch locally, while Playbot creates a lane workspace from that branch's REMOTE
+# tip, so a landing that has not been pushed yet leaves the workspace behind.
+# That verdict is bin/fm-lane-base-check.sh's to give - it names every state and
+# is tested per state - so nothing here re-derives it; the generated step carries
+# the invocation and branches on its exit code. --landing-branch is validated as
+# required before anything is written, so every lane brief names one concrete
+# branch here, in rule 1 and in the definition of done.
+if [ "$LANE" -eq 1 ]; then
+  if [ -n "$LANE_BRANCH" ]; then
+    LANE_BRANCH_DESC="your workspace branch \`$LANE_BRANCH\`"
+    LANE_READY_LINE="\`done: ready in branch $LANE_BRANCH\`"
+  else
+    LANE_BRANCH_DESC="the branch your workspace was created on"
+    LANE_READY_LINE="\`done: ready in branch {your workspace branch}\`"
+  fi
+  LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
+  # Whether this landing branch is safe to start from is one question with many
+  # states, and prose in a generated document cannot be tested, so the procedure
+  # lives in bin/fm-lane-base-check.sh and the brief carries only its invocation
+  # and the three arms of its exit code. That script also reads the tracked-churn
+  # allowlist from its owner, so no copy of those paths is rendered here.
+  # --publishes is passed only by the modes that ship through a PR: a PR's base is
+  # the landing branch as published, so those lanes may not start from a local
+  # landing branch carrying commits the remote tip lacks. local-only publishes
+  # nothing and makes no remote comparison.
+  LANE_BASE_CHECK=$(shell_quote "$FM_ROOT/bin/fm-lane-base-check.sh")" $LANDING_BRANCH"
+  case "$MODE" in
+    local-only) ;;
+    *) LANE_BASE_CHECK="$LANE_BASE_CHECK --publishes" ;;
+  esac
+  SETUP_PREAMBLE="You are in a Playbot lane workspace: an isolated git worktree of $REPO that Playbot created and already checked out on the branch that workspace owns."
+  IFS= read -r -d '' SETUP1 <<EOF || true
+1. First action: verify your starting point before you touch anything. Both checks below are mandatory; this brief is complete, so nothing outside it will tell you to run them.
+
+   a. **Branch.** Your workspace already owns its branch, and that branch is what workspace freshness, retirement inspection, and firstmate's landing all resolve.
+      Run \`git branch --show-current\` and verify it is $LANE_BRANCH_DESC.
+      If it is not, STOP - append \`blocked: lane is not on its workspace branch\` to the status file and stop.
+      Never run \`git checkout -b\` or \`git switch -c\`, and never switch branches: a branch of your own steps off the one your workspace owns.
+
+   b. **Base.** Playbot creates a lane workspace from the REMOTE tip of the landing branch, so a landing that has not been pushed yet leaves your workspace behind and you would build on stale code. One command decides whether your base is safe to start from; act on its EXIT CODE, never on your own reading of the repository.
+      Run \`$LANE_BASE_CHECK\` from the top of your workspace. It writes nothing - no reset, no fetch, no ref update - it only reports.
+      - exit 0 (\`current: ...\`): your base is safe; proceed.
+      - exit 10: it printed \`reset-required: <ref>\` and \`churn-paths: <paths>\`. When \`churn-paths\` names any path, DISCLOSE BEFORE YOU RESET: run \`git diff HEAD -- <exactly those paths>\` and leave its complete output in your log, untruncated and unsummarized - \`prototype-game/project.godot\` may be among them, and it is a hand-editable settings file rather than a generated one, so it can carry real human edits - then append \`working: discarding Playbot churn before base reset: {those paths}\` to the status file. With paths named and that diff uncaptured or that line unappended, do not reset. Then run \`git reset --hard <the ref it printed>\` and proceed. When \`churn-paths\` is empty there is nothing to disclose: reset to that ref and proceed.
+      - exit 20: it printed one \`blocked: ...\` line naming the evidence. STOP - append that exact line to the status file and stop.
+      - any other exit code is itself a blocker: append \`blocked: lane base check failed: {its output}\` to the status file and stop.
+EOF
+  SETUP1=${SETUP1%$'\n'}
+else
+  SETUP_PREAMBLE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of your task's base branch (its recorded landing branch, else the default branch)."
+  SETUP1="1. First action: create your branch: \`git checkout -b fm/$ID\`"
+fi
+
 case "$MODE" in
   direct-PR)
     SETUP2=""
-    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+    if [ "$LANE" -eq 1 ]; then
+      RULE1="1. Never push to the default branch (push only $LANE_BRANCH_DESC; never create or switch branches). Never merge a PR."
+      DOD_PR_STEP="When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, passing \`--base $LANDING_BRANCH\` explicitly so the PR targets your landing branch.
+That base is not optional: your work is based on \`$LANDING_BRANCH\`, and a PR opened without it targets the repository's default branch instead - a branch this lane must not touch, carrying every commit on the landing branch that the default branch does not have.
+Then append \`done: PR {url}\` to the status file and stop."
+    else
+      RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch). Never merge a PR.'
+      DOD_PR_STEP="When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop."
+    fi
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+$DOD_PR_STEP
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
   local-only)
     SETUP2=""
-    RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
+    # One rendering for both modes: the branch phrase, the ready line and the
+    # landing-branch phrases are the only differences, and a lane resolves its
+    # landing branch from --landing-branch rather than from a state/<id>.meta it
+    # never has.
+    if [ "$LANE" -eq 1 ]; then
+      RULE1="1. Never push to any remote and never open a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches. Firstmate handles the merge into $LANE_LANDING_TARGET."
+      DOD_BRANCH_DESC="$LANE_BRANCH_DESC"
+      DOD_READY_LINE="$LANE_READY_LINE"
+      DOD_LANDING_RULE="Keep that branch a clean fast-forward onto $LANE_LANDING_TARGET.
+If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward."
+      DOD_LANDING_MERGE="The configured merge authority approves the ready branch, then firstmate merges it into $LANE_LANDING_TARGET through the guarded fast-forward path."
+    else
+      RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
+      DOD_BRANCH_DESC="your branch \`fm/$ID\`"
+      DOD_READY_LINE="\`done: ready in branch fm/$ID\`"
+      DOD_LANDING_RULE="Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$META_FILE\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.
+If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward."
+      DOD_LANDING_MERGE="The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path."
+    fi
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$META_FILE\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.
-If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path.
+The task is complete only when committed on $DOD_BRANCH_DESC. Do NOT push, do NOT open a PR, do NOT merge.
+$DOD_LANDING_RULE
+When it is implemented and committed, append $DOD_READY_LINE to the status file and stop.
+$DOD_LANDING_MERGE
 EOF
     ;;
   *)  # no-mistakes
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
-    RULE1='1. Never push to the default branch. Never merge a PR.'
+    # A direct-PR lane establishes its own PR base with `gh-axi --base`, but
+    # `no-mistakes axi run` takes no base flag, so this mode cannot. The lane is
+    # still held to the publication precondition, whose whole premise is that the
+    # PR base is the landing branch - so say plainly who chooses that base here,
+    # and make a mismatch a report rather than something the worker may repair.
+    # A plain statement of fact and nothing more. Every attempt to make the worker
+    # VERIFY that base failed: no-mistakes exposes no way to read its configured
+    # target before a run (`doctor` prints System/Agents health, `status` prints
+    # repo, remote, gate path and daemon state), and an on-PR check has no gate to
+    # attach to that always has a PR. A statement that promises nothing is the
+    # honest state of affairs; the publication precondition at step 1b is what
+    # actually protects this lane, and it is unchanged.
+    if [ "$LANE" -eq 1 ]; then
+      RULE1="1. Never push to the default branch. Never merge a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches."
+      NM_LANE_PR_BASE="
+That PR's base is whatever no-mistakes is configured to target; \`no-mistakes axi run\` takes no base flag, so this brief can neither set nor read it."
+    else
+      RULE1='1. Never push to the default branch. Never merge a PR.'
+      NM_LANE_PR_BASE=""
+    fi
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.$NM_LANE_PR_BASE
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -447,24 +675,51 @@ esac
 # briefs stay byte-identical to the historical Bash 5 output.
 DOD=${DOD%$'\n'}
 
+# A lane brief must need no dispatch-time restatement of its delivery mode: the
+# incident this guards is a lane that ran the no-mistakes pipeline on a local-only
+# project, after which firstmate began restating the mode in every dispatch
+# message. The prominent block repeats only the machine-readable contract line and
+# the one prohibition that mode implies, then points at the Definition of done as
+# the single authority, so the two copies cannot drift into different contracts.
+# bin/fm-spawn.sh reads the first "Delivery contract: mode=" line, which is this
+# one, and both are rendered from the same validated $MODE.
+LANE_CONTRACT_BLOCK=""
+if [ "$LANE" -eq 1 ]; then
+  case "$MODE" in
+    direct-PR)
+      LANE_CONTRACT_RULE="You push your branch and open the PR yourself with \`gh-axi\`. Never run /no-mistakes on this task." ;;
+    local-only)
+      LANE_CONTRACT_RULE="No remote, no PR, no pipeline: never push, never open a PR, never run /no-mistakes. Firstmate lands your branch." ;;
+    *)
+      LANE_CONTRACT_RULE="Implement and commit, then report done and WAIT: firstmate tells you when to run /no-mistakes. Do not start the pipeline before it does." ;;
+  esac
+  IFS= read -r -d '' LANE_CONTRACT_BLOCK <<EOF || true
+
+# Delivery contract - READ THIS BEFORE YOU SHIP ANYTHING
+Delivery contract: mode=$MODE
+$LANE_CONTRACT_RULE
+\`# Definition of done\` at the end of this brief is the full contract and the only delivery authority. Do not infer a different path from habit, from what another lane did, or from anything said when this task was handed to you: this brief is complete and needs no dispatch-time override.
+EOF
+fi
+
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 # Task
 {TASK}
-
+$LANE_CONTRACT_BLOCK
 $HERDR_SECTION
 
 $LEARNING_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of your task's base branch (its recorded landing branch, else the default branch).
+$SETUP_PREAMBLE
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+$SETUP1$SETUP2
 
 # Rules
 $RULE1
@@ -501,4 +756,8 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+if [ "$LANE" -eq 1 ]; then
+  echo "scaffolded: $BRIEF (ship lane, mode=$MODE; replace {TASK})"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+fi
