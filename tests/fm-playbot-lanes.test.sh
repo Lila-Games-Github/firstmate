@@ -2043,30 +2043,34 @@ NODE
 pass "fm-playbot-lanes: dispatch sends linked model profiles and reports Playbot's read-back values"
 
 # The fake Playbot now persists a lower execution level than the one dispatch
-# requested, so the reported effort can only be right if it is read back from
-# Playbot state rather than echoed from the request.
+# requested. The refusal can only name the persisted value if it is read back
+# from Playbot state rather than echoed from the request, and the task must not
+# be sent on a profile the caller did not choose.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'medium\n' > "$FIXTURE_ROOT/launch-persisted-execution-level"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort task\",\"message\":\"Do the fallback work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
 rm -f "$FIXTURE_ROOT/launch-persisted-execution-level"
-OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch echoed the requested reasoningEffort instead of the value Playbot persisted"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch sent the task on an effort Playbot persisted differently from the request"
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
-if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch,threads:send') process.exit(1);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
 if (calls[1].payload.thread.executionReasoningLevel !== 'xhigh' || calls[1].payload.thread.planningReasoningLevel !== 'xhigh') process.exit(1);
-const value = JSON.parse(process.env.OUT).result.structuredContent;
-if (value.thread.workspaceId !== 'ws-worker' || value.thread.title !== 'Fallback effort task') process.exit(1);
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
 const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'), { readOnly: true });
-const row = db.prepare('SELECT execution_model, execution_reasoning_level FROM workspace_threads WHERE id = ?').get(value.thread.id);
+const rows = db.prepare('SELECT id, execution_model, execution_reasoning_level, pending_queue_json FROM workspace_threads WHERE workspace_id = ? AND title = ?').all('ws-worker', 'Fallback effort task');
 db.close();
-if (!row || row.execution_model !== 'gpt-6-astra' || row.execution_reasoning_level !== 'medium') process.exit(1);
-if (value.thread.model !== 'gpt-6-astra' || value.thread.reasoningEffort !== 'medium') process.exit(1);
+if (rows.length !== 1 || rows[0].execution_model !== 'gpt-6-astra' || rows[0].execution_reasoning_level !== 'medium' || rows[0].pending_queue_json !== null) process.exit(1);
+const message = value.error?.message ?? '';
+if (!message.includes(`Chat ${rows[0].id} was created in workspace ws-worker`)) process.exit(1);
+if (!message.includes('persisted model gpt-6-astra at effort medium instead of the requested gpt-6-astra at xhigh')) process.exit(1);
+if (!message.includes('The task was not sent') || !message.includes(`archive chat ${rows[0].id} with archive_chat`)) process.exit(1);
 NODE
-pass "fm-playbot-lanes: dispatch reports the effort Playbot persisted when it differs from the request"
+pass "fm-playbot-lanes: dispatch refuses to send when Playbot persisted a different effort than requested"
 
 # Clients that serialize unset optional fields as JSON null must get the same
 # default-preserving launch as clients that omit them, while a null model beside
