@@ -1,0 +1,40 @@
+workspace_threads columns: id,workspace_id,title,position,is_active,session_id,approval_mode,plan_mode,ephemeral,draft_input,pending_queue_json,agent_status,has_unread,last_user_activity_at,created_at,updated_at,archived,pinned_at,session_realm_key,planning_model,planning_reasoning_level,execution_model,execution_reasoning_level,planning_service_tier,execution_service_tier,mode_profiles_linked,visible
+[
+  {
+    "id": "chat-287f5f34-4d07-4070-a840-b16bc2312a87",
+    "workspace_id": "ws_dcea82fc1107",
+    "title": "fm-lane-dispatch-model proof",
+    "planning_model": "gpt-6-astra",
+    "planning_reasoning_level": "xhigh",
+    "execution_model": "gpt-6-astra",
+    "execution_reasoning_level": "xhigh",
+    "mode_profiles_linked": 1,
+    "archived": 1,
+    "created_at": "2026-09-08T12:58:12.331Z",
+    "updated_at": "2026-09-08T12:59:03.873Z",
+    "session_id": null
+  }
+]
+workspace: [{"id":"ws_dcea82fc1107","project_id":"project_df995db1b164","name":null,"kind":"local","archive_state":"active"}]
+live catalog gpt-6-astra: {"slug":"gpt-6-astra","visibility":"list","default_reasoning_level":"medium","supported":["low","medium","high","xhigh","max","ultra"]}
+live catalog slugs: gpt-6-astra(list), gpt-5.6-sol(list), gpt-5.6-terra(list), gpt-5.6-luna(list), gpt-5.5(list), gpt-5.4(list), gpt-5.4-mini(list), gpt-5.3-codex(list), gpt-5.3-codex-spark(list), gpt-5.2(list), codex-auto-review(hide)
+[eval]:6
+  const has=db.prepare("SELECT name FROM sqlite_master WHERE type=\"table\" AND name=\"threads\"").get();
+               ^
+
+Error: no such column: "table" - should this be a string literal in single-quotes?
+    at [eval]:6:16
+    at runScriptInThisContext (node:internal/vm:219:10)
+    at node:internal/process/execution:483:12
+    at [eval]-wrapper:6:24
+    at runScriptInContext (node:internal/process/execution:481:60)
+    at evalFunction (node:internal/process/execution:315:30)
+    at evalTypeScript (node:internal/process/execution:327:3)
+    at node:internal/main/eval_string:71:3 {
+  code: 'ERR_SQLITE_ERROR',
+  errcode: 1,
+  errstr: 'SQL logic error'
+}
+
+Node.js v26.7.0
+state_5.sqlite harness threads rows titled 'fm-lane-dispatch-model proof': 0 []

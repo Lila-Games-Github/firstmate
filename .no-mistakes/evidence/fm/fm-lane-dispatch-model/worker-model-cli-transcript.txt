@@ -1,0 +1,486 @@
+== Fixture: hermetic fake Playbot (threads:launch surface) with model catalog ==
+$ cat $PLAYBOT_HARNESS_HOME/playbot-model-catalog.json
+{
+  "models": [
+    {
+      "slug": "gpt-6-astra",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low"
+        },
+        {
+          "effort": "medium"
+        },
+        {
+          "effort": "xhigh"
+        }
+      ]
+    },
+    {
+      "slug": "gpt-5.6-sol",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low"
+        },
+        {
+          "effort": "high"
+        }
+      ]
+    },
+    {
+      "slug": "codex-auto-review",
+      "visibility": "hide",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low"
+        },
+        {
+          "effort": "medium"
+        }
+      ]
+    }
+  ]
+}
+
+$ node --no-warnings bin/fm-playbot-lanes.mjs doctor  (chatCreation field)
+{"chatCreation":"launch","playbotApp":{"version":"0.95.0","verifiedVersions":"0.95.x"}}
+
+== 1. Unknown model is refused before any IPC ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Unknown model","model":"gpt-does-not-exist","reasoningEffort":"xhigh"}'
+Unknown Playbot model 'gpt-does-not-exist'; selectable catalog models: gpt-5.6-sol, gpt-6-astra
+(exit 1)
+--- ipc-calls.jsonl (channel + thread payload) ---
+(no IPC call reached Playbot)
+
+== 2. Hidden catalog model (visibility: hide) is refused by name ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Hidden model","model":"codex-auto-review"}'
+Playbot model 'codex-auto-review' is hidden from Playbot's model picker and cannot be selected; selectable catalog models: gpt-5.6-sol, gpt-6-astra
+(exit 1)
+--- ipc-calls.jsonl (channel + thread payload) ---
+(no IPC call reached Playbot)
+
+== 3. Unsupported reasoningEffort is refused ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Unsupported effort","model":"gpt-6-astra","reasoningEffort":"ultra"}'
+Unsupported reasoningEffort 'ultra' for Playbot model 'gpt-6-astra'; supported levels: low, medium, xhigh
+(exit 1)
+--- ipc-calls.jsonl (channel + thread payload) ---
+(no IPC call reached Playbot)
+
+== 4. reasoningEffort without model is refused ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Effort only","reasoningEffort":"xhigh"}'
+model is required when selecting a worker model or reasoningEffort
+(exit 1)
+--- ipc-calls.jsonl (channel + thread payload) ---
+(no IPC call reached Playbot)
+
+== 5. Both options omitted: launch payload carries no profile fields, read-back is null ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Default profile chat"}'
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"thread\": {\n    \"id\": \"thread-created-1\",\n    \"title\": \"Default profile chat\",\n    \"projectId\": \"project-worker\",\n    \"project\": \"prototype-game\",\n    \"workspaceId\": \"ws-worker\",\n    \"workspace\": \"Main\",\n    \"sessionId\": null,\n    \"status\": \"ready\",\n    \"model\": null,\n    \"reasoningEffort\": null,\n    \"queuedCount\": 0,\n    \"hasUnread\": false,\n    \"isActive\": true,\n    \"archived\": false,\n    \"updatedAt\": \"2026-09-08T14:22:04.645Z\",\n    \"url\": \"playbot://workspace/ws-worker/thread/thread-created-1\"\n  }\n}"
+    }
+  ],
+  "structuredContent": {
+    "thread": {
+      "id": "thread-created-1",
+      "title": "Default profile chat",
+      "projectId": "project-worker",
+      "project": "prototype-game",
+      "workspaceId": "ws-worker",
+      "workspace": "Main",
+      "sessionId": null,
+      "status": "ready",
+      "model": null,
+      "reasoningEffort": null,
+      "queuedCount": 0,
+      "hasUnread": false,
+      "isActive": true,
+      "archived": false,
+      "updatedAt": "2026-09-08T14:22:04.645Z",
+      "url": "playbot://workspace/ws-worker/thread/thread-created-1"
+    }
+  }
+}
+(exit 0)
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+{"channel":"threads:launch","destination":{"kind":"existing-workspace","workspaceId":"ws-worker"},"thread":{"title":"Default profile chat","approvalMode":"full-access","planMode":false},"activate":false}
+--- workspace_threads row read back from playbot.db for title 'Default profile chat' ---
+[
+  {
+    "id": "thread-created-1",
+    "workspace_id": "ws-worker",
+    "title": "Default profile chat",
+    "planning_model": null,
+    "planning_reasoning_level": null,
+    "execution_model": null,
+    "execution_reasoning_level": null,
+    "mode_profiles_linked": null,
+    "pending_queue_json": null,
+    "archived": 0
+  }
+]
+
+== 6. Both options null: treated as omitted ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Null profile chat","model":null,"reasoningEffort":null}'
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"thread\": {\n    \"id\": \"thread-created-2\",\n    \"title\": \"Null profile chat\",\n    \"projectId\": \"project-worker\",\n    \"project\": \"prototype-game\",\n    \"workspaceId\": \"ws-worker\",\n    \"workspace\": \"Main\",\n    \"sessionId\": null,\n    \"status\": \"ready\",\n    \"model\": null,\n    \"reasoningEffort\": null,\n    \"queuedCount\": 0,\n    \"hasUnread\": false,\n    \"isActive\": true,\n    \"archived\": false,\n    \"updatedAt\": \"2026-09-08T14:22:04.823Z\",\n    \"url\": \"playbot://workspace/ws-worker/thread/thread-created-2\"\n  }\n}"
+    }
+  ],
+  "structuredContent": {
+    "thread": {
+      "id": "thread-created-2",
+      "title": "Null profile chat",
+      "projectId": "project-worker",
+      "project": "prototype-game",
+      "workspaceId": "ws-worker",
+      "workspace": "Main",
+      "sessionId": null,
+      "status": "ready",
+      "model": null,
+      "reasoningEffort": null,
+      "queuedCount": 0,
+      "hasUnread": false,
+      "isActive": true,
+      "archived": false,
+      "updatedAt": "2026-09-08T14:22:04.823Z",
+      "url": "playbot://workspace/ws-worker/thread/thread-created-2"
+    }
+  }
+}
+(exit 0)
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+{"channel":"threads:launch","destination":{"kind":"existing-workspace","workspaceId":"ws-worker"},"thread":{"title":"Null profile chat","approvalMode":"full-access","planMode":false},"activate":false}
+
+== 7. create_chat gpt-6-astra @ xhigh: exact threads:launch payload + persisted read-back ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"fm-lane-dispatch-model proof","model":"gpt-6-astra","reasoningEffort":"xhigh"}'
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"thread\": {\n    \"id\": \"thread-created-3\",\n    \"title\": \"fm-lane-dispatch-model proof\",\n    \"projectId\": \"project-worker\",\n    \"project\": \"prototype-game\",\n    \"workspaceId\": \"ws-worker\",\n    \"workspace\": \"Main\",\n    \"sessionId\": null,\n    \"status\": \"ready\",\n    \"model\": \"gpt-6-astra\",\n    \"reasoningEffort\": \"xhigh\",\n    \"queuedCount\": 0,\n    \"hasUnread\": false,\n    \"isActive\": true,\n    \"archived\": false,\n    \"updatedAt\": \"2026-09-08T14:22:04.969Z\",\n    \"url\": \"playbot://workspace/ws-worker/thread/thread-created-3\"\n  }\n}"
+    }
+  ],
+  "structuredContent": {
+    "thread": {
+      "id": "thread-created-3",
+      "title": "fm-lane-dispatch-model proof",
+      "projectId": "project-worker",
+      "project": "prototype-game",
+      "workspaceId": "ws-worker",
+      "workspace": "Main",
+      "sessionId": null,
+      "status": "ready",
+      "model": "gpt-6-astra",
+      "reasoningEffort": "xhigh",
+      "queuedCount": 0,
+      "hasUnread": false,
+      "isActive": true,
+      "archived": false,
+      "updatedAt": "2026-09-08T14:22:04.969Z",
+      "url": "playbot://workspace/ws-worker/thread/thread-created-3"
+    }
+  }
+}
+(exit 0)
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+{"channel":"threads:launch","destination":{"kind":"existing-workspace","workspaceId":"ws-worker"},"thread":{"title":"fm-lane-dispatch-model proof","approvalMode":"full-access","planMode":false,"planningModel":"gpt-6-astra","planningReasoningLevel":"xhigh","executionModel":"gpt-6-astra","executionReasoningLevel":"xhigh","modeProfilesLinked":true},"activate":false}
+--- workspace_threads row read back from playbot.db for title 'fm-lane-dispatch-model proof' ---
+[
+  {
+    "id": "thread-created-3",
+    "workspace_id": "ws-worker",
+    "title": "fm-lane-dispatch-model proof",
+    "planning_model": "gpt-6-astra",
+    "planning_reasoning_level": "xhigh",
+    "execution_model": "gpt-6-astra",
+    "execution_reasoning_level": "xhigh",
+    "mode_profiles_linked": 1,
+    "pending_queue_json": null,
+    "archived": 0
+  }
+]
+
+== 8. model alone uses the catalog default effort (gpt-5.6-sol -> low) ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Default effort chat","model":"gpt-5.6-sol"}'
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"thread\": {\n    \"id\": \"thread-created-4\",\n    \"title\": \"Default effort chat\",\n    \"projectId\": \"project-worker\",\n    \"project\": \"prototype-game\",\n    \"workspaceId\": \"ws-worker\",\n    \"workspace\": \"Main\",\n    \"sessionId\": null,\n    \"status\": \"ready\",\n    \"model\": \"gpt-5.6-sol\",\n    \"reasoningEffort\": \"low\",\n    \"queuedCount\": 0,\n    \"hasUnread\": false,\n    \"isActive\": true,\n    \"archived\": false,\n    \"updatedAt\": \"2026-09-08T14:22:05.181Z\",\n    \"url\": \"playbot://workspace/ws-worker/thread/thread-created-4\"\n  }\n}"
+    }
+  ],
+  "structuredContent": {
+    "thread": {
+      "id": "thread-created-4",
+      "title": "Default effort chat",
+      "projectId": "project-worker",
+      "project": "prototype-game",
+      "workspaceId": "ws-worker",
+      "workspace": "Main",
+      "sessionId": null,
+      "status": "ready",
+      "model": "gpt-5.6-sol",
+      "reasoningEffort": "low",
+      "queuedCount": 0,
+      "hasUnread": false,
+      "isActive": true,
+      "archived": false,
+      "updatedAt": "2026-09-08T14:22:05.181Z",
+      "url": "playbot://workspace/ws-worker/thread/thread-created-4"
+    }
+  }
+}
+(exit 0)
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+{"channel":"threads:launch","destination":{"kind":"existing-workspace","workspaceId":"ws-worker"},"thread":{"title":"Default effort chat","approvalMode":"full-access","planMode":false,"planningModel":"gpt-5.6-sol","planningReasoningLevel":"low","executionModel":"gpt-5.6-sol","executionReasoningLevel":"low","modeProfilesLinked":true},"activate":false}
+
+== 9. dispatch with a new workspace + profile: one launch, then send, read-back reported with delivery verdict ==
+$ MCP tools/call dispatch {"landingBranch":"main","project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","newWorkspace":{"baseBranch":"develop","branch":"fm-branch-evidence"},"title":"Isolated model task","message":"Do the isolated work","model":"gpt-6-astra","reasoningEffort":"xhigh"}
+{
+  "thread": {
+    "id": "thread-created-5",
+    "title": "Isolated model task",
+    "projectId": "project-worker",
+    "project": "prototype-game",
+    "workspaceId": "ws-created-1",
+    "workspace": "ws-created-1",
+    "sessionId": null,
+    "status": "ready",
+    "model": "gpt-6-astra",
+    "reasoningEffort": "xhigh",
+    "queuedCount": 0,
+    "hasUnread": false,
+    "isActive": true,
+    "archived": false,
+    "updatedAt": "2026-08-25T08:00:01.000Z",
+    "url": "playbot://workspace/ws-created-1/thread/thread-created-5"
+  },
+  "delivery": {
+    "state": "sending",
+    "messageId": "msg-sent-1",
+    "queuedTotal": 0
+  },
+  "supervision": {}
+}
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+{"channel":"threads:launch","destination":{"kind":"new-workspace","workspace":{"strategy":"project","projectId":"project-worker","branch":"fm-branch-evidence","baseBranch":"develop"}},"thread":{"title":"Isolated model task","approvalMode":"full-access","planMode":false,"planningModel":"gpt-6-astra","planningReasoningLevel":"xhigh","executionModel":"gpt-6-astra","executionReasoningLevel":"xhigh","modeProfilesLinked":true},"activate":false}
+{"channel":"threads:send","threadId":"thread-created-5","text":"Do the isolated work"}
+--- workspace_threads row read back from playbot.db for title 'Isolated model task' ---
+[
+  {
+    "id": "thread-created-5",
+    "workspace_id": "ws-created-1",
+    "title": "Isolated model task",
+    "planning_model": "gpt-6-astra",
+    "planning_reasoning_level": "xhigh",
+    "execution_model": "gpt-6-astra",
+    "execution_reasoning_level": "xhigh",
+    "mode_profiles_linked": 1,
+    "pending_queue_json": "{\"messages\":[]}",
+    "archived": 0
+  }
+]
+
+== 10. Playbot persists a DIFFERENT effort (medium) than requested (xhigh): dispatch refuses before threads:send ==
+$ MCP tools/call dispatch {"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Fallback effort task","message":"Do the fallback work","model":"gpt-6-astra","reasoningEffort":"xhigh"}
+{
+  "error": {
+    "code": -32603,
+    "message": "Chat thread-created-6 was created in workspace ws-worker, but Playbot persisted model gpt-6-astra at effort medium instead of the requested gpt-6-astra at xhigh. No task was sent to it: archive chat thread-created-6 with archive_chat, or use that persisted profile deliberately with send_message."
+  }
+}
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+{"channel":"threads:launch","destination":{"kind":"existing-workspace","workspaceId":"ws-worker"},"thread":{"title":"Fallback effort task","approvalMode":"full-access","planMode":false,"planningModel":"gpt-6-astra","planningReasoningLevel":"xhigh","executionModel":"gpt-6-astra","executionReasoningLevel":"xhigh","modeProfilesLinked":true},"activate":false}
+--- workspace_threads row read back from playbot.db for title 'Fallback effort task' ---
+[
+  {
+    "id": "thread-created-6",
+    "workspace_id": "ws-worker",
+    "title": "Fallback effort task",
+    "planning_model": "gpt-6-astra",
+    "planning_reasoning_level": "xhigh",
+    "execution_model": "gpt-6-astra",
+    "execution_reasoning_level": "medium",
+    "mode_profiles_linked": 1,
+    "pending_queue_json": null,
+    "archived": 0
+  }
+]
+
+== 11. Same divergence on create_chat: refused, naming the created chat ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Fallback effort chat","model":"gpt-6-astra","reasoningEffort":"xhigh"}'
+Chat thread-created-7 was created in workspace ws-worker, but Playbot persisted model gpt-6-astra at effort medium instead of the requested gpt-6-astra at xhigh. No task was sent to it: archive chat thread-created-7 with archive_chat, or use that persisted profile deliberately with send_message.
+(exit 1)
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+{"channel":"threads:launch","destination":{"kind":"existing-workspace","workspaceId":"ws-worker"},"thread":{"title":"Fallback effort chat","approvalMode":"full-access","planMode":false,"planningModel":"gpt-6-astra","planningReasoningLevel":"xhigh","executionModel":"gpt-6-astra","executionReasoningLevel":"xhigh","modeProfilesLinked":true},"activate":false}
+
+== 12. dispatch resolving an EXISTING chat ('Greeting' = chat-worker) with a profile is refused, no IPC, chat untouched ==
+$ MCP tools/call dispatch {"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","thread":"Greeting","message":"Profile on existing chat","model":"gpt-6-astra","reasoningEffort":"xhigh"}
+{
+  "error": {
+    "code": -32603,
+    "message": "dispatch model and reasoningEffort only apply when creating a worker chat; the resolved existing chat was left unchanged"
+  }
+}
+--- ipc-calls.jsonl (channel + thread payload) ---
+(no IPC call reached Playbot)
+--- workspace_threads row read back from playbot.db for title 'Greeting' ---
+[
+  {
+    "id": "chat-worker",
+    "workspace_id": "ws-worker",
+    "title": "Greeting",
+    "planning_model": null,
+    "planning_reasoning_level": null,
+    "execution_model": null,
+    "execution_reasoning_level": null,
+    "mode_profiles_linked": null,
+    "pending_queue_json": null,
+    "archived": 0
+  },
+  {
+    "id": "chat-worker-archived",
+    "workspace_id": "ws-worker-archived",
+    "title": "Greeting",
+    "planning_model": null,
+    "planning_reasoning_level": null,
+    "execution_model": null,
+    "execution_reasoning_level": null,
+    "mode_profiles_linked": null,
+    "pending_queue_json": null,
+    "archived": 0
+  }
+]
+
+== 13. archive the proof chat with confirm=true (mirrors the live cleanup step) ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call archive_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","thread":"thread-created-3","confirm":true}'
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"archived\": \"thread-created-3\"\n}"
+    }
+  ],
+  "structuredContent": {
+    "archived": "thread-created-3"
+  }
+}
+(exit 0)
+--- workspace_threads row read back from playbot.db for title 'fm-lane-dispatch-model proof' ---
+[
+  {
+    "id": "thread-created-3",
+    "workspace_id": "ws-worker",
+    "title": "fm-lane-dispatch-model proof",
+    "planning_model": "gpt-6-astra",
+    "planning_reasoning_level": "xhigh",
+    "execution_model": "gpt-6-astra",
+    "execution_reasoning_level": "xhigh",
+    "mode_profiles_linked": 1,
+    "pending_queue_json": null,
+    "archived": 1
+  }
+]
+
+== 14. Legacy pre-0.94 Playbot (threads:openThread): profile selection is explicitly refused, nothing created ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs doctor  (chatCreation field)
+{"chatCreation":"openThread"}
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Legacy selected model","model":"gpt-6-astra","reasoningEffort":"xhigh"}'
+This Playbot exposes legacy threads:openThread, which cannot honor model or reasoningEffort; update Playbot or omit both options
+(exit 1)
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+--- workspace_threads row read back from playbot.db for title 'Legacy selected model' ---
+[]
+
+== 15. Legacy Playbot with both options omitted still creates via threads:openThread ==
+$ node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"/tmp/fm-playbot-lanes.rP0AtP/fixture/worker","workspace":"ws-worker","title":"Legacy default chat"}'
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\n  \"thread\": {\n    \"id\": \"chat-lane-1788877326472-0efe9fe1\",\n    \"title\": \"Legacy default chat\",\n    \"projectId\": \"project-worker\",\n    \"project\": \"prototype-game\",\n    \"workspaceId\": \"ws-worker\",\n    \"workspace\": \"Main\",\n    \"sessionId\": null,\n    \"status\": \"ready\",\n    \"model\": null,\n    \"reasoningEffort\": null,\n    \"queuedCount\": 0,\n    \"hasUnread\": false,\n    \"isActive\": true,\n    \"archived\": false,\n    \"updatedAt\": \"2026-09-08T14:22:06.477Z\",\n    \"url\": \"playbot://workspace/ws-worker/thread/chat-lane-1788877326472-0efe9fe1\"\n  }\n}"
+    }
+  ],
+  "structuredContent": {
+    "thread": {
+      "id": "chat-lane-1788877326472-0efe9fe1",
+      "title": "Legacy default chat",
+      "projectId": "project-worker",
+      "project": "prototype-game",
+      "workspaceId": "ws-worker",
+      "workspace": "Main",
+      "sessionId": null,
+      "status": "ready",
+      "model": null,
+      "reasoningEffort": null,
+      "queuedCount": 0,
+      "hasUnread": false,
+      "isActive": true,
+      "archived": false,
+      "updatedAt": "2026-09-08T14:22:06.477Z",
+      "url": "playbot://workspace/ws-worker/thread/chat-lane-1788877326472-0efe9fe1"
+    }
+  }
+}
+(exit 0)
+--- ipc-calls.jsonl (channel + thread payload) ---
+{"channel":"threads:launch","destination":{"kind":"fm-capability-probe"}}
+{"channel":"threads:openThread"}
+
+== 16. Tool descriptions and schema advertised to MCP clients (tools/list) ==
+{
+  "name": "create_chat",
+  "description": "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace. Optional model and reasoningEffort select one catalog-validated profile for both linked planning and execution modes; model alone uses that model's catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. The returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile the call refuses, naming the created chat so it can be archived or used deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection.",
+  "model": {
+    "type": [
+      "string",
+      "null"
+    ],
+    "description": "Optional model slug from Playbot's model catalog; null is treated as omitted"
+  },
+  "reasoningEffort": {
+    "type": [
+      "string",
+      "null"
+    ],
+    "description": "Optional reasoning level supported by model; requires model, null uses the model's catalog default"
+  }
+}
+{
+  "name": "dispatch",
+  "description": "Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile dispatch refuses before sending, naming the created chat so it can be archived or sent deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.",
+  "model": {
+    "type": [
+      "string",
+      "null"
+    ],
+    "description": "Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"
+  },
+  "reasoningEffort": {
+    "type": [
+      "string",
+      "null"
+    ],
+    "description": "Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default"
+  }
+}
+
+== 17. server header / version ==
+{"name":"playbot_lanes","version":"0.7.0"}
+TRANSCRIPT_DONE
