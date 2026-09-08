@@ -2068,9 +2068,33 @@ if (rows.length !== 1 || rows[0].execution_model !== 'gpt-6-astra' || rows[0].ex
 const message = value.error?.message ?? '';
 if (!message.includes(`Chat ${rows[0].id} was created in workspace ws-worker`)) process.exit(1);
 if (!message.includes('persisted model gpt-6-astra at effort medium instead of the requested gpt-6-astra at xhigh')) process.exit(1);
-if (!message.includes('The task was not sent') || !message.includes(`archive chat ${rows[0].id} with archive_chat`)) process.exit(1);
+if (!message.includes('No task was sent to it') || !message.includes(`archive chat ${rows[0].id} with archive_chat`)) process.exit(1);
 NODE
 pass "fm-playbot-lanes: dispatch refuses to send when Playbot persisted a different effort than requested"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'medium\n' > "$FIXTURE_ROOT/launch-persisted-execution-level"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort chat\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+rm -f "$FIXTURE_ROOT/launch-persisted-execution-level"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "create_chat returned success on an effort Playbot persisted differently from the request"
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
+if (calls[1].payload.thread.executionReasoningLevel !== 'xhigh') process.exit(1);
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'), { readOnly: true });
+const rows = db.prepare('SELECT id, execution_model, execution_reasoning_level FROM workspace_threads WHERE workspace_id = ? AND title = ?').all('ws-worker', 'Fallback effort chat');
+db.close();
+if (rows.length !== 1 || rows[0].execution_model !== 'gpt-6-astra' || rows[0].execution_reasoning_level !== 'medium') process.exit(1);
+const message = value.error?.message ?? '';
+if (!message.includes(`Chat ${rows[0].id} was created in workspace ws-worker`)) process.exit(1);
+if (!message.includes('persisted model gpt-6-astra at effort medium instead of the requested gpt-6-astra at xhigh')) process.exit(1);
+if (!message.includes(`archive chat ${rows[0].id} with archive_chat`)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: create_chat refuses when Playbot persisted a different effort than requested"
 
 # Clients that serialize unset optional fields as JSON null must get the same
 # default-preserving launch as clients that omit them, while a null model beside

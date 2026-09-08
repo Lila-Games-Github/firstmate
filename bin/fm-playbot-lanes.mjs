@@ -2889,7 +2889,12 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
     const threadId = launch?.thread?.id;
     const workspaceId = launch?.workspace?.id ?? destination.workspaceId;
     if (!threadId || !workspaceId) throw new Error("Playbot did not return the launched chat and workspace ids");
-    return publicThread(resolveThread(targetProject.id, workspaceId, threadId));
+    const created = publicThread(resolveThread(targetProject.id, workspaceId, threadId));
+    if (workerProfile && (created.model !== workerProfile.executionModel || created.reasoningEffort !== workerProfile.executionReasoningLevel)) {
+      const where = newWorkspace === undefined ? `Chat ${created.id} was created in workspace ${created.workspaceId}` : `Workspace ${created.workspaceId} and chat ${created.id} were created`;
+      throw new Error(`${where}, but Playbot persisted model ${created.model ?? "null"} at effort ${created.reasoningEffort ?? "null"} instead of the requested ${workerProfile.executionModel} at ${workerProfile.executionReasoningLevel}. No task was sent to it: archive chat ${created.id} with archive_chat, or use that persisted profile deliberately with send_message.`);
+    }
+    return created;
   }
   if (workerProfile) {
     throw new Error("This Playbot exposes legacy threads:openThread, which cannot honor model or reasoningEffort; update Playbot or omit both options");
@@ -4939,7 +4944,7 @@ function toolDefinitions() {
     },
     {
       name: "create_chat",
-      description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace. Optional model and reasoningEffort select one catalog-validated profile for both linked planning and execution modes; model alone uses that model's catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. The returned thread reports the model and effort read back from Playbot state, never the requested values by assumption. Legacy threads:openThread Playbots explicitly refuse profile selection.",
+      description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace. Optional model and reasoningEffort select one catalog-validated profile for both linked planning and execution modes; model alone uses that model's catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. The returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile the call refuses, naming the created chat so it can be archived or used deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection.",
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), newWorkspace: newWorkspace(), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model, null uses the model's catalog default") }, ["project", "title"]),
     },
     {
@@ -5168,10 +5173,6 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     }
     if (!worker) {
       const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, workerProfile });
-      if (workerProfile && (created.model !== workerProfile.executionModel || created.reasoningEffort !== workerProfile.executionReasoningLevel)) {
-        const where = wantsNewWorkspace ? `Workspace ${created.workspaceId} and chat ${created.id} were created` : `Chat ${created.id} was created in workspace ${created.workspaceId}`;
-        throw new Error(`${where}, but dispatch stopped before sending because Playbot persisted model ${created.model ?? "null"} at effort ${created.reasoningEffort ?? "null"} instead of the requested ${workerProfile.executionModel} at ${workerProfile.executionReasoningLevel}. The task was not sent: archive chat ${created.id} with archive_chat, or deliver the task on that persisted profile deliberately with send_message.`);
-      }
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
     let freshness = null;
