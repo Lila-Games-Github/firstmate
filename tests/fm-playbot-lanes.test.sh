@@ -128,6 +128,12 @@ fs.writeFileSync(path.join(harness, 'playbot-model-catalog.json'), `${JSON.strin
       default_reasoning_level: 'low',
       supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }],
     },
+    {
+      slug: 'codex-auto-review',
+      visibility: 'hide',
+      default_reasoning_level: 'medium',
+      supported_reasoning_levels: [{ effort: 'low' }, { effort: 'medium' }],
+    },
   ],
 }, null, 2)}\n`);
 NODE
@@ -1972,9 +1978,19 @@ out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\
 OUT="$out" node --no-warnings <<'NODE' || fail "create_chat did not reject a model missing from Playbot's catalog"
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes("Unknown Playbot model 'gpt-does-not-exist'")) process.exit(1);
-if (!value.error.message.includes('gpt-6-astra')) process.exit(1);
+if (!value.error.message.includes('gpt-5.6-sol, gpt-6-astra')) process.exit(1);
+if (value.error.message.includes('codex-auto-review')) process.exit(1);
 NODE
 [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "create_chat reached Playbot before rejecting an unknown model"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Hidden model\",\"model\":\"codex-auto-review\",\"reasoningEffort\":\"medium\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "create_chat did not reject a model Playbot's picker hides"
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+if (!value.error?.message.includes("Playbot model 'codex-auto-review' is hidden from Playbot's model picker")) process.exit(1);
+if (!value.error.message.includes('gpt-5.6-sol, gpt-6-astra') || value.error.message.includes('codex-auto-review, ')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "create_chat reached Playbot before rejecting a hidden model"
 
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Unsupported effort\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"ultra\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "create_chat did not reject an unsupported reasoning level"

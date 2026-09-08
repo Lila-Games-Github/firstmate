@@ -2805,10 +2805,12 @@ function requestedWorkerProfile(model, reasoningEffort) {
   if (!Array.isArray(catalog?.models)) {
     throw new Error(`Playbot model catalog at ${modelCatalogPath()} has no models list`);
   }
+  const selectable = (candidate) => candidate?.visibility !== "hide";
   const selected = catalog.models.find((candidate) => candidate?.slug === model);
-  if (!selected) {
-    const known = catalog.models.map((candidate) => candidate?.slug).filter((slug) => typeof slug === "string").sort();
-    throw new Error(`Unknown Playbot model '${model}'; catalog models: ${known.join(", ") || "none"}`);
+  if (!selected || !selectable(selected)) {
+    const known = catalog.models.filter(selectable).map((candidate) => candidate?.slug).filter((slug) => typeof slug === "string").sort();
+    const reason = selected ? `Playbot model '${model}' is hidden from Playbot's model picker and cannot be selected` : `Unknown Playbot model '${model}'`;
+    throw new Error(`${reason}; selectable catalog models: ${known.join(", ") || "none"}`);
   }
   const supported = Array.isArray(selected.supported_reasoning_levels)
     ? selected.supported_reasoning_levels

@@ -69,7 +69,7 @@ When `newWorkspace` is absent, existing workspace selection behavior is unchange
 ### Worker model profiles
 
 `create_chat` and `dispatch` accept optional `model` and `reasoningEffort` fields when they create a chat.
-`model` must be an exact slug in `~/.playbot/harness/playbot-model-catalog.json`, and `reasoningEffort` must be one of that model's `supported_reasoning_levels`.
+`model` must be an exact slug in `~/.playbot/harness/playbot-model-catalog.json` whose `visibility` is not `hide`, so a model Playbot's own picker never offers (such as `codex-auto-review`) is refused by name, and `reasoningEffort` must be one of that model's `supported_reasoning_levels`.
 Selecting `reasoningEffort` requires `model`; selecting only `model` uses its catalog `default_reasoning_level`.
 When both fields are omitted or sent as JSON `null`, the launch payload omits every model-profile field and preserves Playbot's default behavior; a `null` `reasoningEffort` beside a `model` uses that model's catalog default.
 
