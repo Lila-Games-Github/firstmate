@@ -74,7 +74,7 @@ Selecting `reasoningEffort` requires `model`; selecting only `model` uses its ca
 When both fields are omitted or sent as JSON `null`, the launch payload omits every model-profile field and preserves Playbot's default behavior; a `null` `reasoningEffort` beside a `model` uses that model's catalog default.
 
 The selected model and effort are sent as identical planning and execution profiles with `modeProfilesLinked=true`.
-The returned thread's `model` and `reasoningEffort` fields come from Playbot's persisted thread state after launch, not from echoing the request, so null or different values expose an unreadable profile or a Playbot fallback.
+Every chat view, including the thread returned from creation, carries `model` and `reasoningEffort` read from Playbot's persisted thread state rather than echoed from a request; they are `null` when Playbot's thread table has no profile columns or the chat has no persisted profile.
 `dispatch` refuses profile fields when it resolves an existing chat because launch-time selection cannot safely mutate that chat.
 When `create_chat` or `dispatch` creates a chat and the persisted `model` or `reasoningEffort` differs from the requested profile, the call refuses and names the created chat and workspace, the persisted values, and the requested values; `dispatch` refuses before `threads:send`, so no task reaches that chat and the caller can archive it or use the persisted profile deliberately with `send_message`.
 The legacy `threads:openThread` creation path also refuses profile fields explicitly because its verified schema cannot honor them.
