@@ -736,6 +736,23 @@ ok - fm-playbot-lanes: a worker in a project Playbot no longer marks active stil
 
 Those checks run against the hermetic fake DevTools endpoint described below, extended to serve the card channels, to reject a named channel as unregistered, and to omit a snapshot field, so the loud-refusal paths are enforced without waiting for a real Playbot upgrade.
 
+On 2026-09-08, the running Playbot 0.107.0 Linux AppImage was inspected with bounded byte-context reads from `resources/app.asar`.
+Its renderer passes `planningModel`, `planningReasoningLevel`, `planningServiceTier`, `executionModel`, `executionReasoningLevel`, `executionServiceTier`, and `modeProfilesLinked` inside `threads:launch.thread`, and its main handler persists those fields on the thread before returning it.
+The exact focused regression command `bin/fm-test-run.sh tests/fm-playbot-lanes.test.sh` passed with Node v26.7.0 and ended `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0` after 276,479 ms.
+Its profile-specific output was:
+
+```text
+ok - fm-playbot-lanes: worker model and reasoning validation uses Playbot's catalog before launch
+ok - fm-playbot-lanes: create_chat without a worker profile preserves the default launch payload
+ok - fm-playbot-lanes: dispatch sends linked model profiles and reports Playbot's read-back values
+ok - fm-playbot-lanes: legacy openThread creation refuses worker profile selection
+```
+
+The live command `node --no-warnings bin/fm-playbot-lanes.mjs call create_chat '{"project":"project_df995db1b164","workspace":"ws_dcea82fc1107","model":"gpt-6-astra","reasoningEffort":"xhigh","title":"fm-lane-dispatch-model proof"}'` created only empty chat `chat-287f5f34-4d07-4070-a840-b16bc2312a87` and returned persisted `model: "gpt-6-astra"` and `reasoningEffort: "xhigh"`.
+The application database row read back `execution_model=gpt-6-astra`, `execution_reasoning_level=xhigh`, `planning_model=gpt-6-astra`, `planning_reasoning_level=xhigh`, and `mode_profiles_linked=1`.
+The matching harness `threads` query returned zero rows because an empty chat has no Codex session until its first user task; the no-task proof therefore cannot produce a harness row, and the application thread row is the available persisted read-back at this lifecycle stage.
+The exact cleanup command `node --no-warnings bin/fm-playbot-lanes.mjs call archive_chat '{"project":"project_df995db1b164","workspace":"ws_dcea82fc1107","thread":"chat-287f5f34-4d07-4070-a840-b16bc2312a87","confirm":true}'` returned `archived: "chat-287f5f34-4d07-4070-a840-b16bc2312a87"`, and a final database read showed `archived=1`.
+
 ### Dispatch-armed supervision poll
 
 On 2026-08-24, `dispatch` from an external-terminal caller was verified to arm that worker's firstmate watcher poll itself, because Playbot offers such a caller no push path at all: `identify_current_thread` returns `{"controller":"external-terminal","thread":null}`, and `register_lane` refuses with `register_lane requires a Playbot controller chat`.
