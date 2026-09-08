@@ -2088,6 +2088,30 @@ NODE
 [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "create_chat reached Playbot before rejecting a null model beside a reasoningEffort"
 pass "fm-playbot-lanes: null model and reasoningEffort count as omitted while a null model beside an effort is refused"
 
+# A profile can only be applied at creation, so dispatch that resolves an
+# existing chat by id or by exact title has to refuse before any IPC rather than
+# silently sending the task on that chat's current model.
+for existing_selector in '"thread":"chat-worker"' '"title":"Greeting"'; do
+  rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+  out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",$existing_selector,\"message\":\"Profile on existing chat\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+  OUT="$out" node --no-warnings <<'NODE' || fail "dispatch with $existing_selector did not refuse a worker profile on an existing chat"
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+if (!value.error?.message.includes('only apply when creating a worker chat')) process.exit(1);
+NODE
+  [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch with $existing_selector reached Playbot despite refusing the worker profile"
+done
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "the existing chat was changed by a refused dispatch profile"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'), { readOnly: true });
+const row = db.prepare('SELECT execution_model, execution_reasoning_level, planning_model, mode_profiles_linked, pending_queue_json FROM workspace_threads WHERE id = ?').get('chat-worker');
+db.close();
+if (!row || row.execution_model !== null || row.execution_reasoning_level !== null || row.planning_model !== null || row.mode_profiles_linked !== null) process.exit(1);
+if (row.pending_queue_json !== null) process.exit(1);
+NODE
+pass "fm-playbot-lanes: dispatch refuses a worker profile on an existing chat before any IPC"
+
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "normal-terminal dispatch did not create and send without a controller chat"
