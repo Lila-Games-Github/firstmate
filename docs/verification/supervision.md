@@ -738,13 +738,14 @@ Those checks run against the hermetic fake DevTools endpoint described below, ex
 
 On 2026-09-08, the running Playbot 0.107.0 Linux AppImage was inspected with bounded byte-context reads from `resources/app.asar`.
 Its renderer passes `planningModel`, `planningReasoningLevel`, `planningServiceTier`, `executionModel`, `executionReasoningLevel`, `executionServiceTier`, and `modeProfilesLinked` inside `threads:launch.thread`, and its main handler persists those fields on the thread before returning it.
-The exact focused regression command `bin/fm-test-run.sh tests/fm-playbot-lanes.test.sh` passed with Node v26.7.0 and ended `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0` after 276,479 ms.
+The exact focused regression command `bin/fm-test-run.sh tests/fm-playbot-lanes.test.sh` passed with Node v26.7.0 and ended `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0` after 247,600 ms.
 Its profile-specific output was:
 
 ```text
 ok - fm-playbot-lanes: worker model and reasoning validation uses Playbot's catalog before launch
 ok - fm-playbot-lanes: create_chat without a worker profile preserves the default launch payload
 ok - fm-playbot-lanes: dispatch sends linked model profiles and reports Playbot's read-back values
+ok - fm-playbot-lanes: dispatch reports the effort Playbot persisted when it differs from the request
 ok - fm-playbot-lanes: legacy openThread creation refuses worker profile selection
 ```
 

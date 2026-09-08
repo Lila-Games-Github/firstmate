@@ -1331,6 +1331,10 @@ const sendNonObjectFile = path.join(process.env.FIXTURE_ROOT, 'send-non-object')
 // it: the adapter refuses to guess which API it is talking to, so the detection
 // itself throws while the send that came before it already succeeded.
 const probeAcceptedFile = path.join(process.env.FIXTURE_ROOT, 'launch-accepts-probe');
+// A Playbot that persists a different execution reasoning level than the one
+// threads:launch requested, the way a catalog fallback or clamp would: the
+// adapter's read-back has to report what was persisted, not echo the request.
+const launchPersistedExecutionLevelFile = path.join(process.env.FIXTURE_ROOT, 'launch-persisted-execution-level');
 // Playbot's own creation race: the workspaces row can be readable before its
 // workspace_roots rows are committed. "never" leaves them uncommitted forever;
 // a millisecond count commits them from a later tick of this long-lived server,
@@ -1531,7 +1535,7 @@ function launchThread(db, payload) {
     planning_model = ?, planning_reasoning_level = ?, execution_model = ?,
     execution_reasoning_level = ?, mode_profiles_linked = ? WHERE id = ?`)
     .run(thread.planningModel ?? null, thread.planningReasoningLevel ?? null,
-      thread.executionModel ?? null, thread.executionReasoningLevel ?? null,
+      thread.executionModel ?? null, readFileOr(launchPersistedExecutionLevelFile, '') || (thread.executionReasoningLevel ?? null),
       thread.modeProfilesLinked === undefined ? null : Number(thread.modeProfilesLinked), id);
   const activate = payload.activate !== false;
   return {
@@ -2021,6 +2025,32 @@ if (value.lane.supervisor.id !== 'chat-controller' || !value.lane.active) proces
 if (!value.freshness.current || value.freshness.roots[0].commitsAhead !== 0 || value.freshness.roots[0].commitsBehind !== 0) process.exit(1);
 NODE
 pass "fm-playbot-lanes: dispatch sends linked model profiles and reports Playbot's read-back values"
+
+# The fake Playbot now persists a lower execution level than the one dispatch
+# requested, so the reported effort can only be right if it is read back from
+# Playbot state rather than echoed from the request.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'medium\n' > "$FIXTURE_ROOT/launch-persisted-execution-level"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort task\",\"message\":\"Do the fallback work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+rm -f "$FIXTURE_ROOT/launch-persisted-execution-level"
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch echoed the requested reasoningEffort instead of the value Playbot persisted"
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch,threads:send') process.exit(1);
+if (calls[1].payload.thread.executionReasoningLevel !== 'xhigh' || calls[1].payload.thread.planningReasoningLevel !== 'xhigh') process.exit(1);
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.thread.workspaceId !== 'ws-worker' || value.thread.title !== 'Fallback effort task') process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'), { readOnly: true });
+const row = db.prepare('SELECT execution_model, execution_reasoning_level FROM workspace_threads WHERE id = ?').get(value.thread.id);
+db.close();
+if (!row || row.execution_model !== 'gpt-6-astra' || row.execution_reasoning_level !== 'medium') process.exit(1);
+if (value.thread.model !== 'gpt-6-astra' || value.thread.reasoningEffort !== 'medium') process.exit(1);
+NODE
+pass "fm-playbot-lanes: dispatch reports the effort Playbot persisted when it differs from the request"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
