@@ -24,8 +24,9 @@
 //
 // The server talks to Playbot through its local Electron DevTools socket and
 // invokes Playbot's own IPC handlers: threads:launch for chat and workspace
-// creation on Playbot 0.94.0 and newer, with a detected fallback to the
-// pre-0.94 threads:openThread and workspace:create channels, plus the
+// creation on Playbot 0.94.0 and newer, including optional catalog-validated
+// linked planning and execution model profiles, with a detected fallback to
+// the pre-0.94 threads:openThread and workspace:create channels, plus the
 // unchanged threads:send and threads:archiveThread channels, whose send response
 // is the thread snapshot that says whether Playbot delivered the message or is
 // only holding it. On Playbot 0.95.x an explicit forced send promotes that exact
@@ -63,7 +64,7 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.6.0";
+const SERVER_VERSION = "0.7.0";
 const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
@@ -106,6 +107,10 @@ function desktopDir() {
 
 function harnessDir() {
   return path.resolve(process.env.PLAYBOT_HARNESS_HOME ?? path.join(os.homedir(), ".playbot", "harness"));
+}
+
+function modelCatalogPath() {
+  return path.join(harnessDir(), "playbot-model-catalog.json");
 }
 
 function stateDir() {
@@ -559,6 +564,9 @@ function queryOne(db, sql, params = []) {
 function threadRows() {
   const db = openDb(appDbPath());
   try {
+    const columns = new Set(queryAll(db, "PRAGMA table_info(workspace_threads)").map((column) => column.name));
+    const executionModel = columns.has("execution_model") ? "t.execution_model" : "NULL";
+    const executionReasoningLevel = columns.has("execution_reasoning_level") ? "t.execution_reasoning_level" : "NULL";
     return queryAll(db, `
       SELECT
         t.id AS thread_id,
@@ -572,6 +580,8 @@ function threadRows() {
         t.archived,
         t.approval_mode,
         t.plan_mode,
+        ${executionModel} AS execution_model,
+        ${executionReasoningLevel} AS execution_reasoning_level,
         t.last_user_activity_at,
         t.created_at,
         t.updated_at,
@@ -2626,6 +2636,8 @@ function publicThread(row) {
     workspace: row.workspace_name || (row.workspace_kind === "local" ? "Main" : row.workspace_id),
     sessionId: row.session_id,
     status: row.agent_status,
+    model: row.execution_model ?? null,
+    reasoningEffort: row.execution_reasoning_level ?? null,
     // Playbot holds undeliverable messages in a persisted queue the sender never
     // sees, so every chat view reports how many are still waiting.
     queuedCount: queuedMessageCount(row.pending_queue_json),
@@ -2779,6 +2791,45 @@ function workspaceCreatePayload(projectId, { name, baseBranch, branch } = {}) {
   return payload;
 }
 
+function requestedWorkerProfile(model, reasoningEffort) {
+  if (model == null && reasoningEffort == null) return null;
+  if (typeof model !== "string" || !model.trim()) {
+    throw new Error("model is required when selecting a worker model or reasoningEffort");
+  }
+  let catalog;
+  try {
+    catalog = JSON.parse(fs.readFileSync(modelCatalogPath(), "utf8"));
+  } catch (error) {
+    throw new Error(`Playbot model catalog is unreadable at ${modelCatalogPath()}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!Array.isArray(catalog?.models)) {
+    throw new Error(`Playbot model catalog at ${modelCatalogPath()} has no models list`);
+  }
+  const selectable = (candidate) => candidate?.visibility !== "hide";
+  const selected = catalog.models.find((candidate) => candidate?.slug === model);
+  if (!selected || !selectable(selected)) {
+    const known = catalog.models.filter(selectable).map((candidate) => candidate?.slug).filter((slug) => typeof slug === "string").sort();
+    const reason = selected ? `Playbot model '${model}' is hidden from Playbot's model picker and cannot be selected` : `Unknown Playbot model '${model}'`;
+    throw new Error(`${reason}; selectable catalog models: ${known.join(", ") || "none"}`);
+  }
+  const supported = Array.isArray(selected.supported_reasoning_levels)
+    ? selected.supported_reasoning_levels
+      .map((level) => typeof level === "string" ? level : level?.effort)
+      .filter((effort) => typeof effort === "string")
+    : [];
+  const effort = reasoningEffort == null ? selected.default_reasoning_level : reasoningEffort;
+  if (typeof effort !== "string" || !supported.includes(effort)) {
+    throw new Error(`Unsupported reasoningEffort '${String(effort)}' for Playbot model '${model}'; supported levels: ${supported.join(", ") || "none"}`);
+  }
+  return {
+    planningModel: model,
+    planningReasoningLevel: effort,
+    executionModel: model,
+    executionReasoningLevel: effort,
+    modeProfilesLinked: true,
+  };
+}
+
 function readBackWorkspace(project, workspaceId) {
   const fresh = topology().find((candidate) => candidate.id === project.id)
     ?.workspaces.find((workspace) => workspace.id === workspaceId);
@@ -2821,7 +2872,7 @@ function assertNewWorkspaceRequest(name, args) {
   return true;
 }
 
-async function createChat({ project, workspace, newWorkspace, title, approvalMode = "full-access", planMode = false }) {
+async function createChat({ project, workspace, newWorkspace, title, approvalMode = "full-access", planMode = false, model, reasoningEffort, workerProfile = requestedWorkerProfile(model, reasoningEffort) }) {
   const projects = topology();
   const targetProject = resolveProject(project, projects);
   const cleanTitle = String(title ?? "").trim();
@@ -2832,13 +2883,21 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
       : { kind: "new-workspace", workspace: workspaceCreatePayload(targetProject.id, newWorkspace) };
     const launch = await playbotInvoke("threads:launch", {
       destination,
-      thread: { title: cleanTitle, approvalMode, planMode: Boolean(planMode) },
+      thread: { title: cleanTitle, approvalMode, planMode: Boolean(planMode), ...(workerProfile ?? {}) },
       activate: false,
     });
     const threadId = launch?.thread?.id;
     const workspaceId = launch?.workspace?.id ?? destination.workspaceId;
     if (!threadId || !workspaceId) throw new Error("Playbot did not return the launched chat and workspace ids");
-    return publicThread(resolveThread(targetProject.id, workspaceId, threadId));
+    const created = publicThread(resolveThread(targetProject.id, workspaceId, threadId));
+    if (workerProfile && (created.model !== workerProfile.executionModel || created.reasoningEffort !== workerProfile.executionReasoningLevel)) {
+      const where = newWorkspace === undefined ? `Chat ${created.id} was created in workspace ${created.workspaceId}` : `Workspace ${created.workspaceId} and chat ${created.id} were created`;
+      throw new Error(`${where}, but Playbot persisted model ${created.model ?? "null"} at effort ${created.reasoningEffort ?? "null"} instead of the requested ${workerProfile.executionModel} at ${workerProfile.executionReasoningLevel}. No task was sent to it: archive chat ${created.id} with archive_chat, or use that persisted profile deliberately with send_message.`);
+    }
+    return created;
+  }
+  if (workerProfile) {
+    throw new Error("This Playbot exposes legacy threads:openThread, which cannot honor model or reasoningEffort; update Playbot or omit both options");
   }
   const targetWorkspace = newWorkspace === undefined
     ? resolveWorkspace(targetProject, workspace)
@@ -4819,6 +4878,7 @@ function installedHookStatus() {
 function toolDefinitions() {
   const object = (properties = {}, required = []) => ({ type: "object", properties, required, additionalProperties: false });
   const string = (description) => ({ type: "string", description });
+  const nullableString = (description) => ({ type: ["string", "null"], description });
   const boolean = (description, defaultValue) => ({ type: "boolean", description, default: defaultValue });
   const newWorkspace = () => ({
     ...object({
@@ -4884,8 +4944,8 @@ function toolDefinitions() {
     },
     {
       name: "create_chat",
-      description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), newWorkspace: newWorkspace(), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false) }, ["project", "title"]),
+      description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace. Optional model and reasoningEffort select one catalog-validated profile for both linked planning and execution modes; model alone uses that model's catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. The returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile the call refuses, naming the created chat so it can be archived or used deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), newWorkspace: newWorkspace(), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model, null uses the model's catalog default") }, ["project", "title"]),
     },
     {
       name: "send_message",
@@ -4959,8 +5019,8 @@ function toolDefinitions() {
     },
     {
       name: "dispatch",
-      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false) }, ["project", "message"]),
+      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile dispatch refuses before sending, naming the created chat so it can be archived or sent deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -5070,7 +5130,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
   if (name === "create_chat") {
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
-    return { thread: await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title, approvalMode: args.approvalMode, planMode: args.planMode }) };
+    return { thread: await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title, approvalMode: args.approvalMode, planMode: args.planMode, model: args.model, reasoningEffort: args.reasoningEffort }) };
   }
 
   if (name === "dispatch") {
@@ -5097,6 +5157,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       throw new Error(`taskId '${requestedTaskId}' cannot key a watcher poll; use a firstmate task id of up to 64 characters from A-Z, a-z, 0-9, dot, dash, and underscore, not starting with a dot`);
     }
     let worker = null;
+    const workerProfile = requestedWorkerProfile(args.model, args.reasoningEffort);
     if (!wantsNewWorkspace) {
       if (args.thread) {
         worker = resolveThreadInProject(project, args.workspace, args.thread);
@@ -5107,8 +5168,11 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         worker = matches[0] ?? null;
       }
     }
+    if (worker && workerProfile) {
+      throw new Error("dispatch model and reasoningEffort only apply when creating a worker chat; the resolved existing chat was left unchanged");
+    }
     if (!worker) {
-      const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode });
+      const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, workerProfile });
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
     let freshness = null;

@@ -66,6 +66,19 @@ When present, the workspace and the chat are created together in one launch on 0
 `newWorkspace` is mutually exclusive with `workspace`, and `dispatch` additionally rejects combining it with `thread`, because a just-created workspace has no existing chats.
 When `newWorkspace` is absent, existing workspace selection behavior is unchanged.
 
+### Worker model profiles
+
+`create_chat` and `dispatch` accept optional `model` and `reasoningEffort` fields when they create a chat.
+`model` must be an exact slug in `~/.playbot/harness/playbot-model-catalog.json` whose `visibility` is not `hide`, so a model Playbot's own picker never offers (such as `codex-auto-review`) is refused by name, and `reasoningEffort` must be one of that model's `supported_reasoning_levels`.
+Selecting `reasoningEffort` requires `model`; selecting only `model` uses its catalog `default_reasoning_level`.
+When both fields are omitted or sent as JSON `null`, the launch payload omits every model-profile field and preserves Playbot's default behavior; a `null` `reasoningEffort` beside a `model` uses that model's catalog default.
+
+The selected model and effort are sent as identical planning and execution profiles with `modeProfilesLinked=true`.
+Every chat view, including the thread returned from creation, carries `model` and `reasoningEffort` read from Playbot's persisted thread state rather than echoed from a request; they are `null` when Playbot's thread table has no profile columns or the chat has no persisted profile.
+`dispatch` refuses profile fields when it resolves an existing chat because launch-time selection cannot safely mutate that chat.
+When `create_chat` or `dispatch` creates a chat and the persisted `model` or `reasoningEffort` differs from the requested profile, the call refuses and names the created chat and workspace, the persisted values, and the requested values; `dispatch` refuses before `threads:send`, so no task reaches that chat and the caller can archive it or use the persisted profile deliberately with `send_message`.
+The legacy `threads:openThread` creation path also refuses profile fields explicitly because its verified schema cannot honor them.
+
 ### Workspace freshness
 
 `get_workspace_freshness` requires an explicit active workspace selector by id, root path, or unique name plus an explicit `landingBranch`.
@@ -237,7 +250,8 @@ Private route and hook state defaults to `~/.playbot/mcp/project-chat`.
 The integration reads Playbot's application and Codex SQLite databases but never writes them directly.
 Chat creation, message delivery, archive, and guarded workspace retirement operations go through Playbot's Electron IPC handlers over the local DevTools socket.
 
-The current adapter targets Playbot 0.94.0 and Node.js 22.5 or newer, with a detected fallback to the pre-0.94 channels that were verified against Playbot 0.93.1 on Linux.
+The current adapter targets Playbot 0.94.0 and newer and Node.js 22.5 or newer, with a detected fallback to the pre-0.94 channels that were verified against Playbot 0.93.1 on Linux.
+Linked planning and execution model selection is verified against Playbot 0.107.0 on Linux.
 The card, snapshot, queue, and forced-steering channels are verified against Playbot 0.95.x, and every version-sensitive result names the verified range or the exact internal mechanism, so a mismatch is visible rather than inferred.
 A channel Playbot no longer registers, or a snapshot missing a field these tools read, is refused with the missing channel or field and the observed version named; nothing falls back to driving the visible window.
 `doctor` reports the same observed version as `playbotApp`.

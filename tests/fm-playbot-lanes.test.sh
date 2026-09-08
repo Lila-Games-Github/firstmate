@@ -40,9 +40,16 @@ app.exec(`
     id TEXT PRIMARY KEY, workspace_id TEXT, title TEXT, position INTEGER, is_active INTEGER,
     session_id TEXT, approval_mode TEXT, plan_mode INTEGER, ephemeral INTEGER,
     draft_input TEXT, pending_queue_json TEXT, agent_status TEXT, has_unread INTEGER,
-    last_user_activity_at TEXT, created_at TEXT, updated_at TEXT, archived INTEGER
+    last_user_activity_at TEXT, created_at TEXT, updated_at TEXT, archived INTEGER,
+    planning_model TEXT, planning_reasoning_level TEXT,
+    execution_model TEXT, execution_reasoning_level TEXT, mode_profiles_linked INTEGER
   );
 `);
+const threadInsert = `INSERT INTO workspace_threads (
+  id, workspace_id, title, position, is_active, session_id, approval_mode,
+  plan_mode, ephemeral, draft_input, pending_queue_json, agent_status,
+  has_unread, last_user_activity_at, created_at, updated_at, archived
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 const now = '2026-07-29T12:00:00.000Z';
 const projects = [
   ['project-controller', 'firstmate', 'root-controller', path.join(root, 'controller'), 'ws-controller'],
@@ -81,7 +88,7 @@ app.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
 app.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)')
   .run('ws-worker-archived', 'root-worker', path.join(root, 'worker', '.worktrees', 'retired'), 'retired');
 
-const insertThread = app.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const insertThread = app.prepare(threadInsert);
 insertThread.run('chat-controller', 'ws-controller', 'Firstmate', 0, 1, 'controller-session', 'full-access', 0, 0, '', null, 'working', 0, now, now, now, 0);
 insertThread.run('chat-worker', 'ws-worker', 'Greeting', 0, 1, 'worker-session', 'full-access', 0, 0, '', null, 'ready', 0, now, now, now, 0);
 insertThread.run('chat-worker-alt', 'ws-worker-alt', 'Alt greeting', 0, 1, 'worker-alt-session', 'full-access', 0, 0, '', null, 'pending_input', 0, now, now, now, 0);
@@ -108,6 +115,27 @@ codex.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TE
 codex.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)').run('worker-session', rollout, path.join(root, 'worker'), 'Greeting', 1785326400000, 0);
 codex.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?)').run('controller-session', path.join(harness, 'controller-rollout.jsonl'), path.join(root, 'controller'), 'Firstmate', 1785326400000, 0);
 codex.close();
+
+fs.writeFileSync(path.join(harness, 'playbot-model-catalog.json'), `${JSON.stringify({
+  models: [
+    {
+      slug: 'gpt-6-astra',
+      default_reasoning_level: 'medium',
+      supported_reasoning_levels: [{ effort: 'low' }, { effort: 'medium' }, { effort: 'xhigh' }],
+    },
+    {
+      slug: 'gpt-5.6-sol',
+      default_reasoning_level: 'low',
+      supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }],
+    },
+    {
+      slug: 'codex-auto-review',
+      visibility: 'hide',
+      default_reasoning_level: 'medium',
+      supported_reasoning_levels: [{ effort: 'low' }, { effort: 'medium' }],
+    },
+  ],
+}, null, 2)}\n`);
 NODE
 
 # Workspace-retirement evidence is Git behavior, so the fixture uses a real
@@ -1309,6 +1337,10 @@ const sendNonObjectFile = path.join(process.env.FIXTURE_ROOT, 'send-non-object')
 // it: the adapter refuses to guess which API it is talking to, so the detection
 // itself throws while the send that came before it already succeeded.
 const probeAcceptedFile = path.join(process.env.FIXTURE_ROOT, 'launch-accepts-probe');
+// A Playbot that persists a different execution reasoning level than the one
+// threads:launch requested, the way a catalog fallback or clamp would: the
+// adapter's read-back has to report what was persisted, not echo the request.
+const launchPersistedExecutionLevelFile = path.join(process.env.FIXTURE_ROOT, 'launch-persisted-execution-level');
 // Playbot's own creation race: the workspaces row can be readable before its
 // workspace_roots rows are committed. "never" leaves them uncommitted forever;
 // a millisecond count commits them from a later tick of this long-lived server,
@@ -1476,7 +1508,7 @@ function launchThread(db, payload) {
   }
   const thread = payload.thread ?? {};
   for (const key of Object.keys(thread)) {
-    if (!['title', 'approvalMode', 'planMode', 'sessionId', 'sessionProviderKey', 'ephemeral', 'draftInput'].includes(key)) {
+    if (!['title', 'approvalMode', 'planMode', 'sessionId', 'sessionProviderKey', 'ephemeral', 'draftInput', 'planningModel', 'planningReasoningLevel', 'executionModel', 'executionReasoningLevel', 'modeProfilesLinked'].includes(key)) {
       throw new Error(`Unrecognized thread key: ${key}`);
     }
   }
@@ -1499,8 +1531,18 @@ function launchThread(db, payload) {
   threadCounter += 1;
   const id = `thread-created-${threadCounter}`;
   const now = new Date().toISOString();
-  db.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+  db.prepare(`INSERT INTO workspace_threads (
+    id, workspace_id, title, position, is_active, session_id, approval_mode,
+    plan_mode, ephemeral, draft_input, pending_queue_json, agent_status,
+    has_unread, last_user_activity_at, created_at, updated_at, archived
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, workspace.id, thread.title, 0, 1, null, thread.approvalMode, thread.planMode ? 1 : 0, 0, '', null, 'ready', 0, now, now, now, 0);
+  db.prepare(`UPDATE workspace_threads SET
+    planning_model = ?, planning_reasoning_level = ?, execution_model = ?,
+    execution_reasoning_level = ?, mode_profiles_linked = ? WHERE id = ?`)
+    .run(thread.planningModel ?? null, thread.planningReasoningLevel ?? null,
+      thread.executionModel ?? null, readFileOr(launchPersistedExecutionLevelFile, '') || (thread.executionReasoningLevel ?? null),
+      thread.modeProfilesLinked === undefined ? null : Number(thread.modeProfilesLinked), id);
   const activate = payload.activate !== false;
   return {
     workspace: { id: workspace.id, name: workspace.name ?? null },
@@ -1571,13 +1613,13 @@ async function electronInvoke(channel, payload) {
       };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.6.0\n');
+      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.7.0\n');
       return [{
         name: 'playbot_lanes',
         enabled: true,
         error: null,
         toolCount: 21,
-        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.6.0') },
+        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.7.0') },
       }];
     }
     if (channel === 'threads:launch') {
@@ -1634,7 +1676,11 @@ async function electronInvoke(channel, payload) {
     if (channel === 'threads:openThread') {
       if (mode !== 'legacy') throw new Error("No handler registered for 'threads:openThread'");
       const now = new Date().toISOString();
-      db.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      db.prepare(`INSERT INTO workspace_threads (
+        id, workspace_id, title, position, is_active, session_id, approval_mode,
+        plan_mode, ephemeral, draft_input, pending_queue_json, agent_status,
+        has_unread, last_user_activity_at, created_at, updated_at, archived
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(payload.id, payload.workspaceId, payload.title, 0, 1, null, payload.approvalMode, payload.planMode ? 1 : 0, 0, '', null, 'ready', 0, now, now, now, 0);
       return null;
     }
@@ -1839,8 +1885,8 @@ const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
 if (!value.checks.hooks.ready || value.checks.toolCount !== 21) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.6.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.6.0' || value.checks.expectedSchemaVersion !== '0.6.0') process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.7.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.7.0' || value.checks.expectedSchemaVersion !== '0.7.0') process.exit(1);
 if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
 NODE
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
@@ -1860,8 +1906,8 @@ const value = JSON.parse(process.env.OUT);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 const mcpCalls = calls.filter(call => call.channel.startsWith('codex:mcpServers:'));
 if (value.ready !== true || value.changed !== true) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.6.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.6.0' || value.checks.expectedSchemaVersion !== '0.6.0') process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.7.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.7.0' || value.checks.expectedSchemaVersion !== '0.7.0') process.exit(1);
 if (!value.installation.reload.startsWith('reloaded ')) process.exit(1);
 if (mcpCalls.filter(call => call.channel === 'codex:mcpServers:reload').length !== 1) process.exit(1);
 if (mcpCalls.some(call => !['codex:mcpServers:list', 'codex:mcpServers:reload'].includes(call.channel))) process.exit(1);
@@ -1928,6 +1974,34 @@ NODE
 pass "fm-playbot-lanes: create_workspace omits blank optional fields so Playbot's strict schema accepts the payload"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Unknown model\",\"model\":\"gpt-does-not-exist\",\"reasoningEffort\":\"xhigh\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "create_chat did not reject a model missing from Playbot's catalog"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes("Unknown Playbot model 'gpt-does-not-exist'")) process.exit(1);
+if (!value.error.message.includes('gpt-5.6-sol, gpt-6-astra')) process.exit(1);
+if (value.error.message.includes('codex-auto-review')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "create_chat reached Playbot before rejecting an unknown model"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Hidden model\",\"model\":\"codex-auto-review\",\"reasoningEffort\":\"medium\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "create_chat did not reject a model Playbot's picker hides"
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+if (!value.error?.message.includes("Playbot model 'codex-auto-review' is hidden from Playbot's model picker")) process.exit(1);
+if (!value.error.message.includes('gpt-5.6-sol, gpt-6-astra') || value.error.message.includes('codex-auto-review, ')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "create_chat reached Playbot before rejecting a hidden model"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Unsupported effort\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"ultra\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "create_chat did not reject an unsupported reasoning level"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes("Unsupported reasoningEffort 'ultra' for Playbot model 'gpt-6-astra'")) process.exit(1);
+if (!value.error.message.includes('low, medium, xhigh')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "create_chat reached Playbot before rejecting an unsupported reasoning level"
+pass "fm-playbot-lanes: worker model and reasoning validation uses Playbot's catalog before launch"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Direct chat\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "create_chat did not launch into the existing workspace without activating it"
 const fs = require('node:fs');
@@ -1936,16 +2010,18 @@ if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch
 const payload = calls[1].payload;
 if (payload.destination.kind !== 'existing-workspace' || payload.destination.workspaceId !== 'ws-worker') process.exit(1);
 if (payload.thread.title !== 'Direct chat' || payload.thread.approvalMode !== 'full-access' || payload.thread.planMode !== false) process.exit(1);
+if (Object.keys(payload.thread).sort().join(',') !== 'approvalMode,planMode,title') process.exit(1);
 if (payload.activate !== false) process.exit(1);
 const thread = JSON.parse(process.env.OUT).result.structuredContent.thread;
 if (thread.id !== 'thread-created-3' || thread.workspaceId !== 'ws-worker' || thread.title !== 'Direct chat') process.exit(1);
+if (thread.model !== null || thread.reasoningEffort !== null) process.exit(1);
 NODE
-pass "fm-playbot-lanes: create_chat launches with the Playbot-generated thread id and no UI activation"
+pass "fm-playbot-lanes: create_chat without a worker profile preserves the default launch payload"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"develop\",\"branch\":\"fm-branch-3\"},\"title\":\"Isolated task\",\"message\":\"Do the isolated work\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"develop\",\"branch\":\"fm-branch-3\"},\"title\":\"Isolated task\",\"message\":\"Do the isolated work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "dispatch did not create the workspace and worker chat in one launch"
 const fs = require('node:fs');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
@@ -1954,13 +2030,131 @@ const payload = calls[1].payload;
 if (payload.destination.kind !== 'new-workspace' || payload.activate !== false) process.exit(1);
 if (payload.destination.workspace.baseBranch !== 'develop' || payload.destination.workspace.branch !== 'fm-branch-3') process.exit(1);
 if (payload.thread.title !== 'Isolated task') process.exit(1);
+if (payload.thread.planningModel !== 'gpt-6-astra' || payload.thread.executionModel !== 'gpt-6-astra') process.exit(1);
+if (payload.thread.planningReasoningLevel !== 'xhigh' || payload.thread.executionReasoningLevel !== 'xhigh') process.exit(1);
+if (payload.thread.modeProfilesLinked !== true) process.exit(1);
 if (calls[2].payload.threadId !== 'thread-created-4' || calls[2].payload.text !== 'Do the isolated work') process.exit(1);
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.thread.workspaceId !== 'ws-created-3' || value.lane.worker.workspaceId !== 'ws-created-3') process.exit(1);
+if (value.thread.model !== 'gpt-6-astra' || value.thread.reasoningEffort !== 'xhigh') process.exit(1);
 if (value.lane.supervisor.id !== 'chat-controller' || !value.lane.active) process.exit(1);
 if (!value.freshness.current || value.freshness.roots[0].commitsAhead !== 0 || value.freshness.roots[0].commitsBehind !== 0) process.exit(1);
 NODE
-pass "fm-playbot-lanes: dispatch creates a workspace, creates the worker chat inside it, and delivers the task"
+pass "fm-playbot-lanes: dispatch sends linked model profiles and reports Playbot's read-back values"
+
+# The fake Playbot now persists a lower execution level than the one dispatch
+# requested. The refusal can only name the persisted value if it is read back
+# from Playbot state rather than echoed from the request, and the task must not
+# be sent on a profile the caller did not choose.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'medium\n' > "$FIXTURE_ROOT/launch-persisted-execution-level"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort task\",\"message\":\"Do the fallback work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+rm -f "$FIXTURE_ROOT/launch-persisted-execution-level"
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch sent the task on an effort Playbot persisted differently from the request"
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const calls = fs.readFileSync(path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
+if (calls[1].payload.thread.executionReasoningLevel !== 'xhigh' || calls[1].payload.thread.planningReasoningLevel !== 'xhigh') process.exit(1);
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'), { readOnly: true });
+const rows = db.prepare('SELECT id, execution_model, execution_reasoning_level, pending_queue_json FROM workspace_threads WHERE workspace_id = ? AND title = ?').all('ws-worker', 'Fallback effort task');
+db.close();
+if (rows.length !== 1 || rows[0].execution_model !== 'gpt-6-astra' || rows[0].execution_reasoning_level !== 'medium' || rows[0].pending_queue_json !== null) process.exit(1);
+const message = value.error?.message ?? '';
+if (!message.includes(`Chat ${rows[0].id} was created in workspace ws-worker`)) process.exit(1);
+if (!message.includes('persisted model gpt-6-astra at effort medium instead of the requested gpt-6-astra at xhigh')) process.exit(1);
+if (!message.includes('No task was sent to it') || !message.includes(`archive chat ${rows[0].id} with archive_chat`)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: dispatch refuses to send when Playbot persisted a different effort than requested"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'medium\n' > "$FIXTURE_ROOT/launch-persisted-execution-level"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort chat\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+rm -f "$FIXTURE_ROOT/launch-persisted-execution-level"
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "create_chat returned success on an effort Playbot persisted differently from the request"
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const calls = fs.readFileSync(path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
+if (calls[1].payload.thread.executionReasoningLevel !== 'xhigh') process.exit(1);
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'), { readOnly: true });
+const rows = db.prepare('SELECT id, execution_model, execution_reasoning_level FROM workspace_threads WHERE workspace_id = ? AND title = ?').all('ws-worker', 'Fallback effort chat');
+db.close();
+if (rows.length !== 1 || rows[0].execution_model !== 'gpt-6-astra' || rows[0].execution_reasoning_level !== 'medium') process.exit(1);
+const message = value.error?.message ?? '';
+if (!message.includes(`Chat ${rows[0].id} was created in workspace ws-worker`)) process.exit(1);
+if (!message.includes('persisted model gpt-6-astra at effort medium instead of the requested gpt-6-astra at xhigh')) process.exit(1);
+if (!message.includes(`archive chat ${rows[0].id} with archive_chat`)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: create_chat refuses when Playbot persisted a different effort than requested"
+
+# Clients that serialize unset optional fields as JSON null must get the same
+# default-preserving launch as clients that omit them, while a null model beside
+# a real effort is still the refused half-selection.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Null profile\",\"model\":null,\"reasoningEffort\":null}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "create_chat with null model and reasoningEffort did not preserve the default launch payload"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
+if (Object.keys(calls[1].payload.thread).sort().join(',') !== 'approvalMode,planMode,title') process.exit(1);
+const thread = JSON.parse(process.env.OUT).result.structuredContent.thread;
+if (thread.workspaceId !== 'ws-worker' || thread.title !== 'Null profile') process.exit(1);
+if (thread.model !== null || thread.reasoningEffort !== null) process.exit(1);
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Null effort\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":null}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "create_chat with a null reasoningEffort did not use the model's catalog default"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
+if (calls[1].payload.thread.executionModel !== 'gpt-6-astra' || calls[1].payload.thread.executionReasoningLevel !== 'medium') process.exit(1);
+if (calls[1].payload.thread.planningReasoningLevel !== 'medium' || calls[1].payload.thread.modeProfilesLinked !== true) process.exit(1);
+const thread = JSON.parse(process.env.OUT).result.structuredContent.thread;
+if (thread.model !== 'gpt-6-astra' || thread.reasoningEffort !== 'medium') process.exit(1);
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Null model\",\"model\":null,\"reasoningEffort\":\"xhigh\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "create_chat accepted a reasoningEffort with a null model"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('model is required when selecting a worker model or reasoningEffort')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "create_chat reached Playbot before rejecting a null model beside a reasoningEffort"
+pass "fm-playbot-lanes: null model and reasoningEffort count as omitted while a null model beside an effort is refused"
+
+# A profile can only be applied at creation, so dispatch that resolves an
+# existing chat by id or by exact title has to refuse before any IPC rather than
+# silently sending the task on that chat's current model.
+for existing_selector in '"thread":"chat-worker"' '"title":"Greeting"'; do
+  rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+  out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",$existing_selector,\"message\":\"Profile on existing chat\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+  OUT="$out" node --no-warnings <<'NODE' || fail "dispatch with $existing_selector did not refuse a worker profile on an existing chat"
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+if (!value.error?.message.includes('only apply when creating a worker chat')) process.exit(1);
+NODE
+  [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch with $existing_selector reached Playbot despite refusing the worker profile"
+done
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "the existing chat was changed by a refused dispatch profile"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'), { readOnly: true });
+const row = db.prepare('SELECT execution_model, execution_reasoning_level, planning_model, mode_profiles_linked, pending_queue_json FROM workspace_threads WHERE id = ?').get('chat-worker');
+db.close();
+if (!row || row.execution_model !== null || row.execution_reasoning_level !== null || row.planning_model !== null || row.mode_profiles_linked !== null) process.exit(1);
+if (row.pending_queue_json !== null) process.exit(1);
+NODE
+pass "fm-playbot-lanes: dispatch refuses a worker profile on an existing chat before any IPC"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
@@ -2040,6 +2234,17 @@ const value = JSON.parse(process.env.OUT);
 if (value.chatCreation !== 'openThread') process.exit(1);
 NODE
 pass "fm-playbot-lanes: doctor detects the pre-0.94 chat-creation API on a legacy Playbot"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Legacy selected model\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "legacy create_chat silently dropped the selected worker profile"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (!value.error?.message.includes('legacy threads:openThread')) process.exit(1);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch') process.exit(1);
+NODE
+pass "fm-playbot-lanes: legacy openThread creation refuses worker profile selection"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"name\":\"legacy-iso\",\"branch\":\"fm-legacy-1\"}}}")
@@ -2304,7 +2509,11 @@ const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
 const now = new Date().toISOString();
-db.prepare('INSERT INTO workspace_threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+db.prepare(`INSERT INTO workspace_threads (
+  id, workspace_id, title, position, is_active, session_id, approval_mode,
+  plan_mode, ephemeral, draft_input, pending_queue_json, agent_status,
+  has_unread, last_user_activity_at, created_at, updated_at, archived
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
   .run('chat-fresh-parked', 'ws-fresh-clean', 'Fresh parked', 0, 1, null, 'full-access', 0, 0, '', null, 'pending_input', 0, now, now, now, 0);
 db.close();
 NODE
