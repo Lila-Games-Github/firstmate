@@ -2792,7 +2792,7 @@ function workspaceCreatePayload(projectId, { name, baseBranch, branch } = {}) {
 }
 
 function requestedWorkerProfile(model, reasoningEffort) {
-  if (model === undefined && reasoningEffort === undefined) return null;
+  if (model == null && reasoningEffort == null) return null;
   if (typeof model !== "string" || !model.trim()) {
     throw new Error("model is required when selecting a worker model or reasoningEffort");
   }
@@ -2815,7 +2815,7 @@ function requestedWorkerProfile(model, reasoningEffort) {
       .map((level) => typeof level === "string" ? level : level?.effort)
       .filter((effort) => typeof effort === "string")
     : [];
-  const effort = reasoningEffort === undefined ? selected.default_reasoning_level : reasoningEffort;
+  const effort = reasoningEffort == null ? selected.default_reasoning_level : reasoningEffort;
   if (typeof effort !== "string" || !supported.includes(effort)) {
     throw new Error(`Unsupported reasoningEffort '${String(effort)}' for Playbot model '${model}'; supported levels: ${supported.join(", ") || "none"}`);
   }
@@ -2870,12 +2870,11 @@ function assertNewWorkspaceRequest(name, args) {
   return true;
 }
 
-async function createChat({ project, workspace, newWorkspace, title, approvalMode = "full-access", planMode = false, model, reasoningEffort }) {
+async function createChat({ project, workspace, newWorkspace, title, approvalMode = "full-access", planMode = false, model, reasoningEffort, workerProfile = requestedWorkerProfile(model, reasoningEffort) }) {
   const projects = topology();
   const targetProject = resolveProject(project, projects);
   const cleanTitle = String(title ?? "").trim();
   if (!cleanTitle) throw new Error("title must not be blank; Playbot requires a non-empty chat title");
-  const workerProfile = requestedWorkerProfile(model, reasoningEffort);
   if (await chatCreationApi() === "launch") {
     const destination = newWorkspace === undefined
       ? { kind: "existing-workspace", workspaceId: resolveWorkspace(targetProject, workspace).id }
@@ -4872,6 +4871,7 @@ function installedHookStatus() {
 function toolDefinitions() {
   const object = (properties = {}, required = []) => ({ type: "object", properties, required, additionalProperties: false });
   const string = (description) => ({ type: "string", description });
+  const nullableString = (description) => ({ type: ["string", "null"], description });
   const boolean = (description, defaultValue) => ({ type: "boolean", description, default: defaultValue });
   const newWorkspace = () => ({
     ...object({
@@ -4937,8 +4937,8 @@ function toolDefinitions() {
     },
     {
       name: "create_chat",
-      description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace. Optional model and reasoningEffort select one catalog-validated profile for both linked planning and execution modes; model alone uses that model's catalog default effort, reasoningEffort requires model, and omitting both preserves Playbot's default. The returned thread reports the model and effort read back from Playbot state, never the requested values by assumption. Legacy threads:openThread Playbots explicitly refuse profile selection.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), newWorkspace: newWorkspace(), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false), model: string("Optional model slug from Playbot's model catalog"), reasoningEffort: string("Optional reasoning level supported by model; requires model") }, ["project", "title"]),
+      description: "Create an empty Playbot chat in one project workspace without focusing it or starting an agent turn. Can create the workspace first via newWorkspace. Optional model and reasoningEffort select one catalog-validated profile for both linked planning and execution modes; model alone uses that model's catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. The returned thread reports the model and effort read back from Playbot state, never the requested values by assumption. Legacy threads:openThread Playbots explicitly refuse profile selection.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), newWorkspace: newWorkspace(), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model, null uses the model's catalog default") }, ["project", "title"]),
     },
     {
       name: "send_message",
@@ -5012,8 +5012,8 @@ function toolDefinitions() {
     },
     {
       name: "dispatch",
-      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting both preserves Playbot's default. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: string("Optional model slug from Playbot's model catalog; only used when creating a chat"), reasoningEffort: string("Optional reasoning level supported by model; requires model and a newly created chat") }, ["project", "message"]),
+      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
+      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -5165,7 +5165,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       throw new Error("dispatch model and reasoningEffort only apply when creating a worker chat; the resolved existing chat was left unchanged");
     }
     if (!worker) {
-      const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, model: args.model, reasoningEffort: args.reasoningEffort });
+      const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, workerProfile });
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
     let freshness = null;

@@ -2052,6 +2052,42 @@ if (value.thread.model !== 'gpt-6-astra' || value.thread.reasoningEffort !== 'me
 NODE
 pass "fm-playbot-lanes: dispatch reports the effort Playbot persisted when it differs from the request"
 
+# Clients that serialize unset optional fields as JSON null must get the same
+# default-preserving launch as clients that omit them, while a null model beside
+# a real effort is still the refused half-selection.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Null profile\",\"model\":null,\"reasoningEffort\":null}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "create_chat with null model and reasoningEffort did not preserve the default launch payload"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
+if (Object.keys(calls[1].payload.thread).sort().join(',') !== 'approvalMode,planMode,title') process.exit(1);
+const thread = JSON.parse(process.env.OUT).result.structuredContent.thread;
+if (thread.workspaceId !== 'ws-worker' || thread.title !== 'Null profile') process.exit(1);
+if (thread.model !== null || thread.reasoningEffort !== null) process.exit(1);
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Null effort\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":null}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "create_chat with a null reasoningEffort did not use the model's catalog default"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
+if (calls[1].payload.thread.executionModel !== 'gpt-6-astra' || calls[1].payload.thread.executionReasoningLevel !== 'medium') process.exit(1);
+if (calls[1].payload.thread.planningReasoningLevel !== 'medium' || calls[1].payload.thread.modeProfilesLinked !== true) process.exit(1);
+const thread = JSON.parse(process.env.OUT).result.structuredContent.thread;
+if (thread.model !== 'gpt-6-astra' || thread.reasoningEffort !== 'medium') process.exit(1);
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Null model\",\"model\":null,\"reasoningEffort\":\"xhigh\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "create_chat accepted a reasoningEffort with a null model"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('model is required when selecting a worker model or reasoningEffort')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "create_chat reached Playbot before rejecting a null model beside a reasoningEffort"
+pass "fm-playbot-lanes: null model and reasoningEffort count as omitted while a null model beside an effort is refused"
+
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "normal-terminal dispatch did not create and send without a controller chat"
