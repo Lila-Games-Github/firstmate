@@ -2052,11 +2052,11 @@ printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","to
   | node --no-warnings "$SCRIPT" hook-pretool
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort task\",\"message\":\"Do the fallback work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
 rm -f "$FIXTURE_ROOT/launch-persisted-execution-level"
-OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch sent the task on an effort Playbot persisted differently from the request"
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch sent the task on an effort Playbot persisted differently from the request"
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const calls = fs.readFileSync(path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
 if (calls[1].payload.thread.executionReasoningLevel !== 'xhigh' || calls[1].payload.thread.planningReasoningLevel !== 'xhigh') process.exit(1);
 const value = JSON.parse(process.env.OUT);
@@ -2076,11 +2076,11 @@ rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'medium\n' > "$FIXTURE_ROOT/launch-persisted-execution-level"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort chat\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
 rm -f "$FIXTURE_ROOT/launch-persisted-execution-level"
-OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "create_chat returned success on an effort Playbot persisted differently from the request"
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "create_chat returned success on an effort Playbot persisted differently from the request"
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const calls = fs.readFileSync(path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
 if (calls[1].payload.thread.executionReasoningLevel !== 'xhigh') process.exit(1);
 const value = JSON.parse(process.env.OUT);
