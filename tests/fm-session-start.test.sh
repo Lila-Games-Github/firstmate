@@ -4,7 +4,8 @@
 # (recovery) into one ordered digest.
 #
 # Coverage:
-#   - absent-file markers vs empty-but-present files in the context digest
+#   - absent-file markers vs empty-but-present files in the context digest,
+#     including present and absent captain-question registers
 #   - the lock-refusal read-only path: banner leads, every mutating step is
 #     skipped (including bootstrap's five mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
@@ -711,7 +712,8 @@ EOF
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
-  # secondmates.md, captain-shared.md, and learnings.md deliberately absent
+  # secondmates.md, captain-shared.md, captain-questions.md, and learnings.md
+  # deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
@@ -721,20 +723,46 @@ EOF
   assert_contains "$out" "data/captain.md" "digest did not label the captain.md section"
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
     "digest did not label the shared captain section"
+  assert_contains "$out" "data/captain-questions.md" \
+    "digest did not label the absent captain-question register"
 
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
   assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
 
-  # Exactly four context ABSENT markers (secondmates.md, captain-shared.md,
-  # learnings.md; backlog.md is covered by its own test) - and the
+# Exactly five context ABSENT markers (secondmates.md, captain-shared.md,
+  # captain-questions.md, learnings.md; backlog.md is covered by its own test) - and the
   # present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 4 ] || fail "expected 4 ABSENT markers (secondmates.md, captain-shared.md, learnings.md, backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 5 ] || fail "expected 5 ABSENT markers (secondmates.md, captain-shared.md, captain-questions.md, learnings.md, backlog.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+test_context_digest_prints_present_captain_questions() {
+  local rec root home fakebin out questions_section
+  rec=$(new_world context-captain-questions)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf '%s\n' '# Open questions' '' '- Which launch date should we use?' > "$home/data/captain-questions.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  questions_section=$(printf '%s\n' "$out" | awk '/^data\/captain-questions\.md$/{flag=1;next}/^data\//{flag=0}flag')
+
+  assert_contains "$questions_section" "# Open questions" \
+    "digest did not print the present captain-question register heading"
+  assert_contains "$questions_section" "- Which launch date should we use?" \
+    "digest did not print the present captain-question register entry"
+  assert_not_contains "$questions_section" "ABSENT" \
+    "digest marked a present captain-question register absent"
+
+  pass "context digest prints a present captain-question register in full"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -2535,6 +2563,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_context_digest_prints_present_captain_questions
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
