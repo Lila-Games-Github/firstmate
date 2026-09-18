@@ -1,0 +1,19 @@
+Does the suite still DRIVE the script the upstream sync deletes?
+
+bin/fm-pr-check-migrate.sh was wrapped in a recorder that logs every invocation and
+then defers to the real script, so both suites ran completely untouched and passed.
+The fork itself calls it as "--checks-safe"; only the test drove it with no arguments.
+
+SUITE                           RESULT            DIRECT CALLS    FORK-INTERNAL CALLS
+------------------------------  ----------------  --------------  -------------------
+before (648fee7)                180 ok / 0 failed  2               12
+after  (6982322)                178 ok / 0 failed  0               12
+
+Recorded direct (no-argument) invocations before this change:
+  argc=0 argv=
+  argc=0 argv=
+Recorded direct (no-argument) invocations after this change:
+  (none - the suite no longer drives the retired script at all)
+
+The fork-internal call count is unchanged (12 vs 12), so no product path lost
+coverage. The 180 -> 178 delta is exactly the two retired sections removed.

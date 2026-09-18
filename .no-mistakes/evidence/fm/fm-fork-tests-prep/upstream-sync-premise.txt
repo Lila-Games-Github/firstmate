@@ -1,0 +1,16 @@
+Premise check against the real upstream (kunchenguid/firstmate @ main), read-only.
+bin/fm-pr-fork-sync-proof.sh only accepts the sync PR when the merge changes no
+path upstream has never touched - so a fork-only path must be fixed beforehand.
+
+PATH ON UPSTREAM main                  HTTP     MEANING
+---------------------                  ----     -------
+tests/fm-playbot-lanes.test.sh         404      fork-only: the sync may not fix it
+tests/fm-merge-local.test.sh           404      fork-only: the sync may not fix it
+tests/fm-pr-check-security.test.sh     200      upstream-owned: the merge itself carries it
+bin/fm-pr-check-migrate.sh             404      retired upstream (deleted)
+bin/fm-captain-hold.sh                 200      added upstream (the new merge gate)
+
+Callers of the retired script on upstream main (0 = the sync retires the call site too):
+  bin/fm-watch.sh        references=0
+  bin/fm-pr-check.sh     references=0
+  bin/fm-bootstrap.sh    references=0

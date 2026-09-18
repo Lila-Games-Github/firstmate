@@ -1,0 +1,40 @@
+$ # A "real firstmate home" is provisioned by bin/fm-home-seed.sh.
+$ # The merge-local fixture used to be a bare directory with no data/;
+$ # this shows what the real provisioner actually produces.
+
+$ ls -1 "$HOME_UNDER_TEST"   # before seeding: a plain firstmate checkout
+AGENTS.md
+assets
+bin
+CLAUDE.md
+CONTRIBUTING.md
+docs
+LICENSE
+README.md
+skills
+tests
+VISION.md
+
+$ bin/fm-home-seed.sh evidence-home "$HOME_UNDER_TEST" --no-projects
+scaffolded: $SCRATCH/homeseed3/parent/data/evidence-home/brief.md (secondmate charter)
+home=$SCRATCH/homeseed3/child
+
+$ ls -1 "$HOME_UNDER_TEST"   # after seeding: data/ config/ projects/ state/ now exist
+AGENTS.md
+assets
+bin
+CLAUDE.md
+config
+CONTRIBUTING.md
+data
+docs
+LICENSE
+projects
+README.md
+skills
+state
+tests
+VISION.md
+
+$ test -d "$HOME_UNDER_TEST/data" && echo "data/ present in a real firstmate home"
+data/ present in a real firstmate home

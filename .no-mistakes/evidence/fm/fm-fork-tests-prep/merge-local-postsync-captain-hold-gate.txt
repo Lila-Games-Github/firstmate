@@ -1,0 +1,18 @@
+Post-sync bin/fm-merge-local.sh (upstream main) gates every local merge on:
+    fm-captain-hold.sh open <task-id> --distinguish-absent
+  exit 0    -> refuse (still held for the captain)
+  exit 1|3  -> proceed with the fast-forward
+  otherwise -> refuse ("could not determine whether ... is still held")
+Both scripts below are the real upstream files, run unmodified.
+
+--- OLD fixture: FM_HOME built by tests/fm-merge-local.test.sh BEFORE this change (no data/) ---
+  $ ls -A $FM_HOME  ->  (empty)
+  captain-hold stderr: fm-captain-hold: data directory cannot be resolved: $FIXTURE/old-fixture-home/data
+  captain-hold exit  : 2
+  merge-local gate   : REFUSE  -> "could not determine whether task task-x1 is still held for the captain; refusing to merge"
+
+--- NEW fixture: FM_HOME built by tests/fm-merge-local.test.sh AFTER this change (data/ present) ---
+  $ ls -A $FM_HOME  ->  data 
+  captain-hold stderr: (none)
+  captain-hold exit  : 3
+  merge-local gate   : PROCEED -> no open captain call; fm-merge-local.sh performs the fast-forward
