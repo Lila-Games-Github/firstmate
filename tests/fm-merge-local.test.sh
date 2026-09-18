@@ -20,10 +20,11 @@ TMP_ROOT=$(fm_test_tmproot fm-merge-local-tests)
 make_case() {
   local name=$1 case_dir
   case_dir="$TMP_ROOT/$name"
-  # Mirror a real firstmate home, which always has data/. The local-merge path
-  # consults the home's captain-hold records before it merges, and that reader
-  # reports a home whose data directory cannot be resolved as indeterminate
-  # rather than as "no captain calls recorded", which refuses the merge.
+  # Mirror a real firstmate home, which always has data/. The captain-hold
+  # reader that guards the local-merge path reports a home whose data directory
+  # cannot be resolved as indeterminate rather than as "no captain calls
+  # recorded", so a data/-less fixture home refuses the merge once
+  # bin/fm-merge-local.sh carries that gate from upstream.
   mkdir -p "$case_dir/state" "$case_dir/home" "$case_dir/home/data"
   git init -q -b main "$case_dir/project"
   git -C "$case_dir/project" commit -q --allow-empty -m baseline
