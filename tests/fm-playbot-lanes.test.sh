@@ -4987,6 +4987,7 @@ retired_home="$FIXTURE_ROOT/retired-remote-home"
 cat > "$retired_meta" <<EOF
 window=remote:$retired_task_id
 kind=secondmate
+spawn_gen=fixture-$retired_task_id
 remote_host=remote-test
 remote_root=$ROOT
 home=$retired_home
@@ -5057,6 +5058,7 @@ retired_pr_meta="$FM_HOME_FIXTURE/state/$retired_pr_task_id.meta"
 cat > "$retired_pr_meta" <<EOF
 window=remote:$retired_pr_task_id
 kind=secondmate
+spawn_gen=fixture-$retired_pr_task_id
 remote_host=remote-test
 remote_root=$ROOT
 home=$retired_home
@@ -5161,6 +5163,7 @@ retired_receipt_meta="$FM_HOME_FIXTURE/state/$retired_receipt_task_id.meta"
 cat > "$retired_receipt_meta" <<EOF
 window=remote:$retired_receipt_task_id
 kind=secondmate
+spawn_gen=fixture-$retired_receipt_task_id
 remote_host=remote-test
 remote_root=$ROOT
 home=$retired_home
@@ -5246,6 +5249,7 @@ local_race_task_id=fm-autoarm-retired-local-pr
 local_race_meta="$FM_HOME_FIXTURE/state/$local_race_task_id.meta"
 cat > "$local_race_meta" <<EOF
 window=firstmate:fm-$local_race_task_id
+spawn_gen=fixture-$local_race_task_id
 worktree=$FIXTURE_ROOT/missing-local-race-worktree
 project=$FIXTURE_ROOT/worker
 kind=ship
@@ -5352,6 +5356,7 @@ partial_meta="$FM_HOME_FIXTURE/state/$partial_task_id.meta"
 cat > "$partial_meta" <<EOF
 window=remote:$partial_task_id
 kind=secondmate
+spawn_gen=fixture-$partial_task_id
 remote_host=remote-test
 remote_root=$ROOT
 home=$retired_home

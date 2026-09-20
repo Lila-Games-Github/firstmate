@@ -1489,6 +1489,7 @@ EOF
   printf '%s\n' "done: report complete" >"$home/state/$id.status"
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" \
+    "spawn_gen=fixture-$id" \
     "worktree=$home/projects/missing-$id" \
     "project=$home/projects/FrogPile" \
     "harness=codex" \
