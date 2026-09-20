@@ -1,0 +1,7 @@
+window=firstmate:fm-cleanup-source
+spawn_gen=fixture-cleanup-source
+worktree=/tmp/fm-evidence-run/learning-home/projects/missing-cleanup-source
+project=/tmp/fm-evidence-run/learning-home/projects/FrogPile
+harness=codex
+kind=scout
+mode=scout

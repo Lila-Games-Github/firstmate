@@ -1,0 +1,6 @@
+window=remote:fm-autoarm-retired-remote
+kind=secondmate
+spawn_gen=fixture-fm-autoarm-retired-remote
+remote_host=remote-test
+remote_root=/var/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M2ZT9KAFE6AFHTHV4F6S02QE
+home=/tmp/fm-evidence-run/fm-playbot-lanes.PzSi72/fixture/retired-remote-home

@@ -1,0 +1,6 @@
+window=firstmate:fm-fm-autoarm-retired-local-pr
+spawn_gen=fixture-fm-autoarm-retired-local-pr
+worktree=/tmp/fm-evidence-run/fm-playbot-lanes.PzSi72/fixture/missing-local-race-worktree
+project=/tmp/fm-evidence-run/fm-playbot-lanes.PzSi72/fixture/worker
+kind=ship
+mode=local-only
