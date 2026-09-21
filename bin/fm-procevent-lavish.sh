@@ -122,6 +122,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
+# shellcheck source=bin/fm-jev-adapter-lib.sh
+. "$SCRIPT_DIR/fm-jev-adapter-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -545,13 +547,12 @@ cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 # comment matches the captured element text. Choice rows keep Context data
 # out of that field. A pure annotation has no prompt.
 cmd_read() {
-  local file=${1-} lifecycle session_ended read_status=0 triage_file='' triage_mode=off
+  local file=${1-} lifecycle session_ended read_status=0 triage_file=''
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  triage_mode=$("$SCRIPT_DIR/fm-jev.sh" mode triage 2>/dev/null || printf 'off\n')
-  if [ "$triage_mode" != off ]; then
+  if fm_jev_observer_ready triage; then
     triage_file=$(mktemp "${TMPDIR:-/tmp}/fm-jev-lavish-read.XXXXXX") || triage_file=''
   fi
   perl -e '

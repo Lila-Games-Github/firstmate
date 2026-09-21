@@ -43,10 +43,13 @@ PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
 # Stage optional Jev observations while presentation locks are held, then make
-# the consultations only after those locks are released. Off mode creates no
-# scratch file, makes no network call, and changes no presentation byte.
-JEV_TRIAGE_MODE=$("$SCRIPT_DIR/fm-jev.sh" mode triage 2>/dev/null || printf 'off\n')
-if [ "$JEV_TRIAGE_MODE" != off ]; then
+# the consultations only after those locks are released. A use that could not
+# answer - off, no key, kill switch, unreadable configuration, no budget share -
+# creates no scratch file, stages nothing, makes no network call, and changes no
+# presentation byte.
+# shellcheck source=bin/fm-jev-adapter-lib.sh
+. "$SCRIPT_DIR/fm-jev-adapter-lib.sh"
+if fm_jev_observer_ready triage; then
   DRAIN_JEV_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-jev-wake-drain.XXXXXX") || DRAIN_JEV_TMP=
 fi
 fm_wake_presentation_observe_status() { # <status-line>

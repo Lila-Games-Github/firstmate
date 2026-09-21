@@ -723,7 +723,10 @@ split_plan_filter='
 '
 
 # Today's call count and spend, overall and for one use, from the date-matching
-# lines only. Prints an empty string when the scan could not be made.
+# lines only. A day with no rows at all still prints four zeros, so an empty
+# string means the scan itself failed - one unparseable line bearing today's
+# date is enough - and every caller must refuse rather than read it as an
+# unspent budget.
 day_usage_counts() { # <use> <day>
   grep -F "\"date\":\"$2\"" "$LEDGER" 2>/dev/null | jq -s -r --arg use "$1" '
     [(map(select(.network_attempted)) | length),
@@ -776,7 +779,7 @@ split_affordable() { # <use> <parts-dir> <count> <budget-bytes>
   done
   today=$(date -u +%Y-%m-%d)
   counts=$(day_usage_counts "$use" "$today") || counts=
-  [ -n "$counts" ] || counts=$'0\t0\t0\t0'
+  [ -n "$counts" ] || return 1
   IFS=$'\t' read -r calls spend use_calls use_spend <<<"$counts"
   case "${calls:-x}" in ''|*[!0-9]*) return 1 ;; esac
   case "${use_calls:-x}" in ''|*[!0-9]*) return 1 ;; esac
@@ -891,15 +894,10 @@ consult_one() { # <use> <envelope-file>
   # Only today's rows can consume today's budget, so the scan is bounded by one
   # day of evidence rather than by the whole retained ledger.
   counts=$(day_usage_counts "$use" "$today") || counts=
-  if [ -n "$counts" ]; then
-    IFS=$'\t' read -r calls spend use_calls use_spend <<<"$counts"
-  else
-    calls=0
-    spend=0
-    use_calls=0
-    use_spend=0
-  fi
+  IFS=$'\t' read -r calls spend use_calls use_spend <<<"$counts"
   if [ -z "${calls:-}" ] || [ -z "${spend:-}" ] || [ -z "${use_calls:-}" ] || [ -z "${use_spend:-}" ]; then
+    record_refusal_row "$use" "$file" ledger-unreadable "$request_bytes" || true
+    PART_STOP=ledger-unreadable
     unlock_ledger || true
     emit_unavailable "$use" ledger-unreadable "$fallback"
     return 0

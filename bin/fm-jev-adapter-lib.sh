@@ -7,8 +7,10 @@
 # workflow step runs by name: accept-check, commit-lint, and open-questions all
 # say why they are doing nothing instead of exiting silently, since an operator
 # who enabled the feature with no key otherwise gets no feedback from any
-# surface. The presentation-path triage hook stays silent by design and does not
-# use this helper.
+# surface. The presentation-path triage hooks share the same gate through
+# fm_jev_observer_ready, which answers the same question without printing
+# anything, because a per-drain diagnostic on the supervision path would be
+# noise.
 
 # fm_jev_adapter_ready <use>
 # 0 when <use> is configured on and a key is resolvable, leaving the effective
@@ -16,10 +18,9 @@
 # on stderr and returns 1. Never prints the key or any part of it.
 FM_JEV_ADAPTER_MODE=off
 fm_jev_adapter_ready() { # <use>
-  local use=$1 dir status mode reason key explanation
-  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local use=$1 status mode reason key explanation
   FM_JEV_ADAPTER_MODE=off
-  status=$("$dir/fm-jev.sh" status "$use" 2>/dev/null) || status=
+  status=$(fm_jev_use_status "$use") || status=
   if [ -z "$status" ]; then
     printf '%s: off (bin/fm-jev.sh could not report its configuration)\n' "$use" >&2
     return 1
@@ -32,4 +33,26 @@ fm_jev_adapter_ready() { # <use>
     return 1
   fi
   return 0
+}
+
+fm_jev_use_status() { # <use>
+  local dir
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  "$dir/fm-jev.sh" status "$1" 2>/dev/null
+}
+
+# fm_jev_observer_ready <use>
+# 0 when a consultation for <use> could actually be made, and silent either way,
+# so a presentation-path hook can skip staging without printing a per-drain
+# diagnostic. `mode` alone never resolves the key, and the built-in
+# configuration is active, so a hook gated on it would stage every presented
+# line and build a whole envelope on every drain of a keyless home only for the
+# client to refuse it. `status` settles the key, the kill switch, an unreadable
+# configuration and a zero budget share in one call that costs the same.
+fm_jev_observer_ready() { # <use>
+  local status mode reason key
+  status=$(fm_jev_use_status "$1") || status=
+  [ -n "$status" ] || return 1
+  IFS=$'\t' read -r mode reason key _ <<<"$status"
+  [ "${mode:-off}" != off ] && [ "${key:-absent}" = present ] && [ "${reason:-none}" = none ]
 }

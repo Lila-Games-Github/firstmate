@@ -28,6 +28,7 @@ The adapters you run by name - `bin/fm-jev-accept-check.sh`, `bin/fm-jev-commit-
 The triage hooks inside `bin/fm-wake-drain.sh` and `bin/fm-procevent-lavish.sh read` stay silent, because they run on the presentation path where a per-drain diagnostic would be noise.
 `bin/fm-jev-report.sh` opens with the effective mode of each use and whether a key is present.
 A malformed config, missing key, exhausted cap, timeout, HTTP error, or malformed response also falls back without blocking the caller.
+So does a ledger whose current day cannot be parsed: the day's spend is then unknown, so consultations are refused with `ledger-unreadable` until `bin/fm-jev.sh validate-ledger` is run and the named file repaired.
 The system never changes a use's configured mode or disables Jev because of a disagreement; disagreements remain visible for evaluation.
 
 ## Uses

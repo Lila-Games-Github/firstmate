@@ -455,6 +455,82 @@ EOF
   pass "Jev triage hooks: a whole drain and a whole Lavish read each cost one observation"
 }
 
+# One unparseable line bearing today's date is enough to make the day scan
+# fail. Reading that as an unspent budget would turn every daily and per-use
+# cap off for the rest of the day, so the client must refuse instead and leave
+# evidence of why.
+test_unreadable_day_scan_refuses_instead_of_spending() {
+  local home="$TMP_ROOT/corrupt-day" before today out row
+  write_config "$home" off shadow off off
+  write_key "$home"
+  today=$(date -u +%Y-%m-%d)
+  before=$(request_count)
+  out=$(printf 'done: first\n' | jev_env "$home" "$TRIAGE" --kind status)
+  [ "$out" = actionable ] || fail "the first consultation did not reach the endpoint: '$out'"
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "the first consultation made no request"
+
+  printf '{"schema_version":2,"timestamp":"x","date":"%s","use":"tri\n' "$today" \
+    >> "$home/state/jev-ledger.jsonl"
+  before=$(request_count)
+  out=$(printf 'done: second\n' | jev_env "$home" "$TRIAGE" --kind status)
+  [ -z "$out" ] || fail "a consultation used Jev while the day's spend could not be counted: '$out'"
+  [ "$(request_count)" -eq "$before" ] \
+    || fail "an unreadable day scan was read as an unspent budget and reached the endpoint"
+  row=$(tail -1 "$home/state/jev-ledger.jsonl")
+  jq -e '.network_attempted == false and .unavailable_reason == "ledger-unreadable" and
+    .cost_usd == 0 and .use == "triage"' <<<"$row" >/dev/null \
+    || fail "the refusal left no evidence of why nothing ran: $row"
+
+  before=$(request_count)
+  out=$(printf 'done: third\n' | jev_env "$home" "$TRIAGE" --kind status)
+  [ "$(request_count)" -eq "$before" ] \
+    || fail "a later consultation that day still spent against the uncountable budget"
+  pass "Jev budgets: a day whose spend cannot be counted refuses rather than spending freely"
+}
+
+# `mode` never resolves the key and the built-in configuration is active, so the
+# presentation hooks have to ask `status` or a keyless home stages every line
+# and builds a whole envelope on every drain for a consultation that cannot
+# happen.
+test_observer_gate_requires_a_usable_key() {
+  local home="$TMP_ROOT/observer-gate" before out
+  write_config "$home" off shadow off off
+  mkdir -p "$home/state"
+  # shellcheck source=bin/fm-jev-adapter-lib.sh
+  . "$ROOT/bin/fm-jev-adapter-lib.sh"
+
+  if FM_HOME="$home" fm_jev_observer_ready triage; then
+    fail "the observer gate opened for a home with no key"
+  fi
+
+  write_key "$home"
+  FM_HOME="$home" fm_jev_observer_ready triage \
+    || fail "the observer gate stayed shut for a configured use with a key"
+
+  if FM_HOME="$home" fm_jev_observer_ready accept-check; then
+    fail "the observer gate opened for a use configured off"
+  fi
+  if ! jq '.kill_switch = true' "$home/config/jev.json" > "$home/config/jev.json.tmp" \
+    || ! mv "$home/config/jev.json.tmp" "$home/config/jev.json"; then
+    fail "could not engage the kill switch"
+  fi
+  if FM_HOME="$home" fm_jev_observer_ready triage; then
+    fail "the observer gate opened with the kill switch engaged"
+  fi
+  write_config "$home" off shadow off off
+
+  # The keyless drain must still present every row and reach no endpoint.
+  rm -f "$home/.env"
+  append_wake "$home/state" check task-k "check: task-k needs review" \
+    || fail "could not stage a wake for the keyless drain"
+  before=$(request_count)
+  out=$(jev_env "$home" "$DRAIN" 2>/dev/null) || fail "keyless wake drain failed"
+  assert_contains "$out" "check: task-k needs review" "the keyless drain hid a presented wake"
+  [ "$(request_count)" -eq "$before" ] || fail "a keyless drain reached the endpoint"
+  [ ! -e "$home/state/jev-ledger.jsonl" ] || fail "a keyless drain wrote a ledger row"
+  pass "Jev triage hooks: the presentation gate needs a usable key, and a keyless drain still presents"
+}
+
 test_model_family_and_mismatch() {
   local home="$TMP_ROOT/model" before out
   write_config "$home" off shadow off off
@@ -949,6 +1025,8 @@ test_small_global_cap_keeps_every_use_reachable
 test_ledger_rotates_monthly_and_report_reads_archives
 test_consult_does_not_read_the_whole_ledger
 test_shadow_presentation_hooks
+test_unreadable_day_scan_refuses_instead_of_spending
+test_observer_gate_requires_a_usable_key
 test_model_family_and_mismatch
 test_report_fixture_and_empty_error
 test_report_scores_discarded_labels_as_the_negative_class
