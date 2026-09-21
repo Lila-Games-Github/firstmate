@@ -1112,16 +1112,17 @@ test_consult_does_not_read_the_whole_ledger() {
 # that same work is the false positive the evaluation needs to be able to see.
 test_report_scores_discarded_labels_as_the_negative_class() {
   local ledger="$TMP_ROOT/discarded-ledger" fixture="$ROOT/tests/fixtures/jev-ledger.jsonl" out
-  : > "$ledger"
-  head -1 "$fixture" | jq -c '.consultation_id = "correct-rejection" | .subject = "task-r" |
-    .jev_verdict = "rejected" | .final_decision = "discarded" | .eventual_outcome = "discarded" |
-    .label_source = "teardown-force-discard"' >> "$ledger"
-  head -1 "$fixture" | jq -c '.consultation_id = "wrong-acceptance" | .subject = "task-w" |
-    .existing_decision = "rejected" | .baseline_decision = "rejected" | .agreement = false |
-    .final_decision = "discarded" | .eventual_outcome = "discarded" |
-    .label_source = "teardown-force-discard"' >> "$ledger"
-  head -1 "$fixture" | jq -c '.consultation_id = "still-open" | .subject = "task-u" |
-    .final_decision = null | .eventual_outcome = null | .label_source = null' >> "$ledger"
+  {
+    head -1 "$fixture" | jq -c '.consultation_id = "correct-rejection" | .subject = "task-r" |
+      .jev_verdict = "rejected" | .final_decision = "discarded" | .eventual_outcome = "discarded" |
+      .label_source = "teardown-force-discard"'
+    head -1 "$fixture" | jq -c '.consultation_id = "wrong-acceptance" | .subject = "task-w" |
+      .existing_decision = "rejected" | .baseline_decision = "rejected" | .agreement = false |
+      .final_decision = "discarded" | .eventual_outcome = "discarded" |
+      .label_source = "teardown-force-discard"'
+    head -1 "$fixture" | jq -c '.consultation_id = "still-open" | .subject = "task-u" |
+      .final_decision = null | .eventual_outcome = null | .label_source = null'
+  } > "$ledger"
   "$JEV" validate-ledger "$ledger" || fail "a discarded-outcome ledger failed schema validation"
   out=$($REPORT "$ledger") || fail "report rejected the discarded-outcome ledger"
   assert_contains "$out" $'accept-check\t3\t2\t1\t1\t50%\t1\t0\t' \

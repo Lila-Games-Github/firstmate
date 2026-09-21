@@ -981,7 +981,7 @@ consult_one() { # <use> <envelope-file>
   fi
   if [ "$use_calls" -ge "$USE_CALL_CAP" ]; then
     record_refusal_row "$use" "$file" use-daily-call-cap "$request_bytes" || true
-    PART_STOP=use-daily-call-cap
+    PART_STOP='use-daily-call-cap'
     unlock_ledger || true
     emit_unavailable "$use" use-daily-call-cap "$fallback"
     return 0
@@ -998,7 +998,7 @@ consult_one() { # <use> <envelope-file>
   total=$(jq -cn --argjson spend "$use_spend" --argjson cost "$pre_cost" '$spend + $cost')
   if jq -en --argjson total "$total" --argjson cap "$USE_SPEND_CAP" '$total > $cap' >/dev/null; then
     record_refusal_row "$use" "$file" use-daily-spend-cap "$request_bytes" || true
-    PART_STOP=use-daily-spend-cap
+    PART_STOP='use-daily-spend-cap'
     unlock_ledger || true
     emit_unavailable "$use" use-daily-spend-cap "$fallback"
     return 0
