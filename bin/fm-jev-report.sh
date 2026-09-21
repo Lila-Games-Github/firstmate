@@ -29,7 +29,12 @@
 # A `refusals:` section names every budget refusal that never reached the
 # network, so a day in which a cap or an oversized request stopped the feature
 # is visible rather than silent. The report also lists every Jev-versus-baseline
-# disagreement with both rationales and the returned typed probabilities, and
+# disagreement with both rationales and the returned typed probabilities; a
+# batched per-item verdict is listed as the items that actually diverged, never
+# as the whole batch object, so one routine answer among fifty does not bury the
+# acceptance and commit-lint disagreements an operator came to read. Rows
+# written before the ledger recorded `differing_keys` have theirs derived here
+# from the verdict and the baseline, and
 # closes with the advisory findings the active adapters recorded, which is where
 # an acceptance or commit-lint advisory is surfaced: no adapter writes one to a
 # task status file, because a `note:` there would supersede a worker's terminal
@@ -178,12 +183,27 @@ else
 fi
 
 DISAGREEMENTS=$(jq -r '
+  . as $row |
+  def differing:
+    if (.differing_keys | type) == "array" then .differing_keys
+    elif (.jev_verdict | type) == "object" and (.baseline_decision | type) == "object" then
+      ([.jev_verdict | to_entries[] | select(.value != $row.baseline_decision[.key]) | .key] | sort)
+    else null end;
   select(.agreement == false) |
+  (differing) as $keys |
   "- consultation_id=\(.consultation_id) use=\(.use) subject=\(.subject)\n" +
-  "  jev_decision=\(.jev_verdict | tojson)\n" +
+  (if $keys == null then
+     "  jev_decision=\(.jev_verdict | tojson)\n" +
+     "  jev_probabilities=\(.jev_probabilities | tojson)\n" +
+     "  baseline_decision=\(.baseline_decision | tojson)\n"
+   else
+     "  differing_items=\($keys | length) of \($row.jev_verdict | length)\n" +
+     ([$keys[] |
+        "  - item=\(.) jev_choice=\($row.jev_verdict[.] | tojson)" +
+        " jev_probabilities=\($row.jev_probabilities[.] | tojson)" +
+        " baseline_choice=\($row.baseline_decision[.] | tojson)"] | join("\n")) + "\n"
+   end) +
   "  jev_rationale=\(.jev_rationale | tojson)\n" +
-  "  jev_probabilities=\(.jev_probabilities | tojson)\n" +
-  "  baseline_decision=\(.baseline_decision | tojson)\n" +
   "  baseline_rationale=\(.baseline_rationale | tojson)\n" +
   "  eventual_outcome=\(.eventual_outcome | tojson) label_source=\(.label_source | tojson)"
 ' "${NONEMPTY[@]}") || DISAGREEMENTS=

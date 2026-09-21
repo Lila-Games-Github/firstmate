@@ -543,6 +543,48 @@ test_oversized_material_splits_and_truncates() {
   pass "Jev client: an over-budget envelope is split per question and shortened, never silently dropped"
 }
 
+# An N-part split spends N calls and N request bodies. Starting one that cannot
+# finish leaves the later questions permanently unanswered for the day, so the
+# client keeps one shrunk request that still classifies every question.
+test_split_that_cannot_finish_is_never_started() {
+  local home before out proposal
+
+  home="$TMP_ROOT/questions-spend-capped"
+  # Room for one budget-sized request today, not the two a split would cost.
+  write_config "$home" off off off shadow 100 2000 0.0001
+  write_key "$home"
+  make_big_questions_fixture "$home" 20000
+  before=$(request_count)
+  out=$(jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages") \
+    || fail "a spend-capped sweep failed instead of sending one request"
+  proposal="$home/questions-jev-review.md"
+  [ "$out" = "$proposal" ] && [ -s "$proposal" ] || fail "the spend-capped sweep wrote no proposal"
+  [ "$(request_count)" -eq $((before + 1)) ] \
+    || fail "a split was started that the per-use spend cap could not finish"
+  [ "$(grep -c '^- ' "$proposal")" -eq 2 ] \
+    || fail "the spend-capped sweep lost a question: $(cat "$proposal")"
+  grep -q 'null' "$proposal" && fail "the spend-capped sweep rendered an unanswered question"
+  jq -e -s 'length == 1 and .[0].available == true and .[0].truncated == true' \
+    "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "the spend-capped sweep did not record one shortened consultation"
+
+  home="$TMP_ROOT/questions-call-capped"
+  write_config "$home" off off off shadow 1 2000
+  write_key "$home"
+  make_big_questions_fixture "$home" 20000
+  before=$(request_count)
+  out=$(jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages") \
+    || fail "a call-capped sweep failed instead of sending one request"
+  proposal="$home/questions-jev-review.md"
+  [ -s "$proposal" ] || fail "the call-capped sweep wrote no proposal"
+  [ "$(request_count)" -eq $((before + 1)) ] \
+    || fail "a split was started that the daily call cap could not finish"
+  [ "$(grep -c '^- ' "$proposal")" -eq 2 ] \
+    || fail "the call-capped sweep lost a question: $(cat "$proposal")"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the capped sweep row failed validation"
+  pass "Jev client: a split that a call or spend cap could not finish is never started"
+}
+
 test_unfittable_question_is_refused_with_a_row() {
   local home="$TMP_ROOT/questions-unfittable" before out
   # A cap no request can fit under: the refusal must be recorded, not silent.
@@ -564,8 +606,12 @@ test_unfittable_question_is_refused_with_a_row() {
   pass "Jev client: a question too large even alone is refused with a recorded reason, not silence"
 }
 
-test_oversized_accept_check_still_reviews() {
-  local home="$TMP_ROOT/accept-big" before
+# The report every criterion shares is not group-owned, so splitting would copy
+# the same oversized text into every part for the same truncated prefix at N
+# times the spend and N of the day's calls. One shrunk request answers all of
+# them instead.
+test_oversized_shared_report_is_shrunk_not_duplicated() {
+  local home="$TMP_ROOT/accept-big" before request
   write_config "$home" shadow off off off 100 2000
   write_key "$home"
   make_accept_fixture "$home"
@@ -576,12 +622,49 @@ test_oversized_accept_check_still_reviews() {
   [ -s "$home/data/task-a/acceptance.json" ] || fail "an oversized report produced no acceptance record"
   jq -e '(.criteria | length) == 2 and .verdict == "accepted"' "$home/data/task-a/acceptance.json" >/dev/null \
     || fail "the oversized acceptance record lost a criterion"
-  [ "$(request_count)" -eq $((before + 2)) ] || fail "the oversized acceptance check did not split per criterion"
+  [ "$(request_count)" -eq $((before + 1)) ] \
+    || fail "the shared oversized report was duplicated across per-criterion requests"
+  request=$(tail -1 "$REQUEST_LOG")
+  jq -e '(.questions | length) == 2 and (.state.acceptance_criteria | length) == 2 and
+    (.state.report | length) < 20000' <<<"$request" >/dev/null \
+    || fail "the single request lost a criterion or kept the whole oversized report"
+  jq -e -s 'length == 1 and .[0].truncated == true and .[0].use == "accept-check"' \
+    "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "the oversized acceptance row does not record its shortening"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "oversized acceptance row failed validation"
+  pass "Jev client: oversized shared state is shrunk into one request, never copied per question"
+}
+
+# The complement: when the per-question material is what does not fit, each
+# question still gets its own budget-sized request.
+test_oversized_per_question_state_still_splits() {
+  local home="$TMP_ROOT/accept-big-criteria" before
+  write_config "$home" shadow off off off 100 2000
+  write_key "$home"
+  mkdir -p "$home/data/task-a"
+  awk 'BEGIN {
+    while (length(one) < 9000) one = one "The report names every changed file. "
+    while (length(two) < 9000) two = two "The report includes a passing test command. "
+    print "# Task"; print ""; print "## Acceptance criteria"; print ""
+    print "- " one; print "- " two
+  }' > "$home/data/task-a/brief.md"
+  printf 'Changed bin/example.sh and ran tests/example.test.sh successfully.\n' \
+    > "$home/data/task-a/report.md"
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ -s "$home/data/task-a/acceptance.json" ] || fail "oversized criteria produced no acceptance record"
+  jq -e '(.criteria | length) == 2' "$home/data/task-a/acceptance.json" >/dev/null \
+    || fail "the split acceptance record lost a criterion"
+  [ "$(request_count)" -eq $((before + 2)) ] \
+    || fail "oversized per-question criteria did not split into one request each"
+  jq -e -s 'length == 2 and all(.[]; (.state.acceptance_criteria | length) == 1)' \
+    <<<"$(tail -2 "$REQUEST_LOG")" >/dev/null \
+    || fail "a split part carried a criterion its own question never asked about"
   jq -e -s 'length == 2 and all(.[]; .truncated == true and .use == "accept-check")' \
     "$home/state/jev-ledger.jsonl" >/dev/null \
-    || fail "the oversized acceptance rows do not record their shortening"
-  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "oversized acceptance rows failed validation"
-  pass "Jev acceptance adapter: an oversized report is split and shortened by the client, not skipped"
+    || fail "the split acceptance rows do not record their shortening"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "split acceptance rows failed validation"
+  pass "Jev client: material only one question owns still splits into per-question requests"
 }
 
 test_small_global_cap_keeps_every_use_reachable() {
@@ -694,6 +777,54 @@ test_report_scores_discarded_labels_as_the_negative_class() {
   pass "Jev report: a discarded task scores as a negative label and an unlabelled row stays apart"
 }
 
+# Finding routine items is what triage is for, so one routine answer in a batch
+# must not read as a whole-batch disagreement, and the report must name the item
+# that diverged rather than dumping every item of the batch.
+test_report_names_only_the_differing_items_of_a_batch() {
+  local home="$TMP_ROOT/triage-differ" before out row
+  write_config "$home" off shadow off off
+  write_key "$home"
+  before=$(request_count)
+  out=$(printf 'status\tFORCE_ROUTINE one\nstatus\ttwo\nstatus\tthree\n' \
+    | jev_env "$home" "$TRIAGE" --batch)
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "the mixed batch did not cost one request"
+  row=$(cat "$home/state/jev-ledger.jsonl")
+  jq -e '.differing_keys == ["item_1__attention"] and
+    .agreement_keys == {"item_1__attention":false,"item_2__attention":true,"item_3__attention":true} and
+    .agreement == false and .schema_version == 2' <<<"$row" >/dev/null \
+    || fail "the row did not record agreement item by item: $row"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the per-item agreement row failed validation"
+  out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") || fail "report rejected the mixed-batch ledger"
+  assert_contains "$out" "differing_items=1 of 3" "the report does not say how much of the batch diverged"
+  assert_contains "$out" 'item=item_1__attention jev_choice="routine"' \
+    "the report does not name the item that diverged with its Jev choice"
+  assert_contains "$out" 'baseline_choice="actionable"' "the report drops the baseline choice"
+  printf '%s\n' "$out" | grep -q 'item=item_2__attention' \
+    && fail "the report listed an item that agreed: $out"
+  printf '%s\n' "$out" | grep -q 'jev_decision=' \
+    && fail "the report still dumped the whole batch verdict object: $out"
+  pass "Jev report: a batched disagreement names only the items that diverged"
+}
+
+# A version 1 row predates agreement_keys, so the report has to derive the
+# differing items from the verdict and the baseline to stay readable.
+test_report_derives_differing_items_for_an_old_row() {
+  local ledger="$TMP_ROOT/v1-batch-ledger" fixture="$ROOT/tests/fixtures/jev-ledger.jsonl" out
+  head -3 "$fixture" | tail -1 | jq -c '
+    .consultation_id = "v1-batch" | .subject = "wake+status" |
+    .jev_verdict = {"item_1__attention":"routine","item_2__attention":"actionable"} |
+    .existing_decision = {"item_1__attention":"actionable","item_2__attention":"actionable"} |
+    .baseline_decision = {"item_1__attention":"actionable","item_2__attention":"actionable"} |
+    .decision_after_jev = .baseline_decision |
+    .final_decision = null | .eventual_outcome = null | .agreement = false' > "$ledger"
+  "$JEV" validate-ledger "$ledger" || fail "a version 1 batched row stopped validating after the schema bump"
+  out=$($REPORT "$ledger") || fail "report rejected a version 1 batched ledger"
+  assert_contains "$out" "differing_items=1 of 2" "the report did not derive the differing items of an old row"
+  assert_contains "$out" 'item=item_1__attention jev_choice="routine"' \
+    "the derived listing lost the item that diverged"
+  pass "Jev report: a pre-bump batched row still lists only its differing items"
+}
+
 test_report_fixture_and_empty_error() {
   local out rc=0 empty="$TMP_ROOT/empty-ledger" malformed="$TMP_ROOT/malformed-ledger"
   out=$($REPORT "$ROOT/tests/fixtures/jev-ledger.jsonl") || fail "report rejected the valid fixture ledger"
@@ -732,8 +863,10 @@ test_active_advisories_never_touch_task_status
 test_open_questions_request_builder
 test_shared_page_is_sent_once
 test_oversized_material_splits_and_truncates
+test_split_that_cannot_finish_is_never_started
 test_unfittable_question_is_refused_with_a_row
-test_oversized_accept_check_still_reviews
+test_oversized_shared_report_is_shrunk_not_duplicated
+test_oversized_per_question_state_still_splits
 test_small_global_cap_keeps_every_use_reachable
 test_ledger_rotates_monthly_and_report_reads_archives
 test_consult_does_not_read_the_whole_ledger
@@ -741,5 +874,7 @@ test_shadow_presentation_hooks
 test_model_family_and_mismatch
 test_report_fixture_and_empty_error
 test_report_scores_discarded_labels_as_the_negative_class
+test_report_names_only_the_differing_items_of_a_batch
+test_report_derives_differing_items_for_an_old_row
 
 printf 'all fm-jev tests passed\n'

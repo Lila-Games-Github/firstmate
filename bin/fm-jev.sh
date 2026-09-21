@@ -43,6 +43,20 @@
 # naming per-call-token-cap. A budget refusal always writes a row, with
 # network_attempted false, so the report can show why nothing ran.
 #
+# Splitting is taken only when it buys something. State that is not group-owned
+# and not reachable through `ledger.context` has to be copied verbatim into
+# every part, so a split is refused when that copy does not fit the budget by
+# itself - an oversized report shared by five criteria would otherwise cost five
+# near-identical requests - and it is refused when the whole split would not fit
+# the day's remaining calls and spend for this use. Either refusal sends one
+# shortened request instead, so every question is still answered.
+#
+# Agreement is per key wherever the verdict is: `agreement_keys` answers item by
+# item and `differing_keys` names only the items that diverged, so a batch of
+# ten with one routine answer is reviewable as that one item rather than as one
+# false boolean over the whole batch. The scalar `agreement` is all-keys-agree.
+# Rows are schema version 2; version 1 rows without those fields still read.
+#
 # The ledger is append-only and rotates monthly into state/jev-ledger/YYYY-MM
 # .jsonl. `consult` validates only the row it appends and counts the day's
 # budget from date-matching lines, so an interactive drain never pays for
@@ -239,7 +253,7 @@ resolve_use_config() { # <use>
 ledger_row_valid_filter='
   . as $row |
   type == "object" and
-  .schema_version == 1 and
+  (.schema_version == 1 or .schema_version == 2) and
   (.timestamp | type) == "string" and
   (.date | type) == "string" and
   (.consultation_id | type) == "string" and (.consultation_id | length) > 0 and
@@ -283,6 +297,13 @@ ledger_row_valid_filter='
   .existing_decision == .baseline_decision and
   (.baseline_rationale | type) == "string" and (.baseline_rationale | length) > 0 and
   ((.agreement == null) or ((.agreement | type) == "boolean")) and
+  ((.agreement_keys == null) or ((.agreement_keys | type) == "object" and
+    all(.agreement_keys[]; type == "boolean"))) and
+  ((.differing_keys == null) or ((.differing_keys | type) == "array" and
+    all(.differing_keys[]; type == "string"))) and
+  (if .agreement_keys == null then .differing_keys == null
+   else .differing_keys ==
+     ([$row.agreement_keys | to_entries[] | select(.value | not) | .key] | sort) end) and
   ($row | has("decision_after_jev")) and
   ($row | has("final_decision")) and
   ($row | has("eventual_outcome")) and
@@ -291,6 +312,7 @@ ledger_row_valid_filter='
    ((.label_source | type) == "string" and (.label_source | length) > 0)) and
   (if .eventual_outcome == null then .label_source == null else true end) and
   .agreement == (if .jev_verdict == null or .baseline_decision == null then null
+                 elif .agreement_keys != null then all(.agreement_keys[]; .)
                  else .jev_verdict == .baseline_decision end) and
   (if .available then
      .unavailable_reason == null and .jev_verdict != null and
@@ -543,12 +565,13 @@ record_unavailable_attempt() { # <use> <subject> <reason> <baseline-json> <basel
     --argjson baseline "$baseline" --argjson latency "$latency" --argjson cost "$cost" \
     --argjson estimate "$estimate" --argjson bytes "$bytes" --argjson truncated "$truncated" \
     --arg response_model "$RESPONSE_MODEL" '
-    {schema_version:1,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
+    {schema_version:2,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
      mode:$mode,configured_mode:$configured_mode,network_attempted:true,available:false,
      unavailable_reason:$reason,input_tokens:$input_tokens,input_tokens_source:"estimate",
      jev_verdict:null,jev_rationale:("Jev was unavailable: " + $reason),jev_probabilities:{},
      confidence:null,confidence_floor:$floor,existing_decision:$baseline,
      baseline_decision:$baseline,baseline_rationale:$baseline_rationale,agreement:null,
+     agreement_keys:null,differing_keys:null,
      decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,label_source:null,corrected:false,latency_ms:$latency,
      cost_usd:$cost,estimated_big_model_tokens:$estimate,request_bytes:$bytes,used_jev:false,
      truncated:$truncated,jev_flagged:[],jev_confidences:{},used_jev_keys:{},
@@ -635,7 +658,11 @@ cmd_request_budget() {
 # group; `ledger.context` names a shared container whose entries are pulled in
 # by reference, so a page ten questions cite travels once per part that cites it
 # instead of ten times. Strategies with no per-question state, such as the
-# commit lint, yield null and are never split.
+# commit lint, yield null and are never split. Whatever is left - state that is
+# neither group-owned nor reachable through `ledger.context` - is copied
+# verbatim into every part, so the plan is abandoned when that copy alone does
+# not fit the per-call budget: splitting an oversized shared report across its
+# criteria would send the same truncated prefix N times for N times the spend.
 # shellcheck disable=SC2016 # jq program; dollar names belong to jq.
 split_plan_filter='
   def gkey: sub("__.*$"; "");
@@ -649,45 +676,60 @@ split_plan_filter='
   | ([$vq[] | gkey] | unique) as $gkeys
   | ([$state | to_entries[] | select((.value | type) == "object")]) as $objects
   | ([$gkeys[] as $g | {g:$g, containers:[$objects[] | select(.value | has($g)) | .key]}]) as $groups
-  | if ($groups | length) < 2 or any($groups[]; (.containers | length) == 0) then null
+  | ([$groups[].containers] | add // [] | unique) as $owned
+  | (($state | keys) - $owned) as $shared
+  | ([$shared[] as $k
+      | select((($ctx | has($k)) | not) or (($state[$k] | type) != "object")) | $k]) as $copied
+  | ((reduce $copied[] as $k ({}; . + {($k): $state[$k]})) | tojson | utf8bytelength) as $copied_bytes
+  | if ($groups | length) < 2 or any($groups[]; (.containers | length) == 0)
+       or $copied_bytes >= $budget then null
     else
-      ($groups | map(.containers) | add | unique) as $owned
-      | (($state | keys) - $owned) as $shared
-      | [ $groups[] as $grp
-          | ($grp.g) as $g
-          | ([$vq[] | select(gkey == $g)]) as $part_vq
-          | (reduce $grp.containers[] as $c ({}; . + {($c): {($g): $state[$c][$g]}})) as $own
-          | (reduce $shared[] as $k ({};
-               if ($ctx | has($k)) and (($state[$k] | type) == "object") then
-                 ([$grp.containers[] as $c | $state[$c][$g]
-                    | if type == "object" then .[$ctx[$k]] else empty end]
-                  | map(select(type == "string")) | unique) as $names
-                 | . + {($k): (reduce $names[] as $n ({};
-                     if $state[$k] | has($n) then . + {($n): $state[$k][$n]} else . end))}
-               else . + {($k): $state[$k]} end)) as $context
-          | {request:{state:($context + $own),
-                      questions:($rq | with_entries(select(.key | gkey == $g)))},
-             ledger:($env.ledger
-               | .baseline_decision = (if ($env.ledger.baseline_decision | type) == "object"
-                   then ($env.ledger.baseline_decision
-                         | with_entries(select(.key as $k | $part_vq | index($k) != null)))
-                   else $env.ledger.baseline_decision end)
-               | .estimated_big_model_tokens =
-                   (($env.ledger.estimated_big_model_tokens * ($part_vq | length) / ($vq | length)) | round)
-               | .verdict = ($v | .questions = $part_vq))}
-        ]
+      [ $groups[] as $grp
+        | ($grp.g) as $g
+        | ([$vq[] | select(gkey == $g)]) as $part_vq
+        | (reduce $grp.containers[] as $c ({}; . + {($c): {($g): $state[$c][$g]}})) as $own
+        | (reduce $shared[] as $k ({};
+             if ($ctx | has($k)) and (($state[$k] | type) == "object") then
+               ([$grp.containers[] as $c | $state[$c][$g]
+                  | if type == "object" then .[$ctx[$k]] else empty end]
+                | map(select(type == "string")) | unique) as $names
+               | . + {($k): (reduce $names[] as $n ({};
+                   if $state[$k] | has($n) then . + {($n): $state[$k][$n]} else . end))}
+             else . + {($k): $state[$k]} end)) as $context
+        | {request:{state:($context + $own),
+                    questions:($rq | with_entries(select(.key | gkey == $g)))},
+           ledger:($env.ledger
+             | .baseline_decision = (if ($env.ledger.baseline_decision | type) == "object"
+                 then ($env.ledger.baseline_decision
+                       | with_entries(select(.key as $k | $part_vq | index($k) != null)))
+                 else $env.ledger.baseline_decision end)
+             | .estimated_big_model_tokens =
+                 (($env.ledger.estimated_big_model_tokens * ($part_vq | length) / ($vq | length)) | round)
+             | .verdict = ($v | .questions = $part_vq))}
+      ]
     end
 '
+
+# Today's call count and spend, overall and for one use, from the date-matching
+# lines only. Prints an empty string when the scan could not be made.
+day_usage_counts() { # <use> <day>
+  grep -F "\"date\":\"$2\"" "$LEDGER" 2>/dev/null | jq -s -r --arg use "$1" '
+    [(map(select(.network_attempted)) | length),
+     (map(.cost_usd) | add // 0),
+     (map(select(.use == $use and .network_attempted)) | length),
+     (map(select(.use == $use) | .cost_usd) | add // 0)] | @tsv' 2>/dev/null
+}
 
 request_body_bytes() { # <envelope-file>
   jq -c --arg model "$MODEL" '.request + {model:$model}' "$1" 2>/dev/null | LC_ALL=C wc -c | tr -d ' '
 }
 
 # Rewrites <envelope-file> into one envelope per question group. Prints the part
-# count, or returns 1 when this envelope has no per-question state to split on.
-plan_split() { # <envelope-file> <parts-dir>
-  local file=$1 dir=$2 count=0 line
-  jq -c "$split_plan_filter" "$file" > "$dir/plan.json" 2>/dev/null || return 1
+# count, or returns 1 when this envelope has no per-question state to split on
+# or when splitting it would only duplicate shared state across the parts.
+plan_split() { # <envelope-file> <parts-dir> <budget-bytes>
+  local file=$1 dir=$2 budget=$3 count=0 line
+  jq -c --argjson budget "$budget" "$split_plan_filter" "$file" > "$dir/plan.json" 2>/dev/null || return 1
   [ -s "$dir/plan.json" ] || return 1
   case "$(jq -r 'if type == "array" then length else 0 end' "$dir/plan.json" 2>/dev/null)" in
     ''|0|1) return 1 ;;
@@ -699,6 +741,42 @@ plan_split() { # <envelope-file> <parts-dir>
   done < <(jq -c '.[]' "$dir/plan.json" 2>/dev/null)
   [ "$count" -ge 2 ] || return 1
   printf '%s\n' "$count"
+}
+
+# An N-part split costs N calls and N request bodies, so a split that would run
+# into a call or spend cap partway through leaves the later questions
+# unanswered for the rest of the day. Projected here against today's counters so
+# a split that cannot complete is never started; consult_one still re-checks
+# every cap under the ledger lock before each request, and one shrunk request
+# remains the fallback.
+split_affordable() { # <use> <parts-dir> <count> <budget-bytes>
+  local use=$1 dir=$2 count=$3 budget=$4 index=0 part bytes tokens total=0
+  local today counts calls spend use_calls use_spend projected
+  while [ "$index" -lt "$count" ]; do
+    part="$dir/part-$(printf '%04d' "$index").json"
+    index=$((index + 1))
+    [ -f "$part" ] || continue
+    bytes=$(request_body_bytes "$part")
+    case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$bytes" -le "$budget" ] || bytes=$budget
+    tokens=$(( (bytes + BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN ))
+    total=$((total + tokens))
+  done
+  today=$(date -u +%Y-%m-%d)
+  counts=$(day_usage_counts "$use" "$today") || counts=
+  [ -n "$counts" ] || counts=$'0\t0\t0\t0'
+  IFS=$'\t' read -r calls spend use_calls use_spend <<<"$counts"
+  case "${calls:-x}" in ''|*[!0-9]*) return 1 ;; esac
+  case "${use_calls:-x}" in ''|*[!0-9]*) return 1 ;; esac
+  [ $((calls + count)) -le "$DAILY_CALL_CAP" ] || return 1
+  [ $((use_calls + count)) -le "$USE_CALL_CAP" ] || return 1
+  projected=$(jq -cn --argjson tokens "$total" --argjson rate "$PRICE_PER_MILLION" \
+    '$tokens * $rate / 1000000' 2>/dev/null) || return 1
+  jq -en --argjson spend "${spend:-0}" --argjson cost "$projected" --argjson cap "$DAILY_SPEND_CAP" \
+    '($spend + $cost) <= $cap' >/dev/null 2>&1 || return 1
+  jq -en --argjson spend "${use_spend:-0}" --argjson cost "$projected" --argjson cap "$USE_SPEND_CAP" \
+    '($spend + $cost) <= $cap' >/dev/null 2>&1 || return 1
+  return 0
 }
 
 # Shortens the longest bounded string in a part's state until the part fits the
@@ -749,12 +827,13 @@ record_refusal_row() { # <use> <envelope-file> <reason> <bytes>
     --arg baseline_rationale "$baseline_rationale" --argjson floor "$CONFIDENCE_FLOOR" \
     --argjson baseline "$baseline" --argjson estimate "$estimate" \
     --argjson bytes "$bytes" --argjson truncated "$truncated" '
-    {schema_version:1,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
+    {schema_version:2,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
      mode:$mode,configured_mode:$configured_mode,network_attempted:false,available:false,
      unavailable_reason:$reason,input_tokens:0,input_tokens_source:"estimate",
      jev_verdict:null,jev_rationale:("Jev was not consulted: " + $reason),jev_probabilities:{},
      confidence:null,confidence_floor:$floor,existing_decision:$baseline,
      baseline_decision:$baseline,baseline_rationale:$baseline_rationale,agreement:null,
+     agreement_keys:null,differing_keys:null,
      decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,label_source:null,corrected:false,
      latency_ms:0,cost_usd:0,estimated_big_model_tokens:$estimate,request_bytes:$bytes,
      used_jev:false,truncated:$truncated,jev_flagged:[],jev_confidences:{},used_jev_keys:{},
@@ -773,6 +852,7 @@ consult_one() { # <use> <envelope-file>
   local request_json request_bytes request_tokens derive row result now id
   local used_jev=false decision_after source=reported probabilities agreement reason=''
   local confidences='{}' qualified='{}' used_keys='{}' request_api=''
+  local agreement_keys=null differing_keys=null
   subject=$(jq -r '.ledger.subject' "$file")
   fallback=$(jq -c '.ledger.baseline_decision' "$file")
   baseline_rationale=$(jq -r '.ledger.baseline_rationale' "$file")
@@ -798,11 +878,7 @@ consult_one() { # <use> <envelope-file>
   fi
   # Only today's rows can consume today's budget, so the scan is bounded by one
   # day of evidence rather than by the whole retained ledger.
-  counts=$(grep -F "\"date\":\"$today\"" "$LEDGER" 2>/dev/null | jq -s -r --arg use "$use" '
-    [(map(select(.network_attempted)) | length),
-     (map(.cost_usd) | add // 0),
-     (map(select(.use == $use and .network_attempted)) | length),
-     (map(select(.use == $use) | .cost_usd) | add // 0)] | @tsv' 2>/dev/null) || counts=
+  counts=$(day_usage_counts "$use" "$today") || counts=
   if [ -n "$counts" ]; then
     IFS=$'\t' read -r calls spend use_calls use_spend <<<"$counts"
   else
@@ -919,8 +995,22 @@ consult_one() { # <use> <envelope-file>
       if (.value | has("noul")) then {yes:.value.noul,no:(1 - .value.noul)}
       else .value.probabilities end)
   ' "$RESPONSE_FILE") || probabilities='{}'
-  agreement=$(jq -cn --argjson jev "$(jq -c '.verdict' <<<"$derive")" --argjson baseline "$fallback" '
-    if $jev == null or $baseline == null then null else $jev == $baseline end
+  # A per-key verdict disagrees per key. Collapsing a batch of ten to one
+  # boolean makes the normal case - some items routine - look like a total
+  # divergence and hides which item actually differed, so the row carries both.
+  agreement_keys=$(jq -cn --argjson jev "$(jq -c '.verdict' <<<"$derive")" --argjson baseline "$fallback" '
+    if ($jev | type) == "object" and ($baseline | type) == "object"
+    then ($jev | with_entries(.value = (.value == $baseline[.key]))) else null end
+  ') || agreement_keys=null
+  differing_keys=$(jq -cn --argjson keys "$agreement_keys" '
+    if $keys == null then null
+    else ([$keys | to_entries[] | select(.value | not) | .key] | sort) end
+  ') || differing_keys=null
+  agreement=$(jq -cn --argjson jev "$(jq -c '.verdict' <<<"$derive")" --argjson baseline "$fallback" \
+    --argjson keys "$agreement_keys" '
+    if $jev == null or $baseline == null then null
+    elif $keys != null then all($keys[]; .)
+    else $jev == $baseline end
   ')
   # A per-key strategy is gated per key: one unconfident answer in a batch of ten
   # must not discard the nine confident ones, and the row's scalar confidence is
@@ -963,19 +1053,21 @@ consult_one() { # <use> <envelope-file>
     --argjson floor "$CONFIDENCE_FLOOR" --argjson verdict "$(jq -c '.verdict' <<<"$derive")" \
     --argjson confidence "$(jq -c '.confidence' <<<"$derive")" --argjson baseline "$fallback" \
     --argjson agreement "$agreement" --argjson probabilities "$probabilities" \
+    --argjson agreement_keys "$agreement_keys" --argjson differing_keys "$differing_keys" \
     --argjson after "$decision_after" --argjson latency "$latency" \
     --argjson cost "$cost" --argjson estimate "$estimate" --argjson bytes "$request_bytes" \
     --argjson truncated "$truncated" --arg response_model "$RESPONSE_MODEL" \
     --argjson flagged "$(jq -c '.flagged // []' <<<"$derive")" \
     --argjson confidences "$confidences" --argjson used_keys "$used_keys" \
     --argjson used "$used_jev" --argjson answers "$(jq -c '.answers' "$RESPONSE_FILE")" '
-    {schema_version:1,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
+    {schema_version:2,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
      mode:$mode,configured_mode:$configured_mode,network_attempted:true,available:true,
      unavailable_reason:null,input_tokens:$input_tokens,input_tokens_source:$source,
      jev_verdict:$verdict,jev_rationale:$jev_rationale,jev_probabilities:$probabilities,
      confidence:$confidence,confidence_floor:$floor,
      existing_decision:$baseline,baseline_decision:$baseline,baseline_rationale:$baseline_rationale,
-     agreement:$agreement,decision_after_jev:$after,final_decision:null,eventual_outcome:null,label_source:null,
+     agreement:$agreement,agreement_keys:$agreement_keys,differing_keys:$differing_keys,
+     decision_after_jev:$after,final_decision:null,eventual_outcome:null,label_source:null,
      corrected:false,latency_ms:$latency,cost_usd:$cost,
      estimated_big_model_tokens:$estimate,request_bytes:$bytes,used_jev:$used,
      truncated:$truncated,jev_flagged:$flagged,jev_confidences:$confidences,used_jev_keys:$used_keys,
@@ -1003,14 +1095,16 @@ consult_one() { # <use> <envelope-file>
     --arg jev_rationale "$(jq -r '.rationale' <<<"$derive")" --argjson probabilities "$probabilities" \
     --argjson truncated "$truncated" --argjson confidences "$confidences" \
     --argjson qualified "$qualified" --argjson used_keys "$used_keys" \
-    --argjson agreement "$agreement" --argjson used "$used_jev" '
+    --argjson agreement "$agreement" --argjson used "$used_jev" \
+    --argjson agreement_keys "$agreement_keys" --argjson differing_keys "$differing_keys" '
     {status:"available",consultation_id:$id,use:$use,mode:$mode,configured_mode:$configured_mode,
      model:$model,confidence_floor:$floor,verdict:$derive.verdict,confidence:$derive.confidence,
      answers:$answers,input_tokens:$input_tokens,latency_ms:$latency,cost_usd:$cost,
      jev_rationale:$jev_rationale,jev_probabilities:$probabilities,truncated:$truncated,
      flagged:($derive.flagged // []),
      confidences:$confidences,qualified:$qualified,used_jev_keys:$used_keys,
-     fallback_decision:$fallback,baseline_rationale:$baseline_rationale,agreement:$agreement,used_jev:$used}
+     fallback_decision:$fallback,baseline_rationale:$baseline_rationale,agreement:$agreement,
+     agreement_keys:$agreement_keys,differing_keys:$differing_keys,used_jev:$used}
      + (if $derive.risks then {risks:$derive.risks} else {} end)') || {
     emit_unavailable "$use" result-render-failed "$fallback"
     return 0
@@ -1046,6 +1140,11 @@ merge_part_results() { # <use> <envelope-file> <results-jsonl>
            elif $v.strategy == "all_noul" then
              (if all($ok[]; .verdict == $v.positive_label) then $v.positive_label else $v.negative_label end)
            else $ok[0].verdict end) as $verdict
+        | (if ($verdict | type) == "object" and ($led.baseline_decision | type) == "object"
+           then ($verdict | with_entries(.value = (.value == $led.baseline_decision[.key])))
+           else null end) as $agreement_keys
+        | (if $agreement_keys == null then null
+           else ([$agreement_keys | to_entries[] | select(.value | not) | .key] | sort) end) as $differing_keys
         | {status:"available",
            consultation_id:$ok[0].consultation_id,
            consultation_ids:[$ok[].consultation_id],
@@ -1063,7 +1162,9 @@ merge_part_results() { # <use> <envelope-file> <results-jsonl>
            flagged:($ok | map(.flagged // []) | add | unique),
            confidences:$confidences, qualified:$qualified, used_jev_keys:$used_keys,
            fallback_decision:$led.baseline_decision, baseline_rationale:$led.baseline_rationale,
+           agreement_keys:$agreement_keys, differing_keys:$differing_keys,
            agreement:(if $verdict == null or $led.baseline_decision == null then null
+                      elif $agreement_keys != null then all($agreement_keys[]; .)
                       else $verdict == $led.baseline_decision end),
            used_jev:(any($ok[]; .used_jev)),
            parts:($parts | length), parts_unavailable:$refused}
@@ -1112,7 +1213,11 @@ cmd_consult() {
   case "$bytes" in ''|*[!0-9]*) bytes=$((budget + 1)) ;; esac
   parts=0
   if [ "$bytes" -gt "$budget" ]; then
-    parts=$(plan_split "$REQUEST_FILE" "$PARTS_DIR") || parts=0
+    parts=$(plan_split "$REQUEST_FILE" "$PARTS_DIR" "$budget") || parts=0
+    case "$parts" in ''|*[!0-9]*) parts=0 ;; esac
+    if [ "$parts" -ge 2 ] && ! split_affordable "$use" "$PARTS_DIR" "$parts" "$budget"; then
+      parts=0
+    fi
   fi
   case "$parts" in ''|*[!0-9]*) parts=0 ;; esac
   if [ "$parts" -lt 2 ]; then

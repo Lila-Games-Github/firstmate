@@ -580,15 +580,18 @@ A response is accepted when its model id is in the `jev-` family, so another bui
 It copies an environment-provided key into a non-exported private variable, unsets the original before invoking child processes, and passes the key to `curl` through a file descriptor rather than argv.
 The key and full request are never written to the ledger.
 
-Every network attempt, and every budget refusal, appends one version 1 JSON object to `state/jev-ledger.jsonl` under a bounded lock.
+Every network attempt, and every budget refusal, appends one version 2 JSON object to `state/jev-ledger.jsonl` under a bounded lock.
+Version 1 rows written before the per-item agreement fields existed remain valid and are read by `bin/fm-jev-report.sh` and `bin/fm-jev.sh finalize` exactly as before, so no ledger must be rewritten or deleted for the bump.
 The ledger rotates monthly: when the running file's first row predates the current month, it is appended to `state/jev-ledger/YYYY-MM.jsonl` and the running file starts empty. `bin/fm-jev-report.sh` and `bin/fm-jev.sh finalize` read the running file and every archive, so rotation hides no evidence and no archive must ever be deleted. `consult` validates only the row it is about to append and counts the day's budget from date-matching lines, so an interactive drain never pays for retained history.
 The identity fields are `timestamp`, `date`, `consultation_id`, `use`, and `subject`.
 The configuration fields are `mode`, `configured_mode`, and `confidence_floor`.
 The service fields are `network_attempted`, `available`, `unavailable_reason`, `response_model`, `input_tokens`, `input_tokens_source`, `latency_ms`, `cost_usd`, `request_bytes`, `truncated`, `jev_answers`, and `jev_probabilities`.
 `network_attempted` is false exactly on the budget-refusal rows, which carry `available: false`, a naming `unavailable_reason`, and zero `input_tokens`, `latency_ms` and `cost_usd`.
 `truncated` is true when the adapter had to shorten its bounded material to fit the per-call budget, and `jev_flagged` names the questions that drove a negative or risk verdict.
-The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `decision_after_jev`, `eventual_outcome`, `label_source`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
+The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `agreement_keys`, `differing_keys`, `decision_after_jev`, `eventual_outcome`, `label_source`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
 A batched per-item consultation adds `jev_confidences` and `used_jev_keys`, one entry per asked item; `used_jev` is then true when at least one item qualified, and `bin/fm-jev-report.sh` credits such a row the share of its `estimated_big_model_tokens` whose own answers qualified.
+Such a row also carries `agreement_keys`, one boolean per asked item, and `differing_keys`, the sorted items whose Jev answer differs from the baseline; the scalar `agreement` is then true exactly when every item agrees, so one routine answer in a batch of fifty is recorded as that one item rather than as a whole-batch divergence.
+Both are null on a scalar verdict. `bin/fm-jev-report.sh` lists a batched disagreement as those items only - each with its Jev choice, its returned probabilities, and the baseline choice - and derives them the same way for a version 1 row that predates the fields.
 `existing_decision` and `final_decision` are compatibility aliases for `baseline_decision` and `eventual_outcome`.
 Because Jev returns typed answers rather than prose reasoning, `jev_rationale` is a deterministic explanation of the returned probabilities and configured verdict aggregation, not hidden model reasoning.
 An unavailable path before a network attempt writes no row, while a failed attempt writes a row with the reason and existing decision.
