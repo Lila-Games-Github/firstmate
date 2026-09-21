@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "task-a",
+  "generated_at": "2026-09-21T17:14:15Z",
+  "consultation_id": "20260921T17:14:15Z-1853380-19163",
+  "mode": "active",
+  "model": "jev-1.13.0",
+  "verdict": "accepted",
+  "confidence": 0.95,
+  "confidence_floor": 0.8,
+  "truncated": false,
+  "criteria": [
+    {
+      "id": "criterion_1",
+      "text": "The report names the changed file.",
+      "probability": 0.95,
+      "truncated": false,
+      "judged_characters": 34,
+      "met": true
+    },
+    {
+      "id": "criterion_2",
+      "text": "The report includes a passing test command.",
+      "probability": 0.95,
+      "truncated": false,
+      "judged_characters": 43,
+      "met": true
+    }
+  ],
+  "unmet_criteria": [],
+  "unjudged_criteria": [],
+  "advisory": null
+}
