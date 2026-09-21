@@ -63,13 +63,13 @@ stage_jev_wake_rows() { # <deduped-raw-rows>
 $rows
 EOF
 }
+# One drain is one consultation: every staged item goes out in a single batched
+# request, so a drain that presented twenty lines cannot spend twenty of the
+# day's calls or serialize twenty five-second timeouts on the supervision path.
 run_jev_triage_observers() {
-  local kind item
   [ -n "$DRAIN_JEV_TMP" ] && [ -s "$DRAIN_JEV_TMP" ] || return 0
-  while IFS=$(printf '\t') read -r kind item; do
-    [ -n "$item" ] || continue
-    printf '%s\n' "$item" | "$SCRIPT_DIR/fm-jev-triage.sh" --kind "$kind" >/dev/null 2>&1 || true
-  done < "$DRAIN_JEV_TMP"
+  "$SCRIPT_DIR/fm-jev-triage.sh" --batch < "$DRAIN_JEV_TMP" >/dev/null 2>&1 || true
+  : > "$DRAIN_JEV_TMP" 2>/dev/null || true
 }
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --

@@ -97,6 +97,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
+  <id>/acceptance.json, <id>/commit-lint.json  optional Jev observer findings, including the advisory that never goes to a status file; written by bin/fm-jev-accept-check.sh and bin/fm-jev-commit-lint.sh (docs/jev.md)
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
   jev-ledger.jsonl   optional append-only Jev consultation and outcome ledger; bin/fm-jev.sh owns its schema and docs/jev.md owns its operator workflow
@@ -391,7 +392,7 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 
 ### PR ready, landing, and teardown
 
-Unless the corresponding Jev use is explicitly off, run `bin/fm-jev-accept-check.sh <id>` before judging a worker's terminal report and run `bin/fm-jev-commit-lint.sh <worktree>` before landing; both are advisory observers and [`docs/jev.md`](docs/jev.md) owns their workflow.
+Unless the corresponding Jev use is explicitly off, run `bin/fm-jev-accept-check.sh <id>` before judging a worker's terminal report and run `bin/fm-jev-commit-lint.sh <worktree>` before landing; both are advisory observers that write their findings to `data/<id>/acceptance.json` and `data/<id>/commit-lint.json`, never to the task's status file, and [`docs/jev.md`](docs/jev.md) owns their workflow.
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll, and a non-zero exit after recording means `pr=` remains recorded but the merge poll was not armed.
 Tell the captain the PR's full `https://...` URL copied from the worker's ready line or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.

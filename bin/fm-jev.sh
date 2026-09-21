@@ -3,6 +3,8 @@
 #
 # Usage:
 #   fm-jev.sh mode <accept-check|triage|commit-lint|open-questions>
+#   fm-jev.sh status <accept-check|triage|commit-lint|open-questions>
+#   fm-jev.sh request-budget <accept-check|triage|commit-lint|open-questions>
 #   fm-jev.sh consult <accept-check|triage|commit-lint|open-questions> < envelope.json
 #   fm-jev.sh finalize --use <use> --subject <subject> --decision-json <json>
 #   fm-jev.sh validate-ledger [ledger.jsonl]
@@ -10,6 +12,11 @@
 # `mode` prints the effective mode only: off, shadow, or active. The built-in
 # configuration defaults every use to active; config/jev.json can select shadow
 # or off per use or engage the global kill switch.
+#
+# `status` prints one tab-separated line - effective mode, machine reason,
+# `present` or `absent` for the key, and a human explanation - so an explicitly
+# invoked adapter can name why it is doing nothing. `request-budget` prints the
+# largest request body in bytes this use may send, or 0 when it is unavailable.
 #
 # `consult` reads one JSON envelope from stdin. Its `request` member is the
 # exact state/questions payload; this client pins the model before sending it.
@@ -25,8 +32,12 @@
 # later human or deterministic ground truth without adding a second row.
 #
 # Configuration is the effective home's gitignored config/jev.json. The schema
-# and active built-in defaults live in docs/configuration.md. The ledger is
+# and active built-in defaults live in docs/configuration.md. Each use owns a
+# share of the daily budget so no use can starve another. The ledger is
 # state/jev-ledger.jsonl. docs/jev.md owns the operator workflow and metrics.
+#
+# Tokens are counted at four request bytes per input token here and in every
+# adapter estimate, so one budget arithmetic applies end to end.
 #
 # Secret handling: TYPESAFE_API_KEY is copied into one non-exported shell
 # variable, removed from the environment, and passed to curl through fd 3.
@@ -45,12 +56,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG_FILE="$CONFIG_DIR/jev.json"
 LEDGER="${FM_JEV_LEDGER_OVERRIDE:-$STATE/jev-ledger.jsonl}"
 MODEL=jev-1.13.0
+MODEL_FAMILY=jev-
 ENDPOINT=https://api.typesafe.ai/v1/systemone
 PRICE_PER_MILLION=0.042
+BYTES_PER_TOKEN=4
 HTTP_TIMEOUT=5
 LOCK_TIMEOUT=5
 KNOWN_USES='["accept-check","triage","commit-lint","open-questions"]'
-DEFAULT_CONFIG_JSON='{"version":1,"kill_switch":false,"per_call_token_cap":32000,"daily":{"call_cap":100,"spend_usd_cap":0.05},"uses":{"accept-check":{"mode":"active","confidence_floor":0.8},"triage":{"mode":"active","confidence_floor":0.65},"commit-lint":{"mode":"active","confidence_floor":0.8},"open-questions":{"mode":"active","confidence_floor":0.65}}}'
+DEFAULT_CONFIG_JSON='{"version":1,"kill_switch":false,"per_call_token_cap":32000,"daily":{"call_cap":100,"spend_usd_cap":0.05},"uses":{"accept-check":{"mode":"active","confidence_floor":0.8,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"triage":{"mode":"active","confidence_floor":0.65,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"commit-lint":{"mode":"active","confidence_floor":0.8,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"open-questions":{"mode":"active","confidence_floor":0.65,"daily":{"call_cap":25,"spend_usd_cap":0.0125}}}}'
 
 CONFIG_STATUS=absent
 CONFIG_REASON=config-absent
@@ -61,6 +74,9 @@ CONFIDENCE_FLOOR=1
 PER_CALL_TOKEN_CAP=0
 DAILY_CALL_CAP=0
 DAILY_SPEND_CAP=0
+USE_CALL_CAP=0
+USE_SPEND_CAP=0
+RESPONSE_MODEL=
 
 REQUEST_FILE=
 RESPONSE_FILE=
@@ -141,6 +157,9 @@ load_config() {
     elif any(.uses[]; type != "object") then "each use must be an object"
     elif any(.uses[]; . as $use | ($use.mode | type) != "string" or (["off","shadow","active"] | index($use.mode) | not)) then "each use mode must be off, shadow, or active"
     elif any(.uses[]; (.confidence_floor | type) != "number" or .confidence_floor < 0 or .confidence_floor > 1) then "each confidence_floor must be a number from 0 through 1"
+    elif any(.uses[]; has("daily") and (.daily | type) != "object") then "each use daily must be an object"
+    elif any(.uses[]; has("daily") and ((.daily.call_cap | integer | not) or .daily.call_cap < 0)) then "each use daily.call_cap must be a nonnegative integer"
+    elif any(.uses[]; has("daily") and ((.daily.spend_usd_cap | type) != "number" or .daily.spend_usd_cap < 0)) then "each use daily.spend_usd_cap must be a nonnegative number"
     else empty end
   ' <<<"$CONFIG_JSON" 2>/dev/null) || err='config is not valid JSON'
   if [ -n "$err" ]; then
@@ -152,6 +171,9 @@ load_config() {
   CONFIG_REASON=
 }
 
+# A use that names no daily budget of its own receives an equal share of the
+# global budget, so the shares of the four uses always sum to the global cap and
+# a high-volume use can never consume another use's budget.
 resolve_use_config() { # <use>
   local use=$1 kill
   CONFIGURED_MODE=off
@@ -160,6 +182,8 @@ resolve_use_config() { # <use>
   PER_CALL_TOKEN_CAP=0
   DAILY_CALL_CAP=0
   DAILY_SPEND_CAP=0
+  USE_CALL_CAP=0
+  USE_SPEND_CAP=0
   load_config
   [ "$CONFIG_STATUS" = ok ] || return 0
   kill=$(jq -r '.kill_switch' <<<"$CONFIG_JSON")
@@ -168,6 +192,10 @@ resolve_use_config() { # <use>
   PER_CALL_TOKEN_CAP=$(jq -r '.per_call_token_cap' <<<"$CONFIG_JSON")
   DAILY_CALL_CAP=$(jq -r '.daily.call_cap' <<<"$CONFIG_JSON")
   DAILY_SPEND_CAP=$(jq -r '.daily.spend_usd_cap' <<<"$CONFIG_JSON")
+  USE_CALL_CAP=$(jq -r --argjson known "$KNOWN_USES" --arg use "$use" \
+    '.uses[$use].daily.call_cap // ((.daily.call_cap / ($known | length)) | floor)' <<<"$CONFIG_JSON")
+  USE_SPEND_CAP=$(jq -r --argjson known "$KNOWN_USES" --arg use "$use" \
+    '.uses[$use].daily.spend_usd_cap // (.daily.spend_usd_cap / ($known | length))' <<<"$CONFIG_JSON")
   if [ "$kill" = true ]; then
     CONFIG_REASON='kill-switch'
     return 0
@@ -198,6 +226,9 @@ ledger_row_valid_filter='
   (.cost_usd | type) == "number" and .cost_usd >= 0 and
   (.estimated_big_model_tokens | type) == "number" and .estimated_big_model_tokens >= 0 and
   (.request_bytes | type) == "number" and .request_bytes >= 0 and
+  ((.response_model == null) or ((.response_model | type) == "string")) and
+  ((.truncated == null) or ((.truncated | type) == "boolean")) and
+  ((.jev_flagged == null) or ((.jev_flagged | type) == "array")) and
   (.used_jev | type) == "boolean" and
   (.corrected | type) == "boolean" and
   (.jev_answers | type) == "object" and
@@ -286,6 +317,7 @@ envelope_valid() {
   (.ledger.subject | type) == "string" and
   (.ledger | has("baseline_decision")) and
   (.ledger.baseline_rationale | type) == "string" and (.ledger.baseline_rationale | length) > 0 and
+    ((.ledger | has("truncated") | not) or ((.ledger.truncated | type) == "boolean")) and
     (.ledger.estimated_big_model_tokens | type) == "number" and .ledger.estimated_big_model_tokens >= 0 and
     (.ledger.verdict | type) == "object" and
     (.ledger.verdict.strategy | type) == "string" and
@@ -310,8 +342,11 @@ envelope_valid() {
   ' "$REQUEST_FILE" >/dev/null 2>&1
 }
 
+# Any model id in the pinned family answers; a well-formed answer from another
+# model is a mismatch the caller records with the returned id, not a generic
+# malformed response.
 response_valid() { # <api-request-file> <response-file>
-  jq -e --arg model "$MODEL" --slurpfile request "$1" '
+  jq -e --arg model "$MODEL_FAMILY" --slurpfile request "$1" '
     . as $root |
     ($request[0].questions) as $questions |
     def answer_ok($question; $answer):
@@ -332,7 +367,7 @@ response_valid() { # <api-request-file> <response-file>
         (($answer.probabilities | add) as $sum | $sum >= 0.99 and $sum <= 1.01) and
         $answer.score >= 0 and $answer.score <= (($question.criteria | length) - 1)
       end;
-    type == "object" and .model == $model and
+    type == "object" and (.model | type) == "string" and (.model | startswith($model)) and
     (.answers | type) == "object" and ((.answers | keys | sort) == ($questions | keys | sort)) and
     all($questions | to_entries[]; . as $entry | answer_ok($entry.value; $root.answers[$entry.key])) and
     ((has("usage") | not) or
@@ -340,6 +375,14 @@ response_valid() { # <api-request-file> <response-file>
        (.usage.input_tokens | type) == "number" and .usage.input_tokens >= 0 and
        (.usage.output_tokens | type) == "number" and .usage.output_tokens >= 0))
   ' "$2" >/dev/null 2>&1
+}
+
+# The model id the service returned, reduced to a bounded identifier-safe token
+# so an unexpected value is still safe to record in the ledger and the report.
+response_model_id() { # <response-file>
+  local id
+  id=$(jq -r 'if type == "object" and (.model | type) == "string" then .model else empty end' "$1" 2>/dev/null) || return 0
+  printf '%s' "$id" | LC_ALL=C tr -cd 'A-Za-z0-9._:/@-' | cut -c1-64
 }
 
 derive_verdict() { # <envelope-file> <response-file>
@@ -350,60 +393,65 @@ derive_verdict() { # <envelope-file> <response-file>
     if $v.strategy == "all_noul" then
       [$v.questions[] as $q | $answers[$q].noul] as $p |
       ($p | min) as $min |
+      [$v.questions[] | select((1 - $answers[.].noul) >= $floor)] as $flagged |
       if all($p[]; . >= $floor) then
-        {verdict:$v.positive_label, confidence:$min,
+        {verdict:$v.positive_label, confidence:$min, flagged:$flagged,
          rationale:"Every named Noul yes probability met the configured confidence floor."}
       else
-        {verdict:$v.negative_label, confidence:([$p[] | 1 - .] | max),
+        {verdict:$v.negative_label, confidence:([$p[] | 1 - .] | max), flagged:$flagged,
          rationale:"At least one named Noul yes probability missed the configured confidence floor."}
       end
     elif $v.strategy == "any_noul" then
       [$v.questions[] as $q | $answers[$q].noul] as $p |
       ($p | max) as $max |
+      [$v.questions[] | select($answers[.].noul >= $floor)] as $flagged |
       if any($p[]; . >= $floor) then
-        {verdict:$v.positive_label, confidence:$max,
+        {verdict:$v.positive_label, confidence:$max, flagged:$flagged,
          rationale:"At least one named Noul yes probability met the configured confidence floor."}
       else
-        {verdict:$v.negative_label, confidence:(1 - $max),
+        {verdict:$v.negative_label, confidence:(1 - $max), flagged:$flagged,
          rationale:"No named Noul yes probability met the configured confidence floor."}
       end
     elif $v.strategy == "choice" then
       ($answers[$v.question]) as $a |
-      {verdict:$a.choice, confidence:$a.confidence,
+      {verdict:$a.choice, confidence:$a.confidence, flagged:[],
        rationale:"The returned Choice winner is the Jev decision; confidence is the returned Choice confidence."}
     elif $v.strategy == "choices" then
       (reduce $v.questions[] as $q ({}; . + {($q):$answers[$q].choice})) as $out |
-      {verdict:$out, confidence:([$v.questions[] as $q | $answers[$q].confidence] | min),
+      {verdict:$out, confidence:([$v.questions[] as $q | $answers[$q].confidence] | min), flagged:[],
        rationale:"Each returned Choice winner is retained; aggregate confidence is the lowest returned Choice confidence."}
     elif $v.strategy == "risk_nouls" then
       [$v.checks[] as $check |
         {question:$check.question,
          risk_probability:(if $check.risk_when == "yes" then $answers[$check.question].noul else 1 - $answers[$check.question].noul end)}] as $risks |
       ([$risks[].risk_probability] | max) as $max |
+      [$risks[] | select(.risk_probability >= $floor) | .question] as $flagged |
       if any($risks[]; .risk_probability >= $floor) then
-        {verdict:$v.positive_label, confidence:$max, risks:$risks,
+        {verdict:$v.positive_label, confidence:$max, risks:$risks, flagged:$flagged,
          rationale:"At least one configured risk probability met the confidence floor."}
       else
-        {verdict:$v.negative_label, confidence:(1 - $max), risks:$risks,
+        {verdict:$v.negative_label, confidence:(1 - $max), risks:$risks, flagged:$flagged,
          rationale:"No configured risk probability met the confidence floor."}
       end
     else error("unsupported verdict strategy") end
   '
 }
 
-record_unavailable_attempt() { # <use> <subject> <reason> <baseline-json> <baseline-rationale> <estimate> <bytes> <latency>
-  local use=$1 subject=$2 reason=$3 baseline=$4 baseline_rationale=$5 estimate=$6 bytes=$7 latency=$8
+record_unavailable_attempt() { # <use> <subject> <reason> <baseline-json> <baseline-rationale> <estimate> <tokens> <latency> <bytes> <truncated>
+  local use=$1 subject=$2 reason=$3 baseline=$4 baseline_rationale=$5 estimate=$6 tokens=$7 latency=$8
+  local bytes=$9 truncated=${10}
   local now today id cost row
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   today=${now%%T*}
   id="${today//-/}T${now#*T}-$$-${RANDOM:-0}"
-  cost=$(jq -cn --argjson tokens "$bytes" --argjson rate "$PRICE_PER_MILLION" '$tokens * $rate / 1000000')
+  cost=$(jq -cn --argjson tokens "$tokens" --argjson rate "$PRICE_PER_MILLION" '$tokens * $rate / 1000000')
   row=$(jq -cn --arg now "$now" --arg today "$today" --arg id "$id" \
     --arg use "$use" --arg subject "$subject" --arg mode "$EFFECTIVE_MODE" \
     --arg configured_mode "$CONFIGURED_MODE" --arg reason "$reason" --arg baseline_rationale "$baseline_rationale" \
-    --argjson input_tokens "$bytes" --argjson floor "$CONFIDENCE_FLOOR" \
+    --argjson input_tokens "$tokens" --argjson floor "$CONFIDENCE_FLOOR" \
     --argjson baseline "$baseline" --argjson latency "$latency" --argjson cost "$cost" \
-    --argjson estimate "$estimate" --argjson bytes "$bytes" '
+    --argjson estimate "$estimate" --argjson bytes "$bytes" --argjson truncated "$truncated" \
+    --arg response_model "$RESPONSE_MODEL" '
     {schema_version:1,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
      mode:$mode,configured_mode:$configured_mode,network_attempted:true,available:false,
      unavailable_reason:$reason,input_tokens:$input_tokens,input_tokens_source:"estimate",
@@ -412,6 +460,8 @@ record_unavailable_attempt() { # <use> <subject> <reason> <baseline-json> <basel
      baseline_decision:$baseline,baseline_rationale:$baseline_rationale,agreement:null,
      decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,corrected:false,latency_ms:$latency,
      cost_usd:$cost,estimated_big_model_tokens:$estimate,request_bytes:$bytes,used_jev:false,
+     truncated:$truncated,jev_flagged:[],
+     response_model:(if $response_model == "" then null else $response_model end),
      jev_answers:{}}') || return 1
   append_ledger_row "$row" || return 1
   emit_unavailable "$use" "$reason" "$baseline"
@@ -424,11 +474,72 @@ cmd_mode() {
   printf '%s\n' "$EFFECTIVE_MODE"
 }
 
+# 0 when TYPESAFE_API_KEY resolves from the environment or the effective home's
+# .env. The value stays in a local and is never printed, returned, or logged.
+key_present() {
+  local key=${TYPESAFE_API_KEY:-}
+  if [ -z "$key" ]; then
+    # shellcheck source=bin/fm-env-lib.sh
+    . "$SCRIPT_DIR/fm-env-lib.sh"
+    key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+  fi
+  [ -n "$key" ]
+}
+
+cmd_status() {
+  local use=${1:-} reason='' keystate=absent explanation=''
+  if ! use_valid "$use"; then
+    printf 'off\tinvalid-use\tabsent\t%s is not a Jev use\n' "${use:-(none)}"
+    return 0
+  fi
+  resolve_use_config "$use"
+  key_present && keystate=present
+  if [ -z "$EFFECTIVE_MODE" ]; then
+    EFFECTIVE_MODE=off
+    reason=config-unresolved
+  fi
+  if [ -n "$reason" ]; then
+    :
+  elif [ "$CONFIG_STATUS" != ok ]; then
+    reason=$CONFIG_REASON
+  elif [ "$CONFIG_REASON" = kill-switch ]; then
+    reason='kill-switch'
+  elif [ "$EFFECTIVE_MODE" = off ]; then
+    reason=mode-off
+  elif [ "$keystate" = absent ]; then
+    reason=missing-key
+  fi
+  case "$reason" in
+    '') explanation="$use is $EFFECTIVE_MODE" ;;
+    kill-switch) explanation="$CONFIG_FILE sets kill_switch to true" ;;
+    mode-off) explanation="$CONFIG_FILE sets $use to off" ;;
+    missing-key) explanation="TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env" ;;
+    config-invalid) explanation="$CONFIG_FILE is not valid against the version 1 schema" ;;
+    config-unreadable) explanation="$CONFIG_FILE is not a readable regular file" ;;
+    jq-missing|config-unresolved) explanation='jq is not installed, so no configuration could be resolved' ;;
+    *) explanation="$use is unavailable: $reason" ;;
+  esac
+  printf '%s\t%s\t%s\t%s\n' "$EFFECTIVE_MODE" "${reason:-none}" "$keystate" "$explanation"
+}
+
+# The largest request body this use may send, in bytes, so an adapter can size
+# bounded material with the same arithmetic the preflight applies.
+cmd_request_budget() {
+  local use=${1:-}
+  use_valid "$use" || { printf '0\n'; return 0; }
+  resolve_use_config "$use"
+  if [ "$EFFECTIVE_MODE" = off ] || [ "$CONFIG_STATUS" != ok ]; then
+    printf '0\n'
+    return 0
+  fi
+  printf '%s\n' "$((PER_CALL_TOKEN_CAP * BYTES_PER_TOKEN))"
+}
+
 cmd_consult() {
   local use=${1:-} fallback=null baseline_rationale='' subject='' estimate=0 request_bytes=0 request_tokens=0
-  local today calls spend pre_cost total http=000 t0=0 t1=0 latency=0 actual_tokens=0 cost=0
+  local today counts calls spend use_calls use_spend pre_cost total http=000 t0=0 t1=0 latency=0 actual_tokens=0 cost=0
   local request_json derive row result now id used_jev=false decision_after source=reported
-  local probabilities agreement
+  local probabilities agreement truncated=false reason=''
   local request_api='' TYPESAFE_API_KEY_PRIVATE=''
   use_valid "$use" || { emit_unavailable "${use:-unknown}" invalid-use; return 0; }
   resolve_use_config "$use"
@@ -446,6 +557,7 @@ cmd_consult() {
   fallback=$(jq -c '.ledger.baseline_decision' "$REQUEST_FILE")
   baseline_rationale=$(jq -r '.ledger.baseline_rationale' "$REQUEST_FILE")
   estimate=$(jq -r '.ledger.estimated_big_model_tokens' "$REQUEST_FILE")
+  truncated=$(jq -r '.ledger.truncated // false' "$REQUEST_FILE")
 
   TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
   export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
@@ -464,7 +576,7 @@ cmd_consult() {
   }
   request_bytes=$(LC_ALL=C printf '%s' "$request_json" | wc -c | tr -d ' ')
   case "$request_bytes" in ''|*[!0-9]*) emit_unavailable "$use" token-estimate-failed "$fallback"; return 0 ;; esac
-  request_tokens=$request_bytes
+  request_tokens=$(( (request_bytes + BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN ))
   if [ "$request_tokens" -gt "$PER_CALL_TOKEN_CAP" ]; then
     emit_unavailable "$use" per-call-token-cap "$fallback"
     return 0
@@ -478,15 +590,32 @@ cmd_consult() {
   fi
   today=$(date -u +%Y-%m-%d)
   if [ -s "$LEDGER" ]; then
-    calls=$(jq -s --arg today "$today" '[.[] | select(.date == $today and .network_attempted)] | length' "$LEDGER")
-    spend=$(jq -s --arg today "$today" '[.[] | select(.date == $today) | .cost_usd] | add // 0' "$LEDGER")
+    counts=$(jq -s -r --arg today "$today" --arg use "$use" '
+      [.[] | select(.date == $today)] as $today_rows |
+      [($today_rows | map(select(.network_attempted)) | length),
+       ($today_rows | map(.cost_usd) | add // 0),
+       ($today_rows | map(select(.use == $use and .network_attempted)) | length),
+       ($today_rows | map(select(.use == $use) | .cost_usd) | add // 0)] | @tsv' "$LEDGER")
+    IFS=$'\t' read -r calls spend use_calls use_spend <<<"$counts"
+    if [ -z "${calls:-}" ] || [ -z "${spend:-}" ] || [ -z "${use_calls:-}" ] || [ -z "${use_spend:-}" ]; then
+      unlock_ledger || true
+      emit_unavailable "$use" ledger-unreadable "$fallback"
+      return 0
+    fi
   else
     calls=0
     spend=0
+    use_calls=0
+    use_spend=0
   fi
   if [ "$calls" -ge "$DAILY_CALL_CAP" ]; then
     unlock_ledger || true
     emit_unavailable "$use" daily-call-cap "$fallback"
+    return 0
+  fi
+  if [ "$use_calls" -ge "$USE_CALL_CAP" ]; then
+    unlock_ledger || true
+    emit_unavailable "$use" use-daily-call-cap "$fallback"
     return 0
   fi
   pre_cost=$(jq -cn --argjson tokens "$request_tokens" --argjson rate "$PRICE_PER_MILLION" '$tokens * $rate / 1000000')
@@ -494,6 +623,12 @@ cmd_consult() {
   if jq -en --argjson total "$total" --argjson cap "$DAILY_SPEND_CAP" '$total > $cap' >/dev/null; then
     unlock_ledger || true
     emit_unavailable "$use" daily-spend-cap "$fallback"
+    return 0
+  fi
+  total=$(jq -cn --argjson spend "$use_spend" --argjson cost "$pre_cost" '$spend + $cost')
+  if jq -en --argjson total "$total" --argjson cap "$USE_SPEND_CAP" '$total > $cap' >/dev/null; then
+    unlock_ledger || true
+    emit_unavailable "$use" use-daily-spend-cap "$fallback"
     return 0
   fi
 
@@ -514,8 +649,9 @@ cmd_consult() {
     --data-binary @- 2>/dev/null) || http=000
   t1=$(fm_timing_now_ms)
   latency=$((t1 - t0))
+  RESPONSE_MODEL=$(response_model_id "$RESPONSE_FILE")
   if [ "$http" != 200 ]; then
-    record_unavailable_attempt "$use" "$subject" "http-$http" "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" || {
+    record_unavailable_attempt "$use" "$subject" "http-$http" "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" "$request_bytes" "$truncated" || {
       unlock_ledger || true
       emit_unavailable "$use" ledger-write-failed "$fallback"
       return 0
@@ -526,14 +662,18 @@ cmd_consult() {
   request_api=$(mktemp "${TMPDIR:-/tmp}/fm-jev-request.XXXXXX") || request_api=
   if [ -z "$request_api" ] || ! printf '%s\n' "$request_json" > "$request_api"; then
     [ -z "${request_api:-}" ] || rm -f -- "$request_api"
-    record_unavailable_attempt "$use" "$subject" response-validation-failed "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" \
+    record_unavailable_attempt "$use" "$subject" response-validation-failed "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" "$request_bytes" "$truncated" \
       || emit_unavailable "$use" ledger-write-failed "$fallback"
     unlock_ledger || true
     return 0
   fi
   if ! response_valid "$request_api" "$RESPONSE_FILE"; then
     rm -f -- "$request_api"
-    record_unavailable_attempt "$use" "$subject" response-malformed "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" || {
+    case "$RESPONSE_MODEL" in
+      ''|"$MODEL_FAMILY"*) reason=response-malformed ;;
+      *) reason=response-model-mismatch ;;
+    esac
+    record_unavailable_attempt "$use" "$subject" "$reason" "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" "$request_bytes" "$truncated" || {
       unlock_ledger || true
       emit_unavailable "$use" ledger-write-failed "$fallback"
       return 0
@@ -544,7 +684,7 @@ cmd_consult() {
   rm -f -- "$request_api"
 
   derive=$(derive_verdict "$REQUEST_FILE" "$RESPONSE_FILE") || {
-    record_unavailable_attempt "$use" "$subject" verdict-malformed "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" \
+    record_unavailable_attempt "$use" "$subject" verdict-malformed "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" "$request_bytes" "$truncated" \
       || emit_unavailable "$use" ledger-write-failed "$fallback"
     unlock_ledger || true
     return 0
@@ -585,6 +725,8 @@ cmd_consult() {
     --argjson agreement "$agreement" --argjson probabilities "$probabilities" \
     --argjson after "$decision_after" --argjson latency "$latency" \
     --argjson cost "$cost" --argjson estimate "$estimate" --argjson bytes "$request_bytes" \
+    --argjson truncated "$truncated" --arg response_model "$RESPONSE_MODEL" \
+    --argjson flagged "$(jq -c '.flagged // []' <<<"$derive")" \
     --argjson used "$used_jev" --argjson answers "$(jq -c '.answers' "$RESPONSE_FILE")" '
     {schema_version:1,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
      mode:$mode,configured_mode:$configured_mode,network_attempted:true,available:true,
@@ -595,6 +737,8 @@ cmd_consult() {
      agreement:$agreement,decision_after_jev:$after,final_decision:null,eventual_outcome:null,
      corrected:false,latency_ms:$latency,cost_usd:$cost,
      estimated_big_model_tokens:$estimate,request_bytes:$bytes,used_jev:$used,
+     truncated:$truncated,jev_flagged:$flagged,
+     response_model:(if $response_model == "" then null else $response_model end),
      jev_answers:$answers}') || {
     unlock_ledger || true
     emit_unavailable "$use" ledger-render-failed "$fallback"
@@ -610,17 +754,19 @@ cmd_consult() {
     return 0
   }
   result=$(jq -cn --arg id "$id" --arg use "$use" --arg mode "$EFFECTIVE_MODE" \
-    --arg configured_mode "$CONFIGURED_MODE" --arg model "$MODEL" \
+    --arg configured_mode "$CONFIGURED_MODE" --arg model "${RESPONSE_MODEL:-$MODEL}" \
     --argjson floor "$CONFIDENCE_FLOOR" --argjson derive "$derive" \
     --argjson answers "$(jq -c '.answers' "$RESPONSE_FILE")" \
     --argjson input_tokens "$actual_tokens" --argjson latency "$latency" \
     --argjson cost "$cost" --argjson fallback "$fallback" --arg baseline_rationale "$baseline_rationale" \
     --arg jev_rationale "$(jq -r '.rationale' <<<"$derive")" --argjson probabilities "$probabilities" \
+    --argjson truncated "$truncated" \
     --argjson agreement "$agreement" --argjson used "$used_jev" '
     {status:"available",consultation_id:$id,use:$use,mode:$mode,configured_mode:$configured_mode,
      model:$model,confidence_floor:$floor,verdict:$derive.verdict,confidence:$derive.confidence,
      answers:$answers,input_tokens:$input_tokens,latency_ms:$latency,cost_usd:$cost,
-     jev_rationale:$jev_rationale,jev_probabilities:$probabilities,
+     jev_rationale:$jev_rationale,jev_probabilities:$probabilities,truncated:$truncated,
+     flagged:($derive.flagged // []),
      fallback_decision:$fallback,baseline_rationale:$baseline_rationale,agreement:$agreement,used_jev:$used}
      + (if $derive.risks then {risks:$derive.risks} else {} end)') || {
     emit_unavailable "$use" result-render-failed "$fallback"
@@ -671,9 +817,11 @@ cmd_validate_ledger() {
 
 case "${1:-}" in
   mode) shift; cmd_mode "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  request-budget) shift; cmd_request_budget "$@" ;;
   consult) shift; cmd_consult "$@" ;;
   finalize) cmd_finalize "$@" ;;
   validate-ledger) shift; cmd_validate_ledger "$@" ;;
-  -h|--help|help|'') sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *) printf 'usage: fm-jev.sh mode|consult|finalize|validate-ledger ...\n' >&2; exit 2 ;;
+  -h|--help|help|'') sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) printf 'usage: fm-jev.sh mode|status|request-budget|consult|finalize|validate-ledger ...\n' >&2; exit 2 ;;
 esac

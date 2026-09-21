@@ -8,7 +8,8 @@
 # One request contains one Choice per question: still_open, settled, or
 # cannot_tell. The proposal is written beside the questions file as
 # <stem>-jev-review.md. It never edits the questions file or any referenced page.
-# Off or unavailable mode exits zero without output or side effects.
+# Off or unavailable mode names the reason on stderr, writes nothing, and exits
+# zero.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,8 +17,9 @@ QUESTIONS_TEMPLATE="$SCRIPT_DIR/jev-questions/open-questions.json"
 [ "$#" -eq 2 ] || exit 0
 QUESTIONS_FILE=$1
 PAGES_DIR=$2
-MODE=$("$SCRIPT_DIR/fm-jev.sh" mode open-questions 2>/dev/null || printf 'off\n')
-[ "$MODE" != off ] || exit 0
+# shellcheck source=bin/fm-jev-adapter-lib.sh
+. "$SCRIPT_DIR/fm-jev-adapter-lib.sh"
+fm_jev_adapter_ready open-questions || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 [ -f "$QUESTIONS_FILE" ] && [ -r "$QUESTIONS_FILE" ] && [ ! -L "$QUESTIONS_FILE" ] || exit 0
 [ -d "$PAGES_DIR" ] && [ ! -L "$PAGES_DIR" ] || exit 0

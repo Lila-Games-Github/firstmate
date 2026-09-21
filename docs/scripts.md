@@ -113,6 +113,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor and quota snapshot schema validation           |
 | `fm-quota-choose.sh`     | Choose the first candidate with known positive quota from an ordered harness:model list |
 | `fm-jev.sh`              | Own bounded Jev requests, configuration enforcement, and the consultation outcome ledger |
+| `fm-jev-adapter-lib.sh`  | Shared opt-in gate that makes an explicitly invoked Jev adapter name its off reason  |
 | `fm-jev-accept-check.sh` | Review a worker report against extracted acceptance criteria without controlling completion |
 | `fm-jev-triage.sh`       | Classify one narrowed supervision input without changing its presentation            |
 | `fm-jev-commit-lint.sh`  | Review task-branch commits for message agreement and declared risk signals without blocking landing |

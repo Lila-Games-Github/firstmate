@@ -543,21 +543,25 @@ The complete version 1 schema is:
     "spend_usd_cap": 0.05
   },
   "uses": {
-    "accept-check": {"mode": "active", "confidence_floor": 0.8},
-    "triage": {"mode": "active", "confidence_floor": 0.65},
-    "commit-lint": {"mode": "active", "confidence_floor": 0.8},
-    "open-questions": {"mode": "active", "confidence_floor": 0.65}
+    "accept-check": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
+    "triage": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
+    "commit-lint": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
+    "open-questions": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}}
   }
 }
 ```
 
 `version` must be `1`, `kill_switch` must be Boolean, and `uses` must contain exactly the four named objects.
 `per_call_token_cap` is an integer from 1 through 32000.
-The client conservatively treats one request byte as one input token before sending, so the preflight may refuse a request that the service tokenizer would accept.
+The client counts four request bytes as one input token, the same approximation every adapter uses for its own estimate, so one budget arithmetic applies from the adapter that sizes bounded material to the preflight that enforces the cap.
+`bin/fm-jev.sh request-budget <use>` prints the resulting maximum request body in bytes, which is how the commit lint decides whether a commit's diff must be truncated.
 `daily.call_cap` is a nonnegative integer, and `daily.spend_usd_cap` is a nonnegative US-dollar number.
+Each use may also carry its own `daily` object with the same two fields; a use that omits it receives an equal share of the global budget, so the four shares always sum to the global cap.
+Both budgets apply: a call needs room under the global cap and under its own use's cap, which is why a high-volume use such as triage can never consume the acceptance check's or the commit lint's share of the day.
+Every ledger row names the `use` that consumed the budget.
 The UTC date on ledger rows defines a budget day.
 Preflight spend uses the pinned rate of US$0.042 per million input tokens and the conservative input estimate, while a completed call records the response's reported input tokens when present and otherwise retains the estimate.
-Caps never trigger a retry and return the structured unavailable result to the adapter.
+Caps never trigger a retry and return the structured unavailable result to the adapter; a use over its own share is refused with `use-daily-call-cap` or `use-daily-spend-cap` rather than the global reason.
 
 Each `mode` is `off`, `shadow`, or `active`.
 Off does not build adapter state, make a network call, write the ledger, or alter existing output.
@@ -567,19 +571,22 @@ Active triage records the confidence-qualified Jev classification but never supp
 Disagreement never changes a configured mode, lowers it to shadow, or engages the kill switch.
 See [jev.md](jev.md) for each adapter's effect and rollback workflow.
 
-`bin/fm-jev.sh` pins `jev-1.13.0`, fixes the endpoint at `https://api.typesafe.ai/v1/systemone`, times out after five seconds, and accepts only schema-checked typed answers.
+`bin/fm-jev.sh` requests `jev-1.13.0`, fixes the endpoint at `https://api.typesafe.ai/v1/systemone`, times out after five seconds, and accepts only schema-checked typed answers.
+A response is accepted when its model id is in the `jev-` family, so another build of the pinned model still answers; the returned id is recorded as `response_model` on every row, and a well-formed answer from any other model is refused with the distinct `response-model-mismatch` reason beside that id.
 It copies an environment-provided key into a non-exported private variable, unsets the original before invoking child processes, and passes the key to `curl` through a file descriptor rather than argv.
 The key and full request are never written to the ledger.
 
 Every network attempt appends one version 1 JSON object to `state/jev-ledger.jsonl` under a bounded lock.
 The identity fields are `timestamp`, `date`, `consultation_id`, `use`, and `subject`.
 The configuration fields are `mode`, `configured_mode`, and `confidence_floor`.
-The service fields are `network_attempted`, `available`, `unavailable_reason`, `input_tokens`, `input_tokens_source`, `latency_ms`, `cost_usd`, `request_bytes`, `jev_answers`, and `jev_probabilities`.
+The service fields are `network_attempted`, `available`, `unavailable_reason`, `response_model`, `input_tokens`, `input_tokens_source`, `latency_ms`, `cost_usd`, `request_bytes`, `truncated`, `jev_answers`, and `jev_probabilities`.
+`truncated` is true when the adapter had to shorten its bounded material to fit the per-call budget, and `jev_flagged` names the questions that drove a negative or risk verdict.
 The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `decision_after_jev`, `eventual_outcome`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
 `existing_decision` and `final_decision` are compatibility aliases for `baseline_decision` and `eventual_outcome`.
 Because Jev returns typed answers rather than prose reasoning, `jev_rationale` is a deterministic explanation of the returned probabilities and configured verdict aggregation, not hidden model reasoning.
 An unavailable path before a network attempt writes no row, while a failed attempt writes a row with the reason and existing decision.
 Owning lifecycle paths may update a matching row's later `eventual_outcome`; successful task teardown supplies the accepted outcome for acceptance-check rows.
+No adapter writes an advisory to a task's status file, because a `note:` line there is a status event that would supersede a worker's terminal `done:` line and re-arm supervision's wedge aging for a finished task; advisories live in `data/<id>/acceptance.json`, `data/<id>/commit-lint.json`, and the `advisories:` section of `bin/fm-jev-report.sh`.
 
 ## Toolchain
 

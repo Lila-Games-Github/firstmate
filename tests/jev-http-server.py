@@ -22,26 +22,21 @@ class Handler(BaseHTTPRequestHandler):
         for key, question in request["questions"].items():
             qtype = question["type"]
             if qtype == "noul":
+                risks = ("persistence", "tests_weakened", "debug_output", "credential")
                 if key.startswith("criterion_") and "FORCE_UNMET" in state_text:
                     probability = 0.05
-                elif key.endswith("__credential") and "FORCE_CREDENTIAL_FLAG" in state_text:
+                elif key.endswith("credential") and "FORCE_CREDENTIAL_FLAG" in state_text:
                     probability = 0.95
-                elif key.endswith("__persistence"):
-                    probability = 0.05
-                elif key.endswith("__tests_weakened"):
-                    probability = 0.05
-                elif key.endswith("__debug_output"):
-                    probability = 0.05
-                elif key.endswith("__credential"):
+                elif key.endswith(risks):
                     probability = 0.05
                 else:
                     probability = 0.95
                 answers[key] = {"type": "noul", "noul": probability}
             elif qtype == "choice":
                 options = list(question["criteria"].keys())
-                if key == "attention":
+                if key.endswith("attention"):
                     choice = "actionable"
-                elif key == "review_kind":
+                elif key.endswith("review_kind"):
                     choice = "ruling"
                 elif "settled" in options:
                     choice = "settled"
@@ -67,8 +62,18 @@ class Handler(BaseHTTPRequestHandler):
                     "probabilities": probabilities,
                 }
 
+        # The client accepts any model id in the pinned family and records what
+        # came back, so the fixture can answer as an alias build or as another
+        # model entirely.
+        if "FORCE_MODEL_MISMATCH" in state_text:
+            model = "some-other-model-2"
+        elif "FORCE_MODEL_ALIAS" in state_text:
+            model = "jev-1.13"
+        else:
+            model = "jev-1.13.0"
+
         response = {
-            "model": "jev-1.13.0",
+            "model": model,
             "answers": answers,
             "usage": {"input_tokens": max(1, len(body) // 4), "output_tokens": 0},
         }

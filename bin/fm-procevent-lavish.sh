@@ -545,7 +545,7 @@ cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 # comment matches the captured element text. Choice rows keep Context data
 # out of that field. A pure annotation has no prompt.
 cmd_read() {
-  local file=${1-} lifecycle session_ended read_status=0 triage_row triage_file='' triage_mode=off
+  local file=${1-} lifecycle session_ended read_status=0 triage_file='' triage_mode=off
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
@@ -626,7 +626,7 @@ cmd_read() {
         my $item = "tag=$tag uid=$uid selector=$selector text=$text";
         $item .= " prompt=$prompt" if length $prompt;
         $item =~ s/[\x00-\x1f\x7f]+/ /g;
-        print {$triage} "$item\n";
+        print {$triage} "review-answer\t$item\n";
       }
       close $triage;
     }
@@ -691,12 +691,10 @@ cmd_read() {
     }
     print "END LAVISH RESULT ($presented of $want)\n";
   ' "$file" "$lifecycle" "$session_ended" "$triage_file" || read_status=$?
+  # One read is one consultation: the whole captured element set goes out in a
+  # single batched request rather than one call per element.
   if [ "$read_status" -eq 0 ] && [ -n "$triage_file" ] && [ -s "$triage_file" ]; then
-    while IFS= read -r triage_row || [ -n "$triage_row" ]; do
-      [ -n "$triage_row" ] || continue
-      printf '%s\n' "$triage_row" \
-        | "$SCRIPT_DIR/fm-jev-triage.sh" --kind review-answer >/dev/null 2>&1 || true
-    done < "$triage_file"
+    "$SCRIPT_DIR/fm-jev-triage.sh" --batch < "$triage_file" >/dev/null 2>&1 || true
   fi
   [ -z "$triage_file" ] || rm -f -- "$triage_file"
   return "$read_status"

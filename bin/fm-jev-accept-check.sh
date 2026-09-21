@@ -10,10 +10,16 @@
 # section has prose but no list, the section is one criterion.
 #
 # When Jev is available, writes data/<id>/acceptance.json atomically. Shadow
-# mode changes no task record. Active mode may append one advisory `note:` that
-# names criteria Jev found unmet above the configured confidence floor; it never
-# accepts, rejects, closes, blocks, or otherwise changes task lifecycle.
-# Off or unavailable mode exits zero without writing or printing anything.
+# mode records the criterion verdicts only. Active mode additionally records an
+# `advisory` naming the criteria Jev found unmet above the configured confidence
+# floor, which bin/fm-jev-report.sh also surfaces from the ledger.
+#
+# No Jev adapter ever writes a task's status file: a `note:` there is a status
+# event that would supersede the worker's terminal `done:` line and change
+# supervision classification, and this observer never changes task lifecycle.
+#
+# Off or unavailable mode names the reason on stderr and exits zero without
+# writing anything or printing on stdout.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,8 +32,10 @@ QUESTIONS="$SCRIPT_DIR/jev-questions/accept-check.json"
 case "${1:-}" in ''|*[!A-Za-z0-9._-]*) exit 0 ;; esac
 [ "$#" -eq 1 ] || exit 0
 ID=$1
-MODE=$("$SCRIPT_DIR/fm-jev.sh" mode accept-check 2>/dev/null || printf 'off\n')
-[ "$MODE" != off ] || exit 0
+# shellcheck source=bin/fm-jev-adapter-lib.sh
+. "$SCRIPT_DIR/fm-jev-adapter-lib.sh"
+fm_jev_adapter_ready accept-check || exit 0
+MODE=$FM_JEV_ADAPTER_MODE
 command -v jq >/dev/null 2>&1 || exit 0
 
 BRIEF="$DATA/$ID/brief.md"
@@ -106,29 +114,26 @@ jq -n --arg report "$REPORT_TEXT" --arg subject "$ID" --argjson estimate "$ESTIM
 OUT="$DATA/$ID/acceptance.json"
 OUT_TMP="$DATA/$ID/.acceptance.json.tmp.$$"
 mkdir -p "$DATA/$ID" || exit 0
-jq -n --arg task "$ID" --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+jq -n --arg task "$ID" --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg mode "$MODE" \
   --slurpfile criteria "$CRITERIA_JSON" --slurpfile result "$RESULT" '
   ($result[0]) as $r |
   ($criteria[0] | to_entries | map({key:("criterion_" + ((.key + 1) | tostring)), value:.value}) | from_entries) as $named |
+  [$named | to_entries[] |
+    {id:.key,text:.value,probability:$r.answers[.key].noul,
+     met:(if $r.answers[.key].noul >= $r.confidence_floor then true
+          elif (1 - $r.answers[.key].noul) >= $r.confidence_floor then false
+          else null end)}] as $criteria_rows |
+  ([$criteria_rows[] | select(.met == false) | .id]) as $unmet |
   {schema_version:1,task_id:$task,generated_at:$generated,consultation_id:$r.consultation_id,
    mode:$r.mode,model:$r.model,verdict:$r.verdict,confidence:$r.confidence,
    confidence_floor:$r.confidence_floor,
-   criteria:[$named | to_entries[] |
-     {id:.key,text:.value,probability:$r.answers[.key].noul,
-      met:(if $r.answers[.key].noul >= $r.confidence_floor then true
-           elif (1 - $r.answers[.key].noul) >= $r.confidence_floor then false
-           else null end)}]}
+   criteria:$criteria_rows,
+   unmet_criteria:$unmet,
+   advisory:(if $mode == "active" and ($unmet | length) > 0 then
+       "Jev acceptance check flagged unmet criteria: " + ($unmet | join(", "))
+       + " (advisory only; completion remains a human decision)"
+     else null end)}
 ' > "$OUT_TMP" || { rm -f "$OUT_TMP"; exit 0; }
 chmod 0600 "$OUT_TMP" || { rm -f "$OUT_TMP"; exit 0; }
 mv -f "$OUT_TMP" "$OUT" || { rm -f "$OUT_TMP"; exit 0; }
-
-if [ "$MODE" = active ]; then
-  UNMET=$(jq -r '[.criteria[] | select(.met == false) | .id] | join(", ")' "$OUT")
-  if [ -n "$UNMET" ] && [ ! -L "$STATUS_FILE" ]; then
-    NOTE="note: Jev acceptance check flagged unmet criteria: $UNMET (advisory only; completion remains a human decision)"
-    if [ ! -f "$STATUS_FILE" ] || ! grep -qxF "$NOTE" "$STATUS_FILE" 2>/dev/null; then
-      printf '%s\n' "$NOTE" >> "$STATUS_FILE" 2>/dev/null || true
-    fi
-  fi
-fi
 exit 0

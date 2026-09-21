@@ -3,6 +3,8 @@
 #
 # Usage: fm-jev-report.sh [state/jev-ledger.jsonl]
 #
+# Opens with the effective mode of each use and whether a key is present, so an
+# operator reading the metrics can see at once whether the feature is on.
 # Prints one row per use and an overall row. Agreement, false positives, and
 # false negatives use only consultations with a non-null Jev verdict and eventual
 # decision. Object verdicts (open-question batches) compare matching keys. Spend
@@ -10,8 +12,11 @@
 # confidence-qualified consultations in both shadow and active modes; until a
 # use has active rows, that value is a counterfactual estimate, not observed
 # savings. The report also lists every Jev-versus-baseline disagreement with both
-# rationales and the returned typed probabilities. Empty or malformed ledgers
-# exit non-zero with a clear diagnostic.
+# rationales and the returned typed probabilities. It closes with the advisory
+# findings the active adapters recorded, which is where an acceptance or
+# commit-lint advisory is surfaced: no adapter writes one to a task status file,
+# because a `note:` there would supersede a worker's terminal `done:` line.
+# Empty or malformed ledgers exit non-zero with a clear diagnostic.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,6 +24,19 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LEDGER=${1:-${FM_JEV_LEDGER_OVERRIDE:-$STATE/jev-ledger.jsonl}}
+
+MODES=
+KEY_STATE=absent
+for use in accept-check triage commit-lint open-questions; do
+  STATUS=$("$SCRIPT_DIR/fm-jev.sh" status "$use" 2>/dev/null) || STATUS=
+  IFS=$'\t' read -r USE_MODE USE_REASON USE_KEY _ <<<"$STATUS"
+  [ "${USE_KEY:-absent}" != present ] || KEY_STATE=present
+  case "${USE_REASON:-none}" in
+    none|'') MODES="$MODES $use=${USE_MODE:-off}" ;;
+    *) MODES="$MODES $use=${USE_MODE:-off}($USE_REASON)" ;;
+  esac
+done
+printf 'jev configuration:%s TYPESAFE_API_KEY=%s\n' "$MODES" "$KEY_STATE"
 
 if [ ! -s "$LEDGER" ]; then
   printf 'jev report: ledger is empty: %s\n' "$LEDGER" >&2
@@ -84,6 +102,19 @@ jq -s -r '
       "  jev_probabilities=\(.jev_probabilities | tojson)\n" +
       "  baseline_decision=\(.baseline_decision | tojson)\n" +
       "  baseline_rationale=\(.baseline_rationale | tojson)"
+    ) | join("\n"))
+  end
+' "$LEDGER"
+
+jq -s -r '
+  [.[] | select(.mode == "active" and .available and .used_jev and ((.jev_flagged // []) | length) > 0)] as $rows |
+  if ($rows | length) == 0 then "advisories: none"
+  else
+    "advisories:\n" +
+    ($rows | map(
+      "- use=\(.use) subject=\(.subject) consultation_id=\(.consultation_id)" +
+      " flagged=\((.jev_flagged // []) | join(","))" +
+      (if .truncated then " truncated=true" else "" end)
     ) | join("\n"))
   end
 ' "$LEDGER"
