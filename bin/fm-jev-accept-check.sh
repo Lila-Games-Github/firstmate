@@ -50,7 +50,8 @@ CRITERIA_LINES="$TMP_DIR/criteria-lines"
 CRITERIA_JSON="$TMP_DIR/criteria.json"
 ENVELOPE="$TMP_DIR/envelope.json"
 RESULT="$TMP_DIR/result.json"
-REPORT_TEXT=
+REPORT_MATERIAL="$TMP_DIR/report.txt"
+: > "$REPORT_MATERIAL"
 
 awk '
   function heading_level(line, copy) { copy=line; sub(/[^#].*$/, "", copy); return length(copy) }
@@ -85,14 +86,14 @@ fi
 jq -Rsc 'split("\n") | map(select(length > 0))' < "$CRITERIA_LINES" > "$CRITERIA_JSON" || exit 0
 
 if [ -f "$REPORT" ] && [ -r "$REPORT" ] && [ ! -L "$REPORT" ]; then
-  REPORT_TEXT=$(cat "$REPORT") || exit 0
+  cp -- "$REPORT" "$REPORT_MATERIAL" || exit 0
 elif [ -f "$STATUS_FILE" ] && [ -r "$STATUS_FILE" ] && [ ! -L "$STATUS_FILE" ]; then
-  REPORT_TEXT=$(awk '/^[[:space:]]*done[[:space:]]*:/ { line=$0 } END { print line }' "$STATUS_FILE")
+  awk '/^[[:space:]]*done[[:space:]]*:/ { line=$0 } END { print line }' "$STATUS_FILE" > "$REPORT_MATERIAL"
 fi
-[ -n "$REPORT_TEXT" ] || exit 0
+[ -s "$REPORT_MATERIAL" ] || exit 0
 
-ESTIMATE=$(( (${#REPORT_TEXT} + $(wc -c < "$MATERIAL") + 3) / 4 ))
-jq -n --arg report "$REPORT_TEXT" --arg subject "$ID" --argjson estimate "$ESTIMATE" \
+ESTIMATE=$(( ($(wc -c < "$REPORT_MATERIAL") + $(wc -c < "$MATERIAL") + 3) / 4 ))
+jq -n --rawfile report "$REPORT_MATERIAL" --arg subject "$ID" --argjson estimate "$ESTIMATE" \
   --slurpfile criteria "$CRITERIA_JSON" --slurpfile template "$QUESTIONS" '
   ($criteria[0] | to_entries | map({key:("criterion_" + ((.key + 1) | tostring)), value:.value}) | from_entries) as $named |
   ($named | keys) as $keys |

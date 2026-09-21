@@ -236,13 +236,28 @@ MISMATCHES=$(jq -r '
     else "settled" end;
   . as $row |
   select(.available and .jev_verdict != null and .eventual_outcome != null) |
-  select((.jev_verdict | type) == "string" and (.eventual_outcome | type) == "string") |
-  select((.jev_verdict == positive(.use)) != (.eventual_outcome == positive(.use))) |
+  (if (.jev_verdict | type) == "object" and (.eventual_outcome | type) == "object" then
+     [.jev_verdict | to_entries[] as $entry |
+       select($row.eventual_outcome | has($entry.key)) |
+       select(($entry.value == positive($row.use)) !=
+         ($row.eventual_outcome[$entry.key] == positive($row.use))) | $entry.key]
+   elif (.jev_verdict == positive(.use)) != (.eventual_outcome == positive(.use)) then null
+   else [] end) as $keys |
+  select($keys == null or ($keys | length) > 0) |
   "- consultation_id=\(.consultation_id) use=\(.use) subject=\(.subject)\n" +
-  "  jev_decision=\(.jev_verdict | tojson) eventual_outcome=\(.eventual_outcome | tojson)" +
-  " label_source=\(.label_source | tojson)\n" +
-  "  jev_rationale=\(.jev_rationale | tojson)\n" +
-  "  jev_probabilities=\(.jev_probabilities | tojson)"
+  (if $keys == null then
+     "  jev_decision=\(.jev_verdict | tojson) eventual_outcome=\(.eventual_outcome | tojson)" +
+     " label_source=\(.label_source | tojson)\n" +
+     "  jev_probabilities=\(.jev_probabilities | tojson)\n"
+   else
+     ([$keys[] |
+       "  - item=\(.) jev_choice=\($row.jev_verdict[.] | tojson)" +
+       " eventual_outcome=\($row.eventual_outcome[.] | tojson)" +
+       " jev_probabilities=\($row.jev_probabilities[.] | tojson)" +
+       " label_source=\($row.label_source | tojson)"] | join("\n")) + "\n"
+   end) +
+  "  jev_rationale=\(.jev_rationale | tojson)"
+
 ' "${NONEMPTY[@]}") || MISMATCHES=
 if [ -z "$MISMATCHES" ]; then
   printf 'outcome-mismatches: none\n'

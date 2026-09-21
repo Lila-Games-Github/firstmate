@@ -80,7 +80,10 @@ FINDINGS="$TMP_DIR/findings.jsonl"
 : > "$FINDINGS"
 
 build_envelope() { # <sha> <message> <diff> <truncated>
-  jq -n --arg subject "$TASK_ID@${1:0:12}" --arg sha "$1" --arg message "$2" --arg diff "$3" \
+  printf '%s' "$2" > "$TMP_DIR/message.txt" || return 1
+  printf '%s' "$3" > "$TMP_DIR/diff.txt" || return 1
+  jq -n --arg subject "$TASK_ID@${1:0:12}" --arg sha "$1" \
+    --rawfile message "$TMP_DIR/message.txt" --rawfile diff "$TMP_DIR/diff.txt" \
     --argjson truncated "$4" --slurpfile template "$QUESTIONS" '
     {sha:$sha,message:$message,diff:$diff,truncated:$truncated} as $commit |
     ($template[0] | keys) as $checks |

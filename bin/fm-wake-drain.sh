@@ -91,15 +91,23 @@ EOF
 # day's calls or serialize twenty five-second timeouts on the supervision path.
 run_jev_triage_observers() {
   [ -n "$DRAIN_JEV_TMP" ] || return 0
+  local admitted="$DRAIN_JEV_TMP.admitted" covered="$DRAIN_JEV_TMP.covered"
+  : > "$admitted"
+  : > "$covered"
   if [ -s "$DRAIN_JEV_TMP" ]; then
-    "$SCRIPT_DIR/fm-jev-triage.sh" --batch < "$DRAIN_JEV_TMP" >/dev/null 2>&1 || true
+    "$SCRIPT_DIR/fm-jev-triage.sh" --batch --admitted-lines "$admitted" \
+      < "$DRAIN_JEV_TMP" >/dev/null 2>&1 || true
+    awk 'FILENAME == ARGV[1] { admitted[$0]=1; next } FNR in admitted' \
+      "$admitted" "$DRAIN_JEV_TMP" > "$covered"
     : > "$DRAIN_JEV_TMP" 2>/dev/null || true
   fi
-  if [ -s "$DRAIN_JEV_PRESENT" ]; then
-    sort -u "$DRAIN_JEV_PRESENT" > "$DRAIN_JEV_SEEN.tmp.$$" 2>/dev/null \
-      && mv -f "$DRAIN_JEV_SEEN.tmp.$$" "$DRAIN_JEV_SEEN" 2>/dev/null \
-      || rm -f -- "$DRAIN_JEV_SEEN.tmp.$$" 2>/dev/null || true
-  fi
+  [ ! -f "$DRAIN_JEV_SEEN" ] || cat "$DRAIN_JEV_SEEN" >> "$covered"
+  awk 'FILENAME == ARGV[1] { covered[$0]=1; next } $0 in covered' \
+    "$covered" "$DRAIN_JEV_PRESENT" | sort -u > "$DRAIN_JEV_SEEN.tmp.$$" \
+    && mv -f "$DRAIN_JEV_SEEN.tmp.$$" "$DRAIN_JEV_SEEN" 2>/dev/null \
+    || rm -f -- "$DRAIN_JEV_SEEN.tmp.$$" 2>/dev/null || true
+  rm -f -- "$admitted" "$covered"
+
 }
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --

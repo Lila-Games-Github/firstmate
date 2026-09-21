@@ -58,22 +58,21 @@ while IFS= read -r line || [ -n "$line" ]; do
   INDEX=$((INDEX + 1))
   KEY="question_$INDEX"
   if ! jq -e --arg page "$PAGE" 'has($page)' "$PAGES" >/dev/null 2>&1; then
-    PAGE_TEXT=$(cat "$PAGE_FILE") || exit 0
-    jq -c --arg page "$PAGE" --arg text "$PAGE_TEXT" '. + {($page):$text}' "$PAGES" > "$PAGES.tmp" || exit 0
+    jq -c --arg page "$PAGE" --rawfile text "$PAGE_FILE" '. + {($page):$text}' "$PAGES" > "$PAGES.tmp" || exit 0
     mv -f "$PAGES.tmp" "$PAGES" || exit 0
   fi
-  jq -cn --arg key "$KEY" --arg question "$QUESTION" --arg page "$PAGE" \
+  printf '%s' "$QUESTION" > "$TMP_DIR/question.txt" || exit 0
+  jq -cn --arg key "$KEY" --rawfile question "$TMP_DIR/question.txt" --arg page "$PAGE" \
     '{key:$key,question:$question,page:$page}' >> "$ITEMS" || exit 0
 done < "$QUESTIONS_FILE"
 [ "$INDEX" -gt 0 ] || exit 0
 
-ITEMS_JSON=$(jq -sc 'map({key:.key,value:{question:.question,page:.page}}) | from_entries' "$ITEMS") || exit 0
-PAGES_JSON=$(jq -c '.' "$PAGES") || exit 0
-EXISTING=$(jq -cn --argjson items "$ITEMS_JSON" 'reduce ($items | keys[]) as $key ({}; . + {($key):"still_open"})') || exit 0
-ESTIMATE=$(( (${#ITEMS_JSON} + ${#PAGES_JSON} + 3) / 4 ))
-jq -n --arg subject "$(basename "$QUESTIONS_FILE")" --argjson items "$ITEMS_JSON" \
-  --argjson pages "$PAGES_JSON" \
-  --argjson existing "$EXISTING" --argjson estimate "$ESTIMATE" --slurpfile template "$QUESTIONS_TEMPLATE" '
+jq -sc 'map({key:.key,value:{question:.question,page:.page}}) | from_entries' "$ITEMS" > "$TMP_DIR/items.json" || exit 0
+jq -n --arg subject "$(basename "$QUESTIONS_FILE")" --slurpfile item_data "$TMP_DIR/items.json" \
+  --slurpfile page_data "$PAGES" --slurpfile template "$QUESTIONS_TEMPLATE" '
+  $item_data[0] as $items | $page_data[0] as $pages |
+  (reduce ($items | keys[]) as $key ({}; . + {($key):"still_open"})) as $existing |
+  (((($items | tojson | length) + ($pages | tojson | length) + 3) / 4) | floor) as $estimate |
   ($items | keys) as $keys |
   {request:{state:{questions:$items,pages:$pages},questions:(reduce $keys[] as $key ({};
      . + {($key):($template[0].question
@@ -92,7 +91,8 @@ case "$QUESTIONS_FILE" in
   *) OUTPUT=$QUESTIONS_FILE-jev-review.md ;;
 esac
 OUTPUT_TMP="$(dirname "$OUTPUT")/.$(basename "$OUTPUT").tmp.$$"
-jq -r --argjson items "$ITEMS_JSON" '
+jq -r --slurpfile item_data "$TMP_DIR/items.json" '
+  $item_data[0] as $items |
   . as $r |
   ([$items | keys[] | select($r.answers[.] == null)]) as $unanswered |
   "# Proposed Jev open-question review", "",

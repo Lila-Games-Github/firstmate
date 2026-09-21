@@ -3,7 +3,8 @@
 #
 # Usage:
 #   printf '%s\n' <item> | fm-jev-triage.sh --kind status|wake|review-answer
-#   fm-jev-triage.sh --batch   < "<kind><TAB><item>" lines
+#   fm-jev-triage.sh --batch [--admitted-lines <file>] < "<kind><TAB><item>" lines
+# --admitted-lines writes input line numbers with answers, regardless of confidence.
 #
 # Both forms make at most one network call, so one drain or one Lavish read
 # costs one consultation no matter how many items it presented. Each item gets
@@ -29,6 +30,12 @@ PER_ITEM_OVERHEAD=2200
 ENVELOPE_OVERHEAD=1024
 MAX_ITEMS_CEILING=50
 
+ADMITTED_LINES=
+if [ "$#" -eq 3 ] && [ "$1" = --batch ] && [ "$2" = --admitted-lines ]; then
+  ADMITTED_LINES=$3
+  : > "$ADMITTED_LINES" || exit 0
+  set -- --batch
+fi
 MODE_FLAG=
 KIND=
 if [ "${1:-}" = --kind ] && [ $# -eq 2 ]; then
@@ -83,9 +90,8 @@ else
 fi
 [ "$INDEX" -gt 0 ] || exit 0
 
-ITEMS_JSON=$(jq -sc '.' "$ITEMS") || exit 0
-ESTIMATE=$(( (${#ITEMS_JSON} + 3) / 4 ))
-jq -n --argjson items "$ITEMS_JSON" --argjson estimate "$ESTIMATE" \
+ESTIMATE=$(( ($(wc -c < "$ITEMS") + 3) / 4 ))
+jq -n --slurpfile items "$ITEMS" --argjson estimate "$ESTIMATE" \
   --slurpfile template "$QUESTIONS" '
   def attention_key: .key + "__attention";
   def review_key: .key + "__review_kind";
@@ -107,11 +113,18 @@ jq -n --argjson items "$ITEMS_JSON" --argjson estimate "$ESTIMATE" \
 "$SCRIPT_DIR/fm-jev.sh" consult triage < "$ENVELOPE" > "$RESULT" 2>/dev/null || exit 0
 [ "$(jq -r '.status // "unavailable"' "$RESULT" 2>/dev/null)" = available ] || exit 0
 
+if [ -n "$ADMITTED_LINES" ]; then
+  jq -r --slurpfile items "$ITEMS" '
+    . as $r | $items[] |
+    select($r.answers[.key + "__attention"] != null) | .line
+  ' "$RESULT" > "$ADMITTED_LINES" || exit 0
+fi
+
 # The client owns the per-item confidence gate and records the same per-key
 # decision on the ledger row, so printed classifications and recorded evidence
 # cannot disagree item by item.
 if [ "$MODE_FLAG" = single ]; then
-  jq -r --argjson items "$ITEMS_JSON" '
+  jq -r --slurpfile items "$ITEMS" '
     . as $r |
     ($items[0]) as $item |
     select($r.qualified[$item.key + "__attention"]) |
@@ -120,7 +133,7 @@ if [ "$MODE_FLAG" = single ]; then
     | join(" ")
   ' "$RESULT"
 else
-  jq -r --argjson items "$ITEMS_JSON" '
+  jq -r --slurpfile items "$ITEMS" '
     . as $r |
     $items[] |
     . as $item |

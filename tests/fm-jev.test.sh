@@ -346,7 +346,7 @@ test_commit_lint_truncates_instead_of_skipping() {
   write_config "$home" off off shadow off 100 2000
   write_key "$home"
   make_git_fixture "$repo"
-  awk 'BEGIN { for (i = 0; i < 4000; i++) print "padding line " i }' >> "$repo/file.txt"
+  awk 'BEGIN { for (i = 0; i < 14000; i++) print "padding line " i }' >> "$repo/file.txt"
   git -C "$repo" add file.txt
   git -C "$repo" commit -qm 'Add a diff far larger than the per-call budget'
   before=$(request_count)
@@ -495,6 +495,30 @@ test_unchanged_presentation_is_consulted_once() {
   pass "Jev triage hooks: an unchanged presented item is consulted once, not once per drain"
 }
 
+test_presentation_overflow_is_consulted_on_next_drain() {
+  local home="$TMP_ROOT/drain-overflow" before i out
+  write_config "$home" off shadow off off
+  write_key "$home"
+  for i in $(seq 1 51); do
+    printf 'needs-decision: decide approach %s?\n' "$i" > "$home/state/task-$i.status"
+  done
+  before=$(request_count)
+  jev_env "$home" "$DRAIN" >/dev/null 2>&1 || fail "first overflow drain failed"
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "first overflow drain did not consult"
+  [ "$(wc -l < "$home/state/.jev-triage-seen")" -eq 50 ] || fail "overflow was marked seen"
+  out=$(jev_env "$home" "$DRAIN" 2>/dev/null) || fail "second overflow drain failed"
+  assert_contains "$out" 'needs-decision:' "overflow drain lost presentation"
+  [ "$(request_count)" -eq $((before + 2)) ] || fail "overflow was never consulted"
+  jq -e -s '([.[].state.items | keys[]] | length) == 51' \
+    <<<"$(tail -2 "$REQUEST_LOG")" >/dev/null || fail "overflow consultation coverage was incomplete"
+  jev_env "$home" "$DRAIN" >/dev/null 2>&1 || fail "third overflow drain failed"
+  [ "$(request_count)" -eq $((before + 2)) ] || fail "covered items were reconsulted"
+  rm -f "$home/state/"*.status
+  jev_env "$home" "$DRAIN" >/dev/null 2>&1 || fail "resolved drain failed"
+  [ ! -s "$home/state/.jev-triage-seen" ] || fail "resolved items were not pruned"
+  pass "Jev triage hooks: overflow remains eligible until consulted"
+}
+
 test_unreadable_day_scan_refuses_instead_of_spending() {
   local home="$TMP_ROOT/corrupt-day" before today out row
   write_config "$home" off shadow off off
@@ -635,7 +659,7 @@ test_oversized_material_splits_and_truncates() {
   # questions instead of becoming a silent no-op.
   write_config "$home" off off off shadow 100 2000
   write_key "$home"
-  make_big_questions_fixture "$home" 20000
+  make_big_questions_fixture "$home" 200000
   before=$(request_count)
   out=$(jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages") \
     || fail "an oversized open-question sweep failed instead of splitting"
@@ -811,7 +835,7 @@ test_oversized_shared_report_is_shrunk_not_duplicated() {
   write_config "$home" shadow off off off 100 2000
   write_key "$home"
   make_accept_fixture "$home"
-  awk 'BEGIN { while (length(out) < 20000) out = out "Changed bin/example.sh and ran tests/example.test.sh. "; print out }' \
+  awk 'BEGIN { while (length(out) < 200000) out = out "Changed bin/example.sh and ran tests/example.test.sh. "; print out }' \
     > "$home/data/task-a/report.md"
   before=$(request_count)
   jev_env "$home" "$ACCEPT" task-a
@@ -1104,6 +1128,28 @@ test_report_derives_differing_items_for_an_old_row() {
 # The day the key is revoked every consultation fails the same way. If that
 # never reaches a report section the operator sees consultations climbing with
 # nothing labelled and no stated cause.
+test_report_lists_per_key_outcome_mismatches() {
+  local home="$TMP_ROOT/question-outcome" out id
+  write_config "$home" off off off shadow
+  write_key "$home"
+  make_questions_fixture "$home"
+  printf '%s\n' '- Another date? [page: launch.md]' >> "$home/questions.md"
+  jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages" >/dev/null
+  id=$(jq -r '.subject' "$home/state/jev-ledger.jsonl")
+  jev_env "$home" "$JEV" finalize --use open-questions --subject "$id" \
+    --decision-json '{"question_1":"still_open","question_2":"settled","missing":"settled"}' --label-source reviewer >/dev/null
+  out=$(jev_env "$home" "$REPORT") || fail "report failed for keyed outcomes"
+  out=${out#*outcome-mismatches:}
+  assert_contains "$out" 'item=question_1 jev_choice="settled" eventual_outcome="still_open"' \
+    "report omitted the per-key outcome mismatch"
+  assert_contains "$out" 'jev_probabilities=' "mismatch lost probabilities"
+  assert_contains "$out" 'label_source="reviewer"' "mismatch lost label provenance"
+  assert_contains "$out" 'jev_rationale=' "mismatch lost rationale"
+  [[ "$out" != *'item=question_2'* && "$out" != *'item=missing'* ]] \
+    || fail "report included matching or absent verdict keys"
+  pass "Jev report: keyed outcome mismatches show only differing matched keys"
+}
+
 test_report_names_failed_network_attempts() {
   local ledger="$TMP_ROOT/failed-attempts-ledger" fixture="$ROOT/tests/fixtures/jev-ledger.jsonl" out
   head -1 "$fixture" | jq -c '.consultation_id = "revoked-key" | .subject = "task-k" |
@@ -1169,12 +1215,14 @@ test_ledger_rotates_monthly_and_report_reads_archives
 test_consult_does_not_read_the_whole_ledger
 test_shadow_presentation_hooks
 test_unchanged_presentation_is_consulted_once
+test_presentation_overflow_is_consulted_on_next_drain
 test_unreadable_day_scan_refuses_instead_of_spending
 test_observer_gate_requires_a_usable_key
 test_model_family_and_mismatch
 test_report_fixture_and_empty_error
 test_report_scores_discarded_labels_as_the_negative_class
 test_report_names_failed_network_attempts
+test_report_lists_per_key_outcome_mismatches
 test_report_names_only_the_differing_items_of_a_batch
 test_report_derives_differing_items_for_an_old_row
 
