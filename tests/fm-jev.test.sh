@@ -191,7 +191,8 @@ test_unavailable_key_and_caps_fall_back() {
     || fail "a cap refusal left no evidence of why nothing ran"
   "$JEV" validate-ledger "$capped/state/jev-ledger.jsonl" || fail "the refusal row failed schema validation"
   out=$(FM_HOME="$capped" "$REPORT" "$capped/state/jev-ledger.jsonl") || fail "report rejected a refusal-only ledger"
-  assert_contains "$out" "reason=daily-call-cap refused=1" "the report does not show why nothing ran"
+  assert_contains "$out" "reason=daily-call-cap kind=pre-request-refusal count=1" \
+    "the report does not show why nothing ran"
   assert_contains "$out" $'triage\t0\t0\t0\t0\tn/a' "a refusal was counted as a consultation"
 
   write_config "$killed" off shadow off off
@@ -459,6 +460,41 @@ EOF
 # fail. Reading that as an unspent budget would turn every daily and per-use
 # cap off for the rest of the day, so the client must refuse instead and leave
 # evidence of why.
+# An open decision is re-printed on every drain until it is answered, so
+# staging it unconditionally would re-consult the identical line every drain
+# and spend the day's triage share on duplicates while a genuinely new line
+# goes unconsulted.
+test_unchanged_presentation_is_consulted_once() {
+  local home="$TMP_ROOT/drain-dedup" before out
+  write_config "$home" off shadow off off
+  write_key "$home"
+  mkdir -p "$home/state"
+  printf 'working: started\nneeds-decision: which approach should the crew take?\n' \
+    > "$home/state/task-d.status"
+  before=$(request_count)
+  out=$(jev_env "$home" "$DRAIN" 2>/dev/null) || fail "the first drain failed"
+  assert_contains "$out" "needs-decision: which approach should the crew take?" \
+    "the first drain did not present the open decision"
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "the first drain did not consult once"
+
+  out=$(jev_env "$home" "$DRAIN" 2>/dev/null) || fail "the second drain failed"
+  assert_contains "$out" "needs-decision: which approach should the crew take?" \
+    "the dedup suppressed the presentation itself, not just the consultation"
+  [ "$(request_count)" -eq $((before + 1)) ] \
+    || fail "an unchanged open decision was re-consulted on the next drain"
+  jq -e -s 'length == 1' "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "the second drain appended another row for the same unchanged item"
+
+  # A genuinely different line is still consulted, and the resolved one is
+  # pruned rather than suppressing it forever.
+  printf 'working: started\nneeds-decision: which rollout window applies?\n' \
+    > "$home/state/task-d.status"
+  out=$(jev_env "$home" "$DRAIN" 2>/dev/null) || fail "the third drain failed"
+  [ "$(request_count)" -eq $((before + 2)) ] \
+    || fail "a changed open decision was suppressed by the seen set"
+  pass "Jev triage hooks: an unchanged presented item is consulted once, not once per drain"
+}
+
 test_unreadable_day_scan_refuses_instead_of_spending() {
   local home="$TMP_ROOT/corrupt-day" before today out row
   write_config "$home" off shadow off off
@@ -761,7 +797,7 @@ test_unfittable_question_is_refused_with_a_row() {
     || fail "an unfittable question left no evidence on any surface"
   "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the refusal row failed schema validation"
   out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") || fail "report rejected the refusal ledger"
-  assert_contains "$out" "reason=question-block-token-cap refused=1" \
+  assert_contains "$out" "reason=question-block-token-cap kind=pre-request-refusal count=1" \
     "the report does not say the cap is too small for the questions themselves"
   pass "Jev client: a question too large even alone is refused with a recorded reason, not silence"
 }
@@ -862,13 +898,22 @@ test_oversized_accept_check_is_one_request_and_one_row() {
   request=$(tail -1 "$REQUEST_LOG")
   jq -e '(.questions | length) == 2 and (.state.acceptance_criteria | length) == 2' <<<"$request" >/dev/null \
     || fail "the single request lost a criterion: $request"
+  # Every criterion came back from a stub, so the row must not be a scored
+  # prediction: the report would otherwise count it in agreement and error
+  # columns and credit its untruncated estimate as tokens avoided.
   jq -e -s 'length == 1 and .[0].truncated == true and .[0].use == "accept-check" and
-    .[0].subject == "task-a" and (.[0].jev_verdict | type) == "string"' \
+    .[0].subject == "task-a" and .[0].network_attempted == true and
+    .[0].available == false and .[0].unavailable_reason == "questions-truncated" and
+    .[0].jev_verdict == null and .[0].used_jev == false and
+    .[0].decision_after_jev == .[0].baseline_decision and (.[0].jev_flagged | length) == 0 and
+    .[0].estimated_big_model_tokens <= ((.[0].request_bytes + 3) / 4 | floor)' \
     "$home/state/jev-ledger.jsonl" >/dev/null \
-    || fail "the oversized acceptance check did not record exactly one shortened subject row"
+    || fail "a verdict built only from stubs was recorded as a scored prediction"
   # Jev judged a stub of each criterion, so the record must not present those
-  # answers as judgements of the criteria the brief actually states.
-  jq -e '.truncated == true and (.unjudged_criteria | sort) == ["criterion_1","criterion_2"] and
+  # answers as judgements of the criteria the brief actually states, and it
+  # must not claim a verdict over criteria it says nothing supports.
+  jq -e '.truncated == true and .verdict == "unjudged" and .confidence == null and
+    (.unjudged_criteria | sort) == ["criterion_1","criterion_2"] and
     (.unmet_criteria | length) == 0 and
     all(.criteria[]; .met == null and .truncated == true and
         .judged_characters < (.text | length))' \
@@ -882,9 +927,11 @@ test_oversized_accept_check_is_one_request_and_one_row() {
   "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the acceptance row failed validation"
   out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") \
     || fail "report rejected the shortened acceptance ledger"
-  assert_contains "$out" "truncated=true" \
-    "the report hides a shortened shadow-mode consultation: $out"
-  pass "Jev acceptance check: a criterion Jev saw only a stub of is recorded unjudged, not met"
+  assert_contains "$out" "reason=questions-truncated kind=failed-attempt count=1" \
+    "the report does not name the consultation that could not be scored: $out"
+  printf '%s\n' "$out" | awk -F'\t' '$1 == "accept-check" { exit ($3 == "0" && $10 == "0") ? 0 : 1 }' \
+    || fail "an unscorable consultation was still counted as a labelled prediction or avoided tokens: $out"
+  pass "Jev acceptance check: a verdict built only from stubs is recorded unjudged, never scored"
 }
 
 test_small_global_cap_keeps_every_use_reachable() {
@@ -994,6 +1041,15 @@ test_report_scores_discarded_labels_as_the_negative_class() {
     "the report did not score discarded work as the negative class with the unlabelled row apart: $out"
   assert_contains "$out" 'eventual_outcome="discarded" label_source="teardown-force-discard"' \
     "the report does not name the ground truth and the teardown path behind a disagreement"
+  # An acceptance row supplies no baseline, so `disagreements:` can never hold
+  # it; the mismatch against the recorded outcome is the only review surface.
+  assert_contains "$out" "outcome-mismatches:" "the report has no outcome-mismatch section"
+  assert_contains "$out" "consultation_id=wrong-acceptance" \
+    "an acceptance Jev called accepted and teardown discarded is reviewable nowhere: $out"
+  assert_contains "$out" 'jev_decision="accepted" eventual_outcome="discarded" label_source="teardown-force-discard"' \
+    "the outcome mismatch does not show both sides"
+  printf '%s\n' "$out" | grep -q 'consultation_id=correct-rejection use' \
+    && fail "a correct rejection was listed as an outcome mismatch: $out"
   pass "Jev report: a discarded task scores as a negative label and an unlabelled row stays apart"
 }
 
@@ -1045,6 +1101,24 @@ test_report_derives_differing_items_for_an_old_row() {
   pass "Jev report: a pre-bump batched row still lists only its differing items"
 }
 
+# The day the key is revoked every consultation fails the same way. If that
+# never reaches a report section the operator sees consultations climbing with
+# nothing labelled and no stated cause.
+test_report_names_failed_network_attempts() {
+  local ledger="$TMP_ROOT/failed-attempts-ledger" fixture="$ROOT/tests/fixtures/jev-ledger.jsonl" out
+  head -1 "$fixture" | jq -c '.consultation_id = "revoked-key" | .subject = "task-k" |
+    .network_attempted = true | .available = true | .unavailable_reason = "http-401" |
+    .jev_verdict = null | .confidence = null | .used_jev = false | .agreement = null |
+    .jev_answers = {} | .jev_probabilities = {} | .jev_flagged = [] |
+    .final_decision = null | .eventual_outcome = null | .label_source = null |
+    .available = false' > "$ledger"
+  "$JEV" validate-ledger "$ledger" || fail "a failed-attempt row does not satisfy the ledger schema"
+  out=$($REPORT "$ledger") || fail "report rejected a ledger of failed attempts"
+  assert_contains "$out" "reason=http-401 kind=failed-attempt count=1" \
+    "a revoked key is named on no report section: $out"
+  pass "Jev report: an attempt that reached the service and failed is named, not just counted"
+}
+
 test_report_fixture_and_empty_error() {
   local out rc=0 empty="$TMP_ROOT/empty-ledger" malformed="$TMP_ROOT/malformed-ledger"
   out=$($REPORT "$ROOT/tests/fixtures/jev-ledger.jsonl") || fail "report rejected the valid fixture ledger"
@@ -1094,11 +1168,13 @@ test_small_global_cap_keeps_every_use_reachable
 test_ledger_rotates_monthly_and_report_reads_archives
 test_consult_does_not_read_the_whole_ledger
 test_shadow_presentation_hooks
+test_unchanged_presentation_is_consulted_once
 test_unreadable_day_scan_refuses_instead_of_spending
 test_observer_gate_requires_a_usable_key
 test_model_family_and_mismatch
 test_report_fixture_and_empty_error
 test_report_scores_discarded_labels_as_the_negative_class
+test_report_names_failed_network_attempts
 test_report_names_only_the_differing_items_of_a_batch
 test_report_derives_differing_items_for_an_old_row
 

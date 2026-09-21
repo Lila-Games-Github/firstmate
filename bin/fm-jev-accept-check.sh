@@ -109,7 +109,12 @@ jq -n --arg report "$REPORT_TEXT" --arg subject "$ID" --argjson estimate "$ESTIM
 ' > "$ENVELOPE" || exit 0
 
 "$SCRIPT_DIR/fm-jev.sh" consult accept-check < "$ENVELOPE" > "$RESULT" 2>/dev/null || exit 0
-[ "$(jq -r '.status // "unavailable"' "$RESULT" 2>/dev/null)" = available ] || exit 0
+STATUS=$(jq -r '.status // "unavailable"' "$RESULT" 2>/dev/null) || STATUS=unavailable
+REASON=$(jq -r '.reason // ""' "$RESULT" 2>/dev/null) || REASON=
+case "$STATUS:$REASON" in
+  available:*|unavailable:questions-truncated) ;;
+  *) exit 0 ;;
+esac
 
 OUT="$DATA/$ID/acceptance.json"
 OUT_TMP="$DATA/$ID/.acceptance.json.tmp.$$"
@@ -131,7 +136,9 @@ jq -n --arg task "$ID" --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg mo
   ([$criteria_rows[] | select(.met == false) | .id]) as $unmet |
   ([$criteria_rows[] | select(.truncated) | .id]) as $unjudged |
   {schema_version:1,task_id:$task,generated_at:$generated,consultation_id:$r.consultation_id,
-   mode:$r.mode,model:$r.model,verdict:$r.verdict,confidence:$r.confidence,
+   mode:$r.mode,model:$r.model,
+   verdict:(if ($unjudged | length) == ($criteria_rows | length) then "unjudged" else $r.verdict end),
+   confidence:(if ($unjudged | length) == ($criteria_rows | length) then null else $r.confidence end),
    confidence_floor:$r.confidence_floor,
    truncated:(($r.truncated // false) or ($unjudged | length) > 0),
    criteria:$criteria_rows,

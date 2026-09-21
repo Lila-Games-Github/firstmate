@@ -27,6 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
 DRAIN_JEV_TMP=
+DRAIN_JEV_PRESENT=
+DRAIN_JEV_SEEN=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
 RECOVERY_MARKER="$STATE/.watcher-down"
@@ -51,17 +53,35 @@ case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10
 . "$SCRIPT_DIR/fm-jev-adapter-lib.sh"
 if fm_jev_observer_ready triage; then
   DRAIN_JEV_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-jev-wake-drain.XXXXXX") || DRAIN_JEV_TMP=
+  if [ -n "$DRAIN_JEV_TMP" ]; then
+    DRAIN_JEV_PRESENT=$(mktemp "${TMPDIR:-/tmp}/fm-jev-wake-present.XXXXXX") \
+      || { rm -f -- "$DRAIN_JEV_TMP"; DRAIN_JEV_TMP=; }
+  fi
+  [ -z "$DRAIN_JEV_TMP" ] || DRAIN_JEV_SEEN="$STATE/.jev-triage-seen"
 fi
-fm_wake_presentation_observe_status() { # <status-line>
+# Two of the three sections that feed the observer are re-printed on every
+# drain - an open decision stays printed until it resolves - so staging each
+# presented line unconditionally would re-consult the identical item on every
+# drain and spend the day's triage share on duplicates. An item is consulted
+# once per distinct content: $DRAIN_JEV_SEEN carries the records the previous
+# drain presented, and each drain rewrites it with exactly what it presented,
+# so a row that resolves is pruned and the same content returning later is
+# consulted again.
+fm_wake_presentation_stage() { # <record>
   [ -n "$DRAIN_JEV_TMP" ] || return 0
-  printf 'status\t%s\n' "$1" >> "$DRAIN_JEV_TMP" 2>/dev/null || true
+  printf '%s\n' "$1" >> "$DRAIN_JEV_PRESENT" 2>/dev/null || true
+  grep -Fxq -- "$1" "$DRAIN_JEV_SEEN" 2>/dev/null && return 0
+  printf '%s\n' "$1" >> "$DRAIN_JEV_TMP" 2>/dev/null || true
+}
+fm_wake_presentation_observe_status() { # <status-line>
+  fm_wake_presentation_stage "$(printf 'status\t%s' "$1")"
 }
 stage_jev_wake_rows() { # <deduped-raw-rows>
   local rows=$1 row
   [ -n "$DRAIN_JEV_TMP" ] || return 0
   while IFS= read -r row || [ -n "$row" ]; do
     [ -n "$row" ] || continue
-    printf 'wake\t%s\n' "$row" >> "$DRAIN_JEV_TMP" 2>/dev/null || true
+    fm_wake_presentation_stage "$(printf 'wake\t%s' "$row")"
   done <<EOF
 $rows
 EOF
@@ -70,9 +90,16 @@ EOF
 # request, so a drain that presented twenty lines cannot spend twenty of the
 # day's calls or serialize twenty five-second timeouts on the supervision path.
 run_jev_triage_observers() {
-  [ -n "$DRAIN_JEV_TMP" ] && [ -s "$DRAIN_JEV_TMP" ] || return 0
-  "$SCRIPT_DIR/fm-jev-triage.sh" --batch < "$DRAIN_JEV_TMP" >/dev/null 2>&1 || true
-  : > "$DRAIN_JEV_TMP" 2>/dev/null || true
+  [ -n "$DRAIN_JEV_TMP" ] || return 0
+  if [ -s "$DRAIN_JEV_TMP" ]; then
+    "$SCRIPT_DIR/fm-jev-triage.sh" --batch < "$DRAIN_JEV_TMP" >/dev/null 2>&1 || true
+    : > "$DRAIN_JEV_TMP" 2>/dev/null || true
+  fi
+  if [ -s "$DRAIN_JEV_PRESENT" ]; then
+    sort -u "$DRAIN_JEV_PRESENT" > "$DRAIN_JEV_SEEN.tmp.$$" 2>/dev/null \
+      && mv -f "$DRAIN_JEV_SEEN.tmp.$$" "$DRAIN_JEV_SEEN" 2>/dev/null \
+      || rm -f -- "$DRAIN_JEV_SEEN.tmp.$$" 2>/dev/null || true
+  fi
 }
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
@@ -652,6 +679,7 @@ cleanup() {
   [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
   [ -z "$DRAIN_VIEW_TMP" ] || rm -f -- "$DRAIN_VIEW_TMP" 2>/dev/null || true
   [ -z "$DRAIN_JEV_TMP" ] || rm -f -- "$DRAIN_JEV_TMP" 2>/dev/null || true
+  [ -z "$DRAIN_JEV_PRESENT" ] || rm -f -- "$DRAIN_JEV_PRESENT" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi

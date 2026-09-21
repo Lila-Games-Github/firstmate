@@ -107,6 +107,7 @@ CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG_FILE="$CONFIG_DIR/jev.json"
 LEDGER="${FM_JEV_LEDGER_OVERRIDE:-$STATE/jev-ledger.jsonl}"
+LAST_ATTEMPT_ID=
 MODEL=jev-1.13.0
 MODEL_FAMILY=jev-
 ENDPOINT=https://api.typesafe.ai/v1/systemone
@@ -158,14 +159,15 @@ use_valid() {
 
 json_available() { command -v jq >/dev/null 2>&1; }
 
-emit_unavailable() { # <use> <reason> [<fallback-json>]
-  local use=$1 reason=$2 fallback=${3:-null}
+emit_unavailable() { # <use> <reason> [<fallback-json>] [<truncated-keys-json>]
+  local use=$1 reason=$2 fallback=${3:-null} shortened=${4:-\{\}}
   if json_available && jq empty >/dev/null 2>&1 <<<"$fallback"; then
+    jq empty >/dev/null 2>&1 <<<"$shortened" || shortened='{}'
     jq -cn --arg use "$use" --arg mode "$EFFECTIVE_MODE" \
       --arg configured_mode "$CONFIGURED_MODE" --arg reason "$reason" \
-      --argjson fallback "$fallback" \
+      --argjson fallback "$fallback" --argjson shortened "$shortened" \
       '{status:"unavailable", use:$use, mode:$mode, configured_mode:$configured_mode,
-        reason:$reason, fallback_decision:$fallback}'
+        reason:$reason, fallback_decision:$fallback, truncated_keys:$shortened}'
   else
     printf '{"status":"unavailable","use":"%s","mode":"off","configured_mode":"off","reason":"%s","fallback_decision":null}\n' \
       "$use" "$reason"
@@ -570,6 +572,7 @@ record_unavailable_attempt() { # <use> <subject> <reason> <baseline-json> <basel
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   today=${now%%T*}
   id="${today//-/}T${now#*T}-$$-${RANDOM:-0}"
+  LAST_ATTEMPT_ID=$id
   cost=$(jq -cn --argjson tokens "$tokens" --argjson rate "$PRICE_PER_MILLION" '$tokens * $rate / 1000000')
   row=$(jq -cn --arg now "$now" --arg today "$today" --arg id "$id" \
     --arg use "$use" --arg subject "$subject" --arg mode "$EFFECTIVE_MODE" \
@@ -754,6 +757,19 @@ day_usage_counts() { # <use> <day>
      (map(select(.use == $use) | .cost_usd) | add // 0)] | @tsv' 2>/dev/null
 }
 
+# 0 when every question this envelope's verdict names had its own state
+# shortened. A question's state is the group its key belongs to, so a criterion
+# is judged on a stub when `acceptance_criteria.criterion_2` was shortened, and
+# a shortened shared report does not make any single question unjudged.
+all_verdict_questions_truncated() { # <envelope-file>
+  jq -e '
+    def gkey: sub("__.*$"; "");
+    (.ledger.verdict.questions // []) as $q
+    | ([(.ledger.truncated_keys // {} | keys)[] | split(".")[]] | unique) as $cut
+    | ($q | length) > 0 and all($q[]; . as $k | ($cut | index($k | gkey)) != null)
+  ' "$1" >/dev/null 2>&1
+}
+
 # The pinned model and the question block with no state at all: what a request
 # costs before any material is attached. shrink_to_budget can only shorten
 # state, so a cap this alone cannot fit is one no shortening will ever satisfy,
@@ -922,6 +938,10 @@ consult_one() { # <use> <envelope-file>
   request_bytes=$(LC_ALL=C printf '%s' "$request_json" | wc -c | tr -d ' ')
   case "$request_bytes" in ''|*[!0-9]*) emit_unavailable "$use" token-estimate-failed "$fallback"; return 0 ;; esac
   request_tokens=$(( (request_bytes + BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN ))
+  # Crediting the adapter's estimate of material Jev never saw would book a
+  # saving that did not happen, so a shortened request is only ever credited
+  # the tokens it actually carried.
+  [ "$truncated" != true ] || estimate=$request_tokens
 
   lock_ledger || { emit_unavailable "$use" ledger-busy "$fallback"; return 0; }
   today=$(date -u +%Y-%m-%d)
@@ -1027,6 +1047,28 @@ consult_one() { # <use> <envelope-file>
     return 0
   fi
   rm -f -- "$request_api"
+
+  # A verdict every one of whose questions was answered from a shortened stub
+  # is not a judgement of the material the adapter gathered. Recording it as a
+  # scored prediction would put it in the report's agreement and error columns
+  # and credit its tokens as avoided, so the row says the consultation could
+  # not be scored and the caller keeps its baseline.
+  if [ "$truncated" = true ] && all_verdict_questions_truncated "$file"; then
+    if ! record_unavailable_attempt "$use" "$subject" questions-truncated "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" "$request_bytes" "$truncated" >/dev/null; then
+      unlock_ledger || true
+      emit_unavailable "$use" ledger-write-failed "$fallback" "$truncated_keys"
+      return 0
+    fi
+    unlock_ledger || true
+    jq -cn --arg use "$use" --arg mode "$EFFECTIVE_MODE" --arg cmode "$CONFIGURED_MODE" \
+      --arg id "$LAST_ATTEMPT_ID" --argjson floor "$CONFIDENCE_FLOOR" \
+      --argjson fallback "$fallback" --argjson shortened "$truncated_keys" \
+      '{status:"unavailable",use:$use,mode:$mode,configured_mode:$cmode,
+        reason:"questions-truncated",consultation_id:$id,confidence_floor:$floor,
+        fallback_decision:$fallback,truncated:true,truncated_keys:$shortened}' \
+      || emit_unavailable "$use" questions-truncated "$fallback" "$truncated_keys"
+    return 0
+  fi
 
   derive=$(derive_verdict "$file" "$RESPONSE_FILE") || {
     record_unavailable_attempt "$use" "$subject" verdict-malformed "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" "$request_bytes" "$truncated" \

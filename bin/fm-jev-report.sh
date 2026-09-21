@@ -26,9 +26,14 @@
 # still count. Until a use has active rows, that value is a counterfactual
 # estimate, not observed savings.
 #
-# A `refusals:` section names every budget refusal that never reached the
-# network, so a day in which a cap or an oversized request stopped the feature
-# is visible rather than silent. The report also lists every Jev-versus-baseline
+# An `unanswered:` section counts every consultation that produced no answer,
+# grouped by reason and split into the budget refusals that never reached the
+# network and the attempts that reached it and failed, so a day stopped by a
+# cap and a day stopped by a revoked key are both named rather than silent.
+# `outcome-mismatches:` then lists every consultation whose verdict class
+# differs from the outcome later recorded for it, which is the only place an
+# acceptance check can be reviewed: it supplies no baseline to disagree with,
+# so it never appears under `disagreements:`. The report also lists every Jev-versus-baseline
 # disagreement with both rationales and the returned typed probabilities; a
 # batched per-item verdict is listed as the items that actually diverged, never
 # as the whole batch object, so one routine answer among fifty does not bury the
@@ -172,18 +177,20 @@ printf '%s\n' "$METRICS"
 
 REFUSALS=$(jq -n -r '
   reduce inputs as $row ({};
-    if ($row.network_attempted | not) then
-      (($row.use) + "\t" + ($row.unavailable_reason // "unavailable")) as $key
+    if $row.available then .
+    else
+      (($row.use) + "\t" + ($row.unavailable_reason // "unavailable") + "\t"
+        + (if $row.network_attempted then "failed-attempt" else "pre-request-refusal" end)) as $key
       | .[$key] = ((.[$key] // 0) + 1)
-    else . end)
+    end)
   | to_entries | sort_by(.key)[]
   | (.key | split("\t")) as $parts
-  | "- use=\($parts[0]) reason=\($parts[1]) refused=\(.value)"
+  | "- use=\($parts[0]) reason=\($parts[1]) kind=\($parts[2]) count=\(.value)"
 ' "${NONEMPTY[@]}") || REFUSALS=
 if [ -z "$REFUSALS" ]; then
-  printf 'refusals: none\n'
+  printf 'unanswered: none\n'
 else
-  printf 'refusals:\n%s\n' "$REFUSALS"
+  printf 'unanswered:\n%s\n' "$REFUSALS"
 fi
 
 DISAGREEMENTS=$(jq -r '
@@ -215,6 +222,32 @@ if [ -z "$DISAGREEMENTS" ]; then
   printf 'disagreements: none\n'
 else
   printf 'disagreements:\n%s\n' "$DISAGREEMENTS"
+fi
+
+# An acceptance row has no baseline to disagree with, so it can never reach
+# `disagreements:`; the ground truth teardown recorded is the only thing its
+# verdict can be compared against. Without this section a false positive is a
+# number in the table with no way to see what Jev said or why.
+MISMATCHES=$(jq -r '
+  def positive($use):
+    if $use == "accept-check" then "accepted"
+    elif $use == "triage" then "actionable"
+    elif $use == "commit-lint" then "flagged"
+    else "settled" end;
+  . as $row |
+  select(.available and .jev_verdict != null and .eventual_outcome != null) |
+  select((.jev_verdict | type) == "string" and (.eventual_outcome | type) == "string") |
+  select((.jev_verdict == positive(.use)) != (.eventual_outcome == positive(.use))) |
+  "- consultation_id=\(.consultation_id) use=\(.use) subject=\(.subject)\n" +
+  "  jev_decision=\(.jev_verdict | tojson) eventual_outcome=\(.eventual_outcome | tojson)" +
+  " label_source=\(.label_source | tojson)\n" +
+  "  jev_rationale=\(.jev_rationale | tojson)\n" +
+  "  jev_probabilities=\(.jev_probabilities | tojson)"
+' "${NONEMPTY[@]}") || MISMATCHES=
+if [ -z "$MISMATCHES" ]; then
+  printf 'outcome-mismatches: none\n'
+else
+  printf 'outcome-mismatches:\n%s\n' "$MISMATCHES"
 fi
 
 ADVISORIES=$(jq -r '
