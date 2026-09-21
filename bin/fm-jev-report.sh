@@ -9,9 +9,11 @@
 # false negatives use only consultations with a non-null Jev verdict and eventual
 # decision. Object verdicts (open-question batches) compare matching keys. Spend
 # includes every network attempt. Estimated tokens avoided includes available,
-# confidence-qualified consultations in both shadow and active modes; until a
-# use has active rows, that value is a counterfactual estimate, not observed
-# savings. The report also lists every Jev-versus-baseline disagreement with both
+# confidence-qualified consultations in both shadow and active modes; a batched
+# per-key consultation contributes the share of its estimate whose own answers
+# qualified, so nine confident answers out of ten still count. Until a use has
+# active rows, that value is a counterfactual estimate, not observed savings.
+# The report also lists every Jev-versus-baseline disagreement with both
 # rationales and the returned typed probabilities. It closes with the advisory
 # findings the active adapters recorded, which is where an acceptance or
 # commit-lint advisory is surfaced: no adapter writes one to a task status file,
@@ -61,6 +63,15 @@ METRICS=$(jq -s -r '
         select($row.eventual_outcome | has($entry.key)) |
         {pred:$entry.value,actual:$row.eventual_outcome[$entry.key]}]
     else [{pred:.jev_verdict,actual:.eventual_outcome}] end;
+  def avoided:
+    . as $row |
+    if ($row.available | not) then 0
+    elif (($row.jev_confidences // {}) | length) > 0 then
+      ([$row.jev_confidences[] | select(. >= $row.confidence_floor)] | length) as $qualified |
+      (($row.estimated_big_model_tokens * $qualified / ($row.jev_confidences | length)) | round)
+    elif $row.confidence != null and $row.confidence >= $row.confidence_floor then
+      $row.estimated_big_model_tokens
+    else 0 end;
   def metrics($rows; $name):
     [$rows[] | . as $row | pairs[] | . + {use:$row.use}] as $pairs |
     ($pairs | length) as $labelled |
@@ -73,7 +84,7 @@ METRICS=$(jq -s -r '
      false_positive:($pairs | map(select(.pred == positive(.use) and .actual != positive(.use))) | length),
      false_negative:($pairs | map(select(.pred != positive(.use) and .actual == positive(.use))) | length),
      spend:($rows | map(.cost_usd) | add // 0),
-     estimated_tokens_avoided:($rows | map(select(.available and .confidence != null and .confidence >= .confidence_floor) | .estimated_big_model_tokens) | add // 0),
+     estimated_tokens_avoided:($rows | map(avoided) | add // 0),
      active_rows:($rows | map(select(.mode == "active")) | length)};
   . as $all |
   (["accept-check","triage","commit-lint","open-questions"][] as $use |

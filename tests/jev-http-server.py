@@ -9,6 +9,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 port_file, log_file = sys.argv[1:3]
 
 
+def item_text(request, key):
+    """The state entry a question key belongs to, as JSON text."""
+    base = key.split("__")[0]
+    for container in request.get("state", {}).values():
+        if isinstance(container, dict) and base in container:
+            return json.dumps(container[base], separators=(",", ":"))
+    return ""
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -34,21 +43,28 @@ class Handler(BaseHTTPRequestHandler):
                 answers[key] = {"type": "noul", "noul": probability}
             elif qtype == "choice":
                 options = list(question["criteria"].keys())
+                text = item_text(request, key)
                 if key.endswith("attention"):
-                    choice = "actionable"
+                    choice = "routine" if "FORCE_ROUTINE" in text else "actionable"
                 elif key.endswith("review_kind"):
                     choice = "ruling"
                 elif "settled" in options:
                     choice = "settled"
                 else:
                     choice = options[0]
-                remaining = (1.0 - 0.9) / (len(options) - 1)
+                # Per-question confidence, so one item of a batch can come back
+                # below the floor while its siblings stay confident.
+                if "FORCE_LOW_CONFIDENCE" in text:
+                    confidence, winner = 0.4, 0.55
+                else:
+                    confidence, winner = 0.9, 0.9
+                remaining = (1.0 - winner) / (len(options) - 1)
                 probabilities = {option: remaining for option in options}
-                probabilities[choice] = 0.9
+                probabilities[choice] = winner
                 answers[key] = {
                     "type": "choice",
                     "choice": choice,
-                    "confidence": 0.9,
+                    "confidence": confidence,
                     "probabilities": probabilities,
                 }
             else:

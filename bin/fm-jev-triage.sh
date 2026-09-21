@@ -12,7 +12,9 @@
 #
 # --kind prints "<attention>" or "<attention> <review_kind>" for its one item.
 # --batch prints "<input-line-number><TAB><attention>[<TAB><review_kind>]" for
-# each item whose returned confidence met the configured floor.
+# each item whose returned confidence met the configured floor. That gate is per
+# item and belongs to the client, so an unconfident answer costs only its own
+# item and the ledger records the same item-by-item outcome.
 # Callers may inspect that output, but existing presentation remains
 # authoritative in every mode because a mistaken routine verdict must never make
 # a wake disappear. This hook is a silent observer: off or unavailable mode
@@ -105,13 +107,15 @@ jq -n --argjson items "$ITEMS_JSON" --argjson estimate "$ESTIMATE" \
 "$SCRIPT_DIR/fm-jev.sh" consult triage < "$ENVELOPE" > "$RESULT" 2>/dev/null || exit 0
 [ "$(jq -r '.status // "unavailable"' "$RESULT" 2>/dev/null)" = available ] || exit 0
 
+# The client owns the per-item confidence gate and records the same per-key
+# decision on the ledger row, so printed classifications and recorded evidence
+# cannot disagree item by item.
 if [ "$MODE_FLAG" = single ]; then
   jq -r --argjson items "$ITEMS_JSON" '
     . as $r |
     ($items[0]) as $item |
-    ($r.answers[$item.key + "__attention"]) as $attention |
-    select($attention.confidence >= $r.confidence_floor) |
-    [$attention.choice,
+    select($r.qualified[$item.key + "__attention"]) |
+    [$r.answers[$item.key + "__attention"].choice,
      (if $item.kind == "review-answer" then $r.answers[$item.key + "__review_kind"].choice else empty end)]
     | join(" ")
   ' "$RESULT"
@@ -120,9 +124,8 @@ else
     . as $r |
     $items[] |
     . as $item |
-    ($r.answers[$item.key + "__attention"]) as $attention |
-    select($attention.confidence >= $r.confidence_floor) |
-    [($item.line | tostring), $attention.choice,
+    select($r.qualified[$item.key + "__attention"]) |
+    [($item.line | tostring), $r.answers[$item.key + "__attention"].choice,
      (if $item.kind == "review-answer" then $r.answers[$item.key + "__review_kind"].choice else empty end)]
     | @tsv
   ' "$RESULT"

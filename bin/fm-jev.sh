@@ -27,6 +27,12 @@
 # responses all return status=unavailable so callers keep their old behavior.
 # Only a network attempt creates a ledger row.
 #
+# The `choices` recipe is per key: every named question keeps its own returned
+# confidence, and `qualified`, `used_jev_keys`, and `decision_after_jev` are
+# decided one key at a time against the use's confidence floor. The scalar
+# `confidence` on that result and row is the lowest of them, a batch summary
+# that gates nothing, so one unconfident answer cannot discard the rest.
+#
 # `finalize` updates every row without an eventual outcome for one use and
 # subject under the ledger lock. It is how an owning lifecycle path records the
 # later human or deterministic ground truth without adding a second row.
@@ -229,6 +235,15 @@ ledger_row_valid_filter='
   ((.response_model == null) or ((.response_model | type) == "string")) and
   ((.truncated == null) or ((.truncated | type) == "boolean")) and
   ((.jev_flagged == null) or ((.jev_flagged | type) == "array")) and
+  ((.jev_confidences == null) or ((.jev_confidences | type) == "object" and
+    all(.jev_confidences[]; type == "number" and . >= 0 and . <= 1))) and
+  ((.used_jev_keys == null) or ((.used_jev_keys | type) == "object" and
+    all(.used_jev_keys[]; type == "boolean"))) and
+  ((.jev_confidences // {} | keys) == (.used_jev_keys // {} | keys)) and
+  (if ((.used_jev_keys // {}) | length) > 0
+   then .used_jev == any(.used_jev_keys[]; .) and
+        .used_jev_keys == (.jev_confidences | map_values(. >= $row.confidence_floor and $row.mode == "active"))
+   else true end) and
   (.used_jev | type) == "boolean" and
   (.corrected | type) == "boolean" and
   (.jev_answers | type) == "object" and
@@ -328,7 +343,9 @@ envelope_valid() {
      elif .ledger.verdict.strategy == "choice" then
        named_questions([.ledger.verdict.question]; .request.questions)
      elif .ledger.verdict.strategy == "choices" then
-       named_questions(.ledger.verdict.questions; .request.questions)
+       named_questions(.ledger.verdict.questions; .request.questions) and
+       (.ledger.baseline_decision | type) == "object" and
+       all(.ledger.verdict.questions[]; . as $name | $root.ledger.baseline_decision | has($name))
      elif .ledger.verdict.strategy == "risk_nouls" then
        (.ledger.verdict.checks | type) == "array" and (.ledger.verdict.checks | length) > 0 and
        all(.ledger.verdict.checks[];
@@ -418,8 +435,9 @@ derive_verdict() { # <envelope-file> <response-file>
        rationale:"The returned Choice winner is the Jev decision; confidence is the returned Choice confidence."}
     elif $v.strategy == "choices" then
       (reduce $v.questions[] as $q ({}; . + {($q):$answers[$q].choice})) as $out |
-      {verdict:$out, confidence:([$v.questions[] as $q | $answers[$q].confidence] | min), flagged:[],
-       rationale:"Each returned Choice winner is retained; aggregate confidence is the lowest returned Choice confidence."}
+      (reduce $v.questions[] as $q ({}; . + {($q):$answers[$q].confidence})) as $confidences |
+      {verdict:$out, confidence:([$confidences[]] | min), confidences:$confidences, flagged:[],
+       rationale:"Each returned Choice winner is retained with the confidence Jev returned for it; the row confidence is the lowest of those and summarizes the batch without gating any answer."}
     elif $v.strategy == "risk_nouls" then
       [$v.checks[] as $check |
         {question:$check.question,
@@ -460,7 +478,7 @@ record_unavailable_attempt() { # <use> <subject> <reason> <baseline-json> <basel
      baseline_decision:$baseline,baseline_rationale:$baseline_rationale,agreement:null,
      decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,corrected:false,latency_ms:$latency,
      cost_usd:$cost,estimated_big_model_tokens:$estimate,request_bytes:$bytes,used_jev:false,
-     truncated:$truncated,jev_flagged:[],
+     truncated:$truncated,jev_flagged:[],jev_confidences:{},used_jev_keys:{},
      response_model:(if $response_model == "" then null else $response_model end),
      jev_answers:{}}') || return 1
   append_ledger_row "$row" || return 1
@@ -540,6 +558,7 @@ cmd_consult() {
   local today counts calls spend use_calls use_spend pre_cost total http=000 t0=0 t1=0 latency=0 actual_tokens=0 cost=0
   local request_json derive row result now id used_jev=false decision_after source=reported
   local probabilities agreement truncated=false reason=''
+  local confidences='{}' qualified='{}' used_keys='{}'
   local request_api='' TYPESAFE_API_KEY_PRIVATE=''
   use_valid "$use" || { emit_unavailable "${use:-unknown}" invalid-use; return 0; }
   resolve_use_config "$use"
@@ -705,14 +724,37 @@ cmd_consult() {
   agreement=$(jq -cn --argjson jev "$(jq -c '.verdict' <<<"$derive")" --argjson baseline "$fallback" '
     if $jev == null or $baseline == null then null else $jev == $baseline end
   ')
-  if [ "$EFFECTIVE_MODE" = active ] \
-    && jq -en --argjson confidence "$(jq -c '.confidence' <<<"$derive")" \
-      --argjson floor "$CONFIDENCE_FLOOR" '$confidence >= $floor' >/dev/null; then
-    used_jev=true
-    decision_after=$(jq -c '.verdict' <<<"$derive")
+  # A per-key strategy is gated per key: one unconfident answer in a batch of ten
+  # must not discard the nine confident ones, and the row's scalar confidence is
+  # only a summary. Scalar strategies keep the single all-or-nothing gate.
+  confidences=$(jq -c '.confidences // {}' <<<"$derive")
+  qualified=$(jq -cn --argjson confidences "$confidences" --argjson floor "$CONFIDENCE_FLOOR" \
+    '$confidences | map_values(. >= $floor)') || qualified='{}'
+  if [ "$confidences" = '{}' ]; then
+    used_keys='{}'
+    if [ "$EFFECTIVE_MODE" = active ] \
+      && jq -en --argjson confidence "$(jq -c '.confidence' <<<"$derive")" \
+        --argjson floor "$CONFIDENCE_FLOOR" '$confidence >= $floor' >/dev/null; then
+      used_jev=true
+      decision_after=$(jq -c '.verdict' <<<"$derive")
+    else
+      used_jev=false
+      decision_after=$fallback
+    fi
   else
-    used_jev=false
-    decision_after=$fallback
+    used_keys=$(jq -cn --argjson qualified "$qualified" --arg mode "$EFFECTIVE_MODE" \
+      '$qualified | map_values(. and $mode == "active")') || used_keys='{}'
+    used_jev=$(jq -r 'any(.[]; .)' <<<"$used_keys")
+    decision_after=$(jq -cn --argjson baseline "$fallback" --argjson verdict "$(jq -c '.verdict' <<<"$derive")" \
+      --argjson used "$used_keys" '
+      reduce ($used | to_entries[]) as $entry ($baseline;
+        if $entry.value then . + {($entry.key):$verdict[$entry.key]} else . end)') || {
+      confidences='{}'
+      qualified='{}'
+      used_keys='{}'
+      used_jev=false
+      decision_after=$fallback
+    }
   fi
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   id="${today//-/}T${now#*T}-$$-${RANDOM:-0}"
@@ -727,6 +769,7 @@ cmd_consult() {
     --argjson cost "$cost" --argjson estimate "$estimate" --argjson bytes "$request_bytes" \
     --argjson truncated "$truncated" --arg response_model "$RESPONSE_MODEL" \
     --argjson flagged "$(jq -c '.flagged // []' <<<"$derive")" \
+    --argjson confidences "$confidences" --argjson used_keys "$used_keys" \
     --argjson used "$used_jev" --argjson answers "$(jq -c '.answers' "$RESPONSE_FILE")" '
     {schema_version:1,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
      mode:$mode,configured_mode:$configured_mode,network_attempted:true,available:true,
@@ -737,7 +780,7 @@ cmd_consult() {
      agreement:$agreement,decision_after_jev:$after,final_decision:null,eventual_outcome:null,
      corrected:false,latency_ms:$latency,cost_usd:$cost,
      estimated_big_model_tokens:$estimate,request_bytes:$bytes,used_jev:$used,
-     truncated:$truncated,jev_flagged:$flagged,
+     truncated:$truncated,jev_flagged:$flagged,jev_confidences:$confidences,used_jev_keys:$used_keys,
      response_model:(if $response_model == "" then null else $response_model end),
      jev_answers:$answers}') || {
     unlock_ledger || true
@@ -760,13 +803,15 @@ cmd_consult() {
     --argjson input_tokens "$actual_tokens" --argjson latency "$latency" \
     --argjson cost "$cost" --argjson fallback "$fallback" --arg baseline_rationale "$baseline_rationale" \
     --arg jev_rationale "$(jq -r '.rationale' <<<"$derive")" --argjson probabilities "$probabilities" \
-    --argjson truncated "$truncated" \
+    --argjson truncated "$truncated" --argjson confidences "$confidences" \
+    --argjson qualified "$qualified" --argjson used_keys "$used_keys" \
     --argjson agreement "$agreement" --argjson used "$used_jev" '
     {status:"available",consultation_id:$id,use:$use,mode:$mode,configured_mode:$configured_mode,
      model:$model,confidence_floor:$floor,verdict:$derive.verdict,confidence:$derive.confidence,
      answers:$answers,input_tokens:$input_tokens,latency_ms:$latency,cost_usd:$cost,
      jev_rationale:$jev_rationale,jev_probabilities:$probabilities,truncated:$truncated,
      flagged:($derive.flagged // []),
+     confidences:$confidences,qualified:$qualified,used_jev_keys:$used_keys,
      fallback_decision:$fallback,baseline_rationale:$baseline_rationale,agreement:$agreement,used_jev:$used}
      + (if $derive.risks then {risks:$derive.risks} else {} end)') || {
     emit_unavailable "$use" result-render-failed "$fallback"

@@ -7,6 +7,17 @@ Jev cannot produce free text, prove correctness, recover missing product intent,
 ## Enable and disable
 
 Put `TYPESAFE_API_KEY=` in the effective home's gitignored `.env` to enable the built-in active configuration.
+That key is the only opt-in, and it is the same key `bin/fm-dispatch-resolve.sh` already uses for typed dispatch resolution.
+A home that already has it therefore turns all four observers active on its next `bin/fm-wake-drain.sh`, with no further configuration step, and begins transmitting the material listed under [Uses](#uses) to TypeSafe AI:
+
+| Use | What each consultation transmits |
+| --- | --- |
+| Acceptance check | The acceptance criteria extracted from `data/<id>/brief.md` and the text of the worker's `data/<id>/report.md`. |
+| Supervision triage | Each presented status line, wake row, or captured Lavish review element, truncated to 1500 characters per item. |
+| Commit lint | Each branch-only commit's subject, body, and diff, or its `git show --stat` plus leading hunks when the diff exceeds the per-call budget. |
+| Open questions | Each question line and the full text of the page that line references. |
+
+Shadow and `off` remain the manual opt-outs; neither is selected for you.
 Create the gitignored `config/jev.json` described in [configuration.md](configuration.md#jev-decision-observers-configjevjson) to change budgets or select another mode per use.
 Shadow mode sends the request and records the answer, but the existing path still decides.
 Active mode uses a confidence-qualified answer only for the adapter effects listed below, with the existing path as the deterministic fallback.
@@ -24,7 +35,7 @@ The system never changes a use's configured mode or disables Jev because of a di
 | Use | Command or hook | Shadow behavior | Active behavior |
 | --- | --- | --- | --- |
 | Acceptance check | `bin/fm-jev-accept-check.sh <task-id>` | Writes `data/<id>/acceptance.json` from one Noul per extracted acceptance criterion. | Also records `unmet_criteria` and an `advisory` string in that same file, but never accepts, rejects, blocks, or closes the task. |
-| Supervision triage | `bin/fm-wake-drain.sh` and `bin/fm-procevent-lavish.sh read` | Records routine or actionable for each presented item and ruling, question, or instruction for captured review answers, batching one drain or one read into a single request. | Marks the confidence-qualified classification as the Jev decision in the ledger, while presentation remains unchanged so no input can be silently lost. |
+| Supervision triage | `bin/fm-wake-drain.sh` and `bin/fm-procevent-lavish.sh read` | Records routine or actionable for each presented item and ruling, question, or instruction for captured review answers, batching one drain or one read into a single request. | Marks each confidence-qualified classification in the batch as the Jev decision for that item in the ledger, while presentation remains unchanged so no input can be silently lost. |
 | Commit lint | `bin/fm-jev-commit-lint.sh <worktree>` | Reviews each branch commit in its own request for message and diff agreement, persistence changes, weakened tests, debug output, and credentials, and writes `data/<id>/commit-lint.json`. | Also records an `advisory` string in that same file, but never blocks or authorizes landing. |
 | Open questions | `bin/fm-jev-open-questions.sh <questions-file> <pages-dir>` | Writes `<stem>-jev-review.md` with still open, settled, or cannot tell against each question's named page. | Writes the same proposal and never edits the question register or referenced pages. |
 
@@ -53,6 +64,7 @@ Acceptance rows begin without that label and successful teardown records the lat
 The report's token count is an estimate based on the bounded material each adapter supplied.
 Acceptance estimates the report and criterion text, triage estimates the presented items, commit lint estimates the commit-and-diff JSON, and open-question review estimates the questions and named page text; each uses the conventional four-characters-per-token approximation because these paths do not otherwise record big-model token use.
 The client applies that same four-bytes-per-token rule to its own preflight, so an adapter sizing bounded material against `bin/fm-jev.sh request-budget <use>` and the cap the client enforces are one arithmetic.
+A batched consultation is credited the share of its estimate whose own items cleared the floor, because each item of a batch is judged on the confidence Jev returned for that item rather than on the batch minimum.
 For shadow rows the value is only a counterfactual estimate of what active mode could avoid.
 Active rows make operational comparison possible, but the value remains an estimate rather than a billing measurement, and advisory-only effects may not eliminate every baseline token.
 Compare both agreement and error direction before promoting a use because a low average error rate can still hide a damaging false negative.

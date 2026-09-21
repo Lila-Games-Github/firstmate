@@ -280,6 +280,34 @@ test_triage_batches_many_items_into_one_call() {
   pass "Jev triage adapter: a whole batch of supervision items costs one consultation"
 }
 
+test_mixed_confidence_batch_is_gated_per_item() {
+  local home="$TMP_ROOT/triage-mixed" before out row avoided
+  write_config "$home" off active off off
+  write_key "$home"
+  before=$(request_count)
+  out=$(printf 'status\tFORCE_ROUTINE one\nstatus\tFORCE_ROUTINE FORCE_LOW_CONFIDENCE two\nstatus\tFORCE_ROUTINE three\n' \
+    | jev_env "$home" "$TRIAGE" --batch)
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "the mixed-confidence batch did not cost one request"
+  [ "$(printf '%s\n' "$out" | grep -c .)" -eq 2 ] \
+    || fail "the unconfident item did not cost its confident siblings their answers: '$out'"
+  assert_contains "$out" $'1\troutine' "a confident item was discarded with its unconfident sibling"
+  assert_contains "$out" $'3\troutine' "a confident item was discarded with its unconfident sibling"
+  row=$(cat "$home/state/jev-ledger.jsonl")
+  jq -e '.used_jev_keys == {"item_1__attention":true,"item_2__attention":false,"item_3__attention":true} and
+    .used_jev == true and .jev_confidences.item_2__attention == 0.4 and .confidence == 0.4' <<<"$row" >/dev/null \
+    || fail "the ledger did not record the batch item by item: $row"
+  jq -e '.decision_after_jev ==
+    {"item_1__attention":"routine","item_2__attention":"actionable","item_3__attention":"routine"}' \
+    <<<"$row" >/dev/null \
+    || fail "decision_after_jev is not the per-item mix of Jev answers and baseline: $row"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "mixed-confidence row failed schema validation"
+  out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") || fail "report rejected the mixed-confidence ledger"
+  avoided=$(printf '%s\n' "$out" | awk -F'\t' '$1 == "triage" { print $9 }')
+  [ -n "$avoided" ] && [ "$avoided" -gt 0 ] \
+    || fail "a batch with two confident answers contributed no estimated tokens avoided: $out"
+  pass "Jev batched triage: each item is gated, recorded, and credited on its own confidence"
+}
+
 test_commit_request_builder() {
   local home="$TMP_ROOT/commit" repo="$TMP_ROOT/commit-repo" before out request
   write_config "$home" off off shadow off
@@ -469,6 +497,7 @@ test_per_use_budget_protects_other_uses
 test_accept_request_and_artifact
 test_triage_request_builder
 test_triage_batches_many_items_into_one_call
+test_mixed_confidence_batch_is_gated_per_item
 test_commit_request_builder
 test_commit_lint_truncates_instead_of_skipping
 test_active_advisories_never_touch_task_status

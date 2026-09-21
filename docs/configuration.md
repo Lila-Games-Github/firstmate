@@ -567,6 +567,8 @@ Each `mode` is `off`, `shadow`, or `active`.
 Off does not build adapter state, make a network call, write the ledger, or alter existing output.
 Shadow asks Jev and records the consultation while the existing path makes the decision.
 Active permits only the adapter's documented advisory effect when the answer meets that use's `confidence_floor`; an unavailable or lower-confidence result keeps the existing decision.
+A batched consultation that asks one Choice per item applies that floor per item: each item keeps the confidence Jev returned for it, `used_jev_keys` and `decision_after_jev` record the qualifying items individually, and the remaining items keep their baseline decision.
+The scalar `confidence` on such a row is the lowest of the returned confidences and is a summary only, so a single unconfident answer neither discards its confident siblings nor makes a large batch look inert.
 Active triage records the confidence-qualified Jev classification but never suppresses or changes presentation, so a false routine verdict cannot silently lose supervision input.
 Disagreement never changes a configured mode, lowers it to shadow, or engages the kill switch.
 See [jev.md](jev.md) for each adapter's effect and rollback workflow.
@@ -582,6 +584,7 @@ The configuration fields are `mode`, `configured_mode`, and `confidence_floor`.
 The service fields are `network_attempted`, `available`, `unavailable_reason`, `response_model`, `input_tokens`, `input_tokens_source`, `latency_ms`, `cost_usd`, `request_bytes`, `truncated`, `jev_answers`, and `jev_probabilities`.
 `truncated` is true when the adapter had to shorten its bounded material to fit the per-call budget, and `jev_flagged` names the questions that drove a negative or risk verdict.
 The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `decision_after_jev`, `eventual_outcome`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
+A batched per-item consultation adds `jev_confidences` and `used_jev_keys`, one entry per asked item; `used_jev` is then true when at least one item qualified, and `bin/fm-jev-report.sh` credits such a row the share of its `estimated_big_model_tokens` whose own answers qualified.
 `existing_decision` and `final_decision` are compatibility aliases for `baseline_decision` and `eventual_outcome`.
 Because Jev returns typed answers rather than prose reasoning, `jev_rationale` is a deterministic explanation of the returned probabilities and configured verdict aggregation, not hidden model reasoning.
 An unavailable path before a network attempt writes no row, while a failed attempt writes a row with the reason and existing decision.
