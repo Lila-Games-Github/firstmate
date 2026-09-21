@@ -253,6 +253,69 @@ test_accept_request_and_artifact() {
   pass "Jev acceptance adapter: one reviewed request writes an artifact and accepts a later final label"
 }
 
+test_accept_preserves_complete_criteria() {
+  local home="$TMP_ROOT/accept-markdown" before
+  write_config "$home" shadow off off off
+  write_key "$home"
+  make_accept_fixture "$home"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+# Task
+## Acceptance criteria
+Approval is mandatory.
+Never infer consent.
+
+- Allow deployment
+  only after approval
+
+  Keep the approval receipt.
+  - Require the release signature.
+- Preserve rollback.
+
+Operators must receive a notification.
+
+## Definition of done
+Record the final release identifier.
+Include the verification command.
+
+## Implementation notes
+This is not an acceptance criterion.
+MD
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "complete criteria were not consulted once"
+  tail -1 "$REQUEST_LOG" | jq -e '.state.acceptance_criteria == {
+    criterion_1:"Approval is mandatory.\nNever infer consent.",
+    criterion_2:"Allow deployment\n  only after approval\n\n  Keep the approval receipt.\n  - Require the release signature.",
+    criterion_3:"Preserve rollback.",
+    criterion_4:"Operators must receive a notification.",
+    criterion_5:"Record the final release identifier.\nInclude the verification command."
+  } and (.questions | length) == 5' >/dev/null || fail "request lost criterion conditions or section prose"
+  jq -e '(.criteria | length) == 5 and
+    .criteria[1].text == "Allow deployment\n  only after approval\n\n  Keep the approval receipt.\n  - Require the release signature."' \
+    "$home/data/task-a/acceptance.json" >/dev/null || fail "artifact lost complete criterion text"
+  pass "Jev acceptance: full list items and prose survive each section"
+}
+
+test_unicode_triage_keeps_single_request_bound() {
+  local home="$TMP_ROOT/triage-unicode" before
+  write_config "$home" off shadow off off 100 2000
+  write_key "$home"
+  python3 - <<'PYDATA' > "$home/items.tsv"
+for _ in range(3):
+    print("status\t" + "界" * 1500)
+PYDATA
+  before=$(request_count)
+  jev_env "$home" "$TRIAGE" --batch < "$home/items.tsv" > "$home/output"
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "Unicode triage exceeded its single-request bound"
+  tail -1 "$REQUEST_LOG" | jq -e '(.state.items | length) == 3 and
+    (.questions | length) == 3 and (tojson | utf8bytelength) <= 8000' >/dev/null \
+    || fail "combined triage lost an item or exceeded the byte budget"
+  jq -e -s 'length == 1 and .[0].network_attempted and .[0].truncated and
+    .[0].request_bytes <= 8000' "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "combined Unicode triage did not record one bounded attempt"
+  pass "Jev triage: oversized Unicode batches shorten into one request"
+}
+
 test_triage_request_builder() {
   local home="$TMP_ROOT/triage" before out request
   write_config "$home" off shadow off off
@@ -1194,6 +1257,8 @@ test_absent_config_defaults_active
 test_unavailable_key_and_caps_fall_back
 test_per_use_budget_protects_other_uses
 test_accept_request_and_artifact
+test_accept_preserves_complete_criteria
+test_unicode_triage_keeps_single_request_bound
 test_triage_request_builder
 test_triage_batches_many_items_into_one_call
 test_mixed_confidence_batch_is_gated_per_item

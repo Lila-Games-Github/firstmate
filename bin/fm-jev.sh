@@ -868,8 +868,9 @@ shrink_to_budget() { # <envelope-file> <budget-bytes>
     [ "$newlen" -ge 32 ] || newlen=32
     jq -c --argjson p "$(jq -c '.p' <<<"$longest")" --argjson n "$newlen" '
       ($p | map(tostring) | join(".")) as $key |
-      ([$n, (.request.state | getpath($p) | length)] | min) as $kept |
-      .request.state |= setpath($p; ((getpath($p))[0:$n]) + "\n(truncated to fit the Jev per-call budget)")
+      (.request.state | getpath($p)) as $text |
+      (($text | length) * $n / ($text | utf8bytelength) | floor) as $kept |
+      .request.state |= setpath($p; ((getpath($p))[0:$kept]) + "\n(truncated to fit the Jev per-call budget)")
       | .ledger.truncated = true
       | .ledger.truncated_keys = ((.ledger.truncated_keys // {}) + {($key): $kept})' \
       "$file" > "$tmp" 2>/dev/null || return 0
@@ -1313,7 +1314,7 @@ cmd_consult() {
   bytes=$(request_body_bytes "$REQUEST_FILE")
   case "$bytes" in ''|*[!0-9]*) bytes=$((budget + 1)) ;; esac
   parts=0
-  if [ "$bytes" -gt "$budget" ]; then
+  if [ "$bytes" -gt "$budget" ] && [ "$use" != triage ]; then
     parts=$(plan_split "$REQUEST_FILE" "$PARTS_DIR" "$budget") || parts=0
     case "$parts" in ''|*[!0-9]*) parts=0 ;; esac
     if [ "$parts" -ge 2 ] && ! split_affordable "$use" "$PARTS_DIR" "$parts" "$budget"; then

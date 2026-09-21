@@ -6,8 +6,8 @@
 # Reads data/<id>/brief.md and data/<id>/report.md, falling back to the newest
 # `done:` status line when no report exists. Markdown sections whose headings
 # contain "acceptance" or "definition of done" own criterion extraction; each
-# list item in those sections becomes one Noul in one Jev request. If such a
-# section has prose but no list, the section is one criterion.
+# list item, including its continuation and nested content, becomes one Noul.
+# Prose paragraphs in each section are retained as separate criteria.
 #
 # When Jev is available, writes data/<id>/acceptance.json atomically. Shadow
 # mode records the criterion verdicts only. Active mode additionally records an
@@ -45,7 +45,6 @@ STATUS_FILE="$STATE/$ID.status"
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-jev-accept.XXXXXX") || exit 0
 trap 'rm -rf -- "$TMP_DIR"' EXIT
-MATERIAL="$TMP_DIR/material"
 CRITERIA_LINES="$TMP_DIR/criteria-lines"
 CRITERIA_JSON="$TMP_DIR/criteria.json"
 ENVELOPE="$TMP_DIR/envelope.json"
@@ -54,36 +53,62 @@ REPORT_MATERIAL="$TMP_DIR/report.txt"
 : > "$REPORT_MATERIAL"
 
 awk '
-  function heading_level(line, copy) { copy=line; sub(/[^#].*$/, "", copy); return length(copy) }
-  function lower(s) { return tolower(s) }
-  /^#{1,6}[[:space:]]/ {
-    level=heading_level($0)
-    title=$0; sub(/^#+[[:space:]]+/, "", title)
-    if (in_section && level <= section_level) in_section=0
-    if (lower(title) ~ /acceptance|definition of done/) {
-      in_section=1
-      section_level=level
-      print ""
-    }
-    next
+  function flush() {
+    sub(/\n+$/, "", text)
+    if (text ~ /[^[:space:]]/) printf "%s%c", text, 0
+    text=""; item=0; blank=0
   }
-  in_section { print }
-' "$BRIEF" > "$MATERIAL"
-[ -s "$MATERIAL" ] || exit 0
-
-awk '
-  /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/ {
+  function append(line) { text=text (text == "" ? "" : "\n") line }
+  function indent(line, prefix) {
+    prefix=line; sub(/[^[:space:]].*$/, "", prefix)
+    gsub(/\t/, "    ", prefix)
+    return length(prefix)
+  }
+  {
     line=$0
-    sub(/^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/, "", line)
-    if (line ~ /[^[:space:]]/) print line
+    if (fence != "") {
+      if (in_section) append(line)
+      trimmed=line; sub(/^[[:space:]]*/, "", trimmed)
+      run=trimmed; sub(/[^`~].*$/, "", run)
+      if (substr(run,1,1) == fence && length(run) >= fence_length &&
+          trimmed ~ /^[`~]+[[:space:]]*$/) fence=""
+      next
+    }
+    trimmed=line; sub(/^[[:space:]]*/, "", trimmed)
+    if (trimmed ~ /^```|^~~~/) {
+      fence=substr(trimmed,1,1)
+      run=trimmed; sub(/[^`~].*$/, "", run); fence_length=length(run)
+      if (in_section) append(line)
+      next
+    }
+    if (line ~ /^#{1,6}[[:space:]]/) {
+      heading=line; sub(/[^#].*$/, "", heading); level=length(heading)
+      title=line; sub(/^#+[[:space:]]+/, "", title)
+      if (in_section && level <= section_level) { flush(); in_section=0 }
+      if (in_section) { flush(); append(line) }
+      else if (tolower(title) ~ /acceptance|definition of done/) {
+        flush(); in_section=1; section_level=level
+      }
+      next
+    }
+    if (!in_section) next
+    if (line ~ /^[[:space:]]*$/) {
+      if (item) { append(""); blank=1 } else flush()
+      next
+    }
+    depth=indent(line)
+    if (line ~ /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/) {
+      if (!item || depth <= item_depth) {
+        flush(); item=1; item_depth=depth
+        sub(/^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/, "", line)
+      }
+    } else if (item && blank && depth <= item_depth) flush()
+    append(line); blank=0
   }
-' "$MATERIAL" > "$CRITERIA_LINES"
-if [ ! -s "$CRITERIA_LINES" ]; then
-  awk 'NF { if (out != "") out=out " "; out=out $0 } END { if (out != "") print out }' \
-    "$MATERIAL" > "$CRITERIA_LINES"
-fi
+  END { flush() }
+' "$BRIEF" > "$CRITERIA_LINES"
 [ -s "$CRITERIA_LINES" ] || exit 0
-jq -Rsc 'split("\n") | map(select(length > 0))' < "$CRITERIA_LINES" > "$CRITERIA_JSON" || exit 0
+jq -Rsc 'split("\u0000") | map(select(length > 0))' < "$CRITERIA_LINES" > "$CRITERIA_JSON" || exit 0
 
 if [ -f "$REPORT" ] && [ -r "$REPORT" ] && [ ! -L "$REPORT" ]; then
   cp -- "$REPORT" "$REPORT_MATERIAL" || exit 0
@@ -92,7 +117,7 @@ elif [ -f "$STATUS_FILE" ] && [ -r "$STATUS_FILE" ] && [ ! -L "$STATUS_FILE" ]; 
 fi
 [ -s "$REPORT_MATERIAL" ] || exit 0
 
-ESTIMATE=$(( ($(wc -c < "$REPORT_MATERIAL") + $(wc -c < "$MATERIAL") + 3) / 4 ))
+ESTIMATE=$(( ($(wc -c < "$REPORT_MATERIAL") + $(wc -c < "$CRITERIA_JSON") + 3) / 4 ))
 jq -n --rawfile report "$REPORT_MATERIAL" --arg subject "$ID" --argjson estimate "$ESTIMATE" \
   --slurpfile criteria "$CRITERIA_JSON" --slurpfile template "$QUESTIONS" '
   ($criteria[0] | to_entries | map({key:("criterion_" + ((.key + 1) | tostring)), value:.value}) | from_entries) as $named |
