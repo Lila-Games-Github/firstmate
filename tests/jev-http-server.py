@@ -26,8 +26,16 @@ class Handler(BaseHTTPRequestHandler):
         with open(log_file, "a", encoding="utf-8") as log:
             log.write(json.dumps(request, separators=(",", ":")) + "\n")
 
-        answers = {}
         state_text = json.dumps(request.get("state", {}), separators=(",", ":"))
+        # One part of a split can fail while its siblings answer; this marker
+        # lets a test put that failure on exactly one part's own state.
+        if "FORCE_HTTP_500" in state_text:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        answers = {}
         for key, question in request["questions"].items():
             qtype = question["type"]
             if qtype == "noul":

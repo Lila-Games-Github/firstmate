@@ -698,6 +698,82 @@ test_one_page_cited_by_every_question_is_not_duplicated() {
   pass "Jev client: a page every question cites is shortened into one request, never sent per question"
 }
 
+# A part of a split can fail on its own. The questions its siblings answered
+# are still real answers, but the one it never asked about must not be rendered
+# as a classification Jev made.
+test_failed_split_part_is_not_rendered_as_a_classification() {
+  local home="$TMP_ROOT/questions-part-failed" before out proposal rows
+  write_config "$home" off off off shadow 100 2000
+  write_key "$home"
+  mkdir -p "$home/pages"
+  cat > "$home/questions.md" <<'MD'
+# Open questions
+
+- Which launch date applies? [page: launch.md]
+- Which pricing tier applies? [page: pricing.md]
+MD
+  awk 'BEGIN { while (length(out) < 20000) out = out "The approved launch date is 2026-10-04. "; print out }' \
+    > "$home/pages/launch.md"
+  awk 'BEGIN { out = "FORCE_HTTP_500 "
+    while (length(out) < 20000) out = out "The approved pricing tier is premium. "; print out }' \
+    > "$home/pages/pricing.md"
+  before=$(request_count)
+  out=$(jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages") \
+    || fail "a sweep with one failing part produced no proposal"
+  proposal="$home/questions-jev-review.md"
+  [ "$out" = "$proposal" ] && [ -s "$proposal" ] || fail "the partial sweep wrote no proposal"
+  [ "$(request_count)" -eq $((before + 2)) ] || fail "the sweep did not split into two requests"
+  [ "$(grep -c '^- ' "$proposal")" -eq 2 ] \
+    || fail "the partial sweep lost a question: $(cat "$proposal")"
+  grep -q 'null' "$proposal" \
+    && fail "the unanswered question was rendered as a classification: $(cat "$proposal")"
+  assert_contains "$(cat "$proposal")" "**unclassified** (no answer): Which pricing tier applies?" \
+    "the question whose part failed is not marked unclassified"
+  assert_contains "$(cat "$proposal")" "1 of 2 questions were not answered" \
+    "the proposal does not say part of the sweep went unanswered"
+  assert_contains "$(cat "$proposal")" "http-500" "the proposal does not name why a question is unanswered"
+  grep -q '^- \*\*settled\*\*.*launch date' "$proposal" \
+    || fail "the answered question lost its classification: $(cat "$proposal")"
+  rows=$(cat "$home/state/jev-ledger.jsonl")
+  jq -e -s 'length == 2 and ([.[] | select(.available)] | length) == 1 and
+    ([.[] | select(.unavailable_reason == "http-500")] | length) == 1' <<<"$rows" >/dev/null \
+    || fail "the partial sweep did not record both the answer and the failure: $rows"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "partial-split rows failed validation"
+  pass "Jev client: a question whose split part failed is reported unclassified, never guessed"
+}
+
+# An aggregate verdict is a claim about every named question, so it cannot be
+# computed from the parts that happened to succeed.
+test_aggregate_verdict_refuses_when_a_part_fails() {
+  local home="$TMP_ROOT/aggregate-part-failed" before out envelope
+  write_config "$home" shadow off off off 100 2000
+  write_key "$home"
+  mkdir -p "$home/state"
+  envelope="$home/envelope.json"
+  jq -n '
+    def pad($n): ($n + ("c" * 9000));
+    {request:{state:{acceptance_criteria:{criterion_1:pad("first "),
+                                          criterion_2:pad("FORCE_HTTP_500 ")}},
+              questions:{criterion_1:{type:"noul",instructions:"Judge criterion_1"},
+                         criterion_2:{type:"noul",instructions:"Judge criterion_2"}}},
+     ledger:{subject:"task-agg",baseline_decision:null,
+       baseline_rationale:"The existing completion path performs human review.",
+       estimated_big_model_tokens:100,
+       verdict:{strategy:"all_noul",questions:["criterion_1","criterion_2"],
+                positive_label:"accepted",negative_label:"rejected"}}}' > "$envelope" \
+    || fail "could not build the aggregate envelope"
+  before=$(request_count)
+  out=$(jev_env "$home" "$JEV" consult accept-check < "$envelope") \
+    || fail "consult exited non-zero on a partly failed split"
+  [ "$(request_count)" -eq $((before + 2)) ] || fail "the aggregate envelope did not split into two requests"
+  jq -e '.status == "unavailable" and .reason == "http-500" and (has("verdict") | not)' <<<"$out" >/dev/null \
+    || fail "an all_noul verdict was reported over the criteria that happened to answer: $out"
+  jq -e -s 'length == 2 and ([.[] | select(.unavailable_reason == "http-500")] | length) == 1' \
+    "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "the partly failed aggregate split left incomplete evidence"
+  pass "Jev client: an aggregate verdict refuses rather than answer from a subset of its questions"
+}
+
 test_unfittable_question_is_refused_with_a_row() {
   local home="$TMP_ROOT/questions-unfittable" before out
   # A cap no request can fit under: the refusal must be recorded, not silent.
@@ -1017,6 +1093,8 @@ test_shared_page_is_sent_once
 test_oversized_material_splits_and_truncates
 test_one_page_cited_by_every_question_is_not_duplicated
 test_split_that_cannot_finish_is_never_started
+test_failed_split_part_is_not_rendered_as_a_classification
+test_aggregate_verdict_refuses_when_a_part_fails
 test_unfittable_question_is_refused_with_a_row
 test_oversized_shared_report_is_shrunk_not_duplicated
 test_shared_report_under_budget_is_still_not_duplicated

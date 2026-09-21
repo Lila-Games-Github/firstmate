@@ -94,11 +94,22 @@ esac
 OUTPUT_TMP="$(dirname "$OUTPUT")/.$(basename "$OUTPUT").tmp.$$"
 jq -r --argjson items "$ITEMS_JSON" '
   . as $r |
+  ([$items | keys[] | select($r.answers[.] == null)]) as $unanswered |
   "# Proposed Jev open-question review", "",
   "Consultation: `\($r.consultation_id)`", "",
+  (if ($unanswered | length) > 0 then
+     "\($unanswered | length) of \($items | length) questions were not answered by this consultation"
+     + (if (($r.parts_unavailable // []) | length) > 0 then
+          " (" + (($r.parts_unavailable // []) | unique | join(", ")) + ")" else "" end)
+     + ". Rerun the sweep to classify them.", ""
+   else empty end),
   ($items | to_entries[] as $item |
     ($r.answers[$item.key]) as $answer |
-    "- **\($answer.choice)** (`\($answer.confidence)`): \($item.value.question) [page: \($item.value.page)]")
+    (if $answer == null then
+       "- **unclassified** (no answer): \($item.value.question) [page: \($item.value.page)]"
+     else
+       "- **\($answer.choice)** (`\($answer.confidence)`): \($item.value.question) [page: \($item.value.page)]"
+     end))
 ' "$RESULT" > "$OUTPUT_TMP" || { rm -f "$OUTPUT_TMP"; exit 0; }
 chmod 0600 "$OUTPUT_TMP" || { rm -f "$OUTPUT_TMP"; exit 0; }
 mv -f "$OUTPUT_TMP" "$OUTPUT" || { rm -f "$OUTPUT_TMP"; exit 0; }

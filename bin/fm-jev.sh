@@ -1124,6 +1124,17 @@ consult_one() { # <use> <envelope-file>
 
 # Recombines the parts of a split consultation into the single result shape the
 # adapters already consume, so splitting is invisible above this boundary.
+#
+# A part can fail on its own - a five-second timeout, an HTTP error, a malformed
+# response - while its siblings answer, and what survives is then a strict
+# subset of what was asked. An aggregate verdict is undefined over a subset:
+# `all_noul` means every named question cleared the floor, so answering it from
+# the parts that happened to succeed would assert something Jev never said.
+# Those strategies therefore refuse the whole consultation and the caller keeps
+# its baseline. A per-key verdict is defined key by key, so it keeps the answers
+# it has; `answers` holds exactly the questions Jev answered and
+# `parts_unavailable` names why the rest are missing, and no caller may read an
+# absent key as an answer.
 # shellcheck disable=SC2016 # jq program; dollar names belong to jq.
 merge_part_results() { # <use> <envelope-file> <results-jsonl>
   local use=$1 envelope=$2 results=$3
@@ -1134,7 +1145,8 @@ merge_part_results() { # <use> <envelope-file> <results-jsonl>
     | ($led.verdict) as $v
     | ([$parts[] | select(.status == "available")]) as $ok
     | ([$parts[] | select(.status != "available") | .reason // "unavailable"]) as $refused
-    | if ($ok | length) == 0 then
+    | (($v.strategy // "") == "choices") as $per_key
+    | if ($ok | length) == 0 or (($refused | length) > 0 and ($per_key | not)) then
         {status:"unavailable", use:$use, mode:$mode, configured_mode:$cmode,
          reason:($refused[0] // "unavailable"), fallback_decision:$led.baseline_decision,
          parts:($parts | length), parts_unavailable:$refused}
