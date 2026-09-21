@@ -840,7 +840,7 @@ MD
 # to carry, and the report would count one prediction N times. Oversized or
 # not, it is one request and one row.
 test_oversized_accept_check_is_one_request_and_one_row() {
-  local home="$TMP_ROOT/accept-big-criteria" before request
+  local home="$TMP_ROOT/accept-big-criteria" before request out
   write_config "$home" shadow off off off 100 2000
   write_key "$home"
   mkdir -p "$home/data/task-a"
@@ -866,8 +866,25 @@ test_oversized_accept_check_is_one_request_and_one_row() {
     .[0].subject == "task-a" and (.[0].jev_verdict | type) == "string"' \
     "$home/state/jev-ledger.jsonl" >/dev/null \
     || fail "the oversized acceptance check did not record exactly one shortened subject row"
+  # Jev judged a stub of each criterion, so the record must not present those
+  # answers as judgements of the criteria the brief actually states.
+  jq -e '.truncated == true and (.unjudged_criteria | sort) == ["criterion_1","criterion_2"] and
+    (.unmet_criteria | length) == 0 and
+    all(.criteria[]; .met == null and .truncated == true and
+        .judged_characters < (.text | length))' \
+    "$home/data/task-a/acceptance.json" >/dev/null \
+    || fail "the record hides that Jev judged shortened criteria: $(cat "$home/data/task-a/acceptance.json")"
+  jq -e '[.criteria[] | select(.id == "criterion_1") | .judged_characters] ==
+    [($request | fromjson | .state.acceptance_criteria.criterion_1
+      | sub("\n\\(truncated to fit the Jev per-call budget\\)$"; "") | length)]' \
+    --arg request "$request" "$home/data/task-a/acceptance.json" >/dev/null \
+    || fail "judged_characters does not match what the request actually carried"
   "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the acceptance row failed validation"
-  pass "Jev client: an aggregate verdict is one request and one subject row, however oversized"
+  out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") \
+    || fail "report rejected the shortened acceptance ledger"
+  assert_contains "$out" "truncated=true" \
+    "the report hides a shortened shadow-mode consultation: $out"
+  pass "Jev acceptance check: a criterion Jev saw only a stub of is recorded unjudged, not met"
 }
 
 test_small_global_cap_keeps_every_use_reachable() {

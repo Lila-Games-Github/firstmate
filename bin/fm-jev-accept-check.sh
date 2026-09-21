@@ -118,19 +118,34 @@ jq -n --arg task "$ID" --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg mo
   --slurpfile criteria "$CRITERIA_JSON" --slurpfile result "$RESULT" '
   ($result[0]) as $r |
   ($criteria[0] | to_entries | map({key:("criterion_" + ((.key + 1) | tostring)), value:.value}) | from_entries) as $named |
+  ($r.truncated_keys // {}) as $shortened |
   [$named | to_entries[] |
+    ($shortened["acceptance_criteria." + .key]) as $judged |
     {id:.key,text:.value,probability:$r.answers[.key].noul,
-     met:(if $r.answers[.key].noul >= $r.confidence_floor then true
+     truncated:($judged != null),
+     judged_characters:(if $judged == null then (.value | length) else $judged end),
+     met:(if $judged != null then null
+          elif $r.answers[.key].noul >= $r.confidence_floor then true
           elif (1 - $r.answers[.key].noul) >= $r.confidence_floor then false
           else null end)}] as $criteria_rows |
   ([$criteria_rows[] | select(.met == false) | .id]) as $unmet |
+  ([$criteria_rows[] | select(.truncated) | .id]) as $unjudged |
   {schema_version:1,task_id:$task,generated_at:$generated,consultation_id:$r.consultation_id,
    mode:$r.mode,model:$r.model,verdict:$r.verdict,confidence:$r.confidence,
    confidence_floor:$r.confidence_floor,
+   truncated:(($r.truncated // false) or ($unjudged | length) > 0),
    criteria:$criteria_rows,
    unmet_criteria:$unmet,
-   advisory:(if $mode == "active" and ($unmet | length) > 0 then
-       "Jev acceptance check flagged unmet criteria: " + ($unmet | join(", "))
+   unjudged_criteria:$unjudged,
+   advisory:(if $mode == "active" and (($unmet | length) > 0 or ($unjudged | length) > 0) then
+       (if ($unmet | length) > 0 then
+          "Jev acceptance check flagged unmet criteria: " + ($unmet | join(", "))
+        else "Jev acceptance check flagged no unmet criterion" end)
+       + (if ($unjudged | length) > 0 then
+            "; " + (($unjudged | length) | tostring)
+            + " criteria went unjudged because their text was shortened to fit the per-call budget: "
+            + ($unjudged | join(", "))
+          else "" end)
        + " (advisory only; completion remains a human decision)"
      else null end)}
 ' > "$OUT_TMP" || { rm -f "$OUT_TMP"; exit 0; }

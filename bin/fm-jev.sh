@@ -827,8 +827,12 @@ split_affordable() { # <use> <parts-dir> <count> <budget-bytes>
 
 # Shortens the longest bounded string in a part's state until the part fits the
 # per-call budget, marking ledger.truncated so the row records that Jev saw less
-# than the adapter gathered. A part that cannot be shrunk enough is left alone
-# for consult_one to refuse and record.
+# than the adapter gathered. Which strings were shortened, and to how many
+# characters each, is recorded in ledger.truncated_keys and carried to the
+# caller as truncated_keys: an adapter must be able to tell that the answer it
+# got is about a stub rather than about the material it gathered, or it will
+# present a judgement of one as a judgement of the other. A part that cannot be
+# shrunk enough is left alone for consult_one to refuse and record.
 shrink_to_budget() { # <envelope-file> <budget-bytes>
   local file=$1 budget=$2 bytes longest len newlen iter=0 tmp="$1.shrink"
   while :; do
@@ -847,8 +851,12 @@ shrink_to_budget() { # <envelope-file> <budget-bytes>
     newlen=$((len - (bytes - budget) - 160))
     [ "$newlen" -ge 32 ] || newlen=32
     jq -c --argjson p "$(jq -c '.p' <<<"$longest")" --argjson n "$newlen" '
+      ($p | map(tostring) | join(".")) as $key |
+      ([$n, (.request.state | getpath($p) | length)] | min) as $kept |
       .request.state |= setpath($p; ((getpath($p))[0:$n]) + "\n(truncated to fit the Jev per-call budget)")
-      | .ledger.truncated = true' "$file" > "$tmp" 2>/dev/null || return 0
+      | .ledger.truncated = true
+      | .ledger.truncated_keys = ((.ledger.truncated_keys // {}) + {($key): $kept})' \
+      "$file" > "$tmp" 2>/dev/null || return 0
     mv -f "$tmp" "$file" 2>/dev/null || return 0
   done
 }
@@ -892,7 +900,7 @@ record_refusal_row() { # <use> <envelope-file> <reason> <bytes>
 # same consultation would be refused for the same reason.
 consult_one() { # <use> <envelope-file>
   local use=$1 file=$2
-  local fallback baseline_rationale subject estimate truncated
+  local fallback baseline_rationale subject estimate truncated truncated_keys
   local today counts calls spend use_calls use_spend pre_cost total
   local http=000 t0=0 t1=0 latency=0 actual_tokens=0 cost=0
   local request_json request_bytes request_tokens derive row result now id
@@ -904,6 +912,7 @@ consult_one() { # <use> <envelope-file>
   baseline_rationale=$(jq -r '.ledger.baseline_rationale' "$file")
   estimate=$(jq -r '.ledger.estimated_big_model_tokens' "$file")
   truncated=$(jq -r '.ledger.truncated // false' "$file")
+  truncated_keys=$(jq -c '.ledger.truncated_keys // {}' "$file")
   RESPONSE_MODEL=
 
   request_json=$(jq -c --arg model "$MODEL" '.request + {model:$model}' "$file") || {
@@ -1136,7 +1145,8 @@ consult_one() { # <use> <envelope-file>
     --argjson input_tokens "$actual_tokens" --argjson latency "$latency" \
     --argjson cost "$cost" --argjson fallback "$fallback" --arg baseline_rationale "$baseline_rationale" \
     --arg jev_rationale "$(jq -r '.rationale' <<<"$derive")" --argjson probabilities "$probabilities" \
-    --argjson truncated "$truncated" --argjson confidences "$confidences" \
+    --argjson truncated "$truncated" --argjson truncated_keys "$truncated_keys" \
+    --argjson confidences "$confidences" \
     --argjson qualified "$qualified" --argjson used_keys "$used_keys" \
     --argjson agreement "$agreement" --argjson used "$used_jev" \
     --argjson agreement_keys "$agreement_keys" --argjson differing_keys "$differing_keys" '
@@ -1144,6 +1154,7 @@ consult_one() { # <use> <envelope-file>
      model:$model,confidence_floor:$floor,verdict:$derive.verdict,confidence:$derive.confidence,
      answers:$answers,input_tokens:$input_tokens,latency_ms:$latency,cost_usd:$cost,
      jev_rationale:$jev_rationale,jev_probabilities:$probabilities,truncated:$truncated,
+     truncated_keys:$truncated_keys,
      flagged:($derive.flagged // []),
      confidences:$confidences,qualified:$qualified,used_jev_keys:$used_keys,
      fallback_decision:$fallback,baseline_rationale:$baseline_rationale,agreement:$agreement,
@@ -1205,6 +1216,7 @@ merge_choice_parts() { # <use> <envelope-file> <results-jsonl>
              + " budget-sized requests."),
            jev_probabilities:$probabilities,
            truncated:(any($ok[]; .truncated == true)),
+           truncated_keys:($ok | map(.truncated_keys // {}) | add),
            flagged:($ok | map(.flagged // []) | add | unique),
            confidences:$confidences, qualified:$qualified, used_jev_keys:$used_keys,
            fallback_decision:$led.baseline_decision, baseline_rationale:$led.baseline_rationale,

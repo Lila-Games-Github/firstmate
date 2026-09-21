@@ -38,7 +38,11 @@
 # closes with the advisory findings the active adapters recorded, which is where
 # an acceptance or commit-lint advisory is surfaced: no adapter writes one to a
 # task status file, because a `note:` there would supersede a worker's terminal
-# `done:` line. Empty or malformed ledgers exit non-zero with a clear diagnostic.
+# `done:` line. Every consultation whose material had to be shortened is listed
+# there too, in shadow as well as active mode and whether or not it flagged
+# anything, because an answer about shortened material is not an answer about
+# what the adapter gathered and an operator has to be able to see that.
+# Empty or malformed ledgers exit non-zero with a clear diagnostic.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -214,9 +218,10 @@ else
 fi
 
 ADVISORIES=$(jq -r '
-  select(.mode == "active" and .available and .used_jev and ((.jev_flagged // []) | length) > 0) |
+  ((.mode == "active") and .available and .used_jev and ((.jev_flagged // []) | length) > 0) as $flagged |
+  select($flagged or (.available and .truncated == true)) |
   "- use=\(.use) subject=\(.subject) consultation_id=\(.consultation_id)" +
-  " flagged=\((.jev_flagged // []) | join(","))" +
+  (if $flagged then " flagged=\((.jev_flagged // []) | join(","))" else "" end) +
   (if .truncated then " truncated=true" else "" end)
 ' "${NONEMPTY[@]}") || ADVISORIES=
 if [ -z "$ADVISORIES" ]; then
