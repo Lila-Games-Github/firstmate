@@ -635,6 +635,45 @@ test_oversized_shared_report_is_shrunk_not_duplicated() {
   pass "Jev client: oversized shared state is shrunk into one request, never copied per question"
 }
 
+# The middle regime between the two extremes: a shared report that fits the
+# budget on its own but is still the bulk of the envelope. Splitting would send
+# five near-identical copies of it to answer five short criteria, where one
+# request shortened by a few hundred bytes carries all five.
+test_shared_report_under_budget_is_still_not_duplicated() {
+  local home="$TMP_ROOT/accept-midsize" before request
+  write_config "$home" shadow off off off 100 2000
+  write_key "$home"
+  mkdir -p "$home/data/task-a"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+# Task
+
+## Acceptance criteria
+
+- The report names the changed file.
+- The report includes a passing test command.
+- The report names the reviewed branch.
+- The report records the run identifier.
+- The report states the landing outcome.
+MD
+  awk 'BEGIN { while (length(out) < 7600) out = out "Changed bin/example.sh and ran tests/example.test.sh. "; print substr(out, 1, 7600) }' \
+    > "$home/data/task-a/report.md"
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ -s "$home/data/task-a/acceptance.json" ] || fail "a mid-size report produced no acceptance record"
+  jq -e '(.criteria | length) == 5' "$home/data/task-a/acceptance.json" >/dev/null \
+    || fail "the mid-size acceptance record lost a criterion"
+  [ "$(request_count)" -eq $((before + 1)) ] \
+    || fail "a report that fits the budget alone was still copied into a request per criterion"
+  request=$(tail -1 "$REQUEST_LOG")
+  jq -e '(.questions | length) == 5 and (.state.acceptance_criteria | length) == 5 and
+    (.state.report | length) < 7600' <<<"$request" >/dev/null \
+    || fail "the single request lost a criterion or kept the whole report: $request"
+  jq -e -s 'length == 1 and .[0].truncated == true' "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "the mid-size acceptance row does not record its shortening"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "mid-size acceptance row failed validation"
+  pass "Jev client: a shared report that is the bulk is shrunk once, even when it fits the budget alone"
+}
+
 # The complement: when the per-question material is what does not fit, each
 # question still gets its own budget-sized request.
 test_oversized_per_question_state_still_splits() {
@@ -866,6 +905,7 @@ test_oversized_material_splits_and_truncates
 test_split_that_cannot_finish_is_never_started
 test_unfittable_question_is_refused_with_a_row
 test_oversized_shared_report_is_shrunk_not_duplicated
+test_shared_report_under_budget_is_still_not_duplicated
 test_oversized_per_question_state_still_splits
 test_small_global_cap_keeps_every_use_reachable
 test_ledger_rotates_monthly_and_report_reads_archives

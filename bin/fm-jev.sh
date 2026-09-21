@@ -45,11 +45,13 @@
 #
 # Splitting is taken only when it buys something. State that is not group-owned
 # and not reachable through `ledger.context` has to be copied verbatim into
-# every part, so a split is refused when that copy does not fit the budget by
-# itself - an oversized report shared by five criteria would otherwise cost five
-# near-identical requests - and it is refused when the whole split would not fit
-# the day's remaining calls and spend for this use. Either refusal sends one
-# shortened request instead, so every question is still answered.
+# every part, so the split is refused unless the group-owned material is what
+# makes the envelope oversized - that copy must be no larger than the
+# group-owned bytes - and unless the duplication it costs stays inside one
+# budget: copied bytes times the part count must not exceed the per-call
+# budget. It is refused again when the whole split would not fit the day's
+# remaining calls and spend for this use. Every refusal sends one shortened
+# request instead, so every question is still answered.
 #
 # Agreement is per key wherever the verdict is: `agreement_keys` answers item by
 # item and `differing_keys` names only the items that diverged, so a batch of
@@ -660,9 +662,12 @@ cmd_request_budget() {
 # instead of ten times. Strategies with no per-question state, such as the
 # commit lint, yield null and are never split. Whatever is left - state that is
 # neither group-owned nor reachable through `ledger.context` - is copied
-# verbatim into every part, so the plan is abandoned when that copy alone does
-# not fit the per-call budget: splitting an oversized shared report across its
-# criteria would send the same truncated prefix N times for N times the spend.
+# verbatim into every part, so the plan is abandoned unless that copy is both
+# smaller than the group-owned material it would be duplicated alongside and
+# small enough that every copy together still fits one per-call budget. A
+# 120KB report shared by five short criteria fails both: the criteria are not
+# what makes the envelope oversized, and five near-identical requests buy
+# nothing a single request shortened by a few kilobytes would not.
 # shellcheck disable=SC2016 # jq program; dollar names belong to jq.
 split_plan_filter='
   def gkey: sub("__.*$"; "");
@@ -681,8 +686,10 @@ split_plan_filter='
   | ([$shared[] as $k
       | select((($ctx | has($k)) | not) or (($state[$k] | type) != "object")) | $k]) as $copied
   | ((reduce $copied[] as $k ({}; . + {($k): $state[$k]})) | tojson | utf8bytelength) as $copied_bytes
+  | ((reduce $owned[] as $k ({}; . + {($k): $state[$k]})) | tojson | utf8bytelength) as $owned_bytes
   | if ($groups | length) < 2 or any($groups[]; (.containers | length) == 0)
-       or $copied_bytes >= $budget then null
+       or $copied_bytes > $owned_bytes
+       or ($copied_bytes * ($groups | length)) > $budget then null
     else
       [ $groups[] as $grp
         | ($grp.g) as $g
