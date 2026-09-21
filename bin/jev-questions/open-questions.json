@@ -1,0 +1,11 @@
+{
+  "question": {
+    "type": "choice",
+    "instructions": "Against the referenced `page` only, classify whether `{question_key}` remains unresolved. Do not infer chronology from dates and do not treat related discussion as a settlement unless the page actually answers the question.",
+    "criteria": {
+      "still_open": "The page does not settle the question.",
+      "settled": "The page directly supplies or records the answer.",
+      "cannot_tell": "The page is ambiguous, incomplete, or insufficient to decide."
+    }
+  }
+}

@@ -545,14 +545,18 @@ cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 # comment matches the captured element text. Choice rows keep Context data
 # out of that field. A pure annotation has no prompt.
 cmd_read() {
-  local file=${1-} lifecycle session_ended
+  local file=${1-} lifecycle session_ended read_status=0 triage_row triage_file='' triage_mode=off
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
+  triage_mode=$("$SCRIPT_DIR/fm-jev.sh" mode triage 2>/dev/null || printf 'off\n')
+  if [ "$triage_mode" != off ]; then
+    triage_file=$(mktemp "${TMPDIR:-/tmp}/fm-jev-lavish-read.XXXXXX") || triage_file=''
+  fi
   perl -e '
     use strict; use warnings;
-    my ($path, $lifecycle, $session_ended) = @ARGV;
+    my ($path, $lifecycle, $session_ended, $triage_path) = @ARGV;
     open my $fh, "<", $path or exit 1;
     my (@fields, $want, @rows);
     while (my $line = <$fh>) {
@@ -611,6 +615,20 @@ cmd_read() {
       } else {
         push @annotations, $f;
       }
+    }
+    if (length $triage_path && open my $triage, ">", $triage_path) {
+      for my $f (@parsed) {
+        my $tag = defined $f->{tag} ? $f->{tag} : "";
+        my $uid = defined $f->{uid} ? $f->{uid} : "";
+        my $selector = defined $f->{selector} ? $f->{selector} : "";
+        my $text = defined $f->{text} ? $f->{text} : "";
+        my $prompt = defined $f->{prompt} ? $f->{prompt} : "";
+        my $item = "tag=$tag uid=$uid selector=$selector text=$text";
+        $item .= " prompt=$prompt" if length $prompt;
+        $item =~ s/[\x00-\x1f\x7f]+/ /g;
+        print {$triage} "$item\n";
+      }
+      close $triage;
     }
     sub emit_body {
       my ($text) = @_;
@@ -672,7 +690,16 @@ cmd_read() {
       print "ANNOTATIONS: (none)\n";
     }
     print "END LAVISH RESULT ($presented of $want)\n";
-  ' "$file" "$lifecycle" "$session_ended"
+  ' "$file" "$lifecycle" "$session_ended" "$triage_file" || read_status=$?
+  if [ "$read_status" -eq 0 ] && [ -n "$triage_file" ] && [ -s "$triage_file" ]; then
+    while IFS= read -r triage_row || [ -n "$triage_row" ]; do
+      [ -n "$triage_row" ] || continue
+      printf '%s\n' "$triage_row" \
+        | "$SCRIPT_DIR/fm-jev-triage.sh" --kind review-answer >/dev/null 2>&1 || true
+    done < "$triage_file"
+  fi
+  [ -z "$triage_file" ] || rm -f -- "$triage_file"
+  return "$read_status"
 }
 
 case "${1-}" in

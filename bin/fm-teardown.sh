@@ -3714,6 +3714,11 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 if [ "$KIND" != secondmate ]; then
   remove_pr_poll_artifacts "$STATE" "$ID" retain || exit 1
+  # A successful completion is the human-labelled acceptance outcome for every
+  # earlier Jev acceptance consultation on this task. This optional observer
+  # never makes cleanup fail when its ledger is absent or unavailable.
+  "$SCRIPT_DIR/fm-jev.sh" finalize --use accept-check --subject "$ID" \
+    --decision-json '"accepted"' >/dev/null 2>&1 || true
 fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1

@@ -26,6 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
+DRAIN_JEV_TMP=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
 RECOVERY_MARKER="$STATE/.watcher-down"
@@ -40,6 +41,36 @@ ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
+
+# Stage optional Jev observations while presentation locks are held, then make
+# the consultations only after those locks are released. Off mode creates no
+# scratch file, makes no network call, and changes no presentation byte.
+JEV_TRIAGE_MODE=$("$SCRIPT_DIR/fm-jev.sh" mode triage 2>/dev/null || printf 'off\n')
+if [ "$JEV_TRIAGE_MODE" != off ]; then
+  DRAIN_JEV_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-jev-wake-drain.XXXXXX") || DRAIN_JEV_TMP=
+fi
+fm_wake_presentation_observe_status() { # <status-line>
+  [ -n "$DRAIN_JEV_TMP" ] || return 0
+  printf 'status\t%s\n' "$1" >> "$DRAIN_JEV_TMP" 2>/dev/null || true
+}
+stage_jev_wake_rows() { # <deduped-raw-rows>
+  local rows=$1 row
+  [ -n "$DRAIN_JEV_TMP" ] || return 0
+  while IFS= read -r row || [ -n "$row" ]; do
+    [ -n "$row" ] || continue
+    printf 'wake\t%s\n' "$row" >> "$DRAIN_JEV_TMP" 2>/dev/null || true
+  done <<EOF
+$rows
+EOF
+}
+run_jev_triage_observers() {
+  local kind item
+  [ -n "$DRAIN_JEV_TMP" ] && [ -s "$DRAIN_JEV_TMP" ] || return 0
+  while IFS=$(printf '\t') read -r kind item; do
+    [ -n "$item" ] || continue
+    printf '%s\n' "$item" | "$SCRIPT_DIR/fm-jev-triage.sh" --kind "$kind" >/dev/null 2>&1 || true
+  done < "$DRAIN_JEV_TMP"
+}
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
 # main (FM_SUPERVISION_ACTOR unset or "main", via fm-lease-lib.sh's fm_lease_actor
@@ -369,6 +400,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       omitted=$((omitted + 1))
       continue
     fi
+    fm_wake_presentation_observe_status "$line"
     output="$output$line
 "
     STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="$STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED$task$(printf '\t')$event_endpoint
@@ -414,6 +446,7 @@ print_unread_status_section() {
     [ -n "$task" ] || continue
     [ -n "$line" ] || continue
     line="$task $line"
+    fm_wake_presentation_observe_status "$line"
     if [ "$shown" -eq 0 ]; then
       printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
     fi
@@ -467,6 +500,7 @@ print_open_decisions_section() {
       omitted=$((omitted + 1))
       continue
     fi
+    fm_wake_presentation_observe_status "$line"
     output="$output$line
 "
     used=$((used + bytes))
@@ -614,6 +648,7 @@ cleanup() {
   local status=$?
   [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
   [ -z "$DRAIN_VIEW_TMP" ] || rm -f -- "$DRAIN_VIEW_TMP" 2>/dev/null || true
+  [ -z "$DRAIN_JEV_TMP" ] || rm -f -- "$DRAIN_JEV_TMP" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
@@ -778,6 +813,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
+  run_jev_triage_observers
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -799,6 +835,7 @@ if [ "$ACTOR" = main ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
+    run_jev_triage_observers
     assert_watcher_liveness
     exit 0
   fi
@@ -848,6 +885,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
 esac
 if [ -n "$RAW_ROWS" ]; then
   printf '%s\n' "$RAW_ROWS" || exit "$?"
+  stage_jev_wake_rows "$RAW_ROWS"
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
@@ -861,5 +899,6 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+run_jev_triage_observers
 assert_watcher_liveness
 exit 0

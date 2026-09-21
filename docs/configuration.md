@@ -522,6 +522,65 @@ The resolver sends the key to `curl` only as a header read from a file descripto
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Jev decision observers (config/jev.json)
+
+`config/jev.json` controls four optional TypeSafe AI Jev observers without changing typed dispatch resolution.
+The file is local and gitignored, is not inherited by secondmate homes, and is absent by default.
+An absent file uses the active built-in configuration shown below.
+An unreadable, symlinked, or malformed file makes every observer unavailable and preserves the existing path without a network call.
+Each observer also needs `TYPESAFE_API_KEY` in the environment or the effective home's `.env`, using the same environment-first accessor as typed dispatch resolution.
+Removing that key, enabling the global kill switch, or setting a use to `off` restores the existing path without a network call.
+
+The complete version 1 schema is:
+
+```json
+{
+  "version": 1,
+  "kill_switch": false,
+  "per_call_token_cap": 32000,
+  "daily": {
+    "call_cap": 100,
+    "spend_usd_cap": 0.05
+  },
+  "uses": {
+    "accept-check": {"mode": "active", "confidence_floor": 0.8},
+    "triage": {"mode": "active", "confidence_floor": 0.65},
+    "commit-lint": {"mode": "active", "confidence_floor": 0.8},
+    "open-questions": {"mode": "active", "confidence_floor": 0.65}
+  }
+}
+```
+
+`version` must be `1`, `kill_switch` must be Boolean, and `uses` must contain exactly the four named objects.
+`per_call_token_cap` is an integer from 1 through 32000.
+The client conservatively treats one request byte as one input token before sending, so the preflight may refuse a request that the service tokenizer would accept.
+`daily.call_cap` is a nonnegative integer, and `daily.spend_usd_cap` is a nonnegative US-dollar number.
+The UTC date on ledger rows defines a budget day.
+Preflight spend uses the pinned rate of US$0.042 per million input tokens and the conservative input estimate, while a completed call records the response's reported input tokens when present and otherwise retains the estimate.
+Caps never trigger a retry and return the structured unavailable result to the adapter.
+
+Each `mode` is `off`, `shadow`, or `active`.
+Off does not build adapter state, make a network call, write the ledger, or alter existing output.
+Shadow asks Jev and records the consultation while the existing path makes the decision.
+Active permits only the adapter's documented advisory effect when the answer meets that use's `confidence_floor`; an unavailable or lower-confidence result keeps the existing decision.
+Active triage records the confidence-qualified Jev classification but never suppresses or changes presentation, so a false routine verdict cannot silently lose supervision input.
+Disagreement never changes a configured mode, lowers it to shadow, or engages the kill switch.
+See [jev.md](jev.md) for each adapter's effect and rollback workflow.
+
+`bin/fm-jev.sh` pins `jev-1.13.0`, fixes the endpoint at `https://api.typesafe.ai/v1/systemone`, times out after five seconds, and accepts only schema-checked typed answers.
+It copies an environment-provided key into a non-exported private variable, unsets the original before invoking child processes, and passes the key to `curl` through a file descriptor rather than argv.
+The key and full request are never written to the ledger.
+
+Every network attempt appends one version 1 JSON object to `state/jev-ledger.jsonl` under a bounded lock.
+The identity fields are `timestamp`, `date`, `consultation_id`, `use`, and `subject`.
+The configuration fields are `mode`, `configured_mode`, and `confidence_floor`.
+The service fields are `network_attempted`, `available`, `unavailable_reason`, `input_tokens`, `input_tokens_source`, `latency_ms`, `cost_usd`, `request_bytes`, `jev_answers`, and `jev_probabilities`.
+The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `decision_after_jev`, `eventual_outcome`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
+`existing_decision` and `final_decision` are compatibility aliases for `baseline_decision` and `eventual_outcome`.
+Because Jev returns typed answers rather than prose reasoning, `jev_rationale` is a deterministic explanation of the returned probabilities and configured verdict aggregation, not hidden model reasoning.
+An unavailable path before a network attempt writes no row, while a failed attempt writes a row with the reason and existing decision.
+Owning lifecycle paths may update a matching row's later `eventual_outcome`; successful task teardown supplies the accepted outcome for acceptance-check rows.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -1106,7 +1165,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # TypeSafe AI opt-in for typed dispatch and config/jev.json observers; absent preserves their fallback paths (docs/configuration.md "Typed dispatch resolution" and "Jev decision observers")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)

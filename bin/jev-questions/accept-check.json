@@ -1,0 +1,10 @@
+{
+  "criterion": {
+    "type": "noul",
+    "instructions": "Does `report` provide concrete evidence that `{criterion_key}` in `acceptance_criteria` is met? Judge the artifact evidence, not claims that the work is complete. A restatement, plan, placeholder, or unsupported assertion is not evidence.",
+    "criteria": {
+      "yes": "The report gives specific evidence that directly satisfies the criterion.",
+      "no": "The report omits the criterion, only asserts success, restates it, or gives no concrete evidence."
+    }
+  }
+}
