@@ -642,7 +642,7 @@ cmd_status() {
   elif [ "$CONFIG_REASON" = kill-switch ]; then
     reason='kill-switch'
   elif [ "$EFFECTIVE_MODE" = off ]; then
-    reason=mode-off
+    reason='mode-off'
   elif [ "$keystate" = absent ]; then
     reason=missing-key
   elif [ "$USE_CALL_CAP" = 0 ] || [ "$DAILY_CALL_CAP" = 0 ]; then
