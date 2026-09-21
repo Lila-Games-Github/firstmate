@@ -587,12 +587,15 @@ The configuration fields are `mode`, `configured_mode`, and `confidence_floor`.
 The service fields are `network_attempted`, `available`, `unavailable_reason`, `response_model`, `input_tokens`, `input_tokens_source`, `latency_ms`, `cost_usd`, `request_bytes`, `truncated`, `jev_answers`, and `jev_probabilities`.
 `network_attempted` is false exactly on the budget-refusal rows, which carry `available: false`, a naming `unavailable_reason`, and zero `input_tokens`, `latency_ms` and `cost_usd`.
 `truncated` is true when the adapter had to shorten its bounded material to fit the per-call budget, and `jev_flagged` names the questions that drove a negative or risk verdict.
-The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `decision_after_jev`, `eventual_outcome`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
+The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `decision_after_jev`, `eventual_outcome`, `label_source`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
 A batched per-item consultation adds `jev_confidences` and `used_jev_keys`, one entry per asked item; `used_jev` is then true when at least one item qualified, and `bin/fm-jev-report.sh` credits such a row the share of its `estimated_big_model_tokens` whose own answers qualified.
 `existing_decision` and `final_decision` are compatibility aliases for `baseline_decision` and `eventual_outcome`.
 Because Jev returns typed answers rather than prose reasoning, `jev_rationale` is a deterministic explanation of the returned probabilities and configured verdict aggregation, not hidden model reasoning.
 An unavailable path before a network attempt writes no row, while a failed attempt writes a row with the reason and existing decision.
-Owning lifecycle paths may update a matching row's later `eventual_outcome`; successful task teardown supplies the accepted outcome for acceptance-check rows.
+Owning lifecycle paths may update a matching row's later `eventual_outcome` through `bin/fm-jev.sh finalize --use <use> --subject <subject> --decision-json <json> --label-source <path>`, which records the supplied outcome verbatim and names the observing path in `label_source`; `corrected` remains the literal difference between `decision_after_jev` and that outcome.
+`label_source` is null exactly while `eventual_outcome` is null.
+Task teardown supplies the acceptance-check label: `accepted` from `teardown-landed` or `teardown-scout-completion-gate`, `discarded` from `teardown-force-discard`, and nothing at all when teardown refuses.
+`bin/fm-jev-report.sh` treats only a use's positive label as the positive class - `accepted` for acceptance checks - counts every other label including `discarded` as negative, and reports rows still awaiting a label under `unlabelled`.
 No adapter writes an advisory to a task's status file, because a `note:` line there is a status event that would supersede a worker's terminal `done:` line and re-arm supervision's wedge aging for a finished task; advisories live in `data/<id>/acceptance.json`, `data/<id>/commit-lint.json`, and the `advisories:` section of `bin/fm-jev-report.sh`.
 
 ## Toolchain

@@ -53,9 +53,9 @@ Do not enable a use for material that policy forbids sending to that service; in
 
 Every network attempt, and every budget refusal, is appended to `state/jev-ledger.jsonl` without the API key or full request content.
 The ledger rotates monthly into `state/jev-ledger/YYYY-MM.jsonl`; the report and `finalize` read the running file and every archive, so nothing is lost and a consultation never pays for retained history.
-Run `bin/fm-jev-report.sh` to print per-use and overall agreement with final decisions, false positives, false negatives, spend, estimated tokens avoided, and active-row counts.
+Run `bin/fm-jev-report.sh` to print per-use and overall agreement with final decisions, consultations still waiting for one, false positives, false negatives, spend, estimated tokens avoided, and active-row counts.
 It then names every budget refusal under `refusals:`, which is where a day lost to an exhausted cap, a zero budget share, or an oversized request becomes visible.
-The report then lists every Jev-versus-baseline disagreement with the two decisions, both rationales, and Jev's typed probabilities, and closes with the advisories the active adapters recorded.
+The report then lists every Jev-versus-baseline disagreement with the two decisions, both rationales, Jev's typed probabilities, and the recorded outcome with the path that observed it, and closes with the advisories the active adapters recorded.
 Pass an alternate JSONL file as the first argument when evaluating a saved fixture or export.
 
 Jev returns typed answers and probabilities, not prose reasoning.
@@ -63,7 +63,11 @@ Jev returns typed answers and probabilities, not prose reasoning.
 `baseline_rationale` is the fixed reviewable explanation supplied by the adapter for the established path.
 
 Agreement is quality evidence only after the owning path has recorded a final decision.
-Acceptance rows begin without that label and successful teardown records the later accepted outcome.
+Acceptance rows begin without that label, and teardown records the outcome it actually reached: `accepted` for an ordinary teardown that passed the landed-work check or a scout that passed the captain-call completion gate, and `discarded` for a `--force` teardown, which is the captain's explicit OK to discard unlanded or dirty work.
+A teardown that refuses records nothing, so the row keeps waiting for a real label rather than collecting a false one.
+Every recorded label names the teardown path that observed it in `label_source`, and the report shows it beside each disagreement.
+`accepted` is the positive class and `discarded` is a negative one, so a Jev rejection of work that was then discarded counts as agreement rather than as a false negative, and an acceptance of discarded work is the false positive it is.
+Consultations with no label yet are counted in the report's `unlabelled` column instead of being folded into either class.
 The report's token count is an estimate based on the bounded material each adapter supplied.
 Acceptance estimates the report and criterion text, triage estimates the presented items, commit lint estimates the commit-and-diff JSON, and open-question review estimates the questions and named page text; each uses the conventional four-characters-per-token approximation because these paths do not otherwise record big-model token use.
 The client applies that same four-bytes-per-token rule to its own preflight, so an adapter sizing bounded material against `bin/fm-jev.sh request-budget <use>` and the cap the client enforces are one arithmetic.

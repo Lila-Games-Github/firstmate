@@ -192,7 +192,7 @@ test_unavailable_key_and_caps_fall_back() {
   "$JEV" validate-ledger "$capped/state/jev-ledger.jsonl" || fail "the refusal row failed schema validation"
   out=$(FM_HOME="$capped" "$REPORT" "$capped/state/jev-ledger.jsonl") || fail "report rejected a refusal-only ledger"
   assert_contains "$out" "reason=daily-call-cap refused=1" "the report does not show why nothing ran"
-  assert_contains "$out" $'triage\t0\t0\t0\tn/a' "a refusal was counted as a consultation"
+  assert_contains "$out" $'triage\t0\t0\t0\t0\tn/a' "a refusal was counted as a consultation"
 
   write_config "$killed" off shadow off off
   write_key "$killed"
@@ -241,11 +241,14 @@ test_accept_request_and_artifact() {
   jq -e '(.criteria | length) == 2 and .verdict == "accepted"' "$home/data/task-a/acceptance.json" >/dev/null \
     || fail "acceptance artifact does not carry both criterion verdicts"
   "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "acceptance ledger row failed schema validation"
-  out=$(jev_env "$home" "$JEV" finalize --use accept-check --subject task-a --decision-json '"accepted"') \
-    || fail "acceptance final decision could not be recorded"
+  jev_env "$home" "$JEV" finalize --use accept-check --subject task-a --decision-json '"accepted"' \
+    && fail "finalize recorded a ground-truth label without naming the path that observed it"
+  out=$(jev_env "$home" "$JEV" finalize --use accept-check --subject task-a --decision-json '"accepted"' \
+    --label-source teardown-landed) || fail "acceptance final decision could not be recorded"
   [ "$(jq -r '.updated' <<<"$out")" -eq 1 ] || fail "acceptance finalization did not update its pending row"
-  jq -e '.final_decision == "accepted" and .eventual_outcome == "accepted"' "$home/state/jev-ledger.jsonl" >/dev/null \
-    || fail "acceptance ledger did not retain its later final decision"
+  jq -e '.final_decision == "accepted" and .eventual_outcome == "accepted"
+    and .label_source == "teardown-landed"' "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "acceptance ledger did not retain its later final decision and its source"
   pass "Jev acceptance adapter: one reviewed request writes an artifact and accepts a later final label"
 }
 
@@ -309,7 +312,7 @@ test_mixed_confidence_batch_is_gated_per_item() {
     || fail "decision_after_jev is not the per-item mix of Jev answers and baseline: $row"
   "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "mixed-confidence row failed schema validation"
   out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") || fail "report rejected the mixed-confidence ledger"
-  avoided=$(printf '%s\n' "$out" | awk -F'\t' '$1 == "triage" { print $9 }')
+  avoided=$(printf '%s\n' "$out" | awk -F'\t' '$1 == "triage" { print $10 }')
   [ -n "$avoided" ] && [ "$avoided" -gt 0 ] \
     || fail "a batch with two confident answers contributed no estimated tokens avoided: $out"
   pass "Jev batched triage: each item is gated, recorded, and credited on its own confidence"
@@ -666,12 +669,37 @@ test_consult_does_not_read_the_whole_ledger() {
   pass "Jev client: a consultation scans only the day it budgets against, not the whole ledger"
 }
 
+# Teardown labels an acceptance row "accepted" or "discarded" while Jev answers
+# "accepted" or "rejected", so the report has to compare classes: a correct
+# rejection of work that was then discarded is agreement, and an acceptance of
+# that same work is the false positive the evaluation needs to be able to see.
+test_report_scores_discarded_labels_as_the_negative_class() {
+  local ledger="$TMP_ROOT/discarded-ledger" fixture="$ROOT/tests/fixtures/jev-ledger.jsonl" out
+  : > "$ledger"
+  head -1 "$fixture" | jq -c '.consultation_id = "correct-rejection" | .subject = "task-r" |
+    .jev_verdict = "rejected" | .final_decision = "discarded" | .eventual_outcome = "discarded" |
+    .label_source = "teardown-force-discard"' >> "$ledger"
+  head -1 "$fixture" | jq -c '.consultation_id = "wrong-acceptance" | .subject = "task-w" |
+    .existing_decision = "rejected" | .baseline_decision = "rejected" | .agreement = false |
+    .final_decision = "discarded" | .eventual_outcome = "discarded" |
+    .label_source = "teardown-force-discard"' >> "$ledger"
+  head -1 "$fixture" | jq -c '.consultation_id = "still-open" | .subject = "task-u" |
+    .final_decision = null | .eventual_outcome = null | .label_source = null' >> "$ledger"
+  "$JEV" validate-ledger "$ledger" || fail "a discarded-outcome ledger failed schema validation"
+  out=$($REPORT "$ledger") || fail "report rejected the discarded-outcome ledger"
+  assert_contains "$out" $'accept-check\t3\t2\t1\t1\t50%\t1\t0\t' \
+    "the report did not score discarded work as the negative class with the unlabelled row apart: $out"
+  assert_contains "$out" 'eventual_outcome="discarded" label_source="teardown-force-discard"' \
+    "the report does not name the ground truth and the teardown path behind a disagreement"
+  pass "Jev report: a discarded task scores as a negative label and an unlabelled row stays apart"
+}
+
 test_report_fixture_and_empty_error() {
   local out rc=0 empty="$TMP_ROOT/empty-ledger" malformed="$TMP_ROOT/malformed-ledger"
   out=$($REPORT "$ROOT/tests/fixtures/jev-ledger.jsonl") || fail "report rejected the valid fixture ledger"
   assert_contains "$out" "jev configuration:" "report did not open with the effective configuration"
   assert_contains "$out" "TYPESAFE_API_KEY=" "report did not state whether a key is present"
-  assert_contains "$out" $'overall\t3\t3\t1\t33.33%\t1\t1\t0.000126\t6000\t1' \
+  assert_contains "$out" $'overall\t3\t3\t0\t1\t33.33%\t1\t1\t0.000126\t6000\t1' \
     "report did not compute agreement, error counts, spend, and estimated tokens"
   assert_contains "$out" "consultation_id=fixture-commit" "report did not list a Jev-versus-baseline disagreement"
   assert_contains "$out" 'jev_rationale="At least one configured risk probability met the confidence floor."' \
@@ -712,5 +740,6 @@ test_consult_does_not_read_the_whole_ledger
 test_shadow_presentation_hooks
 test_model_family_and_mismatch
 test_report_fixture_and_empty_error
+test_report_scores_discarded_labels_as_the_negative_class
 
 printf 'all fm-jev tests passed\n'

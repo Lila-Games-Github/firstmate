@@ -2122,6 +2122,88 @@ test_treehouse_genuinely_different_path_still_refuses() {
   pass "a treehouse record for a genuinely different directory is never substituted and still refuses"
 }
 
+# Seed one pending Jev acceptance consultation for task-x1, so the teardown
+# that follows has a row whose ground-truth label it must supply.
+seed_pending_jev_acceptance_row() {  # <case-dir>
+  local case_dir=$1
+  head -1 "$ROOT/tests/fixtures/jev-ledger.jsonl" \
+    | jq -c '.consultation_id = "teardown-label" | .subject = "task-x1" |
+      .final_decision = null | .eventual_outcome = null | .label_source = null |
+      .corrected = false' > "$case_dir/state/jev-ledger.jsonl"
+}
+
+jev_acceptance_label() {  # <case-dir>
+  jq -r '[.eventual_outcome, .final_decision, .label_source] | map(tostring) | @tsv' \
+    "$1/state/jev-ledger.jsonl"
+}
+
+# Teardown is the only ground truth the acceptance observer ever gets, so a
+# --force teardown - the captain's explicit OK to discard unlanded or dirty
+# work - must not be recorded as an acceptance. If it were, the report's false
+# positives would be unreachable by construction.
+test_forced_teardown_labels_the_jev_acceptance_row_discarded() {
+  local case_dir rc
+  case_dir=$(make_case jev-force-discard)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  seed_pending_jev_acceptance_row "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "jev-force-discard: forced teardown failed: $(cat "$case_dir/stderr")"
+  [ "$(jev_acceptance_label "$case_dir")" = $'discarded\tdiscarded\tteardown-force-discard' ] \
+    || fail "jev-force-discard: a discarded task was labelled $(jev_acceptance_label "$case_dir")"
+  FM_STATE_OVERRIDE="$case_dir/state" "$ROOT/bin/fm-jev.sh" validate-ledger \
+    "$case_dir/state/jev-ledger.jsonl" \
+    || fail "jev-force-discard: the labelled row no longer satisfies the ledger schema"
+  pass "a --force teardown labels its Jev acceptance rows discarded, never accepted"
+}
+
+# The complement: an ordinary teardown passed the landed-work check, so its
+# acceptance label is real rather than a default.
+test_landed_teardown_labels_the_jev_acceptance_row_accepted() {
+  local case_dir rc
+  case_dir=$(make_case jev-landed-accept)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_pending_jev_acceptance_row "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "jev-landed-accept: teardown failed: $(cat "$case_dir/stderr")"
+  [ "$(jev_acceptance_label "$case_dir")" = $'accepted\taccepted\tteardown-landed' ] \
+    || fail "jev-landed-accept: a landed task was labelled $(jev_acceptance_label "$case_dir")"
+  pass "an ordinary landed teardown labels its Jev acceptance rows accepted and names the path"
+}
+
+# A teardown that refuses has observed no outcome at all, so it must leave the
+# row waiting rather than record a label it did not earn.
+test_refused_teardown_leaves_the_jev_acceptance_row_unlabelled() {
+  local case_dir rc
+  case_dir=$(make_case jev-refused-unlabelled)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work"
+  seed_pending_jev_acceptance_row "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "jev-refused-unlabelled: teardown did not refuse unpushed work"
+  grep -q REFUSED "$case_dir/stderr" || fail "jev-refused-unlabelled: no REFUSED line"
+  [ "$(jev_acceptance_label "$case_dir")" = $'null\tnull\tnull' ] \
+    || fail "jev-refused-unlabelled: a refused teardown labelled the row $(jev_acceptance_label "$case_dir")"
+  pass "a refused teardown records no Jev acceptance outcome at all"
+}
+
 test_local_only_force_overrides_unpushed() {
   local case_dir rc
   case_dir=$(make_case force-override)
@@ -4009,6 +4091,9 @@ test_landing_branch_missing_on_origin_names_branch
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_forced_teardown_labels_the_jev_acceptance_row_discarded
+test_landed_teardown_labels_the_jev_acceptance_row_accepted
+test_refused_teardown_leaves_the_jev_acceptance_row_unlabelled
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes

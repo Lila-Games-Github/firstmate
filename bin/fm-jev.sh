@@ -6,7 +6,8 @@
 #   fm-jev.sh status <accept-check|triage|commit-lint|open-questions>
 #   fm-jev.sh request-budget <accept-check|triage|commit-lint|open-questions>
 #   fm-jev.sh consult <accept-check|triage|commit-lint|open-questions> < envelope.json
-#   fm-jev.sh finalize --use <use> --subject <subject> --decision-json <json>
+#   fm-jev.sh finalize --use <use> --subject <subject> --decision-json <json> \
+#     --label-source <path>
 #   fm-jev.sh validate-ledger [ledger.jsonl]
 #
 # `mode` prints the effective mode only: off, shadow, or active. The built-in
@@ -49,7 +50,11 @@
 #
 # `finalize` updates every row without an eventual outcome for one use and
 # subject under the ledger lock. It is how an owning lifecycle path records the
-# later human or deterministic ground truth without adding a second row.
+# later human or deterministic ground truth without adding a second row. The
+# outcome is recorded verbatim, so a caller that discarded the work must say so
+# rather than pass the accepted label, and the required `--label-source` names
+# the owning path that observed it. `corrected` stays a literal difference
+# between the recorded decision and that outcome.
 #
 # Configuration is the effective home's gitignored config/jev.json. The schema
 # and active built-in defaults live in docs/configuration.md. Each use owns a
@@ -282,6 +287,9 @@ ledger_row_valid_filter='
   ($row | has("final_decision")) and
   ($row | has("eventual_outcome")) and
   .final_decision == .eventual_outcome and
+  ((.label_source == null) or
+   ((.label_source | type) == "string" and (.label_source | length) > 0)) and
+  (if .eventual_outcome == null then .label_source == null else true end) and
   .agreement == (if .jev_verdict == null or .baseline_decision == null then null
                  else .jev_verdict == .baseline_decision end) and
   (if .available then
@@ -541,7 +549,7 @@ record_unavailable_attempt() { # <use> <subject> <reason> <baseline-json> <basel
      jev_verdict:null,jev_rationale:("Jev was unavailable: " + $reason),jev_probabilities:{},
      confidence:null,confidence_floor:$floor,existing_decision:$baseline,
      baseline_decision:$baseline,baseline_rationale:$baseline_rationale,agreement:null,
-     decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,corrected:false,latency_ms:$latency,
+     decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,label_source:null,corrected:false,latency_ms:$latency,
      cost_usd:$cost,estimated_big_model_tokens:$estimate,request_bytes:$bytes,used_jev:false,
      truncated:$truncated,jev_flagged:[],jev_confidences:{},used_jev_keys:{},
      response_model:(if $response_model == "" then null else $response_model end),
@@ -747,7 +755,7 @@ record_refusal_row() { # <use> <envelope-file> <reason> <bytes>
      jev_verdict:null,jev_rationale:("Jev was not consulted: " + $reason),jev_probabilities:{},
      confidence:null,confidence_floor:$floor,existing_decision:$baseline,
      baseline_decision:$baseline,baseline_rationale:$baseline_rationale,agreement:null,
-     decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,corrected:false,
+     decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,label_source:null,corrected:false,
      latency_ms:0,cost_usd:0,estimated_big_model_tokens:$estimate,request_bytes:$bytes,
      used_jev:false,truncated:$truncated,jev_flagged:[],jev_confidences:{},used_jev_keys:{},
      response_model:null,jev_answers:{}}') || return 1
@@ -967,7 +975,7 @@ consult_one() { # <use> <envelope-file>
      jev_verdict:$verdict,jev_rationale:$jev_rationale,jev_probabilities:$probabilities,
      confidence:$confidence,confidence_floor:$floor,
      existing_decision:$baseline,baseline_decision:$baseline,baseline_rationale:$baseline_rationale,
-     agreement:$agreement,decision_after_jev:$after,final_decision:null,eventual_outcome:null,
+     agreement:$agreement,decision_after_jev:$after,final_decision:null,eventual_outcome:null,label_source:null,
      corrected:false,latency_ms:$latency,cost_usd:$cost,
      estimated_big_model_tokens:$estimate,request_bytes:$bytes,used_jev:$used,
      truncated:$truncated,jev_flagged:$flagged,jev_confidences:$confidences,used_jev_keys:$used_keys,
@@ -1142,18 +1150,20 @@ cmd_consult() {
 }
 
 cmd_finalize() {
-  local use='' subject='' decision='' tmp updated total file
+  local use='' subject='' decision='' label_source='' tmp updated total file
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --use) [ $# -ge 2 ] || return 2; use=$2; shift 2 ;;
       --subject) [ $# -ge 2 ] || return 2; subject=$2; shift 2 ;;
       --decision-json) [ $# -ge 2 ] || return 2; decision=$2; shift 2 ;;
+      --label-source) [ $# -ge 2 ] || return 2; label_source=$2; shift 2 ;;
       *) return 2 ;;
     esac
   done
   use_valid "$use" || return 2
   [ -n "$subject" ] || return 2
+  [ -n "$label_source" ] || return 2
   json_available || return 1
   jq -e . >/dev/null 2>&1 <<<"$decision" || return 2
   lock_ledger || return 1
@@ -1171,10 +1181,12 @@ cmd_finalize() {
     total=$((total + updated))
     [ "$updated" -gt 0 ] || continue
     tmp=$(mktemp "$STATE/.jev-ledger.finalize.XXXXXX") || { unlock_ledger || true; return 1; }
-    jq -c --arg use "$use" --arg subject "$subject" --argjson decision "$decision" '
+    jq -c --arg use "$use" --arg subject "$subject" --argjson decision "$decision" \
+      --arg label_source "$label_source" '
       if .use == $use and .subject == $subject and .eventual_outcome == null then
         .final_decision = $decision |
         .eventual_outcome = $decision |
+        .label_source = $label_source |
         .corrected = (.decision_after_jev != null and .decision_after_jev != $decision)
       else . end
     ' "$file" > "$tmp" || { rm -f "$tmp"; unlock_ledger || true; return 1; }
@@ -1204,6 +1216,6 @@ case "${1:-}" in
   consult) shift; cmd_consult "$@" ;;
   finalize) cmd_finalize "$@" ;;
   validate-ledger) shift; cmd_validate_ledger "$@" ;;
-  -h|--help|help|'') sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help|'') sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) printf 'usage: fm-jev.sh mode|status|request-budget|consult|finalize|validate-ledger ...\n' >&2; exit 2 ;;
 esac
