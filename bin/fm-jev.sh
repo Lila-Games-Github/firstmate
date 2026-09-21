@@ -43,15 +43,16 @@
 # naming per-call-token-cap. A budget refusal always writes a row, with
 # network_attempted false, so the report can show why nothing ran.
 #
-# Splitting is taken only when it buys something. State that is not group-owned
-# and not reachable through `ledger.context` has to be copied verbatim into
-# every part, so the split is refused unless the group-owned material is what
-# makes the envelope oversized - that copy must be no larger than the
-# group-owned bytes - and unless the duplication it costs stays inside one
-# budget: copied bytes times the part count must not exceed the per-call
-# budget. It is refused again when the whole split would not fit the day's
-# remaining calls and spend for this use. Every refusal sends one shortened
-# request instead, so every question is still answered.
+# Splitting is taken only when it buys something. Everything a part carries that
+# its own group does not own is shared - state copied verbatim plus the
+# `ledger.context` entries that group cites - and what the split duplicates is
+# those per-part totals less the distinct bytes the parts cover between them. A
+# split is refused unless the group-owned material is what makes the envelope
+# oversized, so the duplication must be no larger than the group-owned bytes,
+# and unless the duplication fits one per-call budget. It is refused again when
+# the whole split would not fit the day's remaining calls and spend for this
+# use. Every refusal sends one shortened request instead, so every question is
+# still answered.
 #
 # Agreement is per key wherever the verdict is: `agreement_keys` answers item by
 # item and `differing_keys` names only the items that diverged, so a batch of
@@ -658,16 +659,18 @@ cmd_request_budget() {
 # shares its state key, so a triage item keeps its attention and answer-kind
 # Choices together. A state container keyed by the group name is sliced to that
 # group; `ledger.context` names a shared container whose entries are pulled in
-# by reference, so a page ten questions cite travels once per part that cites it
-# instead of ten times. Strategies with no per-question state, such as the
-# commit lint, yield null and are never split. Whatever is left - state that is
-# neither group-owned nor reachable through `ledger.context` - is copied
-# verbatim into every part, so the plan is abandoned unless that copy is both
-# smaller than the group-owned material it would be duplicated alongside and
-# small enough that every copy together still fits one per-call budget. A
-# 120KB report shared by five short criteria fails both: the criteria are not
-# what makes the envelope oversized, and five near-identical requests buy
-# nothing a single request shortened by a few kilobytes would not.
+# by reference, so a part carries only the entries its own group cites.
+# Strategies with no per-question state, such as the commit lint, yield null and
+# are never split. Everything a part carries that its group does not own is
+# shared: the state keys copied verbatim plus the `ledger.context` entries that
+# group cites. Summed over the parts and less the distinct bytes those parts
+# cover between them, that is what the split duplicates, and the plan is
+# abandoned unless the duplication is both smaller than the group-owned material
+# and small enough to fit one per-call budget. Ten questions citing one 20KB
+# page fail both, exactly as a 120KB report shared by five short criteria does:
+# the group-owned material is not what makes the envelope oversized, and ten
+# near-identical requests buy nothing one shortened request would not. Ten
+# questions citing ten different pages duplicate nothing and still split.
 # shellcheck disable=SC2016 # jq program; dollar names belong to jq.
 split_plan_filter='
   def gkey: sub("__.*$"; "");
@@ -680,30 +683,32 @@ split_plan_filter='
      then ($v.questions // []) else [] end) as $vq
   | ([$vq[] | gkey] | unique) as $gkeys
   | ([$state | to_entries[] | select((.value | type) == "object")]) as $objects
-  | ([$gkeys[] as $g | {g:$g, containers:[$objects[] | select(.value | has($g)) | .key]}]) as $groups
-  | ([$groups[].containers] | add // [] | unique) as $owned
+  | ([$gkeys[] as $g | {g:$g, containers:[$objects[] | select(.value | has($g)) | .key]}]) as $bare
+  | ([$bare[].containers] | add // [] | unique) as $owned
   | (($state | keys) - $owned) as $shared
-  | ([$shared[] as $k
-      | select((($ctx | has($k)) | not) or (($state[$k] | type) != "object")) | $k]) as $copied
-  | ((reduce $copied[] as $k ({}; . + {($k): $state[$k]})) | tojson | utf8bytelength) as $copied_bytes
+  | ([$bare[] as $grp
+      | ($grp.g) as $g
+      | $grp + {shared: (reduce $shared[] as $k ({};
+          if ($ctx | has($k)) and (($state[$k] | type) == "object") then
+            ([$grp.containers[] as $c | $state[$c][$g]
+               | if type == "object" then .[$ctx[$k]] else empty end]
+             | map(select(type == "string")) | unique) as $names
+            | . + {($k): (reduce $names[] as $n ({};
+                if $state[$k] | has($n) then . + {($n): $state[$k][$n]} else . end))}
+          else . + {($k): $state[$k]} end))}]) as $groups
+  | ([$groups[].shared | tojson | utf8bytelength] | add // 0) as $shared_sum
+  | ((reduce $groups[].shared as $o ({}; . * $o)) | tojson | utf8bytelength) as $shared_distinct
+  | ($shared_sum - $shared_distinct) as $duplicated_bytes
   | ((reduce $owned[] as $k ({}; . + {($k): $state[$k]})) | tojson | utf8bytelength) as $owned_bytes
   | if ($groups | length) < 2 or any($groups[]; (.containers | length) == 0)
-       or $copied_bytes > $owned_bytes
-       or ($copied_bytes * ($groups | length)) > $budget then null
+       or $duplicated_bytes > $owned_bytes
+       or $duplicated_bytes > $budget then null
     else
       [ $groups[] as $grp
         | ($grp.g) as $g
         | ([$vq[] | select(gkey == $g)]) as $part_vq
         | (reduce $grp.containers[] as $c ({}; . + {($c): {($g): $state[$c][$g]}})) as $own
-        | (reduce $shared[] as $k ({};
-             if ($ctx | has($k)) and (($state[$k] | type) == "object") then
-               ([$grp.containers[] as $c | $state[$c][$g]
-                  | if type == "object" then .[$ctx[$k]] else empty end]
-                | map(select(type == "string")) | unique) as $names
-               | . + {($k): (reduce $names[] as $n ({};
-                   if $state[$k] | has($n) then . + {($n): $state[$k][$n]} else . end))}
-             else . + {($k): $state[$k]} end)) as $context
-        | {request:{state:($context + $own),
+        | {request:{state:($grp.shared + $own),
                     questions:($rq | with_entries(select(.key | gkey == $g)))},
            ledger:($env.ledger
              | .baseline_decision = (if ($env.ledger.baseline_decision | type) == "object"

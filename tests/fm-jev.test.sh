@@ -585,6 +585,43 @@ test_split_that_cannot_finish_is_never_started() {
   pass "Jev client: a split that a call or spend cap could not finish is never started"
 }
 
+# Ten questions over one page: splitting would send that page ten times, one
+# near-identical truncated prefix per part, for ten of the day's calls. The
+# page is what makes the envelope oversized, not the question text, so one
+# shortened request classifies all ten instead.
+test_one_page_cited_by_every_question_is_not_duplicated() {
+  local home="$TMP_ROOT/questions-one-page" before out proposal i
+  write_config "$home" off off off shadow 100 2000
+  write_key "$home"
+  mkdir -p "$home/pages"
+  {
+    printf '# Open questions\n\n'
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      printf -- '- Which launch detail number %s applies? [page: launch.md]\n' "$i"
+    done
+  } > "$home/questions.md"
+  awk 'BEGIN { while (length(out) < 20000) out = out "The approved launch date is 2026-10-04. "; print out }' \
+    > "$home/pages/launch.md"
+  before=$(request_count)
+  out=$(jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages") \
+    || fail "a single-page sweep failed instead of sending one request"
+  proposal="$home/questions-jev-review.md"
+  [ "$out" = "$proposal" ] && [ -s "$proposal" ] || fail "the single-page sweep wrote no proposal"
+  [ "$(request_count)" -eq $((before + 1)) ] \
+    || fail "one page cited by every question was duplicated across per-question requests"
+  [ "$(grep -c '^- ' "$proposal")" -eq 10 ] \
+    || fail "the single-page sweep lost a question: $(cat "$proposal")"
+  grep -q 'null' "$proposal" && fail "the single-page sweep left a question unclassified"
+  jq -e '(.state.questions | length) == 10 and (.state.pages | length) == 1 and
+    (.state.pages["launch.md"] | length) < 20000' <<<"$(tail -1 "$REQUEST_LOG")" >/dev/null \
+    || fail "the single request lost a question or kept the whole page"
+  jq -e -s 'length == 1 and .[0].truncated == true and .[0].available == true' \
+    "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "the single-page sweep did not record exactly one shortened consultation"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the single-page row failed validation"
+  pass "Jev client: a page every question cites is shortened into one request, never sent per question"
+}
+
 test_unfittable_question_is_refused_with_a_row() {
   local home="$TMP_ROOT/questions-unfittable" before out
   # A cap no request can fit under: the refusal must be recorded, not silent.
@@ -902,6 +939,7 @@ test_active_advisories_never_touch_task_status
 test_open_questions_request_builder
 test_shared_page_is_sent_once
 test_oversized_material_splits_and_truncates
+test_one_page_cited_by_every_question_is_not_duplicated
 test_split_that_cannot_finish_is_never_started
 test_unfittable_question_is_refused_with_a_row
 test_oversized_shared_report_is_shrunk_not_duplicated
