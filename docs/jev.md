@@ -6,13 +6,13 @@ Jev cannot produce free text, prove correctness, recover missing product intent,
 
 ## Enable and disable
 
-Put `TYPESAFE_API_KEY=` in the effective home's gitignored `.env` to enable the built-in active configuration.
+Set a nonempty `TYPESAFE_API_KEY` in the effective home's gitignored `.env` to enable the built-in active configuration.
 That key is the only opt-in, and it is the same key `bin/fm-dispatch-resolve.sh` already uses for typed dispatch resolution.
 A home that already has it therefore turns all four observers active on its next `bin/fm-wake-drain.sh`, with no further configuration step, and begins transmitting the material listed under [Uses](#uses) to TypeSafe AI:
 
 | Use | What each consultation transmits |
 | --- | --- |
-| Acceptance check | The acceptance criteria extracted from `data/<id>/brief.md` and the text of the worker's `data/<id>/report.md`. |
+| Acceptance check | Complete list items and prose criteria from acceptance or definition-of-done sections in `data/<id>/brief.md`, plus `data/<id>/report.md` or the newest `done:` status line when no report exists; the client may shorten this material to fit the request budget. |
 | Supervision triage | Each presented status line, wake row, or captured Lavish review element, truncated to 1500 characters per item. |
 | Commit lint | Each branch-only commit's subject, body, and diff, or its `git show --stat` plus leading hunks when the diff exceeds the per-call budget. |
 | Open questions | Each question line and the text of every page those lines reference, each page once per request rather than once per question, shortened when it exceeds the per-call budget. |
@@ -36,15 +36,20 @@ The system never changes a use's configured mode or disables Jev because of a di
 | Use | Command or hook | Shadow behavior | Active behavior |
 | --- | --- | --- | --- |
 | Acceptance check | `bin/fm-jev-accept-check.sh <task-id>` | Writes `data/<id>/acceptance.json` from one Noul per extracted acceptance criterion, marking each criterion with the number of characters Jev was actually shown. | Also records `unmet_criteria` and an `advisory` string in that same file, but never accepts, rejects, blocks, or closes the task. |
-| Supervision triage | `bin/fm-wake-drain.sh` and `bin/fm-procevent-lavish.sh read` | Records routine or actionable for each presented item and ruling, question, or instruction for captured review answers, batching one drain or one read into a single request. | Marks each confidence-qualified classification in the batch as the Jev decision for that item in the ledger, while presentation remains unchanged so no input can be silently lost. |
+| Supervision triage | `bin/fm-wake-drain.sh` and `bin/fm-procevent-lavish.sh read` | Records routine or actionable for each admitted item and ruling, question, or instruction for captured review answers, batching the admitted items from one drain or one read into at most one request. | Marks each confidence-qualified classification in the batch as the Jev decision for that item in the ledger, while presentation remains unchanged so no input can be silently lost. |
 | Commit lint | `bin/fm-jev-commit-lint.sh <worktree>` | Reviews each branch commit in its own request for message and diff agreement, persistence changes, weakened tests, debug output, and credentials, and writes `data/<id>/commit-lint.json`. | Also records an `advisory` string in that same file, but never blocks or authorizes landing. |
 | Open questions | `bin/fm-jev-open-questions.sh <questions-file> <pages-dir>` | Writes `<stem>-jev-review.md` with still open, settled, or cannot tell against each question's named page, carrying each referenced page once as shared context; a question Jev did not answer is listed as unclassified with the reason rather than given a classification. | Writes the same proposal and never edits the question register or referenced pages. |
 
 Each adapter builds its requests from material that code has already narrowed.
 The question wording is reviewable under `bin/jev-questions/`.
 No adapter writes a task's status file: a `note:` line there is a status event that would supersede a worker's terminal `done:` line and change how supervision classifies an idle, finished pane, so every advisory lives in the use's own evidence file and in the report instead.
-A whole drain or a whole Lavish read is batched into one triage request, and each commit is one commit-lint request; a commit whose diff exceeds the per-call budget is sent as `git show --stat` plus as many leading hunk bytes as fit, with `truncated=true` on its ledger row, rather than cancelling the branch's lint.
-`bin/fm-jev.sh` enforces the per-call budget for every adapter, so no adapter can make an oversized request disappear. An over-budget envelope is split into one request per question, each carrying only the shared context its own question names. Splitting is taken only when it buys something: whatever a part carries that its own question does not own counts as shared, and what the split duplicates is the sum of those per-part shares less the distinct material the parts cover between them. A split is refused unless that duplication is smaller than the per-question material it accompanies and still fits one per-call budget - an oversized worker report shared by five acceptance criteria, or one 20 KB page cited by ten questions, would otherwise cost five or ten near-identical requests, when one shortened request carries every question and essentially the same text - and it is refused again when the whole split would not fit the day's remaining calls and spend for that use. Ten questions citing ten different pages duplicate nothing and still split. Every refusal sends one request instead. Splitting is only ever applied where each part is its own subject with its own verdict, such as the per-question open-question sweep, and each part records that subject; an acceptance check is one verdict over every criterion, so it is never split and stays one request and one ledger row however large its material. If one request of a sweep fails anyway, the surviving questions keep their answers and the rest are named unclassified. A request that still does not fit has its longest state string shortened and records `truncated=true`, and a question that cannot fit even alone is refused with `per-call-token-cap` written to the ledger. Every budget refusal is recorded the same way, so `bin/fm-jev-report.sh` names under `unanswered:` why a use did nothing today.
+Triage admits at most 50 items per drain or Lavish read, with a lower limit when the configured request budget requires it.
+While triage is enabled, the drain remembers answered presentation items in `state/.jev-triage-seen`, regardless of confidence, and avoids reconsulting unchanged content while it remains presented.
+Items omitted by the admission limit or left unanswered remain eligible on later drains; items no longer presented are pruned.
+An oversized combined triage request is shortened rather than split, preserving the one-call limit.
+Acceptance also stays one request; an open-question sweep may split into separate question groups.
+The [client header](../bin/fm-jev.sh) owns the sizing, splitting, and refusal rules.
+Commit lint retains a diff summary and leading hunks when needed; a commit whose message, summary, and question overhead cannot fit is recorded as `too-large` in `commit-lint.json` without a consultation.
 The client requests `jev-1.13.0`, accepts any returned model id in the `jev-` family, records the returned id as `response_model` on every row, sends text-only state, and allows no SDK or free-form output path.
 A well-formed answer from a model outside that family is recorded with the distinct `response-model-mismatch` reason and the returned id, so an endpoint or routing change is diagnosable from the ledger rather than looking like a schema failure.
 Both shadow and active modes transmit that narrowed text to TypeSafe AI, including report excerpts, supervision items, commit messages and diffs, or referenced page text.
@@ -57,7 +62,9 @@ The ledger rotates monthly into `state/jev-ledger/YYYY-MM.jsonl`; the report and
 Run `bin/fm-jev-report.sh` to print per-use and overall agreement with final decisions, consultations still waiting for one, false positives, false negatives, spend, estimated tokens avoided, and active-row counts.
 It then names every consultation that produced no answer under `unanswered:`, grouped by reason and split into the budget refusals that never reached the service and the attempts that reached it and failed, which is where a day lost to an exhausted cap, a zero budget share, an oversized request, or a revoked key becomes visible.
 The report then lists every Jev-versus-baseline disagreement with the two decisions, both rationales, Jev's typed probabilities, and the recorded outcome with the path that observed it, and closes with the advisories the active adapters recorded.
-`outcome-mismatches:` lists every consultation whose verdict class differs from the outcome later recorded for it, with both the decision and the ground truth, the rationale, the probabilities and the label source. That is the only review surface for an acceptance check, which supplies no baseline to disagree with and so never appears under `disagreements:`.
+`outcome-mismatches:` lists every consultation whose verdict class differs from the outcome later recorded for it, with both the decision and the ground truth, the rationale, the probabilities and the label source.
+Acceptance checks supply no baseline and never appear under `disagreements:`, so this section exposes their outcome errors.
+For object verdicts it lists the differing matching keys with their probabilities and label provenance.
 A batched per-item consultation is listed as the items that actually diverged, each with its Jev choice, its probabilities, and the baseline choice, rather than as the whole batch object, because finding routine items is what triage is for and one of them must not read as a total disagreement.
 Pass an alternate JSONL file as the first argument when evaluating a saved fixture or export.
 
@@ -74,10 +81,9 @@ Consultations with no label yet are counted in the report's `unlabelled` column 
 A criterion whose own text had to be shortened to fit the per-call budget is recorded `met: null` with `truncated: true` and its `judged_characters`, listed under `unjudged_criteria`, and left out of `unmet_criteria` and the advisory, which instead names how many criteria went unjudged: an answer about a stub is not an answer about the criterion the brief states.
 When every question a verdict names was answered from a stub the consultation is not scored at all: the row records `questions-truncated` with no verdict, the caller keeps its baseline, `acceptance.json` carries `verdict: "unjudged"`, and the report leaves the row out of agreement, the error columns and the avoided-token credit.
 A shortened request is only ever credited the tokens it actually carried, never the estimate of the material the adapter gathered.
-Every consultation whose material was shortened is listed under `advisories:` in `bin/fm-jev-report.sh` with `truncated=true`, in shadow mode as well as active and whether or not it flagged anything.
-The report's token count is an estimate based on the bounded material each adapter supplied.
-Acceptance estimates the report and criterion text, triage estimates the presented items, commit lint estimates the commit-and-diff JSON, and open-question review estimates the questions and named page text; each uses the conventional four-characters-per-token approximation because these paths do not otherwise record big-model token use.
-The client applies that same four-bytes-per-token rule to its own preflight, so an adapter sizing bounded material against `bin/fm-jev.sh request-budget <use>` and the cap the client enforces are one arithmetic.
+Every available consultation whose material was shortened is listed under `advisories:` in `bin/fm-jev-report.sh` with `truncated=true`, in shadow mode as well as active and whether or not it flagged anything.
+For unshortened requests, the report uses adapter estimates: acceptance and triage divide their material bytes by four, while commit lint and open-question review divide their serialized material character counts by four.
+These are approximate savings estimates and can differ for non-ASCII material; the client enforces request budgets using UTF-8 bytes, including request overhead.
 A batched consultation is credited the share of its estimate whose own items cleared the floor, because each item of a batch is judged on the confidence Jev returned for that item rather than on the batch minimum.
 For shadow rows the value is only a counterfactual estimate of what active mode could avoid.
 Active rows make operational comparison possible, but the value remains an estimate rather than a billing measurement, and advisory-only effects may not eliminate every baseline token.
@@ -86,7 +92,7 @@ Compare both agreement and error direction before promoting a use because a low 
 ## Revert
 
 The fastest global rollback is `"kill_switch": true` in `config/jev.json`.
-Deleting the key from `.env` is equivalent for the four observers.
+Removing the key from both the environment and `.env` disables the four observers; an environment-provided key takes precedence over `.env`.
 To keep the key for typed dispatch while disabling only these observers, set every use in `config/jev.json` to `off`.
 No ledger archive under `state/jev-ledger/` needs deleting either; rotation only moves evidence, it never discards it.
 Removing `config/jev.json` restores the built-in active configuration, so it is not a rollback.

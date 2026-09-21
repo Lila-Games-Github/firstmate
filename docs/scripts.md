@@ -115,7 +115,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-jev.sh`              | Own bounded Jev requests, configuration enforcement, and the consultation outcome ledger |
 | `fm-jev-adapter-lib.sh`  | Shared opt-in gate that makes an explicitly invoked Jev adapter name its off reason  |
 | `fm-jev-accept-check.sh` | Review a worker report against extracted acceptance criteria without controlling completion |
-| `fm-jev-triage.sh`       | Classify one narrowed supervision input without changing its presentation            |
+| `fm-jev-triage.sh`       | Classify a bounded supervision batch without changing its presentation            |
 | `fm-jev-commit-lint.sh`  | Review task-branch commits for message agreement and declared risk signals without blocking landing |
 | `fm-jev-open-questions.sh` | Propose statuses for page-referenced open questions without editing their register  |
 | `fm-jev-report.sh`       | Summarize Jev agreement, error direction, spend, and estimated token avoidance        |

@@ -13,8 +13,8 @@
 # then cancel the whole branch's lint. A commit whose own diff still does not
 # fit is sent as `git show --stat` plus as many leading hunk bytes as remain
 # inside the budget, and its ledger row records truncated=true rather than
-# skipping it. Only a commit whose message alone exceeds the budget is left
-# unreviewed, and the evidence file records that as `status: "too-large"`.
+# skipping it. A commit whose message, diff summary, and question overhead
+# cannot fit is left unreviewed as `status: "too-large"` in the evidence file.
 #
 # The findings are written to data/<task-id>/commit-lint.json and summarized on
 # stdout; bin/fm-jev-report.sh also surfaces them from the ledger. No Jev

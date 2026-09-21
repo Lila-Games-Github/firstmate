@@ -63,8 +63,8 @@ fi
 # drain - an open decision stays printed until it resolves - so staging each
 # presented line unconditionally would re-consult the identical item on every
 # drain and spend the day's triage share on duplicates. An item is consulted
-# once per distinct content: $DRAIN_JEV_SEEN carries the records the previous
-# drain presented, and each drain rewrites it with exactly what it presented,
+# once per distinct content: $DRAIN_JEV_SEEN retains only answered records
+# still presented, leaving overflow and unanswered items eligible for retry,
 # so a row that resolves is pruned and the same content returning later is
 # consulted again.
 fm_wake_presentation_stage() { # <record>

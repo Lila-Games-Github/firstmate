@@ -26,7 +26,7 @@
 # Every outcome is JSON on stdout and exits zero. Missing configuration, kill
 # switch, key, tools, caps, unsafe input, transport failure, and malformed
 # responses all return status=unavailable so callers keep their old behavior.
-# Only a network attempt creates a ledger row.
+# Network attempts and budget refusals create ledger rows when the ledger is writable.
 #
 # The `choices` recipe is per key: every named question keeps its own returned
 # confidence, and `qualified`, `used_jev_keys`, and `decision_after_jev` are
@@ -44,7 +44,9 @@
 # the report can show why nothing ran.
 #
 # An over-budget envelope is split into one request per question group only
-# when its verdict is per key. An aggregate verdict such as the acceptance
+# when its verdict is per key and the use is not triage. Triage always keeps
+# its combined request, shortening it to preserve the one-call bound.
+# An aggregate verdict such as the acceptance
 # check's `all_noul` is one claim about every named question, so a part of it
 # is not a consultation in its own right: each part would record a row
 # asserting the subject's whole verdict over the questions it happened to
@@ -52,6 +54,11 @@
 # always one shortened request. Where a split is allowed, each part is its own
 # subject - `<subject>#<group>` on its row - so finalize matches one row and
 # the report counts each subject exactly once.
+# A group is one verdict question plus every request question sharing its state
+# key. `ledger.context` maps a shared state container to the group field naming
+# its referenced entry; {"pages":"page"} retains only pages that group cites.
+# If a split partly fails, `answers` contains only answered questions and
+# `parts_unavailable` names the missing answers; callers must preserve that absence.
 #
 # Splitting is taken only when it buys something. Everything a part carries that
 # its own group does not own is shared - state copied verbatim plus the
@@ -61,8 +68,8 @@
 # oversized, so the duplication must be no larger than the group-owned bytes,
 # and unless the duplication fits one per-call budget. It is refused again when
 # the whole split would not fit the day's remaining calls and spend for this
-# use. Every refusal sends one shortened request instead, so every question is
-# still answered.
+# use. Declining a split falls back to one shortened request, still subject
+# to the per-call and daily caps and transport failures.
 #
 # Agreement is per key wherever the verdict is: `agreement_keys` answers item by
 # item and `differing_keys` names only the items that diverged, so a batch of
@@ -88,8 +95,8 @@
 # share of the daily budget so no use can starve another. The ledger is
 # state/jev-ledger.jsonl. docs/jev.md owns the operator workflow and metrics.
 #
-# Tokens are counted at four request bytes per input token here and in every
-# adapter estimate, so one budget arithmetic applies end to end.
+# Request-budget and preflight use four request bytes per input token.
+# Adapter savings estimates are described in docs/jev.md.
 #
 # Secret handling: TYPESAFE_API_KEY is copied into one non-exported shell
 # variable, removed from the environment, and passed to curl through fd 3.

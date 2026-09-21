@@ -31,9 +31,9 @@
 # network and the attempts that reached it and failed, so a day stopped by a
 # cap and a day stopped by a revoked key are both named rather than silent.
 # `outcome-mismatches:` then lists every consultation whose verdict class
-# differs from the outcome later recorded for it, which is the only place an
-# acceptance check can be reviewed: it supplies no baseline to disagree with,
-# so it never appears under `disagreements:`. The report also lists every Jev-versus-baseline
+# differs from the outcome later recorded for it; docs/jev.md owns the
+# interpretation of this section and its per-key comparisons.
+# The report also lists every Jev-versus-baseline
 # disagreement with both rationales and the returned typed probabilities; a
 # batched per-item verdict is listed as the items that actually diverged, never
 # as the whole batch object, so one routine answer among fifty does not bury the
@@ -43,10 +43,8 @@
 # closes with the advisory findings the active adapters recorded, which is where
 # an acceptance or commit-lint advisory is surfaced: no adapter writes one to a
 # task status file, because a `note:` there would supersede a worker's terminal
-# `done:` line. Every consultation whose material had to be shortened is listed
-# there too, in shadow as well as active mode and whether or not it flagged
-# anything, because an answer about shortened material is not an answer about
-# what the adapter gathered and an operator has to be able to see that.
+# `done:` line. See docs/jev.md for how shortened and unjudged consultations
+# appear in the report.
 # Empty or malformed ledgers exit non-zero with a clear diagnostic.
 set -u
 
