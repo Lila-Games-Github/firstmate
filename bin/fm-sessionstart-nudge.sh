@@ -22,7 +22,32 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 fm_is_gate_agent "$FM_ROOT" && exit 0
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# Two independent reads of "this session already holds the home lock", because
+# they answer different cases and silence is the safe verdict for a hook whose
+# only outputs are one nudge line or nothing. The shared owner check proves a
+# harness-shaped ancestry and the Playbot thread binding; the plain walk below
+# covers a harness that is pid 1 inside a PID namespace, where no ancestor above
+# it can be inspected at all.
 fm_session_lock_owned_by_self "$STATE" && exit 0
+
+lock_pid_is_in_ancestry() {
+  local lock_pid pid=$$ _
+  [ -f "$STATE/.lock" ] || return 1
+  IFS= read -r lock_pid < "$STATE/.lock" 2>/dev/null || return 1
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$lock_pid" 2>/dev/null || return 1
+  for _ in 1 2 3 4 5 6 7 8; do
+    [ "$pid" = "$lock_pid" ] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$pid" -ge 1 ] || return 1
+  done
+  return 1
+}
+
+lock_pid_is_in_ancestry && exit 0
 nudge=
 fm_operational_input_encode session-start \
   "Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions." \
