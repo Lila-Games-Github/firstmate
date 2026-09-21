@@ -6,10 +6,15 @@
 # A question line is a Markdown bullet ending in `[page: relative/path.md]`.
 # The relative path must stay beneath pages-dir and name a readable regular file.
 # One request contains one Choice per question: still_open, settled, or
-# cannot_tell. The proposal is written beside the questions file as
-# <stem>-jev-review.md. It never edits the questions file or any referenced page.
-# Off or unavailable mode names the reason on stderr, writes nothing, and exits
-# zero.
+# cannot_tell. Each referenced page is carried once in a shared `pages` context
+# block that the questions cite by name, so ten questions about one page do not
+# transmit it ten times. bin/fm-jev.sh owns the per-call budget from there: it
+# splits, shortens, or refuses with a recorded reason, so an oversized page is
+# never a silent no-op.
+#
+# The proposal is written beside the questions file as <stem>-jev-review.md. It
+# never edits the questions file or any referenced page. Off or unavailable mode
+# names the reason on stderr, writes nothing, and exits zero.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,9 +33,11 @@ PAGES_ROOT=$(cd -P "$PAGES_DIR" 2>/dev/null && pwd -P) || exit 0
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-jev-questions.XXXXXX") || exit 0
 trap 'rm -rf -- "$TMP_DIR"' EXIT
 ITEMS="$TMP_DIR/items.jsonl"
+PAGES="$TMP_DIR/pages.json"
 ENVELOPE="$TMP_DIR/envelope.json"
 RESULT="$TMP_DIR/result.json"
 : > "$ITEMS"
+printf '{}\n' > "$PAGES"
 INDEX=0
 while IFS= read -r line || [ -n "$line" ]; do
   TRIMMED=$(printf '%s\n' "$line" | sed 's/^[[:space:]]*//')
@@ -50,24 +57,30 @@ while IFS= read -r line || [ -n "$line" ]; do
   [ -n "$QUESTION" ] || continue
   INDEX=$((INDEX + 1))
   KEY="question_$INDEX"
-  PAGE_TEXT=$(cat "$PAGE_FILE") || exit 0
-  jq -cn --arg key "$KEY" --arg question "$QUESTION" --arg page "$PAGE" --arg text "$PAGE_TEXT" \
-    '{key:$key,question:$question,page:$page,text:$text}' >> "$ITEMS" || exit 0
+  if ! jq -e --arg page "$PAGE" 'has($page)' "$PAGES" >/dev/null 2>&1; then
+    PAGE_TEXT=$(cat "$PAGE_FILE") || exit 0
+    jq -c --arg page "$PAGE" --arg text "$PAGE_TEXT" '. + {($page):$text}' "$PAGES" > "$PAGES.tmp" || exit 0
+    mv -f "$PAGES.tmp" "$PAGES" || exit 0
+  fi
+  jq -cn --arg key "$KEY" --arg question "$QUESTION" --arg page "$PAGE" \
+    '{key:$key,question:$question,page:$page}' >> "$ITEMS" || exit 0
 done < "$QUESTIONS_FILE"
 [ "$INDEX" -gt 0 ] || exit 0
 
-ITEMS_JSON=$(jq -sc 'map({key:.key,value:{question:.question,page:.page,text:.text}}) | from_entries' "$ITEMS") || exit 0
+ITEMS_JSON=$(jq -sc 'map({key:.key,value:{question:.question,page:.page}}) | from_entries' "$ITEMS") || exit 0
+PAGES_JSON=$(jq -c '.' "$PAGES") || exit 0
 EXISTING=$(jq -cn --argjson items "$ITEMS_JSON" 'reduce ($items | keys[]) as $key ({}; . + {($key):"still_open"})') || exit 0
-ESTIMATE=$(( (${#ITEMS_JSON} + 3) / 4 ))
+ESTIMATE=$(( (${#ITEMS_JSON} + ${#PAGES_JSON} + 3) / 4 ))
 jq -n --arg subject "$(basename "$QUESTIONS_FILE")" --argjson items "$ITEMS_JSON" \
+  --argjson pages "$PAGES_JSON" \
   --argjson existing "$EXISTING" --argjson estimate "$ESTIMATE" --slurpfile template "$QUESTIONS_TEMPLATE" '
   ($items | keys) as $keys |
-  {request:{state:{questions:$items},questions:(reduce $keys[] as $key ({};
+  {request:{state:{questions:$items,pages:$pages},questions:(reduce $keys[] as $key ({};
      . + {($key):($template[0].question
        | .instructions |= gsub("\\{question_key\\}";$key))}))},
    ledger:{subject:$subject,baseline_decision:$existing,
      baseline_rationale:"The existing question-register path leaves each entry open until an explicit reviewer settles it.",
-     estimated_big_model_tokens:$estimate,
+     estimated_big_model_tokens:$estimate,context:{pages:"page"},
      verdict:{strategy:"choices",questions:$keys}}}
 ' > "$ENVELOPE" || exit 0
 

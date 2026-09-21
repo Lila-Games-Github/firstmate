@@ -15,7 +15,7 @@ A home that already has it therefore turns all four observers active on its next
 | Acceptance check | The acceptance criteria extracted from `data/<id>/brief.md` and the text of the worker's `data/<id>/report.md`. |
 | Supervision triage | Each presented status line, wake row, or captured Lavish review element, truncated to 1500 characters per item. |
 | Commit lint | Each branch-only commit's subject, body, and diff, or its `git show --stat` plus leading hunks when the diff exceeds the per-call budget. |
-| Open questions | Each question line and the full text of the page that line references. |
+| Open questions | Each question line and the text of every page those lines reference, each page once per request rather than once per question, shortened when it exceeds the per-call budget. |
 
 Shadow and `off` remain the manual opt-outs; neither is selected for you.
 Create the gitignored `config/jev.json` described in [configuration.md](configuration.md#jev-decision-observers-configjevjson) to change budgets or select another mode per use.
@@ -37,12 +37,13 @@ The system never changes a use's configured mode or disables Jev because of a di
 | Acceptance check | `bin/fm-jev-accept-check.sh <task-id>` | Writes `data/<id>/acceptance.json` from one Noul per extracted acceptance criterion. | Also records `unmet_criteria` and an `advisory` string in that same file, but never accepts, rejects, blocks, or closes the task. |
 | Supervision triage | `bin/fm-wake-drain.sh` and `bin/fm-procevent-lavish.sh read` | Records routine or actionable for each presented item and ruling, question, or instruction for captured review answers, batching one drain or one read into a single request. | Marks each confidence-qualified classification in the batch as the Jev decision for that item in the ledger, while presentation remains unchanged so no input can be silently lost. |
 | Commit lint | `bin/fm-jev-commit-lint.sh <worktree>` | Reviews each branch commit in its own request for message and diff agreement, persistence changes, weakened tests, debug output, and credentials, and writes `data/<id>/commit-lint.json`. | Also records an `advisory` string in that same file, but never blocks or authorizes landing. |
-| Open questions | `bin/fm-jev-open-questions.sh <questions-file> <pages-dir>` | Writes `<stem>-jev-review.md` with still open, settled, or cannot tell against each question's named page. | Writes the same proposal and never edits the question register or referenced pages. |
+| Open questions | `bin/fm-jev-open-questions.sh <questions-file> <pages-dir>` | Writes `<stem>-jev-review.md` with still open, settled, or cannot tell against each question's named page, carrying each referenced page once as shared context. | Writes the same proposal and never edits the question register or referenced pages. |
 
 Each adapter builds its requests from material that code has already narrowed.
 The question wording is reviewable under `bin/jev-questions/`.
 No adapter writes a task's status file: a `note:` line there is a status event that would supersede a worker's terminal `done:` line and change how supervision classifies an idle, finished pane, so every advisory lives in the use's own evidence file and in the report instead.
 A whole drain or a whole Lavish read is batched into one triage request, and each commit is one commit-lint request; a commit whose diff exceeds the per-call budget is sent as `git show --stat` plus as many leading hunk bytes as fit, with `truncated=true` on its ledger row, rather than cancelling the branch's lint.
+`bin/fm-jev.sh` enforces the per-call budget for every adapter, so no adapter can make an oversized request disappear. An over-budget envelope is split into one request per question, each carrying only the shared context its own question names; a part that still does not fit has its longest state string shortened and records `truncated=true`; and a question that cannot fit even alone is refused with `per-call-token-cap` written to the ledger. Every budget refusal is recorded the same way, so `bin/fm-jev-report.sh` names under `refusals:` why a use did nothing today.
 The client requests `jev-1.13.0`, accepts any returned model id in the `jev-` family, records the returned id as `response_model` on every row, sends text-only state, and allows no SDK or free-form output path.
 A well-formed answer from a model outside that family is recorded with the distinct `response-model-mismatch` reason and the returned id, so an endpoint or routing change is diagnosable from the ledger rather than looking like a schema failure.
 Both shadow and active modes transmit that narrowed text to TypeSafe AI, including report excerpts, supervision items, commit messages and diffs, or referenced page text.
@@ -50,8 +51,10 @@ Do not enable a use for material that policy forbids sending to that service; in
 
 ## Evaluate the result
 
-Every network attempt is appended to `state/jev-ledger.jsonl` without the API key or full request content.
+Every network attempt, and every budget refusal, is appended to `state/jev-ledger.jsonl` without the API key or full request content.
+The ledger rotates monthly into `state/jev-ledger/YYYY-MM.jsonl`; the report and `finalize` read the running file and every archive, so nothing is lost and a consultation never pays for retained history.
 Run `bin/fm-jev-report.sh` to print per-use and overall agreement with final decisions, false positives, false negatives, spend, estimated tokens avoided, and active-row counts.
+It then names every budget refusal under `refusals:`, which is where a day lost to an exhausted cap, a zero budget share, or an oversized request becomes visible.
 The report then lists every Jev-versus-baseline disagreement with the two decisions, both rationales, and Jev's typed probabilities, and closes with the advisories the active adapters recorded.
 Pass an alternate JSONL file as the first argument when evaluating a saved fixture or export.
 
@@ -74,5 +77,6 @@ Compare both agreement and error direction before promoting a use because a low 
 The fastest global rollback is `"kill_switch": true` in `config/jev.json`.
 Deleting the key from `.env` is equivalent for the four observers.
 To keep the key for typed dispatch while disabling only these observers, set every use in `config/jev.json` to `off`.
+No ledger archive under `state/jev-ledger/` needs deleting either; rotation only moves evidence, it never discards it.
 Removing `config/jev.json` restores the built-in active configuration, so it is not a rollback.
 No ledger or generated review artifact must be deleted for rollback, and retaining them preserves the evaluation evidence.

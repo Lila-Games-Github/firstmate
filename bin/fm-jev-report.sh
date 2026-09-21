@@ -3,29 +3,56 @@
 #
 # Usage: fm-jev-report.sh [state/jev-ledger.jsonl]
 #
+# With no argument it reads the running ledger and every archived month under
+# state/jev-ledger/, so monthly rotation never hides evidence. Every pass is
+# streaming, one row at a time, so a year of retained evidence costs constant
+# memory.
+#
 # Opens with the effective mode of each use and whether a key is present, so an
-# operator reading the metrics can see at once whether the feature is on.
-# Prints one row per use and an overall row. Agreement, false positives, and
-# false negatives use only consultations with a non-null Jev verdict and eventual
-# decision. Object verdicts (open-question batches) compare matching keys. Spend
-# includes every network attempt. Estimated tokens avoided includes available,
-# confidence-qualified consultations in both shadow and active modes; a batched
-# per-key consultation contributes the share of its estimate whose own answers
-# qualified, so nine confident answers out of ten still count. Until a use has
-# active rows, that value is a counterfactual estimate, not observed savings.
-# The report also lists every Jev-versus-baseline disagreement with both
-# rationales and the returned typed probabilities. It closes with the advisory
-# findings the active adapters recorded, which is where an acceptance or
-# commit-lint advisory is surfaced: no adapter writes one to a task status file,
-# because a `note:` there would supersede a worker's terminal `done:` line.
-# Empty or malformed ledgers exit non-zero with a clear diagnostic.
+# operator reading the metrics can see at once whether the feature is on, and
+# names a use whose share of the daily budget is zero. Prints one row per use
+# and an overall row over the consultations that reached the network. Agreement,
+# false positives, and false negatives use only consultations with a non-null
+# Jev verdict and eventual decision. Object verdicts (open-question batches)
+# compare matching keys. Spend includes every network attempt. Estimated tokens
+# avoided includes available, confidence-qualified consultations in both shadow
+# and active modes; a batched per-key consultation contributes the share of its
+# estimate whose own answers qualified, so nine confident answers out of ten
+# still count. Until a use has active rows, that value is a counterfactual
+# estimate, not observed savings.
+#
+# A `refusals:` section names every budget refusal that never reached the
+# network, so a day in which a cap or an oversized request stopped the feature
+# is visible rather than silent. The report also lists every Jev-versus-baseline
+# disagreement with both rationales and the returned typed probabilities, and
+# closes with the advisory findings the active adapters recorded, which is where
+# an acceptance or commit-lint advisory is surfaced: no adapter writes one to a
+# task status file, because a `note:` there would supersede a worker's terminal
+# `done:` line. Empty or malformed ledgers exit non-zero with a clear diagnostic.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-LEDGER=${1:-${FM_JEV_LEDGER_OVERRIDE:-$STATE/jev-ledger.jsonl}}
+DEFAULT_LEDGER="${FM_JEV_LEDGER_OVERRIDE:-$STATE/jev-ledger.jsonl}"
+
+LEDGERS=()
+if [ "$#" -gt 0 ]; then
+  LEDGERS=("$1")
+  LABEL=$1
+else
+  LABEL=$DEFAULT_LEDGER
+  ARCHIVE="${DEFAULT_LEDGER%.jsonl}"
+  [ "$ARCHIVE" != "$DEFAULT_LEDGER" ] || ARCHIVE="$DEFAULT_LEDGER.d"
+  if [ -d "$ARCHIVE" ]; then
+    for candidate in "$ARCHIVE"/*.jsonl; do
+      [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+      LEDGERS+=("$candidate")
+    done
+  fi
+  [ ! -f "$DEFAULT_LEDGER" ] || LEDGERS+=("$DEFAULT_LEDGER")
+fi
 
 MODES=
 KEY_STATE=absent
@@ -40,16 +67,23 @@ for use in accept-check triage commit-lint open-questions; do
 done
 printf 'jev configuration:%s TYPESAFE_API_KEY=%s\n' "$MODES" "$KEY_STATE"
 
-if [ ! -s "$LEDGER" ]; then
-  printf 'jev report: ledger is empty: %s\n' "$LEDGER" >&2
+NONEMPTY=()
+for candidate in ${LEDGERS[@]+"${LEDGERS[@]}"}; do
+  [ -s "$candidate" ] || continue
+  NONEMPTY+=("$candidate")
+done
+if [ "${#NONEMPTY[@]}" -eq 0 ]; then
+  printf 'jev report: ledger is empty: %s\n' "$LABEL" >&2
   exit 1
 fi
-if ! "$SCRIPT_DIR/fm-jev.sh" validate-ledger "$LEDGER"; then
-  printf 'jev report: ledger is malformed: %s\n' "$LEDGER" >&2
-  exit 2
-fi
+for candidate in "${NONEMPTY[@]}"; do
+  if ! "$SCRIPT_DIR/fm-jev.sh" validate-ledger "$candidate"; then
+    printf 'jev report: ledger is malformed: %s\n' "$candidate" >&2
+    exit 2
+  fi
+done
 
-METRICS=$(jq -s -r '
+METRICS=$(jq -n -r '
   def positive($use):
     if $use == "accept-check" then "accepted"
     elif $use == "triage" then "actionable"
@@ -72,60 +106,84 @@ METRICS=$(jq -s -r '
     elif $row.confidence != null and $row.confidence >= $row.confidence_floor then
       $row.estimated_big_model_tokens
     else 0 end;
-  def metrics($rows; $name):
-    [$rows[] | . as $row | pairs[] | . + {use:$row.use}] as $pairs |
-    ($pairs | length) as $labelled |
-    ($pairs | map(select(.pred == .actual)) | length) as $agree |
-    {use:$name,
-     consultations:($rows | length),
-     labelled:$labelled,
-     agreement:$agree,
-     agreement_pct:(if $labelled == 0 then "n/a" else ((10000 * $agree / $labelled | round) / 100 | tostring) + "%" end),
-     false_positive:($pairs | map(select(.pred == positive(.use) and .actual != positive(.use))) | length),
-     false_negative:($pairs | map(select(.pred != positive(.use) and .actual == positive(.use))) | length),
-     spend:($rows | map(.cost_usd) | add // 0),
-     estimated_tokens_avoided:($rows | map(avoided) | add // 0),
-     active_rows:($rows | map(select(.mode == "active")) | length)};
-  . as $all |
-  (["accept-check","triage","commit-lint","open-questions"][] as $use |
-    metrics([$all[] | select(.use == $use)]; $use)),
-  metrics($all; "overall") |
-  [.use,.consultations,.labelled,(.agreement|tostring),.agreement_pct,
-   (.false_positive|tostring),(.false_negative|tostring),(.spend|tostring),
-   (.estimated_tokens_avoided|tostring),(.active_rows|tostring)] | @tsv
-' "$LEDGER") || {
-  printf 'jev report: could not compute metrics from %s\n' "$LEDGER" >&2
+  def blank:
+    {consultations:0,labelled:0,agree:0,false_positive:0,false_negative:0,
+     spend:0,avoided:0,active:0};
+  def render:
+    [.use,(.consultations|tostring),(.labelled|tostring),(.agree|tostring),
+     (if .labelled == 0 then "n/a"
+      else ((10000 * .agree / .labelled | round) / 100 | tostring) + "%" end),
+     (.false_positive|tostring),(.false_negative|tostring),(.spend|tostring),
+     (.avoided|tostring),(.active|tostring)] | @tsv;
+  reduce inputs as $row ({};
+    if ($row.network_attempted | not) then .
+    else
+      ($row.use) as $u | ($row | pairs) as $ps |
+      .[$u] = ((.[$u] // blank)
+        | .consultations += 1
+        | .labelled += ($ps | length)
+        | .agree += ([$ps[] | select(.pred == .actual)] | length)
+        | .false_positive += ([$ps[] | select(.pred == positive($u) and .actual != positive($u))] | length)
+        | .false_negative += ([$ps[] | select(.pred != positive($u) and .actual == positive($u))] | length)
+        | .spend += $row.cost_usd
+        | .avoided += ($row | avoided)
+        | .active += (if $row.mode == "active" then 1 else 0 end))
+    end)
+  | . as $by_use
+  | (["accept-check","triage","commit-lint","open-questions"]
+     | map(. as $u | ($by_use[$u] // blank) + {use:$u})) as $rows
+  | ($rows | reduce .[] as $r (blank + {use:"overall"};
+      .consultations += $r.consultations | .labelled += $r.labelled | .agree += $r.agree
+      | .false_positive += $r.false_positive | .false_negative += $r.false_negative
+      | .spend += $r.spend | .avoided += $r.avoided | .active += $r.active)) as $overall
+  | ($rows + [$overall])[] | render
+' "${NONEMPTY[@]}") || {
+  printf 'jev report: could not compute metrics from %s\n' "$LABEL" >&2
   exit 2
 }
 
 printf 'use\tconsultations\tlabelled\tagree\tagreement\tfalse_positive\tfalse_negative\tjev_spend_usd\testimated_tokens_avoided\tactive_rows\n'
 printf '%s\n' "$METRICS"
 
-jq -s -r '
-  [.[] | select(.agreement == false)] as $rows |
-  if ($rows | length) == 0 then "disagreements: none"
-  else
-    "disagreements:\n" +
-    ($rows | map(
-      "- consultation_id=\(.consultation_id) use=\(.use) subject=\(.subject)\n" +
-      "  jev_decision=\(.jev_verdict | tojson)\n" +
-      "  jev_rationale=\(.jev_rationale | tojson)\n" +
-      "  jev_probabilities=\(.jev_probabilities | tojson)\n" +
-      "  baseline_decision=\(.baseline_decision | tojson)\n" +
-      "  baseline_rationale=\(.baseline_rationale | tojson)"
-    ) | join("\n"))
-  end
-' "$LEDGER"
+REFUSALS=$(jq -n -r '
+  reduce inputs as $row ({};
+    if ($row.network_attempted | not) then
+      (($row.use) + "\t" + ($row.unavailable_reason // "unavailable")) as $key
+      | .[$key] = ((.[$key] // 0) + 1)
+    else . end)
+  | to_entries | sort_by(.key)[]
+  | (.key | split("\t")) as $parts
+  | "- use=\($parts[0]) reason=\($parts[1]) refused=\(.value)"
+' "${NONEMPTY[@]}") || REFUSALS=
+if [ -z "$REFUSALS" ]; then
+  printf 'refusals: none\n'
+else
+  printf 'refusals:\n%s\n' "$REFUSALS"
+fi
 
-jq -s -r '
-  [.[] | select(.mode == "active" and .available and .used_jev and ((.jev_flagged // []) | length) > 0)] as $rows |
-  if ($rows | length) == 0 then "advisories: none"
-  else
-    "advisories:\n" +
-    ($rows | map(
-      "- use=\(.use) subject=\(.subject) consultation_id=\(.consultation_id)" +
-      " flagged=\((.jev_flagged // []) | join(","))" +
-      (if .truncated then " truncated=true" else "" end)
-    ) | join("\n"))
-  end
-' "$LEDGER"
+DISAGREEMENTS=$(jq -r '
+  select(.agreement == false) |
+  "- consultation_id=\(.consultation_id) use=\(.use) subject=\(.subject)\n" +
+  "  jev_decision=\(.jev_verdict | tojson)\n" +
+  "  jev_rationale=\(.jev_rationale | tojson)\n" +
+  "  jev_probabilities=\(.jev_probabilities | tojson)\n" +
+  "  baseline_decision=\(.baseline_decision | tojson)\n" +
+  "  baseline_rationale=\(.baseline_rationale | tojson)"
+' "${NONEMPTY[@]}") || DISAGREEMENTS=
+if [ -z "$DISAGREEMENTS" ]; then
+  printf 'disagreements: none\n'
+else
+  printf 'disagreements:\n%s\n' "$DISAGREEMENTS"
+fi
+
+ADVISORIES=$(jq -r '
+  select(.mode == "active" and .available and .used_jev and ((.jev_flagged // []) | length) > 0) |
+  "- use=\(.use) subject=\(.subject) consultation_id=\(.consultation_id)" +
+  " flagged=\((.jev_flagged // []) | join(","))" +
+  (if .truncated then " truncated=true" else "" end)
+' "${NONEMPTY[@]}") || ADVISORIES=
+if [ -z "$ADVISORIES" ]; then
+  printf 'advisories: none\n'
+else
+  printf 'advisories:\n%s\n' "$ADVISORIES"
+fi

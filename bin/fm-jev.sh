@@ -33,6 +33,20 @@
 # `confidence` on that result and row is the lowest of them, a batch summary
 # that gates nothing, so one unconfident answer cannot discard the rest.
 #
+# The per-call budget is enforced here, for every adapter, so no adapter can
+# make an oversized request a silent no-op. An envelope larger than the budget
+# is split into one request per question group, keeping each group's own state
+# and pulling in only the `ledger.context` entries that group names; a part
+# still too large has its longest state string shortened and records
+# truncated=true; a group that cannot fit even then is refused with a ledger row
+# naming per-call-token-cap. A budget refusal always writes a row, with
+# network_attempted false, so the report can show why nothing ran.
+#
+# The ledger is append-only and rotates monthly into state/jev-ledger/YYYY-MM
+# .jsonl. `consult` validates only the row it appends and counts the day's
+# budget from date-matching lines, so an interactive drain never pays for
+# retained history.
+#
 # `finalize` updates every row without an eventual outcome for one use and
 # subject under the ledger lock. It is how an owning lifecycle path records the
 # later human or deterministic ground truth without adding a second row.
@@ -86,6 +100,8 @@ RESPONSE_MODEL=
 
 REQUEST_FILE=
 RESPONSE_FILE=
+PARTS_DIR=
+PART_STOP=
 LOCK_PATH=
 LOCK_HELD=false
 
@@ -93,6 +109,7 @@ cleanup() {
   local status=$?
   [ -z "$REQUEST_FILE" ] || rm -f -- "$REQUEST_FILE" 2>/dev/null || true
   [ -z "$RESPONSE_FILE" ] || rm -f -- "$RESPONSE_FILE" 2>/dev/null || true
+  [ -z "$PARTS_DIR" ] || rm -rf -- "$PARTS_DIR" 2>/dev/null || true
   if [ "$LOCK_HELD" = true ]; then
     fm_lock_release "$LOCK_PATH" 2>/dev/null || true
   fi
@@ -177,9 +194,10 @@ load_config() {
   CONFIG_REASON=
 }
 
-# A use that names no daily budget of its own receives an equal share of the
-# global budget, so the shares of the four uses always sum to the global cap and
-# a high-volume use can never consume another use's budget.
+# A use that names no daily budget of its own receives a share of the global
+# budget. The remainder of an uneven division is handed out one call at a time
+# in use-name order, so the four shares always sum to the global cap exactly and
+# a small global cap is never silently rounded down to no budget at all.
 resolve_use_config() { # <use>
   local use=$1 kill
   CONFIGURED_MODE=off
@@ -198,8 +216,11 @@ resolve_use_config() { # <use>
   PER_CALL_TOKEN_CAP=$(jq -r '.per_call_token_cap' <<<"$CONFIG_JSON")
   DAILY_CALL_CAP=$(jq -r '.daily.call_cap' <<<"$CONFIG_JSON")
   DAILY_SPEND_CAP=$(jq -r '.daily.spend_usd_cap' <<<"$CONFIG_JSON")
-  USE_CALL_CAP=$(jq -r --argjson known "$KNOWN_USES" --arg use "$use" \
-    '.uses[$use].daily.call_cap // ((.daily.call_cap / ($known | length)) | floor)' <<<"$CONFIG_JSON")
+  USE_CALL_CAP=$(jq -r --argjson known "$KNOWN_USES" --arg use "$use" '
+    ($known | sort) as $names | ($names | length) as $n |
+    .daily.call_cap as $cap |
+    .uses[$use].daily.call_cap //
+      (($cap / $n | floor) + (if ($names | index($use)) < ($cap % $n) then 1 else 0 end))' <<<"$CONFIG_JSON")
   USE_SPEND_CAP=$(jq -r --argjson known "$KNOWN_USES" --arg use "$use" \
     '.uses[$use].daily.spend_usd_cap // (.daily.spend_usd_cap / ($known | length))' <<<"$CONFIG_JSON")
   if [ "$kill" = true ]; then
@@ -221,7 +242,9 @@ ledger_row_valid_filter='
   (.subject | type) == "string" and
   (.mode | type) == "string" and (["shadow","active"] | index($row.mode)) != null and
   (.configured_mode | type) == "string" and (["shadow","active"] | index($row.configured_mode)) != null and
-  .network_attempted == true and
+  (.network_attempted | type) == "boolean" and
+  (if .network_attempted then true
+   else .available == false and .latency_ms == 0 and .cost_usd == 0 and .input_tokens == 0 end) and
   (.available | type) == "boolean" and
   ((.unavailable_reason == null) or ((.unavailable_reason | type) == "string")) and
   (.input_tokens | type) == "number" and .input_tokens >= 0 and
@@ -273,11 +296,46 @@ ledger_row_valid_filter='
   (if .eventual_outcome == null then .corrected == false else true end)
 '
 
+# Streaming: one row is held at a time, so validating a year of evidence costs
+# constant memory. `consult` never calls this - it validates only the row it is
+# about to append - so an interactive drain never pays for ledger history.
 validate_ledger_file() { # <file>
   local file=$1
   [ -e "$file" ] || return 0
   [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ] || return 1
-  jq -e -s "all(.[]; $ledger_row_valid_filter)" "$file" >/dev/null 2>&1
+  jq -n -e "reduce inputs as \$row (true; . and (\$row | $ledger_row_valid_filter))" "$file" >/dev/null 2>&1
+}
+
+# Every archived month plus the current ledger, oldest first. The current file
+# holds only the running month; bounded scans and appends stay bounded forever.
+ledger_files() {
+  local archive="${LEDGER%.jsonl}" candidate
+  [ "$archive" != "$LEDGER" ] || archive="$LEDGER.d"
+  if [ -d "$archive" ]; then
+    for candidate in "$archive"/*.jsonl; do
+      [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+      printf '%s\n' "$candidate"
+    done
+  fi
+  [ ! -f "$LEDGER" ] || printf '%s\n' "$LEDGER"
+}
+
+# Moves a ledger whose rows predate the running month into
+# state/jev-ledger/YYYY-MM.jsonl. Called under the ledger lock before an append.
+rotate_ledger() { # <today>
+  local today=$1 first archive dir
+  [ -s "$LEDGER" ] || return 0
+  first=$(head -n 1 "$LEDGER" 2>/dev/null | jq -r 'if (.date | type) == "string" then .date[0:7] else empty end' 2>/dev/null) || return 0
+  [ -n "$first" ] || return 0
+  [ "$first" != "${today:0:7}" ] || return 0
+  dir="${LEDGER%.jsonl}"
+  [ "$dir" != "$LEDGER" ] || dir="$LEDGER.d"
+  mkdir -p "$dir" || return 1
+  archive="$dir/$first.jsonl"
+  [ ! -L "$archive" ] || return 1
+  cat "$LEDGER" >> "$archive" || return 1
+  chmod 0600 "$archive" 2>/dev/null || true
+  : > "$LEDGER" || return 1
 }
 
 lock_ledger() {
@@ -297,12 +355,14 @@ unlock_ledger() {
 }
 
 append_ledger_row() { # <compact-json>
-  local row=$1
+  local row=$1 day
   jq -e "$ledger_row_valid_filter" >/dev/null 2>&1 <<<"$row" || return 1
+  day=$(jq -r '.date' <<<"$row") || return 1
+  rotate_ledger "$day" || return 1
   printf '%s\n' "$row" >> "$LEDGER"
 }
 
-envelope_valid() {
+envelope_valid() { # <envelope-file>
   jq -e '
     def question_ok:
       . as $question |
@@ -333,6 +393,11 @@ envelope_valid() {
   (.ledger | has("baseline_decision")) and
   (.ledger.baseline_rationale | type) == "string" and (.ledger.baseline_rationale | length) > 0 and
     ((.ledger | has("truncated") | not) or ((.ledger.truncated | type) == "boolean")) and
+    ((.ledger | has("context") | not) or
+      ((.ledger.context | type) == "object" and
+       all(.ledger.context | to_entries[];
+         (.value | type) == "string" and
+         (.key as $name | ($root.request.state[$name] | type) == "object")))) and
     (.ledger.estimated_big_model_tokens | type) == "number" and .ledger.estimated_big_model_tokens >= 0 and
     (.ledger.verdict | type) == "object" and
     (.ledger.verdict.strategy | type) == "string" and
@@ -356,7 +421,7 @@ envelope_valid() {
        (.ledger.verdict.positive_label | type) == "string" and
        (.ledger.verdict.negative_label | type) == "string"
      else false end)
-  ' "$REQUEST_FILE" >/dev/null 2>&1
+  ' "$1" >/dev/null 2>&1
 }
 
 # Any model id in the pinned family answers; a well-formed answer from another
@@ -526,9 +591,12 @@ cmd_status() {
     reason=mode-off
   elif [ "$keystate" = absent ]; then
     reason=missing-key
+  elif [ "$USE_CALL_CAP" = 0 ] || [ "$DAILY_CALL_CAP" = 0 ]; then
+    reason=no-budget
   fi
   case "$reason" in
     '') explanation="$use is $EFFECTIVE_MODE" ;;
+    no-budget) explanation="$use is $EFFECTIVE_MODE but its share of daily.call_cap is 0, so every consultation is refused" ;;
     kill-switch) explanation="$CONFIG_FILE sets kill_switch to true" ;;
     mode-off) explanation="$CONFIG_FILE sets $use to off" ;;
     missing-key) explanation="TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env" ;;
@@ -553,86 +621,203 @@ cmd_request_budget() {
   printf '%s\n' "$((PER_CALL_TOKEN_CAP * BYTES_PER_TOKEN))"
 }
 
-cmd_consult() {
-  local use=${1:-} fallback=null baseline_rationale='' subject='' estimate=0 request_bytes=0 request_tokens=0
-  local today counts calls spend use_calls use_spend pre_cost total http=000 t0=0 t1=0 latency=0 actual_tokens=0 cost=0
-  local request_json derive row result now id used_jev=false decision_after source=reported
-  local probabilities agreement truncated=false reason=''
-  local confidences='{}' qualified='{}' used_keys='{}'
-  local request_api='' TYPESAFE_API_KEY_PRIVATE=''
-  use_valid "$use" || { emit_unavailable "${use:-unknown}" invalid-use; return 0; }
-  resolve_use_config "$use"
-  if [ "$CONFIG_STATUS" != ok ]; then emit_unavailable "$use" "$CONFIG_REASON"; return 0; fi
-  if [ "$EFFECTIVE_MODE" = off ]; then emit_unavailable "$use" "${CONFIG_REASON:-mode-off}"; return 0; fi
-  if ! json_available; then emit_unavailable "$use" jq-missing; return 0; fi
+# One question group is one verdict question plus every request question that
+# shares its state key, so a triage item keeps its attention and answer-kind
+# Choices together. A state container keyed by the group name is sliced to that
+# group; `ledger.context` names a shared container whose entries are pulled in
+# by reference, so a page ten questions cite travels once per part that cites it
+# instead of ten times. Strategies with no per-question state, such as the
+# commit lint, yield null and are never split.
+# shellcheck disable=SC2016 # jq program; dollar names belong to jq.
+split_plan_filter='
+  def gkey: sub("__.*$"; "");
+  . as $env
+  | ($env.request.state) as $state
+  | ($env.request.questions) as $rq
+  | ($env.ledger.verdict) as $v
+  | ($env.ledger.context // {}) as $ctx
+  | (if (["choices","all_noul","any_noul"] | index($v.strategy)) != null
+     then ($v.questions // []) else [] end) as $vq
+  | ([$vq[] | gkey] | unique) as $gkeys
+  | ([$state | to_entries[] | select((.value | type) == "object")]) as $objects
+  | ([$gkeys[] as $g | {g:$g, containers:[$objects[] | select(.value | has($g)) | .key]}]) as $groups
+  | if ($groups | length) < 2 or any($groups[]; (.containers | length) == 0) then null
+    else
+      ($groups | map(.containers) | add | unique) as $owned
+      | (($state | keys) - $owned) as $shared
+      | [ $groups[] as $grp
+          | ($grp.g) as $g
+          | ([$vq[] | select(gkey == $g)]) as $part_vq
+          | (reduce $grp.containers[] as $c ({}; . + {($c): {($g): $state[$c][$g]}})) as $own
+          | (reduce $shared[] as $k ({};
+               if ($ctx | has($k)) and (($state[$k] | type) == "object") then
+                 ([$grp.containers[] as $c | $state[$c][$g]
+                    | if type == "object" then .[$ctx[$k]] else empty end]
+                  | map(select(type == "string")) | unique) as $names
+                 | . + {($k): (reduce $names[] as $n ({};
+                     if $state[$k] | has($n) then . + {($n): $state[$k][$n]} else . end))}
+               else . + {($k): $state[$k]} end)) as $context
+          | {request:{state:($context + $own),
+                      questions:($rq | with_entries(select(.key | gkey == $g)))},
+             ledger:($env.ledger
+               | .baseline_decision = (if ($env.ledger.baseline_decision | type) == "object"
+                   then ($env.ledger.baseline_decision
+                         | with_entries(select(.key as $k | $part_vq | index($k) != null)))
+                   else $env.ledger.baseline_decision end)
+               | .estimated_big_model_tokens =
+                   (($env.ledger.estimated_big_model_tokens * ($part_vq | length) / ($vq | length)) | round)
+               | .verdict = ($v | .questions = $part_vq))}
+        ]
+    end
+'
 
-  REQUEST_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-jev-envelope.XXXXXX") || {
-    emit_unavailable "$use" temp-unavailable
-    return 0
-  }
-  command cat > "$REQUEST_FILE" || { emit_unavailable "$use" request-unreadable; return 0; }
-  if ! envelope_valid; then emit_unavailable "$use" request-invalid; return 0; fi
-  subject=$(jq -r '.ledger.subject' "$REQUEST_FILE")
-  fallback=$(jq -c '.ledger.baseline_decision' "$REQUEST_FILE")
-  baseline_rationale=$(jq -r '.ledger.baseline_rationale' "$REQUEST_FILE")
-  estimate=$(jq -r '.ledger.estimated_big_model_tokens' "$REQUEST_FILE")
-  truncated=$(jq -r '.ledger.truncated // false' "$REQUEST_FILE")
+request_body_bytes() { # <envelope-file>
+  jq -c --arg model "$MODEL" '.request + {model:$model}' "$1" 2>/dev/null | LC_ALL=C wc -c | tr -d ' '
+}
 
-  TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
-  export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
-  unset TYPESAFE_API_KEY
-  # shellcheck source=bin/fm-env-lib.sh
-  . "$SCRIPT_DIR/fm-env-lib.sh"
-  if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-    TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-  fi
-  if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then emit_unavailable "$use" missing-key "$fallback"; return 0; fi
-  command -v curl >/dev/null 2>&1 || { emit_unavailable "$use" curl-missing "$fallback"; return 0; }
+# Rewrites <envelope-file> into one envelope per question group. Prints the part
+# count, or returns 1 when this envelope has no per-question state to split on.
+plan_split() { # <envelope-file> <parts-dir>
+  local file=$1 dir=$2 count=0 line
+  jq -c "$split_plan_filter" "$file" > "$dir/plan.json" 2>/dev/null || return 1
+  [ -s "$dir/plan.json" ] || return 1
+  case "$(jq -r 'if type == "array" then length else 0 end' "$dir/plan.json" 2>/dev/null)" in
+    ''|0|1) return 1 ;;
+  esac
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$line" > "$dir/part-$(printf '%04d' "$count").json" || return 1
+    count=$((count + 1))
+  done < <(jq -c '.[]' "$dir/plan.json" 2>/dev/null)
+  [ "$count" -ge 2 ] || return 1
+  printf '%s\n' "$count"
+}
 
-  request_json=$(jq -c --arg model "$MODEL" '.request + {model:$model}' "$REQUEST_FILE") || {
+# Shortens the longest bounded string in a part's state until the part fits the
+# per-call budget, marking ledger.truncated so the row records that Jev saw less
+# than the adapter gathered. A part that cannot be shrunk enough is left alone
+# for consult_one to refuse and record.
+shrink_to_budget() { # <envelope-file> <budget-bytes>
+  local file=$1 budget=$2 bytes longest len newlen iter=0 tmp="$1.shrink"
+  while :; do
+    bytes=$(request_body_bytes "$file")
+    case "$bytes" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$bytes" -gt "$budget" ] || return 0
+    iter=$((iter + 1))
+    [ "$iter" -le 32 ] || return 0
+    longest=$(jq -c '
+      [.request.state | paths(type == "string") as $p | {p:$p, n:(getpath($p) | utf8bytelength)}]
+      | max_by(.n) // empty' "$file" 2>/dev/null) || return 0
+    [ -n "$longest" ] || return 0
+    len=$(jq -r '.n' <<<"$longest" 2>/dev/null) || return 0
+    case "$len" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$len" -gt 160 ] || return 0
+    newlen=$((len - (bytes - budget) - 160))
+    [ "$newlen" -ge 32 ] || newlen=32
+    jq -c --argjson p "$(jq -c '.p' <<<"$longest")" --argjson n "$newlen" '
+      .request.state |= setpath($p; ((getpath($p))[0:$n]) + "\n(truncated to fit the Jev per-call budget)")
+      | .ledger.truncated = true' "$file" > "$tmp" 2>/dev/null || return 0
+    mv -f "$tmp" "$file" 2>/dev/null || return 0
+  done
+}
+
+# A budget refusal is evidence too: without a row, an operator whose whole day
+# was refused sees nothing at all on any surface. These rows never attempted the
+# network, so they cost nothing and consume no call budget.
+record_refusal_row() { # <use> <envelope-file> <reason> <bytes>
+  local use=$1 file=$2 reason=$3 bytes=$4
+  local subject baseline baseline_rationale estimate truncated now today id row
+  subject=$(jq -r '.ledger.subject' "$file" 2>/dev/null) || return 1
+  baseline=$(jq -c '.ledger.baseline_decision' "$file" 2>/dev/null) || return 1
+  baseline_rationale=$(jq -r '.ledger.baseline_rationale' "$file" 2>/dev/null) || return 1
+  estimate=$(jq -r '.ledger.estimated_big_model_tokens' "$file" 2>/dev/null) || return 1
+  truncated=$(jq -r '.ledger.truncated // false' "$file" 2>/dev/null) || return 1
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  today=${now%%T*}
+  id="${today//-/}T${now#*T}-$$-${RANDOM:-0}"
+  row=$(jq -cn --arg now "$now" --arg today "$today" --arg id "$id" \
+    --arg use "$use" --arg subject "$subject" --arg mode "$EFFECTIVE_MODE" \
+    --arg configured_mode "$CONFIGURED_MODE" --arg reason "$reason" \
+    --arg baseline_rationale "$baseline_rationale" --argjson floor "$CONFIDENCE_FLOOR" \
+    --argjson baseline "$baseline" --argjson estimate "$estimate" \
+    --argjson bytes "$bytes" --argjson truncated "$truncated" '
+    {schema_version:1,timestamp:$now,date:$today,consultation_id:$id,use:$use,subject:$subject,
+     mode:$mode,configured_mode:$configured_mode,network_attempted:false,available:false,
+     unavailable_reason:$reason,input_tokens:0,input_tokens_source:"estimate",
+     jev_verdict:null,jev_rationale:("Jev was not consulted: " + $reason),jev_probabilities:{},
+     confidence:null,confidence_floor:$floor,existing_decision:$baseline,
+     baseline_decision:$baseline,baseline_rationale:$baseline_rationale,agreement:null,
+     decision_after_jev:$baseline,final_decision:null,eventual_outcome:null,corrected:false,
+     latency_ms:0,cost_usd:0,estimated_big_model_tokens:$estimate,request_bytes:$bytes,
+     used_jev:false,truncated:$truncated,jev_flagged:[],jev_confidences:{},used_jev_keys:{},
+     response_model:null,jev_answers:{}}') || return 1
+  append_ledger_row "$row"
+}
+
+# Consults Jev for one planned part and prints that part's result JSON. Sets
+# PART_STOP when the refusal is a budget one, because every later part of the
+# same consultation would be refused for the same reason.
+consult_one() { # <use> <envelope-file>
+  local use=$1 file=$2
+  local fallback baseline_rationale subject estimate truncated
+  local today counts calls spend use_calls use_spend pre_cost total
+  local http=000 t0=0 t1=0 latency=0 actual_tokens=0 cost=0
+  local request_json request_bytes request_tokens derive row result now id
+  local used_jev=false decision_after source=reported probabilities agreement reason=''
+  local confidences='{}' qualified='{}' used_keys='{}' request_api=''
+  subject=$(jq -r '.ledger.subject' "$file")
+  fallback=$(jq -c '.ledger.baseline_decision' "$file")
+  baseline_rationale=$(jq -r '.ledger.baseline_rationale' "$file")
+  estimate=$(jq -r '.ledger.estimated_big_model_tokens' "$file")
+  truncated=$(jq -r '.ledger.truncated // false' "$file")
+  RESPONSE_MODEL=
+
+  request_json=$(jq -c --arg model "$MODEL" '.request + {model:$model}' "$file") || {
     emit_unavailable "$use" request-invalid "$fallback"
     return 0
   }
   request_bytes=$(LC_ALL=C printf '%s' "$request_json" | wc -c | tr -d ' ')
   case "$request_bytes" in ''|*[!0-9]*) emit_unavailable "$use" token-estimate-failed "$fallback"; return 0 ;; esac
   request_tokens=$(( (request_bytes + BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN ))
+
+  lock_ledger || { emit_unavailable "$use" ledger-busy "$fallback"; return 0; }
+  today=$(date -u +%Y-%m-%d)
   if [ "$request_tokens" -gt "$PER_CALL_TOKEN_CAP" ]; then
+    record_refusal_row "$use" "$file" per-call-token-cap "$request_bytes" || true
+    unlock_ledger || true
     emit_unavailable "$use" per-call-token-cap "$fallback"
     return 0
   fi
-
-  lock_ledger || { emit_unavailable "$use" ledger-busy "$fallback"; return 0; }
-  if ! validate_ledger_file "$LEDGER"; then
-    unlock_ledger || true
-    emit_unavailable "$use" ledger-invalid "$fallback"
-    return 0
-  fi
-  today=$(date -u +%Y-%m-%d)
-  if [ -s "$LEDGER" ]; then
-    counts=$(jq -s -r --arg today "$today" --arg use "$use" '
-      [.[] | select(.date == $today)] as $today_rows |
-      [($today_rows | map(select(.network_attempted)) | length),
-       ($today_rows | map(.cost_usd) | add // 0),
-       ($today_rows | map(select(.use == $use and .network_attempted)) | length),
-       ($today_rows | map(select(.use == $use) | .cost_usd) | add // 0)] | @tsv' "$LEDGER")
+  # Only today's rows can consume today's budget, so the scan is bounded by one
+  # day of evidence rather than by the whole retained ledger.
+  counts=$(grep -F "\"date\":\"$today\"" "$LEDGER" 2>/dev/null | jq -s -r --arg use "$use" '
+    [(map(select(.network_attempted)) | length),
+     (map(.cost_usd) | add // 0),
+     (map(select(.use == $use and .network_attempted)) | length),
+     (map(select(.use == $use) | .cost_usd) | add // 0)] | @tsv' 2>/dev/null) || counts=
+  if [ -n "$counts" ]; then
     IFS=$'\t' read -r calls spend use_calls use_spend <<<"$counts"
-    if [ -z "${calls:-}" ] || [ -z "${spend:-}" ] || [ -z "${use_calls:-}" ] || [ -z "${use_spend:-}" ]; then
-      unlock_ledger || true
-      emit_unavailable "$use" ledger-unreadable "$fallback"
-      return 0
-    fi
   else
     calls=0
     spend=0
     use_calls=0
     use_spend=0
   fi
+  if [ -z "${calls:-}" ] || [ -z "${spend:-}" ] || [ -z "${use_calls:-}" ] || [ -z "${use_spend:-}" ]; then
+    unlock_ledger || true
+    emit_unavailable "$use" ledger-unreadable "$fallback"
+    return 0
+  fi
   if [ "$calls" -ge "$DAILY_CALL_CAP" ]; then
+    record_refusal_row "$use" "$file" daily-call-cap "$request_bytes" || true
+    PART_STOP=daily-call-cap
     unlock_ledger || true
     emit_unavailable "$use" daily-call-cap "$fallback"
     return 0
   fi
   if [ "$use_calls" -ge "$USE_CALL_CAP" ]; then
+    record_refusal_row "$use" "$file" use-daily-call-cap "$request_bytes" || true
+    PART_STOP=use-daily-call-cap
     unlock_ledger || true
     emit_unavailable "$use" use-daily-call-cap "$fallback"
     return 0
@@ -640,17 +825,22 @@ cmd_consult() {
   pre_cost=$(jq -cn --argjson tokens "$request_tokens" --argjson rate "$PRICE_PER_MILLION" '$tokens * $rate / 1000000')
   total=$(jq -cn --argjson spend "$spend" --argjson cost "$pre_cost" '$spend + $cost')
   if jq -en --argjson total "$total" --argjson cap "$DAILY_SPEND_CAP" '$total > $cap' >/dev/null; then
+    record_refusal_row "$use" "$file" daily-spend-cap "$request_bytes" || true
+    PART_STOP=daily-spend-cap
     unlock_ledger || true
     emit_unavailable "$use" daily-spend-cap "$fallback"
     return 0
   fi
   total=$(jq -cn --argjson spend "$use_spend" --argjson cost "$pre_cost" '$spend + $cost')
   if jq -en --argjson total "$total" --argjson cap "$USE_SPEND_CAP" '$total > $cap' >/dev/null; then
+    record_refusal_row "$use" "$file" use-daily-spend-cap "$request_bytes" || true
+    PART_STOP=use-daily-spend-cap
     unlock_ledger || true
     emit_unavailable "$use" use-daily-spend-cap "$fallback"
     return 0
   fi
 
+  [ -z "$RESPONSE_FILE" ] || rm -f -- "$RESPONSE_FILE" 2>/dev/null || true
   RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-jev-response.XXXXXX") || {
     unlock_ledger || true
     emit_unavailable "$use" temp-unavailable "$fallback"
@@ -702,7 +892,7 @@ cmd_consult() {
   fi
   rm -f -- "$request_api"
 
-  derive=$(derive_verdict "$REQUEST_FILE" "$RESPONSE_FILE") || {
+  derive=$(derive_verdict "$file" "$RESPONSE_FILE") || {
     record_unavailable_attempt "$use" "$subject" verdict-malformed "$fallback" "$baseline_rationale" "$estimate" "$request_tokens" "$latency" "$request_bytes" "$truncated" \
       || emit_unavailable "$use" ledger-write-failed "$fallback"
     unlock_ledger || true
@@ -820,8 +1010,139 @@ cmd_consult() {
   printf '%s\n' "$result"
 }
 
+# Recombines the parts of a split consultation into the single result shape the
+# adapters already consume, so splitting is invisible above this boundary.
+# shellcheck disable=SC2016 # jq program; dollar names belong to jq.
+merge_part_results() { # <use> <envelope-file> <results-jsonl>
+  local use=$1 envelope=$2 results=$3
+  jq -s -c --arg use "$use" --arg mode "$EFFECTIVE_MODE" --arg cmode "$CONFIGURED_MODE" \
+    --slurpfile envelope "$envelope" '
+    . as $parts
+    | ($envelope[0].ledger) as $led
+    | ($led.verdict) as $v
+    | ([$parts[] | select(.status == "available")]) as $ok
+    | ([$parts[] | select(.status != "available") | .reason // "unavailable"]) as $refused
+    | if ($ok | length) == 0 then
+        {status:"unavailable", use:$use, mode:$mode, configured_mode:$cmode,
+         reason:($refused[0] // "unavailable"), fallback_decision:$led.baseline_decision,
+         parts:($parts | length), parts_unavailable:$refused}
+      else
+        ($ok | map(.answers) | add) as $answers
+        | ($ok | map(.confidences // {}) | add) as $confidences
+        | ($ok | map(.qualified // {}) | add) as $qualified
+        | ($ok | map(.used_jev_keys // {}) | add) as $used_keys
+        | ($ok | map(.jev_probabilities // {}) | add) as $probabilities
+        | (if ($ok[0].verdict | type) == "object" then ($ok | map(.verdict) | add)
+           elif $v.strategy == "any_noul" then
+             (if any($ok[]; .verdict == $v.positive_label) then $v.positive_label else $v.negative_label end)
+           elif $v.strategy == "all_noul" then
+             (if all($ok[]; .verdict == $v.positive_label) then $v.positive_label else $v.negative_label end)
+           else $ok[0].verdict end) as $verdict
+        | {status:"available",
+           consultation_id:$ok[0].consultation_id,
+           consultation_ids:[$ok[].consultation_id],
+           use:$use, mode:$ok[0].mode, configured_mode:$ok[0].configured_mode,
+           model:$ok[0].model, confidence_floor:$ok[0].confidence_floor,
+           verdict:$verdict, confidence:([$ok[].confidence] | min),
+           answers:$answers,
+           input_tokens:($ok | map(.input_tokens) | add),
+           latency_ms:($ok | map(.latency_ms) | add),
+           cost_usd:($ok | map(.cost_usd) | add),
+           jev_rationale:($ok[0].jev_rationale + " Answered across " + (($parts | length) | tostring)
+             + " budget-sized requests."),
+           jev_probabilities:$probabilities,
+           truncated:(any($ok[]; .truncated == true)),
+           flagged:($ok | map(.flagged // []) | add | unique),
+           confidences:$confidences, qualified:$qualified, used_jev_keys:$used_keys,
+           fallback_decision:$led.baseline_decision, baseline_rationale:$led.baseline_rationale,
+           agreement:(if $verdict == null or $led.baseline_decision == null then null
+                      else $verdict == $led.baseline_decision end),
+           used_jev:(any($ok[]; .used_jev)),
+           parts:($parts | length), parts_unavailable:$refused}
+      end' "$results"
+}
+
+cmd_consult() {
+  local use=${1:-} fallback=null budget=0 bytes=0 parts=0 index=0 part=''
+  local TYPESAFE_API_KEY_PRIVATE='' results=''
+  PART_STOP=
+  use_valid "$use" || { emit_unavailable "${use:-unknown}" invalid-use; return 0; }
+  resolve_use_config "$use"
+  if [ "$CONFIG_STATUS" != ok ]; then emit_unavailable "$use" "$CONFIG_REASON"; return 0; fi
+  if [ "$EFFECTIVE_MODE" = off ]; then emit_unavailable "$use" "${CONFIG_REASON:-mode-off}"; return 0; fi
+  if ! json_available; then emit_unavailable "$use" jq-missing; return 0; fi
+
+  REQUEST_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-jev-envelope.XXXXXX") || {
+    emit_unavailable "$use" temp-unavailable
+    return 0
+  }
+  command cat > "$REQUEST_FILE" || { emit_unavailable "$use" request-unreadable; return 0; }
+  if ! envelope_valid "$REQUEST_FILE"; then emit_unavailable "$use" request-invalid; return 0; fi
+  fallback=$(jq -c '.ledger.baseline_decision' "$REQUEST_FILE")
+
+  TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
+  export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
+  unset TYPESAFE_API_KEY
+  # shellcheck source=bin/fm-env-lib.sh
+  . "$SCRIPT_DIR/fm-env-lib.sh"
+  if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+    TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+  fi
+  if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then emit_unavailable "$use" missing-key "$fallback"; return 0; fi
+  command -v curl >/dev/null 2>&1 || { emit_unavailable "$use" curl-missing "$fallback"; return 0; }
+
+  PARTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-jev-parts.XXXXXX") || {
+    emit_unavailable "$use" temp-unavailable "$fallback"
+    return 0
+  }
+  # The budget is enforced here, for every adapter, rather than trusted to each
+  # one: an over-budget envelope is split per question group, then shortened,
+  # and only a group that still cannot fit alone is refused - with a row, so it
+  # is never a silent no-op.
+  budget=$((PER_CALL_TOKEN_CAP * BYTES_PER_TOKEN))
+  bytes=$(request_body_bytes "$REQUEST_FILE")
+  case "$bytes" in ''|*[!0-9]*) bytes=$((budget + 1)) ;; esac
+  parts=0
+  if [ "$bytes" -gt "$budget" ]; then
+    parts=$(plan_split "$REQUEST_FILE" "$PARTS_DIR") || parts=0
+  fi
+  case "$parts" in ''|*[!0-9]*) parts=0 ;; esac
+  if [ "$parts" -lt 2 ]; then
+    parts=1
+    cp -- "$REQUEST_FILE" "$PARTS_DIR/part-0000.json" || {
+      emit_unavailable "$use" temp-unavailable "$fallback"
+      return 0
+    }
+  fi
+  results="$PARTS_DIR/results.jsonl"
+  : > "$results"
+  index=0
+  while [ "$index" -lt "$parts" ]; do
+    part="$PARTS_DIR/part-$(printf '%04d' "$index").json"
+    index=$((index + 1))
+    [ -f "$part" ] || continue
+    if [ -n "$PART_STOP" ]; then
+      jq -cn --arg use "$use" --arg reason "$PART_STOP" --arg mode "$EFFECTIVE_MODE" \
+        --arg cmode "$CONFIGURED_MODE" --argjson fallback "$fallback" \
+        '{status:"unavailable",use:$use,mode:$mode,configured_mode:$cmode,reason:$reason,
+          fallback_decision:$fallback}' >> "$results"
+      continue
+    fi
+    shrink_to_budget "$part" "$budget"
+    consult_one "$use" "$part" >> "$results"
+  done
+  if [ "$parts" -eq 1 ]; then
+    command cat "$results"
+    return 0
+  fi
+  merge_part_results "$use" "$REQUEST_FILE" "$results" || {
+    emit_unavailable "$use" result-render-failed "$fallback"
+    return 0
+  }
+}
+
 cmd_finalize() {
-  local use='' subject='' decision='' tmp updated
+  local use='' subject='' decision='' tmp updated total file
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -836,28 +1157,44 @@ cmd_finalize() {
   json_available || return 1
   jq -e . >/dev/null 2>&1 <<<"$decision" || return 2
   lock_ledger || return 1
-  validate_ledger_file "$LEDGER" || { unlock_ledger || true; return 1; }
-  [ -s "$LEDGER" ] || { unlock_ledger || true; printf '{"updated":0}\n'; return 0; }
-  tmp=$(mktemp "$STATE/.jev-ledger.finalize.XXXXXX") || { unlock_ledger || true; return 1; }
-  updated=$(jq -s --arg use "$use" --arg subject "$subject" --argjson decision "$decision" '
-    [ .[] | select(.use == $use and .subject == $subject and .eventual_outcome == null) ] | length
-  ' "$LEDGER") || { rm -f "$tmp"; unlock_ledger || true; return 1; }
-  jq -c --arg use "$use" --arg subject "$subject" --argjson decision "$decision" '
-    if .use == $use and .subject == $subject and .eventual_outcome == null then
-      .final_decision = $decision |
-      .eventual_outcome = $decision |
-      .corrected = (.decision_after_jev != null and .decision_after_jev != $decision)
-    else . end
-  ' "$LEDGER" > "$tmp" || { rm -f "$tmp"; unlock_ledger || true; return 1; }
-  chmod 0600 "$tmp" || { rm -f "$tmp"; unlock_ledger || true; return 1; }
-  mv -f "$tmp" "$LEDGER" || { rm -f "$tmp"; unlock_ledger || true; return 1; }
+  total=0
+  # Streaming per row, over the running ledger and every archived month, so a
+  # teardown never slurps the retained evidence into memory.
+  while IFS= read -r file; do
+    [ -s "$file" ] || continue
+    validate_ledger_file "$file" || { unlock_ledger || true; return 1; }
+    updated=$(jq -n --arg use "$use" --arg subject "$subject" '
+      reduce inputs as $row (0;
+        if $row.use == $use and $row.subject == $subject and $row.eventual_outcome == null
+        then . + 1 else . end)' "$file") || { unlock_ledger || true; return 1; }
+    case "$updated" in ''|*[!0-9]*) unlock_ledger || true; return 1 ;; esac
+    total=$((total + updated))
+    [ "$updated" -gt 0 ] || continue
+    tmp=$(mktemp "$STATE/.jev-ledger.finalize.XXXXXX") || { unlock_ledger || true; return 1; }
+    jq -c --arg use "$use" --arg subject "$subject" --argjson decision "$decision" '
+      if .use == $use and .subject == $subject and .eventual_outcome == null then
+        .final_decision = $decision |
+        .eventual_outcome = $decision |
+        .corrected = (.decision_after_jev != null and .decision_after_jev != $decision)
+      else . end
+    ' "$file" > "$tmp" || { rm -f "$tmp"; unlock_ledger || true; return 1; }
+    chmod 0600 "$tmp" || { rm -f "$tmp"; unlock_ledger || true; return 1; }
+    mv -f "$tmp" "$file" || { rm -f "$tmp"; unlock_ledger || true; return 1; }
+  done < <(ledger_files)
   unlock_ledger || return 1
-  jq -cn --argjson updated "$updated" '{updated:$updated}'
+  jq -cn --argjson updated "$total" '{updated:$updated}'
 }
 
 cmd_validate_ledger() {
-  local file=${1:-$LEDGER}
-  validate_ledger_file "$file"
+  local file
+  if [ "$#" -gt 0 ]; then
+    validate_ledger_file "$1"
+    return "$?"
+  fi
+  while IFS= read -r file; do
+    validate_ledger_file "$file" || return 1
+  done < <(ledger_files)
+  return 0
 }
 
 case "${1:-}" in

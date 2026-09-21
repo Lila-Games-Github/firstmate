@@ -555,13 +555,15 @@ The complete version 1 schema is:
 `per_call_token_cap` is an integer from 1 through 32000.
 The client counts four request bytes as one input token, the same approximation every adapter uses for its own estimate, so one budget arithmetic applies from the adapter that sizes bounded material to the preflight that enforces the cap.
 `bin/fm-jev.sh request-budget <use>` prints the resulting maximum request body in bytes, which is how the commit lint decides whether a commit's diff must be truncated.
+`consult` enforces that budget itself for every adapter, so no adapter can turn an oversized request into a silent no-op. An envelope larger than the budget is split into one request per question group - one verdict question plus every request question sharing its state key - each carrying only its own state. An envelope may declare `ledger.context`, an object mapping a shared state container to the field of each group's state that names the entry it needs; the open-question sweep uses `{"pages": "page"}` so a page ten questions cite is transmitted once rather than ten times. A part still over budget has its longest state string shortened and records `truncated: true`. A group that cannot fit even then is refused with `per-call-token-cap`, and the refusal is written to the ledger rather than dropped.
 `daily.call_cap` is a nonnegative integer, and `daily.spend_usd_cap` is a nonnegative US-dollar number.
-Each use may also carry its own `daily` object with the same two fields; a use that omits it receives an equal share of the global budget, so the four shares always sum to the global cap.
+Each use may also carry its own `daily` object with the same two fields; a use that omits it receives a share of the global budget. The remainder of an uneven division is handed out one call at a time in use-name order, so the four shares always sum to `daily.call_cap` exactly and no call is lost to rounding. A global cap below four therefore leaves some uses a share of zero rather than starving all four: `bin/fm-jev.sh status <use>` reports such a use as its configured mode with the reason `no-budget`, and `bin/fm-jev-report.sh` prints it as `<use>=<mode>(no-budget)`.
 Both budgets apply: a call needs room under the global cap and under its own use's cap, which is why a high-volume use such as triage can never consume the acceptance check's or the commit lint's share of the day.
 Every ledger row names the `use` that consumed the budget.
 The UTC date on ledger rows defines a budget day.
 Preflight spend uses the pinned rate of US$0.042 per million input tokens and the conservative input estimate, while a completed call records the response's reported input tokens when present and otherwise retains the estimate.
 Caps never trigger a retry and return the structured unavailable result to the adapter; a use over its own share is refused with `use-daily-call-cap` or `use-daily-spend-cap` rather than the global reason.
+Every budget refusal appends a ledger row with `network_attempted: false`, zero cost and zero tokens, so `bin/fm-jev-report.sh` can name why nothing ran instead of showing an empty report. Those rows consume no call or spend budget and are excluded from the metrics table, appearing under `refusals:` instead.
 
 Each `mode` is `off`, `shadow`, or `active`.
 Off does not build adapter state, make a network call, write the ledger, or alter existing output.
@@ -578,10 +580,12 @@ A response is accepted when its model id is in the `jev-` family, so another bui
 It copies an environment-provided key into a non-exported private variable, unsets the original before invoking child processes, and passes the key to `curl` through a file descriptor rather than argv.
 The key and full request are never written to the ledger.
 
-Every network attempt appends one version 1 JSON object to `state/jev-ledger.jsonl` under a bounded lock.
+Every network attempt, and every budget refusal, appends one version 1 JSON object to `state/jev-ledger.jsonl` under a bounded lock.
+The ledger rotates monthly: when the running file's first row predates the current month, it is appended to `state/jev-ledger/YYYY-MM.jsonl` and the running file starts empty. `bin/fm-jev-report.sh` and `bin/fm-jev.sh finalize` read the running file and every archive, so rotation hides no evidence and no archive must ever be deleted. `consult` validates only the row it is about to append and counts the day's budget from date-matching lines, so an interactive drain never pays for retained history.
 The identity fields are `timestamp`, `date`, `consultation_id`, `use`, and `subject`.
 The configuration fields are `mode`, `configured_mode`, and `confidence_floor`.
 The service fields are `network_attempted`, `available`, `unavailable_reason`, `response_model`, `input_tokens`, `input_tokens_source`, `latency_ms`, `cost_usd`, `request_bytes`, `truncated`, `jev_answers`, and `jev_probabilities`.
+`network_attempted` is false exactly on the budget-refusal rows, which carry `available: false`, a naming `unavailable_reason`, and zero `input_tokens`, `latency_ms` and `cost_usd`.
 `truncated` is true when the adapter had to shorten its bounded material to fit the per-call budget, and `jev_flagged` names the questions that drove a negative or risk verdict.
 The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `decision_after_jev`, `eventual_outcome`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
 A batched per-item consultation adds `jev_confidences` and `used_jev_keys`, one entry per asked item; `used_jev` is then true when at least one item qualified, and `bin/fm-jev-report.sh` credits such a row the share of its `estimated_big_model_tokens` whose own answers qualified.

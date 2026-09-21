@@ -185,7 +185,14 @@ test_unavailable_key_and_caps_fall_back() {
   out=$(printf 'failed: build\n' | jev_env "$capped" "$TRIAGE" --kind wake 2>&1)
   [ -z "$out" ] || fail "cap-reached triage changed caller output: $out"
   [ "$(request_count)" -eq "$before" ] || fail "cap-reached path reached HTTP"
-  [ ! -e "$capped/state/jev-ledger.jsonl" ] || fail "cap-reached path wrote a consultation row"
+  jq -e -s 'length == 1 and .[0].network_attempted == false and .[0].available == false and
+    .[0].unavailable_reason == "daily-call-cap" and .[0].cost_usd == 0 and .[0].input_tokens == 0' \
+    "$capped/state/jev-ledger.jsonl" >/dev/null \
+    || fail "a cap refusal left no evidence of why nothing ran"
+  "$JEV" validate-ledger "$capped/state/jev-ledger.jsonl" || fail "the refusal row failed schema validation"
+  out=$(FM_HOME="$capped" "$REPORT" "$capped/state/jev-ledger.jsonl") || fail "report rejected a refusal-only ledger"
+  assert_contains "$out" "reason=daily-call-cap refused=1" "the report does not show why nothing ran"
+  assert_contains "$out" $'triage\t0\t0\t0\tn/a' "a refusal was counted as a consultation"
 
   write_config "$killed" off shadow off off
   write_key "$killed"
@@ -466,6 +473,199 @@ test_model_family_and_mismatch() {
   pass "Jev client: any pinned-family build answers, and another model is a named mismatch with its id"
 }
 
+make_big_questions_fixture() { # <home> <page-bytes>
+  local home=$1 bytes=$2
+  mkdir -p "$home/pages"
+  cat > "$home/questions.md" <<'MD'
+# Open questions
+
+- Which launch date applies? [page: launch.md]
+- Which pricing tier applies? [page: pricing.md]
+MD
+  awk -v n="$bytes" 'BEGIN { while (length(out) < n) out = out "The approved launch date is 2026-10-04. "; print out }' \
+    > "$home/pages/launch.md"
+  awk -v n="$bytes" 'BEGIN { while (length(out) < n) out = out "The approved pricing tier is premium. "; print out }' \
+    > "$home/pages/pricing.md"
+}
+
+test_shared_page_is_sent_once() {
+  local home="$TMP_ROOT/questions-shared" before out request
+  write_config "$home" off off off shadow
+  write_key "$home"
+  mkdir -p "$home/pages"
+  cat > "$home/questions.md" <<'MD'
+# Open questions
+
+- Which launch date applies? [page: launch.md]
+- Who signed off on that date? [page: launch.md]
+MD
+  printf 'The approved launch date is 2026-10-04, signed off by the captain.\n' > "$home/pages/launch.md"
+  before=$(request_count)
+  out=$(jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages") \
+    || fail "open-question adapter failed on two questions sharing one page"
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "two questions over one page did not cost one request"
+  request=$(tail -1 "$REQUEST_LOG")
+  jq -e '(.state.questions | length) == 2 and (.state.pages | length) == 1 and
+    (.state.pages | has("launch.md")) and
+    (.state.questions.question_1.page == "launch.md") and
+    ([.state.questions[] | has("text")] | any | not)' <<<"$request" >/dev/null \
+    || fail "the referenced page was not carried once as shared context: $request"
+  assert_contains "$(cat "$out")" "settled" "the shared-context proposal lost its classification"
+  pass "Jev open-question adapter: a page two questions cite is transmitted once, not once per question"
+}
+
+test_oversized_material_splits_and_truncates() {
+  local home="$TMP_ROOT/questions-big" before out proposal rows
+  # A per-call cap far below one page: the sweep must still answer both
+  # questions instead of becoming a silent no-op.
+  write_config "$home" off off off shadow 100 2000
+  write_key "$home"
+  make_big_questions_fixture "$home" 20000
+  before=$(request_count)
+  out=$(jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages") \
+    || fail "an oversized open-question sweep failed instead of splitting"
+  proposal="$home/questions-jev-review.md"
+  [ "$out" = "$proposal" ] && [ -s "$proposal" ] || fail "the oversized sweep wrote no proposal"
+  [ "$(grep -c '^- ' "$proposal")" -eq 2 ] \
+    || fail "the oversized sweep lost a question: $(cat "$proposal")"
+  [ "$(request_count)" -eq $((before + 2)) ] || fail "the oversized sweep did not split per question"
+  jq -e -s 'all(.[]; (.state.pages | length) == 1) and
+    ([.[] | .state.pages | keys[]] | sort) == ["launch.md","pricing.md"]' \
+    <<<"$(tail -2 "$REQUEST_LOG")" >/dev/null \
+    || fail "a split part carried a page its own question never referenced"
+  rows=$(cat "$home/state/jev-ledger.jsonl")
+  jq -e -s 'length == 2 and all(.[]; .truncated == true and .available == true)' <<<"$rows" >/dev/null \
+    || fail "the split rows do not record that Jev saw shortened pages: $rows"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "split rows failed schema validation"
+  pass "Jev client: an over-budget envelope is split per question and shortened, never silently dropped"
+}
+
+test_unfittable_question_is_refused_with_a_row() {
+  local home="$TMP_ROOT/questions-unfittable" before out
+  # A cap no request can fit under: the refusal must be recorded, not silent.
+  write_config "$home" off off off shadow 100 1
+  write_key "$home"
+  make_questions_fixture "$home"
+  before=$(request_count)
+  out=$(jev_env "$home" "$OPEN_QUESTIONS" "$home/questions.md" "$home/pages")
+  [ -z "$out" ] || fail "an unfittable sweep claimed to write a proposal: $out"
+  [ ! -e "$home/questions-jev-review.md" ] || fail "an unfittable sweep wrote a proposal"
+  [ "$(request_count)" -eq "$before" ] || fail "an unfittable request still reached the endpoint"
+  jq -e -s 'length == 1 and .[0].network_attempted == false and
+    .[0].unavailable_reason == "per-call-token-cap" and .[0].use == "open-questions"' \
+    "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "an unfittable question left no evidence on any surface"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the refusal row failed schema validation"
+  out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") || fail "report rejected the refusal ledger"
+  assert_contains "$out" "reason=per-call-token-cap refused=1" "the report hides an oversized refusal"
+  pass "Jev client: a question too large even alone is refused with a recorded reason, not silence"
+}
+
+test_oversized_accept_check_still_reviews() {
+  local home="$TMP_ROOT/accept-big" before
+  write_config "$home" shadow off off off 100 2000
+  write_key "$home"
+  make_accept_fixture "$home"
+  awk 'BEGIN { while (length(out) < 20000) out = out "Changed bin/example.sh and ran tests/example.test.sh. "; print out }' \
+    > "$home/data/task-a/report.md"
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ -s "$home/data/task-a/acceptance.json" ] || fail "an oversized report produced no acceptance record"
+  jq -e '(.criteria | length) == 2 and .verdict == "accepted"' "$home/data/task-a/acceptance.json" >/dev/null \
+    || fail "the oversized acceptance record lost a criterion"
+  [ "$(request_count)" -eq $((before + 2)) ] || fail "the oversized acceptance check did not split per criterion"
+  jq -e -s 'length == 2 and all(.[]; .truncated == true and .use == "accept-check")' \
+    "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "the oversized acceptance rows do not record their shortening"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "oversized acceptance rows failed validation"
+  pass "Jev acceptance adapter: an oversized report is split and shortened by the client, not skipped"
+}
+
+test_small_global_cap_keeps_every_use_reachable() {
+  local home="$TMP_ROOT/smallcap" status out
+  mkdir -p "$home/config" "$home/state" "$home/data"
+  write_key "$home"
+  make_accept_fixture "$home"
+  # Two calls a day in total and no per-use blocks: the remainder must be handed
+  # out rather than floored away, and a use left with nothing must say so.
+  cat > "$home/config/jev.json" <<'JSON'
+{
+  "version": 1,
+  "kill_switch": false,
+  "per_call_token_cap": 32000,
+  "daily": {"call_cap": 2, "spend_usd_cap": 1},
+  "uses": {
+    "accept-check": {"mode": "shadow", "confidence_floor": 0.8},
+    "triage": {"mode": "shadow", "confidence_floor": 0.65},
+    "commit-lint": {"mode": "shadow", "confidence_floor": 0.8},
+    "open-questions": {"mode": "shadow", "confidence_floor": 0.65}
+  }
+}
+JSON
+  status=$(jev_env "$home" "$JEV" status accept-check)
+  [ "$(cut -f2 <<<"$status")" = none ] \
+    || fail "a cap of 2 left the acceptance check no share at all: $status"
+  status=$(jev_env "$home" "$JEV" status triage)
+  [ "$(cut -f1 <<<"$status")" = shadow ] && [ "$(cut -f2 <<<"$status")" = no-budget ] \
+    || fail "a use with a zero share does not report it: $status"
+  jev_env "$home" "$ACCEPT" task-a
+  [ -s "$home/data/task-a/acceptance.json" ] \
+    || fail "the acceptance check was starved by a small global cap"
+  out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl")
+  assert_contains "$out" "triage=shadow(no-budget)" "the report does not flag a use with no budget"
+  pass "Jev budgets: a small global cap is shared out exactly, and a zero share is named"
+}
+
+seed_old_rows() { # <ledger> <date> <count>
+  local ledger=$1 day=$2 count=$3
+  head -1 "$ROOT/tests/fixtures/jev-ledger.jsonl" \
+    | jq -c --arg day "$day" '.date = $day | .timestamp = ($day + "T00:00:00Z")' \
+    | awk -v n="$count" '{ for (i = 0; i < n; i++) { row = $0; sub(/"fixture-accept"/, "\"old-" i "\"", row); print row } }' \
+      >> "$ledger"
+}
+
+test_ledger_rotates_monthly_and_report_reads_archives() {
+  local home="$TMP_ROOT/rotate" month archive out
+  write_config "$home" off shadow off off
+  write_key "$home"
+  mkdir -p "$home/state"
+  month=$(date -u -d '2026-01-15' +%Y-%m 2>/dev/null || printf '2026-01\n')
+  seed_old_rows "$home/state/jev-ledger.jsonl" "$month-15" 3
+  out=$(printf 'done: ready\n' | jev_env "$home" "$TRIAGE" --kind status)
+  [ "$out" = actionable ] || fail "a consultation across a month boundary failed: '$out'"
+  archive="$home/state/jev-ledger/$month.jsonl"
+  [ -s "$archive" ] || fail "last month's rows were not archived"
+  [ "$(wc -l < "$archive")" -eq 3 ] || fail "the archive lost rows"
+  [ "$(wc -l < "$home/state/jev-ledger.jsonl")" -eq 1 ] \
+    || fail "the running ledger still carries last month's rows"
+  out=$(FM_HOME="$home" "$REPORT")
+  assert_contains "$out" $'overall\t4\t' "the report does not read the archived months"
+  pass "Jev ledger: a new month archives the old one and the report still reads every month"
+}
+
+test_consult_does_not_read_the_whole_ledger() {
+  local home="$TMP_ROOT/bigledger" today month oldday before out
+  write_config "$home" off shadow off off
+  write_key "$home"
+  mkdir -p "$home/state"
+  today=$(date -u +%Y-%m-%d)
+  month=$(date -u +%Y-%m)
+  case "$today" in "$month-01") oldday="$month-02" ;; *) oldday="$month-01" ;; esac
+  seed_old_rows "$home/state/jev-ledger.jsonl" "$oldday" 2000
+  printf 'this line is not JSON at all\n' >> "$home/state/jev-ledger.jsonl"
+  before=$(request_count)
+  out=$(printf 'done: ready\n' | jev_env "$home" "$TRIAGE" --kind status)
+  [ "$out" = actionable ] \
+    || fail "consult parsed history it never needed and refused the call: '$out'"
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "the consultation did not reach the endpoint"
+  [ "$(tail -1 "$home/state/jev-ledger.jsonl" | jq -r '.use')" = triage ] \
+    || fail "the new row was not appended after the untouched history"
+  if "$JEV" validate-ledger "$home/state/jev-ledger.jsonl"; then
+    fail "validate-ledger accepted a ledger containing an unparseable line"
+  fi
+  pass "Jev client: a consultation scans only the day it budgets against, not the whole ledger"
+}
+
 test_report_fixture_and_empty_error() {
   local out rc=0 empty="$TMP_ROOT/empty-ledger" malformed="$TMP_ROOT/malformed-ledger"
   out=$($REPORT "$ROOT/tests/fixtures/jev-ledger.jsonl") || fail "report rejected the valid fixture ledger"
@@ -502,6 +702,13 @@ test_commit_request_builder
 test_commit_lint_truncates_instead_of_skipping
 test_active_advisories_never_touch_task_status
 test_open_questions_request_builder
+test_shared_page_is_sent_once
+test_oversized_material_splits_and_truncates
+test_unfittable_question_is_refused_with_a_row
+test_oversized_accept_check_still_reviews
+test_small_global_cap_keeps_every_use_reachable
+test_ledger_rotates_monthly_and_report_reads_archives
+test_consult_does_not_read_the_whole_ledger
 test_shadow_presentation_hooks
 test_model_family_and_mismatch
 test_report_fixture_and_empty_error
