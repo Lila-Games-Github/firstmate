@@ -615,6 +615,8 @@ test_oversized_material_splits_and_truncates() {
   rows=$(cat "$home/state/jev-ledger.jsonl")
   jq -e -s 'length == 2 and all(.[]; .truncated == true and .available == true)' <<<"$rows" >/dev/null \
     || fail "the split rows do not record that Jev saw shortened pages: $rows"
+  jq -e -s '[.[].subject] | sort == ["questions.md#question_1","questions.md#question_2"]' <<<"$rows" >/dev/null \
+    || fail "the split rows do not each name their own subject: $rows"
   "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "split rows failed schema validation"
   pass "Jev client: an over-budget envelope is split per question and shortened, never silently dropped"
 }
@@ -742,38 +744,6 @@ MD
   pass "Jev client: a question whose split part failed is reported unclassified, never guessed"
 }
 
-# An aggregate verdict is a claim about every named question, so it cannot be
-# computed from the parts that happened to succeed.
-test_aggregate_verdict_refuses_when_a_part_fails() {
-  local home="$TMP_ROOT/aggregate-part-failed" before out envelope
-  write_config "$home" shadow off off off 100 2000
-  write_key "$home"
-  mkdir -p "$home/state"
-  envelope="$home/envelope.json"
-  jq -n '
-    def pad($n): ($n + ("c" * 9000));
-    {request:{state:{acceptance_criteria:{criterion_1:pad("first "),
-                                          criterion_2:pad("FORCE_HTTP_500 ")}},
-              questions:{criterion_1:{type:"noul",instructions:"Judge criterion_1"},
-                         criterion_2:{type:"noul",instructions:"Judge criterion_2"}}},
-     ledger:{subject:"task-agg",baseline_decision:null,
-       baseline_rationale:"The existing completion path performs human review.",
-       estimated_big_model_tokens:100,
-       verdict:{strategy:"all_noul",questions:["criterion_1","criterion_2"],
-                positive_label:"accepted",negative_label:"rejected"}}}' > "$envelope" \
-    || fail "could not build the aggregate envelope"
-  before=$(request_count)
-  out=$(jev_env "$home" "$JEV" consult accept-check < "$envelope") \
-    || fail "consult exited non-zero on a partly failed split"
-  [ "$(request_count)" -eq $((before + 2)) ] || fail "the aggregate envelope did not split into two requests"
-  jq -e '.status == "unavailable" and .reason == "http-500" and (has("verdict") | not)' <<<"$out" >/dev/null \
-    || fail "an all_noul verdict was reported over the criteria that happened to answer: $out"
-  jq -e -s 'length == 2 and ([.[] | select(.unavailable_reason == "http-500")] | length) == 1' \
-    "$home/state/jev-ledger.jsonl" >/dev/null \
-    || fail "the partly failed aggregate split left incomplete evidence"
-  pass "Jev client: an aggregate verdict refuses rather than answer from a subset of its questions"
-}
-
 test_unfittable_question_is_refused_with_a_row() {
   local home="$TMP_ROOT/questions-unfittable" before out
   # A cap no request can fit under: the refusal must be recorded, not silent.
@@ -786,12 +756,13 @@ test_unfittable_question_is_refused_with_a_row() {
   [ ! -e "$home/questions-jev-review.md" ] || fail "an unfittable sweep wrote a proposal"
   [ "$(request_count)" -eq "$before" ] || fail "an unfittable request still reached the endpoint"
   jq -e -s 'length == 1 and .[0].network_attempted == false and
-    .[0].unavailable_reason == "per-call-token-cap" and .[0].use == "open-questions"' \
+    .[0].unavailable_reason == "question-block-token-cap" and .[0].use == "open-questions"' \
     "$home/state/jev-ledger.jsonl" >/dev/null \
     || fail "an unfittable question left no evidence on any surface"
   "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the refusal row failed schema validation"
   out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") || fail "report rejected the refusal ledger"
-  assert_contains "$out" "reason=per-call-token-cap refused=1" "the report hides an oversized refusal"
+  assert_contains "$out" "reason=question-block-token-cap refused=1" \
+    "the report does not say the cap is too small for the questions themselves"
   pass "Jev client: a question too large even alone is refused with a recorded reason, not silence"
 }
 
@@ -863,10 +834,13 @@ MD
   pass "Jev client: a shared report that is the bulk is shrunk once, even when it fits the budget alone"
 }
 
-# The complement: when the per-question material is what does not fit, each
-# question still gets its own budget-sized request.
-test_oversized_per_question_state_still_splits() {
-  local home="$TMP_ROOT/accept-big-criteria" before
+# The acceptance verdict is one claim about every criterion, so a part of it is
+# not a consultation in its own right. Splitting it would append one row per
+# part, each asserting the task's whole verdict over the criteria it happened
+# to carry, and the report would count one prediction N times. Oversized or
+# not, it is one request and one row.
+test_oversized_accept_check_is_one_request_and_one_row() {
+  local home="$TMP_ROOT/accept-big-criteria" before request
   write_config "$home" shadow off off off 100 2000
   write_key "$home"
   mkdir -p "$home/data/task-a"
@@ -882,17 +856,18 @@ test_oversized_per_question_state_still_splits() {
   jev_env "$home" "$ACCEPT" task-a
   [ -s "$home/data/task-a/acceptance.json" ] || fail "oversized criteria produced no acceptance record"
   jq -e '(.criteria | length) == 2' "$home/data/task-a/acceptance.json" >/dev/null \
-    || fail "the split acceptance record lost a criterion"
-  [ "$(request_count)" -eq $((before + 2)) ] \
-    || fail "oversized per-question criteria did not split into one request each"
-  jq -e -s 'length == 2 and all(.[]; (.state.acceptance_criteria | length) == 1)' \
-    <<<"$(tail -2 "$REQUEST_LOG")" >/dev/null \
-    || fail "a split part carried a criterion its own question never asked about"
-  jq -e -s 'length == 2 and all(.[]; .truncated == true and .use == "accept-check")' \
+    || fail "the acceptance record lost a criterion"
+  [ "$(request_count)" -eq $((before + 1)) ] \
+    || fail "an aggregate acceptance verdict was split across requests"
+  request=$(tail -1 "$REQUEST_LOG")
+  jq -e '(.questions | length) == 2 and (.state.acceptance_criteria | length) == 2' <<<"$request" >/dev/null \
+    || fail "the single request lost a criterion: $request"
+  jq -e -s 'length == 1 and .[0].truncated == true and .[0].use == "accept-check" and
+    .[0].subject == "task-a" and (.[0].jev_verdict | type) == "string"' \
     "$home/state/jev-ledger.jsonl" >/dev/null \
-    || fail "the split acceptance rows do not record their shortening"
-  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "split acceptance rows failed validation"
-  pass "Jev client: material only one question owns still splits into per-question requests"
+    || fail "the oversized acceptance check did not record exactly one shortened subject row"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "the acceptance row failed validation"
+  pass "Jev client: an aggregate verdict is one request and one subject row, however oversized"
 }
 
 test_small_global_cap_keeps_every_use_reachable() {
@@ -1094,11 +1069,10 @@ test_oversized_material_splits_and_truncates
 test_one_page_cited_by_every_question_is_not_duplicated
 test_split_that_cannot_finish_is_never_started
 test_failed_split_part_is_not_rendered_as_a_classification
-test_aggregate_verdict_refuses_when_a_part_fails
 test_unfittable_question_is_refused_with_a_row
 test_oversized_shared_report_is_shrunk_not_duplicated
 test_shared_report_under_budget_is_still_not_duplicated
-test_oversized_per_question_state_still_splits
+test_oversized_accept_check_is_one_request_and_one_row
 test_small_global_cap_keeps_every_use_reachable
 test_ledger_rotates_monthly_and_report_reads_archives
 test_consult_does_not_read_the_whole_ledger

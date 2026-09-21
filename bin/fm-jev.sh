@@ -36,12 +36,22 @@
 #
 # The per-call budget is enforced here, for every adapter, so no adapter can
 # make an oversized request a silent no-op. An envelope larger than the budget
-# is split into one request per question group, keeping each group's own state
-# and pulling in only the `ledger.context` entries that group names; a part
-# still too large has its longest state string shortened and records
-# truncated=true; a group that cannot fit even then is refused with a ledger row
-# naming per-call-token-cap. A budget refusal always writes a row, with
-# network_attempted false, so the report can show why nothing ran.
+# has its longest state string shortened, recording truncated=true, and a
+# request that cannot fit even then is refused with a ledger row naming
+# per-call-token-cap - or question-block-token-cap when the question block plus
+# the pinned model already exceeds the cap on its own, which no shortening can
+# help. A budget refusal always writes a row, with network_attempted false, so
+# the report can show why nothing ran.
+#
+# An over-budget envelope is split into one request per question group only
+# when its verdict is per key. An aggregate verdict such as the acceptance
+# check's `all_noul` is one claim about every named question, so a part of it
+# is not a consultation in its own right: each part would record a row
+# asserting the subject's whole verdict over the questions it happened to
+# carry, and the report would count one prediction N times. Those envelopes are
+# always one shortened request. Where a split is allowed, each part is its own
+# subject - `<subject>#<group>` on its row - so finalize matches one row and
+# the report counts each subject exactly once.
 #
 # Splitting is taken only when it buys something. Everything a part carries that
 # its own group does not own is shared - state copied verbatim plus the
@@ -660,8 +670,17 @@ cmd_request_budget() {
 # Choices together. A state container keyed by the group name is sliced to that
 # group; `ledger.context` names a shared container whose entries are pulled in
 # by reference, so a part carries only the entries its own group cites.
-# Strategies with no per-question state, such as the commit lint, yield null and
-# are never split. Everything a part carries that its group does not own is
+#
+# Only a per-key verdict may be split. An aggregate verdict such as `all_noul`
+# is one claim about every named question, so a part of it is not a consultation
+# in its own right: each part would append a row asserting the whole subject's
+# verdict over the questions it happened to carry, and the report would count
+# one prediction N times. Strategies with no per-question state, such as the
+# commit lint, are never split either. Every part of a split therefore sets
+# `ledger.subject` to its own group, so each row is one subject, finalize
+# matches one row, and the report counts each subject exactly once.
+#
+# Everything a part carries that its group does not own is
 # shared: the state keys copied verbatim plus the `ledger.context` entries that
 # group cites. Summed over the parts and less the distinct bytes those parts
 # cover between them, that is what the split duplicates, and the plan is
@@ -679,8 +698,7 @@ split_plan_filter='
   | ($env.request.questions) as $rq
   | ($env.ledger.verdict) as $v
   | ($env.ledger.context // {}) as $ctx
-  | (if (["choices","all_noul","any_noul"] | index($v.strategy)) != null
-     then ($v.questions // []) else [] end) as $vq
+  | (if $v.strategy == "choices" then ($v.questions // []) else [] end) as $vq
   | ([$vq[] | gkey] | unique) as $gkeys
   | ([$state | to_entries[] | select((.value | type) == "object")]) as $objects
   | ([$gkeys[] as $g | {g:$g, containers:[$objects[] | select(.value | has($g)) | .key]}]) as $bare
@@ -711,6 +729,7 @@ split_plan_filter='
         | {request:{state:($grp.shared + $own),
                     questions:($rq | with_entries(select(.key | gkey == $g)))},
            ledger:($env.ledger
+             | .subject = ($env.ledger.subject + "#" + $g)
              | .baseline_decision = (if ($env.ledger.baseline_decision | type) == "object"
                  then ($env.ledger.baseline_decision
                        | with_entries(select(.key as $k | $part_vq | index($k) != null)))
@@ -733,6 +752,18 @@ day_usage_counts() { # <use> <day>
      (map(.cost_usd) | add // 0),
      (map(select(.use == $use and .network_attempted)) | length),
      (map(select(.use == $use) | .cost_usd) | add // 0)] | @tsv' 2>/dev/null
+}
+
+# The pinned model and the question block with no state at all: what a request
+# costs before any material is attached. shrink_to_budget can only shorten
+# state, so a cap this alone cannot fit is one no shortening will ever satisfy,
+# and the refusal says so rather than blaming the material.
+question_block_tokens() { # <envelope-file>
+  local bytes
+  bytes=$(jq -c --arg model "$MODEL" '{model:$model,questions:.request.questions,state:{}}' "$1" 2>/dev/null \
+    | LC_ALL=C wc -c | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) printf '0\n'; return 0 ;; esac
+  printf '%s\n' "$(( (bytes + BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN ))"
 }
 
 request_body_bytes() { # <envelope-file>
@@ -886,9 +917,11 @@ consult_one() { # <use> <envelope-file>
   lock_ledger || { emit_unavailable "$use" ledger-busy "$fallback"; return 0; }
   today=$(date -u +%Y-%m-%d)
   if [ "$request_tokens" -gt "$PER_CALL_TOKEN_CAP" ]; then
-    record_refusal_row "$use" "$file" per-call-token-cap "$request_bytes" || true
+    reason=per-call-token-cap
+    [ "$(question_block_tokens "$file")" -le "$PER_CALL_TOKEN_CAP" ] || reason=question-block-token-cap
+    record_refusal_row "$use" "$file" "$reason" "$request_bytes" || true
     unlock_ledger || true
-    emit_unavailable "$use" per-call-token-cap "$fallback"
+    emit_unavailable "$use" "$reason" "$fallback"
     return 0
   fi
   # Only today's rows can consume today's budget, so the scan is bounded by one
@@ -1123,30 +1156,26 @@ consult_one() { # <use> <envelope-file>
 }
 
 # Recombines the parts of a split consultation into the single result shape the
-# adapters already consume, so splitting is invisible above this boundary.
+# adapters already consume, so splitting is invisible above this boundary. Only
+# a per-key verdict is ever split, so there is no aggregate to synthesise here:
+# the parts' answers are disjoint key sets and the merged verdict is their
+# union.
 #
 # A part can fail on its own - a five-second timeout, an HTTP error, a malformed
-# response - while its siblings answer, and what survives is then a strict
-# subset of what was asked. An aggregate verdict is undefined over a subset:
-# `all_noul` means every named question cleared the floor, so answering it from
-# the parts that happened to succeed would assert something Jev never said.
-# Those strategies therefore refuse the whole consultation and the caller keeps
-# its baseline. A per-key verdict is defined key by key, so it keeps the answers
-# it has; `answers` holds exactly the questions Jev answered and
-# `parts_unavailable` names why the rest are missing, and no caller may read an
-# absent key as an answer.
+# response - while its siblings answer. A per-key verdict is defined key by key,
+# so it keeps the answers it has; `answers` holds exactly the questions Jev
+# answered and `parts_unavailable` names why the rest are missing, and no caller
+# may read an absent key as an answer.
 # shellcheck disable=SC2016 # jq program; dollar names belong to jq.
-merge_part_results() { # <use> <envelope-file> <results-jsonl>
+merge_choice_parts() { # <use> <envelope-file> <results-jsonl>
   local use=$1 envelope=$2 results=$3
   jq -s -c --arg use "$use" --arg mode "$EFFECTIVE_MODE" --arg cmode "$CONFIGURED_MODE" \
     --slurpfile envelope "$envelope" '
     . as $parts
     | ($envelope[0].ledger) as $led
-    | ($led.verdict) as $v
     | ([$parts[] | select(.status == "available")]) as $ok
     | ([$parts[] | select(.status != "available") | .reason // "unavailable"]) as $refused
-    | (($v.strategy // "") == "choices") as $per_key
-    | if ($ok | length) == 0 or (($refused | length) > 0 and ($per_key | not)) then
+    | if ($ok | length) == 0 then
         {status:"unavailable", use:$use, mode:$mode, configured_mode:$cmode,
          reason:($refused[0] // "unavailable"), fallback_decision:$led.baseline_decision,
          parts:($parts | length), parts_unavailable:$refused}
@@ -1156,12 +1185,7 @@ merge_part_results() { # <use> <envelope-file> <results-jsonl>
         | ($ok | map(.qualified // {}) | add) as $qualified
         | ($ok | map(.used_jev_keys // {}) | add) as $used_keys
         | ($ok | map(.jev_probabilities // {}) | add) as $probabilities
-        | (if ($ok[0].verdict | type) == "object" then ($ok | map(.verdict) | add)
-           elif $v.strategy == "any_noul" then
-             (if any($ok[]; .verdict == $v.positive_label) then $v.positive_label else $v.negative_label end)
-           elif $v.strategy == "all_noul" then
-             (if all($ok[]; .verdict == $v.positive_label) then $v.positive_label else $v.negative_label end)
-           else $ok[0].verdict end) as $verdict
+        | ($ok | map(.verdict) | add) as $verdict
         | (if ($verdict | type) == "object" and ($led.baseline_decision | type) == "object"
            then ($verdict | with_entries(.value = (.value == $led.baseline_decision[.key])))
            else null end) as $agreement_keys
@@ -1227,9 +1251,10 @@ cmd_consult() {
     return 0
   }
   # The budget is enforced here, for every adapter, rather than trusted to each
-  # one: an over-budget envelope is split per question group, then shortened,
-  # and only a group that still cannot fit alone is refused - with a row, so it
-  # is never a silent no-op.
+  # one: an over-budget envelope with a per-key verdict is split per question
+  # group and then shortened, any other is shortened as one request, and only a
+  # request that still cannot fit is refused - with a row, so it is never a
+  # silent no-op.
   budget=$((PER_CALL_TOKEN_CAP * BYTES_PER_TOKEN))
   bytes=$(request_body_bytes "$REQUEST_FILE")
   case "$bytes" in ''|*[!0-9]*) bytes=$((budget + 1)) ;; esac
@@ -1270,7 +1295,7 @@ cmd_consult() {
     command cat "$results"
     return 0
   fi
-  merge_part_results "$use" "$REQUEST_FILE" "$results" || {
+  merge_choice_parts "$use" "$REQUEST_FILE" "$results" || {
     emit_unavailable "$use" result-render-failed "$fallback"
     return 0
   }
