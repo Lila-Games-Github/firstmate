@@ -61,11 +61,14 @@
 #          crewmate slot is held by a live process lease, so a host restart frees
 #          every slot while the records naming them survive, the next spawn can
 #          be handed that slot, and preparing it would replace the recorded
-#          task's copy. Or Treehouse holds a DURABLE LEASE on it for someone
-#          else: a crewmate never takes one, so the lease is the one a refused
-#          bin/fm-home-seed.sh acquisition deliberately kept - returning it would
-#          clean and reset the very copy the refusal protected - and it stays
-#          until the records are reconciled and it is released by hand.
+#          task's copy. Or Treehouse holds a DURABLE LEASE on it under a
+#          label that is not that record's own: a crewmate copy takes no durable
+#          lease and a secondmate home holds only its own, so the lease is the
+#          one a refused bin/fm-home-seed.sh acquisition deliberately kept -
+#          returning it would clean and reset the very copy the refusal
+#          protected - and it stays until the records are reconciled and it is
+#          released by hand. That second direction covers secondmate home
+#          records as well as crewmate worktrees.
 #          Detect-only, and reported from THIS home's records only.
 #          bin/fm-spawn.sh and bin/fm-home-seed.sh refuse such a slot on the same
 #          evidence, so the line is a warning that a record needs reconciling,
@@ -1559,41 +1562,60 @@ detect_local_config() {
 # reuse that deadlocked two records on one slot.
 #
 # The opposite drift is reported from the same read: a DURABLE lease held on a
-# slot a task record names. A crewmate never takes one, so the holder is another
-# allocation's - in particular the lease a refused bin/fm-home-seed.sh keeps
-# rather than returning, because `treehouse return` cleans and resets the copy
-# the refusal exists to protect. Nothing releases that lease on its own, so it is
-# surfaced every session until the records are reconciled and it is released by
-# hand.
+# slot a record names, under a label that is not that record's own. A crewmate
+# copy takes no durable lease at all and a secondmate home holds only its own, so
+# any other label is another allocation's - in particular the lease a refused
+# bin/fm-home-seed.sh keeps rather than returning, because `treehouse return`
+# cleans and resets the copy the refusal exists to protect. Nothing releases that
+# lease on its own, so it is surfaced every session until the records are
+# reconciled and it is released by hand.
+#
+# That second check covers secondmate home records too, not just crewmate
+# worktrees: a secondmate seeded onto an explicit path that is itself a pool slot
+# leaves that slot unleased, a later seed can be handed it and refused, and the
+# record naming it is then the only one there is. The freed-slot check stays
+# crewmate-only, because a dispatch re-prepares a crewmate copy and nothing
+# re-prepares a secondmate home.
 #
 # Detect-only, and deliberately one-sided in both directions: only a definite
-# `available`, or a definite lease holder that is not the recording task itself,
-# is reported. An unreadable status, an absent treehouse, or a slot Treehouse
-# does not record at all says nothing, because "cannot tell" is not evidence that
-# a record has drifted. A record with no project, no worktree, or a worktree that
-# is not a pool slot at all is skipped for the same reason.
+# `available`, or a definite lease holder that is not the record's own id, is
+# reported. An unreadable status, an absent treehouse, or a slot Treehouse does
+# not record at all says nothing, because "cannot tell" is not evidence that a
+# record has drifted. A record with no slot path, no resolvable project, or a
+# path that is not a pool slot at all is skipped for the same reason.
+#
+# One `treehouse status --json` read answers both questions for a record, so the
+# two verdicts can never come from two different snapshots.
 detect_recorded_slot_drift() {
-  local meta id worktree project kind status holder
+  local meta id kind slot project json free_check
   [ -d "$STATE" ] || return 0
   command -v treehouse >/dev/null 2>&1 || return 0
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
     kind=$(fm_meta_get "$meta" kind)
-    [ "$kind" != secondmate ] || continue
-    [ "$(fm_backend_of_meta "$meta")" != orca ] || continue
-    worktree=$(fm_meta_get "$meta" worktree)
-    project=$(fm_meta_get "$meta" project)
-    [ -n "$worktree" ] && [ -n "$project" ] || continue
-    fm_treehouse_pool_slot "$project" "$worktree" || continue
-    status=$(fm_slot_treehouse_status "$worktree" "$project") || continue
-    if [ "$status" = available ]; then
-      echo "SLOT_RECONCILE: task $id's local copy $worktree reads free to Treehouse while its record still claims it - a restart drops the hold on a copy but not the record, so the next dispatch can be handed the same copy; confirm the task with bin/fm-crew-state.sh $id and clear whichever record is wrong before dispatching into $project"
+    if [ "$kind" = secondmate ]; then
+      free_check=0
+      slot=$(fm_meta_get "$meta" home)
+      [ -n "$slot" ] || continue
+      project=$(fm_slot_project_dir "$slot") || continue
+    else
+      [ "$(fm_backend_of_meta "$meta")" != orca ] || continue
+      free_check=1
+      slot=$(fm_meta_get "$meta" worktree)
+      project=$(fm_meta_get "$meta" project)
+      [ -n "$slot" ] && [ -n "$project" ] || continue
+    fi
+    fm_treehouse_pool_slot "$project" "$slot" || continue
+    json=$(fm_slot_treehouse_pool_json "$project") || continue
+    fm_slot_treehouse_entry "$slot" "$json" || continue
+    if [ "$free_check" = 1 ] && [ "$FM_SLOT_TREEHOUSE_STATUS" = available ]; then
+      echo "SLOT_RECONCILE: task $id's local copy $slot reads free to Treehouse while its record still claims it - a restart drops the hold on a copy but not the record, so the next dispatch can be handed the same copy; confirm the task with bin/fm-crew-state.sh $id and clear whichever record is wrong before dispatching into $project"
       continue
     fi
-    holder=$(fm_slot_treehouse_lease_holder "$worktree" "$project") || continue
-    [ "$holder" != "$id" ] || continue
-    echo "SLOT_RECONCILE: task $id's local copy $worktree carries a Treehouse lease held for '$holder' while task $id's record still claims it - a crewmate copy never takes a durable lease, so this is the one a refused seed kept instead of returning it, because returning would have cleaned and reset that copy; confirm the task with bin/fm-crew-state.sh $id, reconcile whichever record is wrong, then release the lease with 'treehouse return --if-lease-holder $holder $worktree' run from $project"
+    [ -n "$FM_SLOT_TREEHOUSE_LEASE_HOLDER" ] || continue
+    [ "$FM_SLOT_TREEHOUSE_LEASE_HOLDER" != "$id" ] || continue
+    echo "SLOT_RECONCILE: task $id's local copy $slot carries a Treehouse lease held for '$FM_SLOT_TREEHOUSE_LEASE_HOLDER' while task $id's record still claims it - a crewmate copy takes no durable lease and a secondmate home holds only its own, so a lease under another label is the one a refused seed kept instead of returning it, because returning would have cleaned and reset that copy; confirm the task with bin/fm-crew-state.sh $id, reconcile whichever record is wrong, then release the lease with 'treehouse return --if-lease-holder $FM_SLOT_TREEHOUSE_LEASE_HOLDER $slot' run from $project"
   done
 }
 

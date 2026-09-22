@@ -430,6 +430,45 @@ EOF
   pass "bootstrap reports a durable lease stranded on a recorded copy, and only another holder's"
 }
 
+# A secondmate seeded onto an explicit path that is itself a pool slot leaves
+# that slot unleased, so a later seed can be handed it and refused - and the
+# refused seed keeps its lease on purpose. The only record naming that copy is
+# then a kind=secondmate one, so the stranded lease is reported from it or it is
+# never reported at all.
+test_secondmate_home_with_foreign_lease_is_reported() {
+  local rec case_dir home proj wt fakebin out id=mate-on-a-slot
+
+  rec=$(make_slot_case slot-secondmate-lease leased)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "kind=secondmate" "harness=claude" \
+    "home=$wt" "worktree=$wt"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=refused-seed)
+  [ "$(printf '%s\n' "$out" | grep -c SLOT_RECONCILE)" = 1 ] \
+    || fail "a stranded lease on a secondmate home must report exactly one line (got: $out)"
+  printf '%s\n' "$out" \
+    | grep -F "task $id's local copy $wt carries a Treehouse lease held for 'refused-seed'" >/dev/null \
+    || fail "the line did not name both the secondmate record and the lease holder (got: $out)"
+  assert_contains "$out" "treehouse return --if-lease-holder refused-seed $wt" \
+    "the diagnostic did not print the command that releases the stranded lease"
+
+  # The lease a secondmate home is held by is its own, and says nothing.
+  out=$(run_slot_bootstrap "$home" "$fakebin" "FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=$id")
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported the durable lease that holds a secondmate home for itself"
+
+  # The freed-slot half stays crewmate-only: a dispatch re-prepares a crewmate
+  # copy, and nothing re-prepares a secondmate home.
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_STATUS=available)
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported a secondmate home as a freed dispatch slot"
+
+  pass "bootstrap reports a lease stranded on a secondmate home record, and only another holder's"
+}
+
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
   n=0
@@ -1416,6 +1455,7 @@ test_bootstrap_reporting
 test_recorded_slot_that_reads_free_is_reported
 test_recorded_slot_is_identified_through_a_path_alias
 test_recorded_slot_with_foreign_lease_is_reported
+test_secondmate_home_with_foreign_lease_is_reported
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
