@@ -97,8 +97,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
   For `relaunch` that host-side drive is `bin/fm-on.sh <id> fm-remote-secondmate-control.sh relaunch ...`, whose host-local leg runs this same plane against a record that is ordinary and local there, so every checkpoint, journal, rollback, and postcondition below applies unchanged ([`docs/remote-secondmates.md`](remote-secondmates.md)); `interrupt` and `exit` have no such route.
 - An unverified harness is refused rather than guessed at.
 - An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
-- A recorded copy that another live task record also names is refused **before** the running agent is stopped, not after.
-  Both records and the worker stay exactly as they were; reconciling the two records through `bin/fm-teardown.sh <id> --reconcile-slot` is what unblocks it.
+- For a pool-slot collision refused by the first transaction step above, see [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header for the reconciliation command and its required ownership and work-safety proofs.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
