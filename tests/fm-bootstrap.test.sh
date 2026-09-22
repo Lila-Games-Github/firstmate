@@ -251,6 +251,99 @@ assert_timeout_report() {
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
+# --- freed-slot detection ---------------------------------------------------
+#
+# A crewmate's Treehouse slot is held by a live process lease, so a host restart
+# releases every slot while the task records naming them survive. Treehouse then
+# reports the slot available and the next spawn can be handed a live task's copy
+# (observed 2026-09-21). Bootstrap reports that drift, and only when Treehouse
+# gives a definite answer: "cannot tell" is not evidence a record has drifted.
+
+# make_slot_case <name> <slot-status>: a home with one task record naming a real
+# Treehouse pool slot, and a treehouse whose `status --json` reports that slot
+# with <slot-status>. Echoes "<case-dir>|<home>|<project>|<worktree>|<fakebin>".
+make_slot_case() {
+  local name=$1 status=$2 case_dir home proj pool wt fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  pool="$case_dir/pool"
+  wt="$pool/1/repo"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$pool/1"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  git init -q "$proj"
+  git -C "$proj" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm slot-fixture
+  git -C "$proj" worktree add -q --detach "$wt"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$wt" > "$pool/treehouse-state.json"
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  exit 0
+fi
+if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
+  [ "\${FM_FAKE_TREEHOUSE_STATUS_FAILS:-0}" != 1 ] || exit 1
+  printf '[{"name":"1","path":"%s","status":"%s","processes":[{"pid":1,"name":"sh"}]}]\n' \
+    '$wt' "\${FM_FAKE_TREEHOUSE_SLOT_STATUS:-$status}"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+run_slot_bootstrap() {  # <home> <fakebin> [VAR=value ...]
+  local home=$1 fakebin=$2
+  shift 2
+  env "$@" PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_recorded_slot_that_reads_free_is_reported() {
+  local rec case_dir home proj wt fakebin out id=slot-drift-task
+
+  rec=$(make_slot_case slot-free available)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$proj" "kind=ship"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin")
+  printf '%s\n' "$out" | grep -F "SLOT_RECONCILE: task $id's local copy $wt" >/dev/null \
+    || fail "bootstrap did not report a recorded slot Treehouse reports free (got: $out)"
+  assert_contains "$out" "bin/fm-crew-state.sh $id" \
+    "the diagnostic did not say how to confirm the task"
+
+  # A slot Treehouse still holds is the healthy case and stays silent.
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_STATUS=in-use)
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported a slot Treehouse still reports in use"
+
+  # A status read that failed proves nothing either way, so it says nothing.
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_STATUS_FAILS=1)
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported drift from a Treehouse status read that failed"
+
+  # A record whose worktree is an ordinary directory is not a pool slot at all.
+  rec=$(make_slot_case slot-not-pooled available)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  mkdir -p "$case_dir/plain-worktree"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$case_dir/plain-worktree" "project=$proj" "kind=ship"
+  out=$(run_slot_bootstrap "$home" "$fakebin")
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported drift for a worktree that is not a Treehouse pool slot"
+
+  pass "bootstrap reports a recorded pool slot Treehouse reports free, and only on a definite answer"
+}
+
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
   n=0
@@ -1234,6 +1327,7 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_recorded_slot_that_reads_free_is_reported
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version

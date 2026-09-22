@@ -1366,6 +1366,217 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+
+# --- --reconcile-slot: breaking a two-record slot deadlock -------------------
+#
+# The deadlock (observed 2026-09-21): a host reboot freed a pool slot whose task
+# was still live, the next spawn took the same slot and re-prepared it, and two
+# records now name it. The exclusivity refusal then blocks BOTH of them, and
+# --force cannot help because it authorizes discarding THIS task's work while
+# the refusal is about the other task's. --reconcile-slot retires the record
+# whose own work is provably safe without touching the slot, after which the
+# survivor tears down normally and returns it.
+
+# make_collision_case <name> <stale-id> <live-id> <stale-kind> [landed]
+# A pool slot named by two records: <stale-id>, whose worker is gone, and
+# <live-id>, which holds the slot's own owner claim. A ship's stale record gets
+# a branch in the shared project, landed onto the default branch unless the
+# caller asks for an unlanded one. Echoes the case directory.
+make_collision_case() {
+  local name=$1 stale=$2 live=$3 kind=$4 landed=${5:-landed} dir
+  dir=$(make_case "$name")
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/project" branch -M main
+  if [ "$kind" = ship ]; then
+    if [ "$landed" = landed ]; then
+      # Landed: the branch adds nothing the default branch does not already
+      # have, which is exactly what a squash-merged task looks like afterwards.
+      git -C "$dir/project" branch "fm/$stale" main
+    else
+      # Unlanded: a real content change that exists only on the branch. An
+      # empty commit would not do - it leaves the default branch's tree
+      # unchanged, so the containment proof would read it as landed.
+      git -C "$dir/project" checkout -q -b "fm/$stale" main
+      printf 'work that never landed\n' > "$dir/project/unlanded.txt"
+      git -C "$dir/project" add unlanded.txt
+      git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+        commit -qm unlanded-work
+      git -C "$dir/project" checkout -q main
+    fi
+  fi
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=$kind"
+  fm_write_meta "$dir/home/state/$live.meta" \
+    "window=firstmate:fm-$live" "endpoint_task_id=$live" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$live" "$dir/home"
+  printf '%s\n' "$dir"
+}
+
+run_reconcile() {  # <case> <id> [extra args...]
+  local dir=$1 id=$2
+  shift 2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --reconcile-slot "$@"
+}
+
+assert_slot_untouched() {  # <case> <live-id> <description>
+  local dir=$1 live=$2 description=$3
+  assert_present "$dir/worktree/sentinel" "$description: the slot's copy was reset"
+  assert_present "$dir/pool/1/project/.git" "$description: the slot's checkout was removed"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$live" \
+    "$description: the surviving task's slot claim was rewritten"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "$description: the slot was returned to the pool: $(cat "$dir/runtime.log")"
+}
+
+test_reconcile_slot_retires_the_landed_record_and_frees_the_survivor() {
+  local dir stale=stale-pipeline live=live-scout worker rc
+
+  dir=$(make_collision_case reconcile-landed "$stale" "$live" ship)
+  mkdir -p "$dir/home/data/$live"
+  printf 'findings\n' > "$dir/home/data/$live/report.md"
+  # A live worker in the slot: reconciliation must not reach it.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  # Ordinary teardown is still deadlocked in both directions.
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ordinary teardown of the stale record was not refused"
+  assert_contains "$(cat "$dir/stderr")" "--reconcile-slot" \
+    "the deadlock refusal did not point at the sanctioned way out"
+
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--reconcile-slot refused a landed record: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "--reconcile-slot killed the worker holding the slot"
+  assert_absent "$dir/home/state/$stale.meta" "--reconcile-slot left the stale record"
+  assert_present "$dir/home/state/$live.meta" "--reconcile-slot removed the surviving record"
+  assert_slot_untouched "$dir" "$live" "reconciled landed ship record"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # With the stale record gone the survivor is no longer contested, so an
+  # ordinary teardown returns the slot: the deadlock is genuinely broken, not
+  # just deferred.
+  : > "$dir/runtime.log"
+  run_case "$dir" "$live" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the surviving record could not be torn down normally: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$live.meta" "the survivor's record was left behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the survivor's teardown did not return the slot: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: --reconcile-slot retires a landed record without touching the slot, and the survivor then tears down normally"
+}
+
+test_reconcile_slot_accepts_a_scout_whose_report_exists() {
+  local dir stale=stale-scout live=live-scout rc
+  dir=$(make_collision_case reconcile-scout "$stale" "$live" scout)
+  # A scout's deliverable is its report, and teardown also enforces the shared
+  # captain-call completion gate; satisfy both the way a real scout does.
+  mkdir -p "$dir/home/data/$stale"
+  printf 'the deliverable\n' > "$dir/home/data/$stale/report.md"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$stale" --none >/dev/null \
+    || fail "could not record the scout's completed captain-call inventory"
+
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--reconcile-slot refused a scout whose report exists: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$stale.meta" "--reconcile-slot left the scout's record"
+  assert_slot_untouched "$dir" "$live" "reconciled scout record"
+  pass "fm-teardown: --reconcile-slot accepts a scout whose report is already in the Firstmate home"
+}
+
+# Every refusal shape: each one must change nothing at all.
+test_reconcile_slot_refuses_without_proof() {
+  local dir stale=stale-task live=live-task rc
+
+  # A scout with no report has nothing left anywhere: its worktree went with
+  # the slot, so there is no safe reconciliation.
+  dir=$(make_collision_case reconcile-no-report "$stale" "$live" scout)
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--reconcile-slot retired a scout with no report"
+  assert_contains "$(cat "$dir/stderr")" "report" \
+    "the refusal did not name the missing report"
+  assert_present "$dir/home/state/$stale.meta" "the refused reconciliation removed the record"
+  assert_slot_untouched "$dir" "$live" "scout with no report"
+
+  # A ship whose branch is not landed is unlanded work with nothing else
+  # pointing at it once the record goes.
+  dir=$(make_collision_case reconcile-unlanded "$stale" "$live" ship unlanded)
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--reconcile-slot retired a record whose branch is not landed"
+  assert_contains "$(cat "$dir/stderr")" "fm/$stale" \
+    "the refusal did not name the branch that is not landed"
+  assert_present "$dir/home/state/$stale.meta" "the refused reconciliation removed the record"
+  assert_slot_untouched "$dir" "$live" "unlanded ship branch"
+
+  # The slot's claim naming THIS record means the operator picked the live one:
+  # retiring it would leave its worker with nobody to return the slot.
+  dir=$(make_collision_case reconcile-own-claim "$stale" "$live" ship)
+  claim_pool_slot "$dir" "$stale" "$dir/home"
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--reconcile-slot retired the record that still holds the slot"
+  assert_contains "$(cat "$dir/stderr")" "$live" \
+    "the refusal did not name the record to reconcile first"
+  assert_present "$dir/home/state/$stale.meta" "the refused reconciliation removed the record"
+
+  # No claim at all proves nothing about which record is stale.
+  dir=$(make_collision_case reconcile-no-claim "$stale" "$live" ship)
+  rm -f "$dir/pool/1/.fm-slot-owner"
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--reconcile-slot guessed an owner for an unclaimed slot"
+  assert_present "$dir/home/state/$stale.meta" "the refused reconciliation removed the record"
+
+  # No collision at all: ordinary teardown is the correct command, and
+  # --reconcile-slot must not become a quiet way to skip returning a slot.
+  dir=$(make_collision_case reconcile-no-collision "$stale" "$live" ship)
+  rm -f "$dir/home/state/$live.meta"
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--reconcile-slot retired a record that solely holds its slot"
+  assert_contains "$(cat "$dir/stderr")" "no slot collision" \
+    "the refusal did not say there was no collision to reconcile"
+  assert_present "$dir/home/state/$stale.meta" "the refused reconciliation removed the record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "a refused reconciliation reached the runtime: $(cat "$dir/runtime.log")"
+
+  # --reconcile-slot proves work is safe; --force discards work that is not.
+  dir=$(make_collision_case reconcile-with-force "$stale" "$live" ship)
+  set +e
+  run_reconcile "$dir" "$stale" --force > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "--reconcile-slot combined with --force was not rejected as a usage error (exit $rc)"
+  assert_present "$dir/home/state/$stale.meta" "the rejected invocation removed the record"
+
+  pass "fm-teardown: --reconcile-slot refuses with evidence whenever ownership or work safety cannot be proved"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -1387,6 +1598,9 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
+test_reconcile_slot_retires_the_landed_record_and_frees_the_survivor
+test_reconcile_slot_accepts_a_scout_whose_report_exists
+test_reconcile_slot_refuses_without_proof
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

@@ -52,6 +52,11 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#              Relaunch allocates no worktree: it reuses the copy the task's own
+#              record already names, and refuses when that path is missing
+#              rather than taking a fresh one. So the pool-slot ownership guard
+#              bin/fm-spawn.sh applies to a fresh allocation has nothing to
+#              check here - there is no newly handed-out slot to own.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an

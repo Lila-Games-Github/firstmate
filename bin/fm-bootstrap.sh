@@ -17,6 +17,8 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "SLOT_RECONCILE: task <id>'s local copy <path> reads free to
+#                 Treehouse ...",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -53,6 +55,14 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A SLOT_RECONCILE line means a task record still names a Treehouse pool
+#          slot that Treehouse itself reports available. A crewmate slot is held
+#          by a live process lease, so a host restart frees every slot while the
+#          records naming them survive: the next spawn can be handed that slot,
+#          and preparing it would replace the recorded task's copy. Detect-only,
+#          and reported from THIS home's records only. bin/fm-spawn.sh refuses
+#          such a slot on the same evidence, so the line is a warning that a
+#          record needs reconciling, never a report that work was lost.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -199,6 +209,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# Sourced directly rather than through bin/fm-wake-lib.sh, which creates state
+# directories at source time: this one is side-effect free, so the read-only
+# detect phase can use it.
+# shellcheck source=bin/fm-slot-record-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-slot-record-lib.sh"
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -1520,12 +1535,45 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  detect_recorded_slot_free
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+}
+
+# Freed-slot check. A crewmate's Treehouse slot is held by a live PROCESS lease
+# (bin/fm-slot-record-lib.sh owns why), so a host restart releases every slot
+# while the task records naming them survive on disk and the backend restores
+# their panes. Treehouse then reports the slot available and hands it to the next
+# spawn, which prepares it and replaces the recorded task's copy - the 2026-09-21
+# reuse that deadlocked two records on one slot.
+#
+# Detect-only, and deliberately one-sided: only a definite `available` from
+# Treehouse is reported. An unreadable status, an absent treehouse, or a slot
+# Treehouse does not record at all says nothing, because "cannot tell" is not
+# evidence that a record has drifted. A record with no project, no worktree, or a
+# worktree that is not a pool slot at all is skipped for the same reason.
+detect_recorded_slot_free() {
+  local meta id worktree project kind status
+  [ -d "$STATE" ] || return 0
+  command -v treehouse >/dev/null 2>&1 || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" != secondmate ] || continue
+    [ "$(fm_backend_of_meta "$meta")" != orca ] || continue
+    worktree=$(fm_meta_get "$meta" worktree)
+    project=$(fm_meta_get "$meta" project)
+    [ -n "$worktree" ] && [ -n "$project" ] || continue
+    fm_treehouse_pool_slot "$project" "$worktree" || continue
+    status=$(fm_slot_treehouse_status "$worktree" "$project") || continue
+    [ "$status" = available ] || continue
+    echo "SLOT_RECONCILE: task $id's local copy $worktree reads free to Treehouse while its record still claims it - a restart drops the hold on a copy but not the record, so the next dispatch can be handed the same copy; confirm the task with bin/fm-crew-state.sh $id and clear whichever record is wrong before dispatching into $project"
+  done
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,

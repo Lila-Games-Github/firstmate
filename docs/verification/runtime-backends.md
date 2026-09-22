@@ -2095,3 +2095,33 @@ Returning the recorded `/home` spelling succeeded, and `treehouse status --json`
 
 The portable regression pinning teardown's alias resolution and its refusal of genuinely different directories is in `tests/fm-teardown.test.sh` (`test_treehouse_path_alias_of_same_dir_returns_with_recorded_spelling` and `test_treehouse_genuinely_different_path_still_refuses`).
 Refresh this proof against a scratch pool after a treehouse upgrade if returns start refusing paths again.
+
+## Treehouse slot status is a live-process reading
+
+Verified on 2026-09-22 with treehouse v2.1.1 on Fedora, against the firstmate pool `firstmate-da2b8e`.
+This evidence supports `bin/fm-slot-record-lib.sh`'s `fm_slot_treehouse_status` and `bin/fm-bootstrap.sh`'s `SLOT_RECONCILE` detection, both of which act only on a definite `available`.
+
+Each record's `status` field reads `in-use` from the processes currently running under that slot, not from a durable reservation, which is why a host restart makes every crewmate slot read free while its task record survives.
+Read from the project directory, slot 1 (holding a live crewmate) reads `in-use` while the idle slots read `available`:
+
+```sh
+cd /var/home/sanchith/LILA/firstmate && treehouse status --json
+```
+
+```text
+[{"name":"1","status":"in-use"},{"name":"2","status":"available"},{"name":"3","status":"available"}, ...]
+```
+
+Reading the same pool from INSIDE slot 2 makes the `treehouse status` process itself the live process there, and that slot flips to `in-use`:
+
+```sh
+cd /var/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate && treehouse status --json
+```
+
+```text
+[{"name":"1","status":"in-use"},{"name":"2","status":"in-use"},{"name":"3","status":"available"}, ...]
+```
+
+That is why the status read is always taken from the project directory, never from the slot being asked about.
+The portable regression pinning the freed-slot report, its silence on `in-use`, and its silence when the status read fails is in `tests/fm-bootstrap.test.sh` (`test_recorded_slot_that_reads_free_is_reported`).
+Refresh this proof against a scratch pool after a treehouse upgrade if the `status` vocabulary changes.

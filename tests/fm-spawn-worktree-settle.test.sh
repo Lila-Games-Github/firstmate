@@ -19,6 +19,14 @@
 # comparing only against the project adopted it and the isolation guard then
 # refused the launch. The cases below cover both the transient and the pane
 # that never leaves the primary at all.
+#
+# A settled, isolated worktree is still not necessarily an UNOWNED one. A
+# Treehouse pool slot is held by a live process lease, so a host restart frees
+# every slot while the task records naming them survive; Treehouse then hands a
+# live task's slot to the next spawn, which prepares it and replaces that task's
+# checkout (observed 2026-09-21). The last cases below drive that shape: a pool
+# slot another live record already names must refuse before anything is claimed
+# or prepared, while a slot no record names still launches.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -221,9 +229,135 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+
+# --- pool-slot ownership ----------------------------------------------------
+
+# make_pool_settle_case <name> <id>: the settle fixture with its worktree laid
+# out as a real Treehouse pool slot - the fixed <pool>/<slot>/<repo> shape plus
+# the pool's own state file, which is what bin/fm-slot-record-lib.sh requires
+# before it will treat a worktree as a slot at all. Without that layout the
+# ownership guard correctly does not apply, so an ordinary linked worktree
+# cannot stand in for this case.
+make_pool_settle_case() {
+  local name=$1 id=$2 case_dir home proj pool wt fakebin countfile
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  pool="$case_dir/pool"
+  wt="$pool/1/repo"
+  countfile="$case_dir/pane-call-count"
+  fakebin=$(make_settle_fakebin "$case_dir/fake")
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$pool/1"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_git_init_commit "$proj"
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  git -C "$proj" worktree add --quiet --detach "$wt"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$wt" > "$pool/treehouse-state.json"
+  fm_test_spawn_brief "$home" "$id" "Exercise pool-slot ownership for $id."
+  touch "$home/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$case_dir/unused-stale|$fakebin|$countfile|0"
+}
+
+# A slot a live task record still names refuses before the claim is written and
+# before the base is freshened - the two steps that would take the slot from its
+# owner and replace its copy.
+test_pool_slot_owned_by_a_live_record_refuses() {
+  local rec id owner out status claim head_before
+  id='pool-owned-slot-z5'
+  owner=live-pipeline-task
+  rec=$(make_pool_settle_case pool-owned "$id")
+  read_settle_record "$rec"
+  fm_write_meta "$HOME_DIR/state/$owner.meta" \
+    "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$WT_DIR" "project=$PROJ_DIR" "kind=ship"
+  printf 'task=%s\nhome=%s\n' "$owner" "$HOME_DIR" > "$(dirname "$WT_DIR")/.fm-slot-owner"
+  head_before=$(git -C "$WT_DIR" rev-parse HEAD)
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn prepared a pool slot a live task record still owns"$'\n'"$out"
+  assert_contains "$out" "$owner" \
+    "the refusal did not name the task that still records the slot"
+  assert_contains "$out" "$WT_DIR" \
+    "the refusal did not name the slot it declined to prepare"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "the refused spawn published task metadata"
+  assert_present "$HOME_DIR/state/$owner.meta" \
+    "the refused spawn removed the owning task's record"
+  claim=$(cat "$(dirname "$WT_DIR")/.fm-slot-owner")
+  assert_contains "$claim" "task=$owner" \
+    "the refused spawn overwrote the owning task's slot claim"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$head_before" ] \
+    || fail "the refused spawn re-prepared the slot it declined to take"
+  pass "fm-spawn: a pool slot a live task record still names refuses before it is claimed or prepared"
+}
+
+# The same collision recorded on a secondmate home= line is the same slot, and
+# a record in a locally registered secondmate home is just as reachable as one
+# in this home - the pool is shared across both.
+test_pool_slot_owned_across_record_shapes_refuses() {
+  local rec id owner out status second_home case_dir
+  for owner in home-field-owner cross-home-owner; do
+    id="pool-owned-$owner-z6"
+    rec=$(make_pool_settle_case "pool-owned-$owner" "$id")
+    read_settle_record "$rec"
+    if [ "$owner" = home-field-owner ]; then
+      fm_write_meta "$HOME_DIR/state/$owner.meta" \
+        "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+        "worktree=$WT_DIR" "home=$WT_DIR" "project=$PROJ_DIR" "kind=secondmate"
+    else
+      case_dir=$(dirname "$(dirname "$(dirname "$WT_DIR")")")
+      second_home="$case_dir/secondmate-home"
+      mkdir -p "$second_home/state" "$second_home/data"
+      printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+        > "$HOME_DIR/data/secondmates.md"
+      fm_write_meta "$second_home/state/$owner.meta" \
+        "window=firstmate:fm-$owner" "endpoint_task_id=$owner" \
+        "worktree=$WT_DIR" "project=$PROJ_DIR" "kind=scout"
+    fi
+
+    out=$(run_settle_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] \
+      || fail "spawn prepared a slot recorded by $owner"$'\n'"$out"
+    assert_contains "$out" "$owner" \
+      "the refusal did not name $owner as the record still holding the slot"
+    assert_absent "$HOME_DIR/state/$id.meta" \
+      "the spawn refused for $owner still published task metadata"
+  done
+  pass "fm-spawn: a slot recorded as a secondmate home, or by another local home, refuses the same way"
+}
+
+# The guard must not turn every pooled spawn into a refusal: a slot no record
+# names still launches, and a neighbouring record on its OWN slot is not a
+# collision.
+test_unowned_pool_slot_still_launches() {
+  local rec id out status case_dir
+  id='pool-unowned-slot-z7'
+  rec=$(make_pool_settle_case pool-unowned "$id")
+  read_settle_record "$rec"
+  case_dir=$(dirname "$(dirname "$(dirname "$WT_DIR")")")
+  mkdir -p "$case_dir/other-slot"
+  fm_write_meta "$HOME_DIR/state/neighbour.meta" \
+    "window=firstmate:fm-neighbour" "endpoint_task_id=neighbour" \
+    "worktree=$case_dir/other-slot" "project=$PROJ_DIR" "kind=ship"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "an unowned pool slot should still launch"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "the launched spawn did not record the pool slot it took"
+  assert_grep "task=$id" "$(dirname "$WT_DIR")/.fm-slot-owner" \
+    "the launched spawn did not claim the slot it took"
+  pass "fm-spawn: a pool slot no live record names still launches and is claimed"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_pool_slot_owned_by_a_live_record_refuses
+test_pool_slot_owned_across_record_shapes_refuses
+test_unowned_pool_slot_still_launches
 
 echo "# all fm-spawn-worktree-settle tests passed"
