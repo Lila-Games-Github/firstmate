@@ -1,0 +1,42 @@
+{
+  "message_matches": {
+    "type": "noul",
+    "instructions": "For `{commit_key}`, does the commit message accurately describe the material change in its diff?",
+    "criteria": {
+      "yes": "The message and material diff agree.",
+      "no": "The message is misleading, omits the main change, or describes work absent from the diff."
+    }
+  },
+  "persistence": {
+    "type": "noul",
+    "instructions": "Does `{commit_key}` touch persistence, serialization, migration, stored state, or a save-file format?",
+    "criteria": {
+      "yes": "The diff changes persisted data or its interpretation.",
+      "no": "The diff does not affect persisted data or save formats."
+    }
+  },
+  "tests_weakened": {
+    "type": "noul",
+    "instructions": "Does `{commit_key}` delete, bypass, loosen, or materially weaken a test or verification check?",
+    "criteria": {
+      "yes": "Coverage or enforcement is removed or weakened.",
+      "no": "Tests are preserved or strengthened."
+    }
+  },
+  "debug_output": {
+    "type": "noul",
+    "instructions": "Does `{commit_key}` leave accidental debug output, temporary tracing, or diagnostic scaffolding in shipped paths?",
+    "criteria": {
+      "yes": "The diff appears to leave temporary debug behavior behind.",
+      "no": "No accidental debug behavior is present."
+    }
+  },
+  "credential": {
+    "type": "noul",
+    "instructions": "Does `{commit_key}` contain a credential, secret token, private key, password, or a value that plausibly grants access?",
+    "criteria": {
+      "yes": "The diff contains or appears to contain a real credential.",
+      "no": "The diff contains no credential; placeholders and variable names alone do not count."
+    }
+  }
+}

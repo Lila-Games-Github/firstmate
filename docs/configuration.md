@@ -522,6 +522,89 @@ The resolver sends the key to `curl` only as a header read from a file descripto
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Jev decision observers (config/jev.json)
+
+`config/jev.json` controls four optional TypeSafe AI Jev observers without changing typed dispatch resolution.
+The file is local and gitignored, is not inherited by secondmate homes, and is absent by default.
+An absent file uses the active built-in configuration shown below.
+An unreadable, symlinked, or malformed file makes every observer unavailable and preserves the existing path without a network call.
+Each observer also needs `TYPESAFE_API_KEY` in the environment or the effective home's `.env`, using the same environment-first accessor as typed dispatch resolution.
+Removing that key, enabling the global kill switch, or setting a use to `off` restores the existing path without a network call.
+
+The complete version 1 schema is:
+
+```json
+{
+  "version": 1,
+  "kill_switch": false,
+  "per_call_token_cap": 32000,
+  "daily": {
+    "call_cap": 100,
+    "spend_usd_cap": 0.05
+  },
+  "uses": {
+    "accept-check": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
+    "triage": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
+    "commit-lint": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
+    "open-questions": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}}
+  }
+}
+```
+
+`version` must be `1`, `kill_switch` must be Boolean, and `uses` must contain exactly the four named objects.
+`per_call_token_cap` is an integer from 1 through 32000.
+`bin/fm-jev.sh request-budget <use>` reports the request size limit; the client header owns request sizing, splitting, truncation, and refusal mechanics, including triage's single-request limit.
+See [the client contract](../bin/fm-jev.sh) before building an adapter envelope, and [Jev evaluation](jev.md#evaluate-the-result) for interpreting shortened or unanswered consultations.
+`daily.call_cap` is a nonnegative integer, and `daily.spend_usd_cap` is a nonnegative US-dollar number.
+Each use may also carry its own `daily` object with the same two fields; a use that omits it receives a share of the global budget. The remainder of an uneven division is handed out one call at a time in use-name order, so the four shares always sum to `daily.call_cap` exactly and no call is lost to rounding. A global cap below four therefore leaves some uses a share of zero rather than starving all four: `bin/fm-jev.sh status <use>` reports such a use as its configured mode with the reason `no-budget`, and `bin/fm-jev-report.sh` prints it as `<use>=<mode>(no-budget)`.
+Both budgets apply: a call needs room under the global cap and under its own use's cap.
+The built-in per-use shares prevent triage from spending another use's allocation; explicit overrides whose sum exceeds the global cap can exhaust that cap before another use runs.
+Every ledger row names the `use` that consumed the budget.
+The UTC date on ledger rows defines a budget day.
+Preflight spend uses the pinned rate of US$0.042 per million input tokens and the conservative input estimate, while a completed call records the response's reported input tokens when present and otherwise retains the estimate.
+Caps never trigger a retry and return the structured unavailable result to the adapter; a use over its own share is refused with `use-daily-call-cap` or `use-daily-spend-cap` rather than the global reason.
+Budget refusals append ledger rows with `network_attempted: false`, zero cost and zero tokens when the ledger is writable.
+Those rows consume no call or spend budget and are excluded from the metrics table; [Jev evaluation](jev.md#evaluate-the-result) explains the report sections for unanswered consultations.
+
+Each `mode` is `off`, `shadow`, or `active`.
+Off does not build adapter state, make a network call, or write the ledger; [Jev enable and disable](jev.md#enable-and-disable) owns the adapter diagnostics.
+Shadow asks Jev and records the consultation while the existing path makes the decision.
+Active permits only the adapter's documented advisory effect when the answer meets that use's `confidence_floor`; an unavailable or lower-confidence result keeps the existing decision.
+A batched consultation that asks one Choice per item applies that floor per item: each item keeps the confidence Jev returned for it, `used_jev_keys` and `decision_after_jev` record the qualifying items individually, and the remaining items keep their baseline decision.
+The scalar `confidence` on such a row is the lowest of the returned confidences and is a summary only, so a single unconfident answer neither discards its confident siblings nor makes a large batch look inert.
+Active triage records the confidence-qualified Jev classification but never suppresses or changes presentation, so a false routine verdict cannot silently lose supervision input.
+Disagreement never changes a configured mode, lowers it to shadow, or engages the kill switch.
+See [jev.md](jev.md) for each adapter's effect and rollback workflow.
+
+`bin/fm-jev.sh` requests `jev-1.13.0`, fixes the endpoint at `https://api.typesafe.ai/v1/systemone`, times out after five seconds, and accepts only schema-checked typed answers.
+A response is accepted when its model id is in the `jev-` family, so another build of the pinned model still answers; the returned id is recorded as `response_model` on every row, and a well-formed answer from any other model is refused with the distinct `response-model-mismatch` reason beside that id.
+It copies an environment-provided key into a non-exported private variable, unsets the original before invoking child processes, and passes the key to `curl` through a file descriptor rather than argv.
+The key and full request are never written to the ledger.
+
+Every network attempt, and every budget refusal, appends one version 2 JSON object to `state/jev-ledger.jsonl` under a bounded lock.
+Version 1 rows written before the per-item agreement fields existed remain valid and are read by `bin/fm-jev-report.sh` and `bin/fm-jev.sh finalize` exactly as before, so no ledger must be rewritten or deleted for the bump.
+The ledger rotates monthly: when the running file's first row predates the current month, it is appended to `state/jev-ledger/YYYY-MM.jsonl` and the running file starts empty. `bin/fm-jev-report.sh` and `bin/fm-jev.sh finalize` read the running file and every archive, so rotation hides no evidence and no archive must ever be deleted. `consult` validates only the row it is about to append and counts the day's budget from date-matching lines, so an interactive drain never pays for retained history.
+The identity fields are `timestamp`, `date`, `consultation_id`, `use`, and `subject`.
+The configuration fields are `mode`, `configured_mode`, and `confidence_floor`.
+The service fields are `network_attempted`, `available`, `unavailable_reason`, `response_model`, `input_tokens`, `input_tokens_source`, `latency_ms`, `cost_usd`, `request_bytes`, `truncated`, `jev_answers`, and `jev_probabilities`.
+`network_attempted` is false exactly on the refusal rows written before any request, which carry `available: false`, a naming `unavailable_reason`, and zero `input_tokens`, `latency_ms` and `cost_usd`.
+The day's calls and spend are counted from the ledger lines carrying today's date; a day with no rows counts as zero, but a day whose lines cannot all be parsed - one append cut short by a full disk or a killed process is enough - is not. That refuses every consultation for the rest of that day with `ledger-unreadable` rather than reading an uncountable day as an unspent budget, and each refusal is recorded, so `bin/fm-jev.sh validate-ledger` names the file to repair.
+`truncated` is true when the material had to be shortened to fit the per-call budget, and `jev_flagged` names the questions that drove a negative or risk verdict.
+The consultation result additionally carries `truncated_keys`, one entry per shortened state path naming how many of its characters survived, so an adapter can tell an answer about a stub from an answer about what it gathered; `bin/fm-jev-accept-check.sh` uses it to record such a criterion as `met: null` under `unjudged_criteria` rather than as met or unmet.
+When every question the verdict names was shortened the client records no scored verdict at all: the row carries `available: false` with `unavailable_reason: "questions-truncated"`, a null `jev_verdict`, `used_jev: false` and `decision_after_jev` equal to the baseline, so the report cannot count it as a prediction. `estimated_big_model_tokens` on a shortened row is the tokens the request actually carried rather than the adapter's estimate of the untruncated material.
+The comparison fields are `jev_verdict`, `jev_rationale`, `baseline_decision`, `baseline_rationale`, `agreement`, `agreement_keys`, `differing_keys`, `decision_after_jev`, `eventual_outcome`, `label_source`, `corrected`, `used_jev`, and `estimated_big_model_tokens`.
+A batched per-item consultation adds `jev_confidences` and `used_jev_keys`, one entry per asked item; `used_jev` is then true when at least one item qualified, and `bin/fm-jev-report.sh` credits such a row the share of its `estimated_big_model_tokens` whose own answers qualified.
+Such a row also carries `agreement_keys`, one boolean per asked item, and `differing_keys`, the sorted items whose Jev answer differs from the baseline; the scalar `agreement` is then true exactly when every item agrees, so one routine answer in a batch of fifty is recorded as that one item rather than as a whole-batch divergence.
+Both are null on a scalar verdict. `bin/fm-jev-report.sh` lists a batched disagreement as those items only - each with its Jev choice, its returned probabilities, and the baseline choice - and derives them the same way for a version 1 row that predates the fields.
+`existing_decision` and `final_decision` are compatibility aliases for `baseline_decision` and `eventual_outcome`.
+Because Jev returns typed answers rather than prose reasoning, `jev_rationale` is a deterministic explanation of the returned probabilities and configured verdict aggregation, not hidden model reasoning.
+Disabled uses, missing prerequisites, and invalid envelopes return before ledger recording; budget refusals and failed network attempts record their reason and baseline decision when the ledger is writable.
+Owning lifecycle paths may update a matching row's later `eventual_outcome` through `bin/fm-jev.sh finalize --use <use> --subject <subject> --decision-json <json> --label-source <path>`, which records the supplied outcome verbatim and names the observing path in `label_source`; `corrected` remains the literal difference between `decision_after_jev` and that outcome.
+`label_source` is null exactly while `eventual_outcome` is null.
+Task teardown supplies the acceptance-check label: `accepted` from `teardown-landed` or `teardown-scout-completion-gate`, `discarded` from `teardown-force-discard`, and nothing at all when teardown refuses.
+`bin/fm-jev-report.sh` treats only a use's positive label as the positive class - `accepted` for acceptance checks - counts every other label including `discarded` as negative, and reports rows still awaiting a label under `unlabelled`.
+No adapter writes an advisory to a task's status file, because a `note:` line there is a status event that would supersede a worker's terminal `done:` line and re-arm supervision's wedge aging for a finished task; advisories live in `data/<id>/acceptance.json`, `data/<id>/commit-lint.json`, and the `advisories:` section of `bin/fm-jev-report.sh`.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -1106,7 +1189,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # TypeSafe AI opt-in for typed dispatch and config/jev.json observers; absent preserves their fallback paths (docs/configuration.md "Typed dispatch resolution" and "Jev decision observers")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)

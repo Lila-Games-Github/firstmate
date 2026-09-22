@@ -3714,6 +3714,28 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 if [ "$KIND" != secondmate ]; then
   remove_pr_poll_artifacts "$STATE" "$ID" retain || exit 1
+  # Teardown is the ground-truth label for every earlier Jev acceptance
+  # consultation on this task, so it must record which teardown actually
+  # happened. A refusal above never reaches here and so records nothing; an
+  # ordinary teardown passed the landed-work or scout completion gate and is
+  # acceptance; --force skipped those gates, which this file documents as the
+  # captain's explicit OK to discard unlanded or dirty work, and that is a
+  # discard however clean the tree looked. Labelling a discard "accepted" would
+  # make the report's false positives unreachable by construction. This optional
+  # observer never makes cleanup fail when its ledger is absent or unavailable.
+  if [ "$FORCE" = "--force" ]; then
+    JEV_OUTCOME=discarded
+    JEV_LABEL_SOURCE=teardown-force-discard
+  elif [ "$KIND" = scout ]; then
+    JEV_OUTCOME=accepted
+    JEV_LABEL_SOURCE=teardown-scout-completion-gate
+  else
+    JEV_OUTCOME=accepted
+    JEV_LABEL_SOURCE=teardown-landed
+  fi
+  "$SCRIPT_DIR/fm-jev.sh" finalize --use accept-check --subject "$ID" \
+    --decision-json "\"$JEV_OUTCOME\"" --label-source "$JEV_LABEL_SOURCE" \
+    >/dev/null 2>&1 || true
 fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1

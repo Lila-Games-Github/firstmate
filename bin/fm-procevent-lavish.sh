@@ -122,6 +122,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
+# shellcheck source=bin/fm-jev-adapter-lib.sh
+. "$SCRIPT_DIR/fm-jev-adapter-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,111p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -545,14 +547,17 @@ cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 # comment matches the captured element text. Choice rows keep Context data
 # out of that field. A pure annotation has no prompt.
 cmd_read() {
-  local file=${1-} lifecycle session_ended
+  local file=${1-} lifecycle session_ended read_status=0 triage_file=''
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
+  if fm_jev_observer_ready triage; then
+    triage_file=$(mktemp "${TMPDIR:-/tmp}/fm-jev-lavish-read.XXXXXX") || triage_file=''
+  fi
   perl -e '
     use strict; use warnings;
-    my ($path, $lifecycle, $session_ended) = @ARGV;
+    my ($path, $lifecycle, $session_ended, $triage_path) = @ARGV;
     open my $fh, "<", $path or exit 1;
     my (@fields, $want, @rows);
     while (my $line = <$fh>) {
@@ -611,6 +616,20 @@ cmd_read() {
       } else {
         push @annotations, $f;
       }
+    }
+    if (length $triage_path && open my $triage, ">", $triage_path) {
+      for my $f (@parsed) {
+        my $tag = defined $f->{tag} ? $f->{tag} : "";
+        my $uid = defined $f->{uid} ? $f->{uid} : "";
+        my $selector = defined $f->{selector} ? $f->{selector} : "";
+        my $text = defined $f->{text} ? $f->{text} : "";
+        my $prompt = defined $f->{prompt} ? $f->{prompt} : "";
+        my $item = "tag=$tag uid=$uid selector=$selector text=$text";
+        $item .= " prompt=$prompt" if length $prompt;
+        $item =~ s/[\x00-\x1f\x7f]+/ /g;
+        print {$triage} "review-answer\t$item\n";
+      }
+      close $triage;
     }
     sub emit_body {
       my ($text) = @_;
@@ -672,7 +691,14 @@ cmd_read() {
       print "ANNOTATIONS: (none)\n";
     }
     print "END LAVISH RESULT ($presented of $want)\n";
-  ' "$file" "$lifecycle" "$session_ended"
+  ' "$file" "$lifecycle" "$session_ended" "$triage_file" || read_status=$?
+  # One read is one consultation: the whole captured element set goes out in a
+  # single batched request rather than one call per element.
+  if [ "$read_status" -eq 0 ] && [ -n "$triage_file" ] && [ -s "$triage_file" ]; then
+    "$SCRIPT_DIR/fm-jev-triage.sh" --batch < "$triage_file" >/dev/null 2>&1 || true
+  fi
+  [ -z "$triage_file" ] || rm -f -- "$triage_file"
+  return "$read_status"
 }
 
 case "${1-}" in

@@ -2533,6 +2533,9 @@ EOF
         prefix="$prefix; historical / not necessarily the triggering event"
       fi
       line="$prefix: $status_key: $event_line"
+      if declare -F fm_wake_presentation_observe_status >/dev/null 2>&1; then
+        fm_wake_presentation_observe_status "$event_line"
+      fi
       printf '%s\n' "$line" || return 1
     done <<EOF
 $FM_WAKE_UNREAD_LINES

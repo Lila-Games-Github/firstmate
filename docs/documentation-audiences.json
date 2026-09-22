@@ -381,6 +381,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/jev.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },

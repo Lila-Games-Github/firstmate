@@ -112,6 +112,13 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-backlog-transition-lib.sh` | Pair task-record changes with their backlog transitions and replay interrupted closes |
 | `fm-quota-axi-lib.sh`    | Shared `quota-axi` compatibility floor and quota snapshot schema validation           |
 | `fm-quota-choose.sh`     | Choose the first candidate with known positive quota from an ordered harness:model list |
+| `fm-jev.sh`              | Own bounded Jev requests, configuration enforcement, and the consultation outcome ledger |
+| `fm-jev-adapter-lib.sh`  | Shared opt-in gate that makes an explicitly invoked Jev adapter name its off reason  |
+| `fm-jev-accept-check.sh` | Review a worker report against extracted acceptance criteria without controlling completion |
+| `fm-jev-triage.sh`       | Classify a bounded supervision batch without changing its presentation            |
+| `fm-jev-commit-lint.sh`  | Review task-branch commits for message agreement and declared risk signals without blocking landing |
+| `fm-jev-open-questions.sh` | Propose statuses for page-referenced open questions without editing their register  |
+| `fm-jev-report.sh`       | Summarize Jev agreement, error direction, spend, and estimated token avoidance        |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
 | `fm-wake-drain.sh`       | Present and acknowledge the current actor's claimed wake rows alongside status, outcome-backstop, decision, divergence, recovery, and supervision checks |
 | `fm-wake-grant.sh`       | Serialize Pi supervision-branch wake-row claim activation, publication, release, and deactivation |

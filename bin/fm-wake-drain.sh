@@ -26,6 +26,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
+DRAIN_JEV_TMP=
+DRAIN_JEV_PRESENT=
+DRAIN_JEV_SEEN=
 DRAIN_LOCK_HELD=false
 RAW_ROWS=
 RECOVERY_MARKER="$STATE/.watcher-down"
@@ -40,6 +43,72 @@ ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
+
+# Stage optional Jev observations while presentation locks are held, then make
+# the consultations only after those locks are released. A use that could not
+# answer - off, no key, kill switch, unreadable configuration, no budget share -
+# creates no scratch file, stages nothing, makes no network call, and changes no
+# presentation byte.
+# shellcheck source=bin/fm-jev-adapter-lib.sh
+. "$SCRIPT_DIR/fm-jev-adapter-lib.sh"
+if fm_jev_observer_ready triage; then
+  DRAIN_JEV_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-jev-wake-drain.XXXXXX") || DRAIN_JEV_TMP=
+  if [ -n "$DRAIN_JEV_TMP" ]; then
+    DRAIN_JEV_PRESENT=$(mktemp "${TMPDIR:-/tmp}/fm-jev-wake-present.XXXXXX") \
+      || { rm -f -- "$DRAIN_JEV_TMP"; DRAIN_JEV_TMP=; }
+  fi
+  [ -z "$DRAIN_JEV_TMP" ] || DRAIN_JEV_SEEN="$STATE/.jev-triage-seen"
+fi
+# Two of the three sections that feed the observer are re-printed on every
+# drain - an open decision stays printed until it resolves - so staging each
+# presented line unconditionally would re-consult the identical item on every
+# drain and spend the day's triage share on duplicates. An item is consulted
+# once per distinct content: $DRAIN_JEV_SEEN retains only answered records
+# still presented, leaving overflow and unanswered items eligible for retry,
+# so a row that resolves is pruned and the same content returning later is
+# consulted again.
+fm_wake_presentation_stage() { # <record>
+  [ -n "$DRAIN_JEV_TMP" ] || return 0
+  printf '%s\n' "$1" >> "$DRAIN_JEV_PRESENT" 2>/dev/null || true
+  grep -Fxq -- "$1" "$DRAIN_JEV_SEEN" 2>/dev/null && return 0
+  printf '%s\n' "$1" >> "$DRAIN_JEV_TMP" 2>/dev/null || true
+}
+fm_wake_presentation_observe_status() { # <status-line>
+  fm_wake_presentation_stage "$(printf 'status\t%s' "$1")"
+}
+stage_jev_wake_rows() { # <deduped-raw-rows>
+  local rows=$1 row
+  [ -n "$DRAIN_JEV_TMP" ] || return 0
+  while IFS= read -r row || [ -n "$row" ]; do
+    [ -n "$row" ] || continue
+    fm_wake_presentation_stage "$(printf 'wake\t%s' "$row")"
+  done <<EOF
+$rows
+EOF
+}
+# One drain is one consultation: every staged item goes out in a single batched
+# request, so a drain that presented twenty lines cannot spend twenty of the
+# day's calls or serialize twenty five-second timeouts on the supervision path.
+run_jev_triage_observers() {
+  [ -n "$DRAIN_JEV_TMP" ] || return 0
+  local admitted="$DRAIN_JEV_TMP.admitted" covered="$DRAIN_JEV_TMP.covered"
+  : > "$admitted"
+  : > "$covered"
+  if [ -s "$DRAIN_JEV_TMP" ]; then
+    "$SCRIPT_DIR/fm-jev-triage.sh" --batch --admitted-lines "$admitted" \
+      < "$DRAIN_JEV_TMP" >/dev/null 2>&1 || true
+    awk 'FILENAME == ARGV[1] { admitted[$0]=1; next } FNR in admitted' \
+      "$admitted" "$DRAIN_JEV_TMP" > "$covered"
+    : > "$DRAIN_JEV_TMP" 2>/dev/null || true
+  fi
+  [ ! -f "$DRAIN_JEV_SEEN" ] || cat "$DRAIN_JEV_SEEN" >> "$covered"
+  awk 'FILENAME == ARGV[1] { covered[$0]=1; next } $0 in covered' \
+    "$covered" "$DRAIN_JEV_PRESENT" | sort -u > "$DRAIN_JEV_SEEN.tmp.$$" \
+    && mv -f "$DRAIN_JEV_SEEN.tmp.$$" "$DRAIN_JEV_SEEN" 2>/dev/null \
+    || rm -f -- "$DRAIN_JEV_SEEN.tmp.$$" 2>/dev/null || true
+  rm -f -- "$admitted" "$covered"
+
+}
 
 # --- per-actor consume (docs/watcher-continuity.md "Per-actor acknowledgement") --
 # main (FM_SUPERVISION_ACTOR unset or "main", via fm-lease-lib.sh's fm_lease_actor
@@ -369,6 +438,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       omitted=$((omitted + 1))
       continue
     fi
+    fm_wake_presentation_observe_status "$line"
     output="$output$line
 "
     STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="$STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED$task$(printf '\t')$event_endpoint
@@ -414,6 +484,7 @@ print_unread_status_section() {
     [ -n "$task" ] || continue
     [ -n "$line" ] || continue
     line="$task $line"
+    fm_wake_presentation_observe_status "$line"
     if [ "$shown" -eq 0 ]; then
       printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
     fi
@@ -467,6 +538,7 @@ print_open_decisions_section() {
       omitted=$((omitted + 1))
       continue
     fi
+    fm_wake_presentation_observe_status "$line"
     output="$output$line
 "
     used=$((used + bytes))
@@ -614,6 +686,8 @@ cleanup() {
   local status=$?
   [ -z "$DRAIN_TMP" ] || rm -f -- "$DRAIN_TMP" 2>/dev/null || true
   [ -z "$DRAIN_VIEW_TMP" ] || rm -f -- "$DRAIN_VIEW_TMP" 2>/dev/null || true
+  [ -z "$DRAIN_JEV_TMP" ] || rm -f -- "$DRAIN_JEV_TMP" 2>/dev/null || true
+  [ -z "$DRAIN_JEV_PRESENT" ] || rm -f -- "$DRAIN_JEV_PRESENT" 2>/dev/null || true
   if [ "$DRAIN_LOCK_HELD" = true ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   fi
@@ -778,6 +852,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
+  run_jev_triage_observers
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -799,6 +874,7 @@ if [ "$ACTOR" = main ]; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
+    run_jev_triage_observers
     assert_watcher_liveness
     exit 0
   fi
@@ -848,6 +924,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
 esac
 if [ -n "$RAW_ROWS" ]; then
   printf '%s\n' "$RAW_ROWS" || exit "$?"
+  stage_jev_wake_rows "$RAW_ROWS"
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
@@ -861,5 +938,6 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+run_jev_triage_observers
 assert_watcher_liveness
 exit 0

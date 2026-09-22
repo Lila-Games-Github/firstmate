@@ -1,0 +1,19 @@
+{
+  "attention": {
+    "type": "choice",
+    "instructions": "Classify `item` for supervision. Choose actionable only when it reports a decision, failure, blocker, completed outcome, request, correction, or evidence that changes what the supervisor should do. Choose routine for progress chatter, acknowledgements, or repetition that requires no response.",
+    "criteria": {
+      "routine": "No response or changed supervisory action is warranted.",
+      "actionable": "The supervisor should decide, respond, investigate, relay, or take a lifecycle action."
+    }
+  },
+  "review_kind": {
+    "type": "choice",
+    "instructions": "Classify the captured review `item` by what the reviewer communicated.",
+    "criteria": {
+      "ruling": "It selects or settles an offered decision.",
+      "question": "It asks for information or clarification.",
+      "instruction": "It directs work or requests a concrete change."
+    }
+  }
+}
