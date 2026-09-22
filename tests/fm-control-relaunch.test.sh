@@ -144,10 +144,12 @@ new_case() {
   printf '%s\n' "$dir"
 }
 
-# add_ship_task <case-dir> <id> [harness]
+# add_ship_task <case-dir> <id> [harness] [worktree]
+# The worktree defaults to the case's own <dir>/wt; a case that needs the copy
+# laid out as a Treehouse pool slot passes that path instead.
 add_ship_task() {
-  local dir=$1 id=$2 harness=${3:-claude}
-  local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
+  local dir=$1 id=$2 harness=${3:-claude} wt=${4:-$1/wt}
+  local home="$dir/home" proj="$dir/proj"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
@@ -1541,6 +1543,67 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
 
 # --- 6. fm-spawn --relaunch's own refusals -----------------------------------
 
+# --- relaunch into a copy another record owns -------------------------------
+#
+# A relaunch allocates nothing and re-prepares nothing, so the allocation guard
+# has no slot hand-out to refuse here. What it does do is put a fresh agent into
+# the copy this task's record names - and after a restart that copy can be one a
+# different live record now owns, which is the 2026-09-21 state where one slot
+# ended up named by two records. A second agent editing another record's copy is
+# the same class of outcome, so the same record scan has to answer it.
+
+# make_pooled_relaunch_case <name> <id>: a relaunch case whose recorded copy is
+# a real Treehouse pool slot - the fixed <pool>/<slot>/<repo> shape plus the
+# pool's own state file, which is what bin/fm-slot-record-lib.sh requires before
+# it treats a worktree as a slot - with an agent-free endpoint.
+make_pooled_relaunch_case() {  # <name> <id>
+  local name=$1 id=$2 dir
+  dir=$(new_case "$name" "$id")
+  mkdir -p "$dir/pool/1"
+  add_ship_task "$dir" "$id" claude "$dir/pool/1/repo"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$dir/pool/1/repo" \
+    > "$dir/pool/treehouse-state.json"
+  printf 'zsh' > "$dir/fake/command"
+  printf '%s\n' "$dir"
+}
+
+test_spawn_relaunch_refuses_a_slot_another_record_owns() {
+  local dir out rc owner=live-pipeline head_before
+  dir=$(make_pooled_relaunch_case relaunch-owned-slot rl50)
+  fm_write_meta "$dir/home/state/$owner.meta" \
+    "window=fmses:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$dir/pool/1/repo" "project=$dir/proj" "kind=ship"
+  head_before=$(git -C "$dir/pool/1/repo" rev-parse HEAD)
+
+  out=$(run_spawn "$dir" rl50 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunching into a copy another live record owns should refuse"$'\n'"$out"
+  assert_contains "$out" "$owner" "the refusal did not name the record that also owns the copy"
+  assert_contains "$out" "$dir/pool/1/repo" "the refusal did not name the copy it declined to enter"
+  [ "$(meta_field "$dir" rl50 worktree)" = "$dir/pool/1/repo" ] \
+    || fail "the refused relaunch rewrote the task record"
+  assert_present "$dir/home/state/$owner.meta" "the refused relaunch removed the other record"
+  [ "$(git -C "$dir/pool/1/repo" rev-parse HEAD)" = "$head_before" ] \
+    || fail "the refused relaunch moved the copy"
+  [ ! -s "$dir/fake/literal" ] || fail "the refused relaunch still launched an agent"
+  pass "fm-spawn --relaunch: refuses to start an agent in a copy another live record owns"
+}
+
+test_spawn_relaunch_into_an_unowned_pool_slot_still_launches() {
+  local dir out rc
+  dir=$(make_pooled_relaunch_case relaunch-unowned-slot rl51)
+  mkdir -p "$dir/other-copy"
+  fm_write_meta "$dir/home/state/neighbour.meta" \
+    "window=fmses:fm-neighbour" "endpoint_task_id=neighbour" \
+    "worktree=$dir/other-copy" "project=$dir/proj" "kind=ship"
+
+  out=$(run_spawn "$dir" rl51 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a pool slot no other record names should still relaunch"$'\n'"$out"
+  [ "$(meta_field "$dir" rl51 worktree)" = "$dir/pool/1/repo" ] \
+    || fail "the relaunch replaced the recorded copy"
+  [ -s "$dir/fake/literal" ] || fail "the relaunch did not launch a replacement agent"
+  pass "fm-spawn --relaunch: a recorded pool slot no other record names still relaunches"
+}
+
 test_spawn_relaunch_refuses_a_live_agent() {
   local dir out rc
   dir=$(new_case live rl15)
@@ -1758,6 +1821,8 @@ test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
+test_spawn_relaunch_refuses_a_slot_another_record_owns
+test_spawn_relaunch_into_an_unowned_pool_slot_still_launches
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous

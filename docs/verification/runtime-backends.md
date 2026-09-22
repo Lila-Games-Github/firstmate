@@ -2099,7 +2099,7 @@ Refresh this proof against a scratch pool after a treehouse upgrade if returns s
 ## Treehouse slot status is a live-process reading
 
 Verified on 2026-09-22 with treehouse v2.1.1 on Fedora (ostree layout, where `/home` is a symlink to `/var/home`), against the firstmate pool `firstmate-da2b8e`.
-This evidence supports `bin/fm-slot-record-lib.sh`'s `fm_slot_treehouse_status` and `bin/fm-bootstrap.sh`'s `SLOT_RECONCILE` detection, both of which act only on a definite `available`.
+This evidence supports `bin/fm-slot-record-lib.sh`'s `fm_slot_treehouse_entry` and `bin/fm-bootstrap.sh`'s `SLOT_RECONCILE` detection, which act only on a definite reading, and the `path` spelling recorded below is the one the stranded-lease remedy prints, because `treehouse return` matches its argument as a string.
 
 Each record's `status` field reads `in-use` from the processes currently running under that slot, not from a durable reservation, which is why a host restart makes every crewmate slot read free while its task record survives.
 Read from the project directory, slot 1 (holding a live crewmate) reads `in-use` while the idle slots read `available`.

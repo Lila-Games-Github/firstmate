@@ -1615,7 +1615,7 @@ detect_recorded_slot_drift() {
     fi
     [ -n "$FM_SLOT_TREEHOUSE_LEASE_HOLDER" ] || continue
     [ "$FM_SLOT_TREEHOUSE_LEASE_HOLDER" != "$id" ] || continue
-    echo "SLOT_RECONCILE: task $id's local copy $slot carries a Treehouse lease held for '$FM_SLOT_TREEHOUSE_LEASE_HOLDER' while task $id's record still claims it - a crewmate copy takes no durable lease and a secondmate home holds only its own, so a lease under another label is the one a refused seed kept instead of returning it, because returning would have cleaned and reset that copy; confirm the task with bin/fm-crew-state.sh $id, reconcile whichever record is wrong, then release the lease with 'treehouse return --if-lease-holder $FM_SLOT_TREEHOUSE_LEASE_HOLDER $slot' run from $project"
+    echo "SLOT_RECONCILE: task $id's local copy $slot carries a Treehouse lease held for '$FM_SLOT_TREEHOUSE_LEASE_HOLDER' while task $id's record still claims it - a crewmate copy takes no durable lease and a secondmate home holds only its own, so a lease under another label is the one a refused seed kept instead of returning it, because returning would have cleaned and reset that copy; confirm the task with bin/fm-crew-state.sh $id, reconcile whichever record is wrong, then release the lease with 'treehouse return --if-lease-holder $FM_SLOT_TREEHOUSE_LEASE_HOLDER $FM_SLOT_TREEHOUSE_PATH' run from $project - treehouse matches that argument against its own records as a string, so the spelling it records is the one it accepts"
   done
 }
 

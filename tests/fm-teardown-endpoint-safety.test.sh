@@ -1498,6 +1498,28 @@ test_reconcile_slot_accepts_a_scout_whose_report_exists() {
 }
 
 # Every refusal shape: each one must change nothing at all.
+# A secondmate id is a plausible thing for an operator to type here, and the
+# slot gate ahead of the kind check would answer it with the generic "records no
+# live pool slot" - true, but not the reason. The reason is that a secondmate is
+# retired explicitly, and that is what has to be said.
+test_reconcile_slot_refuses_a_secondmate_record_by_its_own_reason() {
+  local dir rc
+  dir=$(make_collision_case reconcile-secondmate sm-stale sm-live secondmate)
+  set +e
+  run_reconcile "$dir" sm-stale >/dev/null 2>"$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--reconcile-slot accepted a secondmate record"
+  assert_contains "$(cat "$dir/stderr")" "secondmate sm-stale is retired explicitly instead" \
+    "the refusal did not give the reason that fits a secondmate id"
+  assert_not_contains "$(cat "$dir/stderr")" "needs a live Treehouse pool slot" \
+    "the refusal fell through to the generic slot-gate reason"
+  assert_present "$dir/home/state/sm-stale.meta" "the refusal removed the secondmate record"
+  assert_present "$dir/home/state/sm-live.meta" "the refusal removed the other record"
+  assert_present "$dir/worktree/sentinel" "the refusal touched the slot's copy"
+  pass "fm-teardown: --reconcile-slot refuses a secondmate id for its own reason"
+}
+
 test_reconcile_slot_refuses_without_proof() {
   local dir stale=stale-task live=live-task rc
 
@@ -1600,6 +1622,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_reconcile_slot_retires_the_landed_record_and_frees_the_survivor
 test_reconcile_slot_accepts_a_scout_whose_report_exists
+test_reconcile_slot_refuses_a_secondmate_record_by_its_own_reason
 test_reconcile_slot_refuses_without_proof
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

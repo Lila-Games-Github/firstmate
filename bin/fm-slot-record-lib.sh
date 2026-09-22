@@ -21,7 +21,7 @@
 #
 # Prerequisites, by function:
 #   fm_treehouse_pool_slot, fm_slot_project_dir, fm_slot_treehouse_pool_json,
-#     fm_slot_treehouse_entry, fm_slot_treehouse_status - git / treehouse only.
+#     fm_slot_treehouse_entry - git / treehouse only.
 #   fm_slot_record_states, fm_slot_record_other_holder - the caller must have
 #     already sourced bin/fm-wake-lib.sh (fm_firstmate_root_home),
 #     bin/fm-backend.sh (fm_meta_get), and
@@ -35,6 +35,7 @@ FM_SLOT_RECORD_HOLDER_META=
 FM_SLOT_RECORD_HOLDER_FIELD=
 FM_SLOT_TREEHOUSE_STATUS=
 FM_SLOT_TREEHOUSE_LEASE_HOLDER=
+FM_SLOT_TREEHOUSE_PATH=
 
 # The physical path of an existing directory, or failure. Every slot comparison
 # below goes through it, so a symlinked prefix (Fedora ostree's /home ->
@@ -148,16 +149,30 @@ fm_slot_treehouse_pool_json() {  # <project-dir>
 #                                              reports, passed through
 #   FM_SLOT_TREEHOUSE_LEASE_HOLDER the durable lease's holder label, empty when
 #                                  no durable lease reserves the slot
+#   FM_SLOT_TREEHOUSE_PATH         the spelling Treehouse itself records for the
+#                                  slot, which is the only one its own `return`
+#                                  matches - it compares by string, so an
+#                                  operator remedy built from the task meta's
+#                                  spelling is refused on an alias host
+#                                  (docs/verification/runtime-backends.md)
 #
 # Reads the machine-readable `treehouse status --json` surface (verified against
 # treehouse v2.1.1 and v2.3.0) rather than the human status table. Each record
 # carries name, path, status, lease_id, lease_holder, leased_at and processes;
-# the full recorded shape is in docs/verification/runtime-backends.md. The key
-# stream is scanned in document order, where a "path" token opens the entry it
-# belongs to and the next one closes it, so an entry that omits a key - or
-# carries it empty, as lease_holder does for every unleased slot - can never
+# the full recorded shape is in docs/verification/runtime-backends.md.
+#
+# Every string-valued key is extracted with ONE pattern and the keys of interest
+# are picked out below, rather than an alternation of three: alternation in a
+# basic regular expression is a GNU grep extension that matches nothing on the
+# BSD grep of a stock macOS, which would leave this function silently reporting
+# no entry for any slot and both SLOT_RECONCILE directions dead with no error.
+# bin/fm-teardown.sh's sibling reader avoids it the same way.
+#
+# The key stream is scanned in document order, where a "path" token opens the
+# entry it belongs to and the next one closes it, so an entry that omits a key -
+# or carries it empty, as lease_holder does for every unleased slot - can never
 # lend a value to the next entry, and the nested "processes" objects carry none
-# of the three keys.
+# of the keys read here.
 #
 # The queried slot is identified by fm_slot_path_matches, which compares
 # physical directories rather than spellings: Treehouse reports the /home alias
@@ -167,6 +182,7 @@ fm_slot_treehouse_entry() {  # <slot-dir> <pool-json>
   local slot=$1 json=$2 canon identity token key value matched=0
   FM_SLOT_TREEHOUSE_STATUS=
   FM_SLOT_TREEHOUSE_LEASE_HOLDER=
+  FM_SLOT_TREEHOUSE_PATH=
   canon=$(fm_slot_canonical_dir "$slot") || return 1
   identity=$(fm_slot_pool_identity "$canon") || identity=''
   while IFS= read -r token; do
@@ -180,8 +196,10 @@ fm_slot_treehouse_entry() {  # <slot-dir> <pool-json>
         [ "$matched" = 0 ] || break
         FM_SLOT_TREEHOUSE_STATUS=
         FM_SLOT_TREEHOUSE_LEASE_HOLDER=
+        FM_SLOT_TREEHOUSE_PATH=
         if fm_slot_path_matches "$value" "$canon" "$identity"; then
           matched=1
+          FM_SLOT_TREEHOUSE_PATH=$value
         fi
         ;;
       *'"status"'*)
@@ -192,20 +210,9 @@ fm_slot_treehouse_entry() {  # <slot-dir> <pool-json>
         ;;
     esac
   done <<EOF
-$(printf '%s\n' "$json" | grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"\|"status"[[:space:]]*:[[:space:]]*"[^"]*"\|"lease_holder"[[:space:]]*:[[:space:]]*"[^"]*"')
+$(printf '%s\n' "$json" | grep -o '"[a-z_]*"[[:space:]]*:[[:space:]]*"[^"]*"')
 EOF
   [ -n "$FM_SLOT_TREEHOUSE_STATUS" ] || return 1
-}
-
-# What Treehouse currently reports for one slot, printed as a single word, for a
-# caller whose only question is that one. Fails without printing when treehouse
-# is absent, its status read fails, or no recorded entry is the same physical
-# directory as the slot.
-fm_slot_treehouse_status() {  # <slot-dir> <project-dir>
-  local json
-  json=$(fm_slot_treehouse_pool_json "$2") || return 1
-  fm_slot_treehouse_entry "$1" "$json" || return 1
-  printf '%s\n' "$FM_SLOT_TREEHOUSE_STATUS"
 }
 
 # Every state directory on THIS machine whose task records could name a slot

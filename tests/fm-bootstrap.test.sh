@@ -427,7 +427,74 @@ EOF
   assert_not_contains "$out" SLOT_RECONCILE \
     "bootstrap reported a durable lease the recording task holds itself"
 
+  # `treehouse return` matches its path argument against its own records as a
+  # string, so a remedy built from the meta's spelling is refused wherever the
+  # two differ. The command has to carry the spelling treehouse recorded.
+  ln -s "$case_dir/pool" "$case_dir/pool-alias"
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=seeded-mate \
+    "FM_FAKE_TREEHOUSE_SLOT_PATH=$case_dir/pool-alias/1/repo")
+  assert_contains "$out" "treehouse return --if-lease-holder seeded-mate $case_dir/pool-alias/1/repo" \
+    "the remedy did not print the spelling treehouse records for the copy"
+  assert_not_contains "$out" "--if-lease-holder seeded-mate $wt" \
+    "the remedy printed the meta's spelling, which treehouse's string match refuses"
+
   pass "bootstrap reports a durable lease stranded on a recorded copy, and only another holder's"
+}
+
+# Stock macOS ships a BSD grep, whose basic regular expressions have no
+# alternation: the GNU-only `\|` is an escaped ordinary character there. An
+# extraction that relies on it yields no tokens at all, and BOTH SLOT_RECONCILE
+# directions then go silent with no error anywhere - which is how this defect
+# survived two rounds unnoticed on a GNU host. These cases drive a real bootstrap
+# through a grep that reproduces exactly that one difference.
+install_bsd_grep_shim() {  # <fakebin> <real-grep>
+  local fakebin=$1 real=$2
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'REAL_GREP=%s\n' "$real"
+    cat <<'SH'
+extended=0
+for a in "$@"; do
+  case "$a" in
+    --extended-regexp|--perl-regexp) extended=1 ;;
+    --*) ;;
+    -*) case "$a" in *E*|*P*) extended=1 ;; esac ;;
+  esac
+done
+args=()
+for a in "$@"; do
+  [ "$extended" = 1 ] || a=${a//\\|/[|]}
+  args+=("$a")
+done
+exec "$REAL_GREP" "${args[@]}"
+SH
+  } > "$fakebin/grep"
+  chmod +x "$fakebin/grep"
+}
+
+test_slot_drift_survives_a_grep_without_bre_alternation() {
+  local rec case_dir home proj wt fakebin out real_grep id=slot-posix-grep-task
+
+  rec=$(make_slot_case slot-posix-grep available)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$proj" "kind=ship"
+  real_grep=$(PATH="$BASE_PATH" command -v grep) || fail "no grep on the hermetic PATH"
+  install_bsd_grep_shim "$fakebin" "$real_grep"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin")
+  printf '%s\n' "$out" | grep -F "SLOT_RECONCILE: task $id's local copy $wt reads free" >/dev/null \
+    || fail "the freed-slot report went silent on a grep without BRE alternation (got: $out)"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_STATUS=leased \
+    FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=refused-seed)
+  printf '%s\n' "$out" | grep -F "carries a Treehouse lease held for 'refused-seed'" >/dev/null \
+    || fail "the stranded-lease report went silent on a grep without BRE alternation (got: $out)"
+
+  pass "bootstrap reports both slot-drift directions on a grep with no BRE alternation"
 }
 
 # A secondmate seeded onto an explicit path that is itself a pool slot leaves
@@ -1456,6 +1523,7 @@ test_recorded_slot_that_reads_free_is_reported
 test_recorded_slot_is_identified_through_a_path_alias
 test_recorded_slot_with_foreign_lease_is_reported
 test_secondmate_home_with_foreign_lease_is_reported
+test_slot_drift_survives_a_grep_without_bre_alternation
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version

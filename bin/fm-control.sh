@@ -54,9 +54,11 @@
 #              running.
 #              Relaunch allocates no worktree: it reuses the copy the task's own
 #              record already names, and refuses when that path is missing
-#              rather than taking a fresh one. So the pool-slot ownership guard
-#              bin/fm-spawn.sh applies to a fresh allocation has nothing to
-#              check here - there is no newly handed-out slot to own.
+#              rather than taking a fresh one. Nothing is re-prepared, but a
+#              copy a record names can be one another live record owns after a
+#              restart, so bin/fm-spawn.sh runs the same pool-slot ownership
+#              scan before it drives the endpoint into that copy; its refusal
+#              surfaces here verbatim and leaves both records untouched.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an

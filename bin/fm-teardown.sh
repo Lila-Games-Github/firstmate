@@ -2417,6 +2417,14 @@ RECONCILE_SLOT_BRANCH=
 require_reconcilable_slot_collision() {
   local slot rc=0 branch report slot_branch unlanded
 
+  # Before the slot gate, which refuses a secondmate for the generic reason that
+  # teardown_live_slot_path resolves no slot for one: the specific reason is the
+  # one an operator who typed a secondmate id needs to read.
+  if [ "$KIND" = secondmate ]; then
+    echo "REFUSED: --reconcile-slot is for crewmate task records; secondmate $ID is retired explicitly instead." >&2
+    return 1
+  fi
+
   slot=$(teardown_live_slot_path) || {
     echo "REFUSED: --reconcile-slot needs a live Treehouse pool slot, and task $ID records ${WT:-no worktree}." >&2
     echo "Only a shared pool slot can deadlock two records this way; tear this task down with the ordinary command." >&2
@@ -2457,10 +2465,6 @@ require_reconcilable_slot_collision() {
   esac
 
   case "$KIND" in
-    secondmate)
-      echo "REFUSED: --reconcile-slot is for crewmate task records; secondmate $ID is retired explicitly instead." >&2
-      return 1
-      ;;
     scout)
       report="$DATA/$ID/report.md"
       if [ ! -f "$report" ] || [ ! -s "$report" ]; then
