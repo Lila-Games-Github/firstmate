@@ -261,7 +261,12 @@ assert_timeout_report() {
 
 # make_slot_case <name> <slot-status>: a home with one task record naming a real
 # Treehouse pool slot, and a treehouse whose `status --json` reports that slot
-# with <slot-status>. Echoes "<case-dir>|<home>|<project>|<worktree>|<fakebin>".
+# with <slot-status>, in the record shape real treehouse prints (recorded in
+# docs/verification/runtime-backends.md). The reported status and the reported
+# path spelling are overridable per run via FM_FAKE_TREEHOUSE_SLOT_STATUS and
+# FM_FAKE_TREEHOUSE_SLOT_PATH, because real treehouse records the spelling it
+# was launched through rather than the one the meta holds.
+# Echoes "<case-dir>|<home>|<project>|<worktree>|<fakebin>".
 make_slot_case() {
   local name=$1 status=$2 case_dir home proj pool wt fakebin
   case_dir="$TMP_ROOT/$name"
@@ -284,8 +289,8 @@ if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
 fi
 if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
   [ "\${FM_FAKE_TREEHOUSE_STATUS_FAILS:-0}" != 1 ] || exit 1
-  printf '[{"name":"1","path":"%s","status":"%s","processes":[{"pid":1,"name":"sh"}]}]\n' \
-    '$wt' "\${FM_FAKE_TREEHOUSE_SLOT_STATUS:-$status}"
+  printf '[{"name":"1","path":"%s","status":"%s","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":1,"name":"sh"}]}]\n' \
+    "\${FM_FAKE_TREEHOUSE_SLOT_PATH:-$wt}" "\${FM_FAKE_TREEHOUSE_SLOT_STATUS:-$status}"
   exit 0
 fi
 exit 0
@@ -342,6 +347,48 @@ EOF
     "bootstrap reported drift for a worktree that is not a Treehouse pool slot"
 
   pass "bootstrap reports a recorded pool slot Treehouse reports free, and only on a definite answer"
+}
+
+# Treehouse records the path spelling it was launched through, which on an
+# ostree host is the /home alias of the /var/home path the meta records
+# (docs/verification/runtime-backends.md). Both spellings name one slot, so the
+# drift report must still recognise it - while a record that names a DIFFERENT
+# slot of the pool stays as silent as it would with no record at all.
+test_recorded_slot_is_identified_through_a_path_alias() {
+  local rec case_dir home proj wt fakebin out id=slot-alias-task alias_wt gone
+
+  rec=$(make_slot_case slot-alias available)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$proj" "kind=ship"
+
+  # The meta records the physical slot; treehouse reports it through a symlinked
+  # prefix that resolves to that same directory.
+  ln -s "$case_dir/pool" "$case_dir/pool-alias"
+  alias_wt="$case_dir/pool-alias/1/repo"
+  [ "$alias_wt" != "$wt" ] || fail "the alias spelling must differ from the recorded worktree"
+  out=$(run_slot_bootstrap "$home" "$fakebin" "FM_FAKE_TREEHOUSE_SLOT_PATH=$alias_wt")
+  printf '%s\n' "$out" | grep -F "SLOT_RECONCILE: task $id's local copy $wt" >/dev/null \
+    || fail "bootstrap did not recognise its own slot through a path alias (got: $out)"
+
+  # A recorded spelling whose prefix resolves nowhere on this host is still that
+  # pool slot...
+  gone="$case_dir/vanished-alias/pool/1/repo"
+  [ ! -e "$gone" ] || fail "the vanished-alias fixture path must not exist"
+  out=$(run_slot_bootstrap "$home" "$fakebin" "FM_FAKE_TREEHOUSE_SLOT_PATH=$gone")
+  printf '%s\n' "$out" | grep -F "SLOT_RECONCILE: task $id's local copy $wt" >/dev/null \
+    || fail "bootstrap did not identify an unresolvable spelling by its pool slot (got: $out)"
+
+  # ...but slot 2 of that pool is a different slot, and reports nothing.
+  out=$(run_slot_bootstrap "$home" "$fakebin" \
+    "FM_FAKE_TREEHOUSE_SLOT_PATH=$case_dir/vanished-alias/pool/2/repo")
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported drift from a Treehouse record for a different slot"
+
+  pass "bootstrap identifies a recorded slot through a path alias, and only that slot"
 }
 
 test_bootstrap_reporting() {
@@ -1328,6 +1375,7 @@ ROWS
 
 test_bootstrap_reporting
 test_recorded_slot_that_reads_free_is_reported
+test_recorded_slot_is_identified_through_a_path_alias
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version

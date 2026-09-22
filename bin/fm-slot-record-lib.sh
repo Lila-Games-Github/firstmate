@@ -43,6 +43,47 @@ fm_slot_canonical_dir() {  # <dir>
   ( CDPATH='' cd -- "$target" && pwd -P )
 }
 
+# The pool-relative identity of a slot path, printed as "<pool>/<slot>/<repo>"
+# from the managed pool's fixed <pool>/<slot>/<repo> layout. Unlike the physical
+# path it survives a spelling whose prefix no longer resolves on this host, so
+# it is the only identity left for a Treehouse record that names a slot through
+# a path alias that is gone. Fails on anything without those three components.
+fm_slot_pool_identity() {  # <slot-path>
+  local rest=$1 repo slot pool
+  case "$rest" in
+    /?*) ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%/}
+  repo=${rest##*/}
+  rest=${rest%/*}
+  slot=${rest##*/}
+  rest=${rest%/*}
+  pool=${rest##*/}
+  [ -n "$repo" ] && [ -n "$slot" ] && [ -n "$pool" ] || return 1
+  printf '%s/%s/%s\n' "$pool" "$slot" "$repo"
+}
+
+# True when a path Treehouse reported names the same slot as <canonical-slot>.
+# Treehouse records the spelling it was launched through, which on this host's
+# ostree layout is the /home alias of the /var/home path a task meta records
+# (verified 2026-09-22, docs/verification/runtime-backends.md), so the two sides
+# are compared as physical directories, never as strings.
+# When the reported spelling does not resolve here at all - the alias itself is
+# gone - the comparison falls back to the pool-relative <pool>/<slot>/<repo>
+# identity, which still distinguishes one slot of one pool from another. An
+# entry whose identity cannot be derived never matches.
+fm_slot_path_matches() {  # <reported-path> <canonical-slot> <slot-identity>
+  local reported=$1 canon=$2 identity=$3 reported_canon
+  [ -n "$reported" ] || return 1
+  if reported_canon=$(fm_slot_canonical_dir "$reported" 2>/dev/null); then
+    [ "$reported_canon" = "$canon" ]
+    return
+  fi
+  [ -n "$identity" ] || return 1
+  [ "$(fm_slot_pool_identity "$reported" 2>/dev/null)" = "$identity" ]
+}
+
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
 # Require both its pool state and the same Git common directory as the recorded
 # project; an ordinary linked worktree is not evidence that Treehouse owns it.
@@ -77,16 +118,24 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # the same reason.
 #
 # Reads the machine-readable `treehouse status --json` surface (verified against
-# treehouse v2.1.1 and v2.3.0) rather than the human status table. The entry's
-# "path" and "status" are paired by scanning the key stream in document order
-# and emitting a pair once both have been seen, so neither key order within an
-# entry nor the nested "processes" objects (which carry neither key) can
-# mispair them.
+# treehouse v2.1.1 and v2.3.0) rather than the human status table. Each record
+# carries name, path, status, lease_id, lease_holder, leased_at and processes;
+# the full recorded shape is in docs/verification/runtime-backends.md. The
+# entry's "path" and "status" are paired by scanning the key stream in document
+# order and emitting a pair once both have been seen, so neither key order
+# within an entry nor the nested "processes" objects (which carry neither key)
+# can mispair them.
+#
+# The queried slot is identified by fm_slot_path_matches, which compares
+# physical directories rather than spellings: Treehouse reports the /home alias
+# that it was launched through while task metas record the /var/home path it
+# resolves to, and a string compare would find no entry at all.
 fm_slot_treehouse_status() {  # <slot-dir> <project-dir>
-  local slot cd_dir canon json token key value path='' status=''
+  local slot cd_dir canon identity json token key value path='' status=''
   slot=$1
   cd_dir=$2
   canon=$(fm_slot_canonical_dir "$slot") || return 1
+  identity=$(fm_slot_pool_identity "$canon") || identity=''
   cd_dir=$(fm_slot_canonical_dir "$cd_dir") || return 1
   command -v treehouse >/dev/null 2>&1 || return 1
   json=$( ( CDPATH='' cd -- "$cd_dir" && treehouse status --json ) 2>/dev/null ) || return 1
@@ -106,7 +155,7 @@ fm_slot_treehouse_status() {  # <slot-dir> <project-dir>
       status) status=$value ;;
     esac
     [ -n "$path" ] && [ -n "$status" ] || continue
-    if [ "$(fm_slot_canonical_dir "$path" 2>/dev/null)" = "$canon" ]; then
+    if fm_slot_path_matches "$path" "$canon" "$identity"; then
       printf '%s\n' "$status"
       return 0
     fi
