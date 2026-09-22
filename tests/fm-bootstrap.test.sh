@@ -265,7 +265,9 @@ assert_timeout_report() {
 # docs/verification/runtime-backends.md). The reported status and the reported
 # path spelling are overridable per run via FM_FAKE_TREEHOUSE_SLOT_STATUS and
 # FM_FAKE_TREEHOUSE_SLOT_PATH, because real treehouse records the spelling it
-# was launched through rather than the one the meta holds.
+# was launched through rather than the one the meta holds, and the durable lease
+# holder via FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER, which is empty for every slot
+# no one has leased.
 # Echoes "<case-dir>|<home>|<project>|<worktree>|<fakebin>".
 make_slot_case() {
   local name=$1 status=$2 case_dir home proj pool wt fakebin
@@ -289,8 +291,9 @@ if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
 fi
 if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
   [ "\${FM_FAKE_TREEHOUSE_STATUS_FAILS:-0}" != 1 ] || exit 1
-  printf '[{"name":"1","path":"%s","status":"%s","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":1,"name":"sh"}]}]\n' \
-    "\${FM_FAKE_TREEHOUSE_SLOT_PATH:-$wt}" "\${FM_FAKE_TREEHOUSE_SLOT_STATUS:-$status}"
+  printf '[{"name":"1","path":"%s","status":"%s","lease_id":"","lease_holder":"%s","leased_at":null,"processes":[{"pid":1,"name":"sh"}]}]\n' \
+    "\${FM_FAKE_TREEHOUSE_SLOT_PATH:-$wt}" "\${FM_FAKE_TREEHOUSE_SLOT_STATUS:-$status}" \
+    "\${FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER:-}"
   exit 0
 fi
 exit 0
@@ -389,6 +392,42 @@ EOF
     "bootstrap reported drift from a Treehouse record for a different slot"
 
   pass "bootstrap identifies a recorded slot through a path alias, and only that slot"
+}
+
+# The other direction of the same drift: a copy a task record names that carries
+# a DURABLE lease for someone else. A crewmate never takes one, so the holder is
+# the lease a refused secondmate seed keeps rather than returning it - returning
+# cleans and resets the copy the refusal protected - and nothing releases it on
+# its own, so session start has to keep saying so.
+test_recorded_slot_with_foreign_lease_is_reported() {
+  local rec case_dir home proj wt fakebin out id=slot-lease-task
+
+  rec=$(make_slot_case slot-lease leased)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$proj" "kind=ship"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=seeded-mate)
+  printf '%s\n' "$out" \
+    | grep -F "SLOT_RECONCILE: task $id's local copy $wt carries a Treehouse lease held for 'seeded-mate'" >/dev/null \
+    || fail "bootstrap did not report a durable lease held on a recorded copy (got: $out)"
+  assert_contains "$out" "treehouse return --if-lease-holder seeded-mate $wt" \
+    "the diagnostic did not print the command that releases the stranded lease"
+
+  # A copy Treehouse holds no durable lease on is the healthy live case.
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_STATUS=in-use)
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported drift for a copy carrying no durable lease"
+
+  # A lease under the recording task's own id is not another allocation's hold.
+  out=$(run_slot_bootstrap "$home" "$fakebin" "FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=$id")
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported a durable lease the recording task holds itself"
+
+  pass "bootstrap reports a durable lease stranded on a recorded copy, and only another holder's"
 }
 
 test_bootstrap_reporting() {
@@ -1376,6 +1415,7 @@ ROWS
 test_bootstrap_reporting
 test_recorded_slot_that_reads_free_is_reported
 test_recorded_slot_is_identified_through_a_path_alias
+test_recorded_slot_with_foreign_lease_is_reported
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version

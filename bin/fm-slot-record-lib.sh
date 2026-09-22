@@ -101,13 +101,11 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
-# What Treehouse currently reports for one slot, printed as a single word:
-#   available - Treehouse holds no live lease for it and would hand it out next
-#   in-use    - Treehouse sees a live process under it
-#   <other>   - whatever else that release of Treehouse reports, passed through
-# Fails without printing when treehouse is absent, its status read fails, or no
-# recorded entry is the same physical directory as the slot - "cannot tell" is
-# never reported as a state, so a caller can only act on a definite answer.
+# One field of the `treehouse status --json` record for a slot, printed as a
+# single word. Fails without printing when treehouse is absent, its status read
+# fails, no recorded entry is the same physical directory as the slot, or the
+# entry carries that field empty - "cannot tell" is never reported as a value,
+# so a caller can only act on a definite answer.
 #
 # Treehouse resolves the pool from the working directory and reports in-use from
 # the processes actually running under each slot, so the read is taken from the
@@ -120,51 +118,69 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # Reads the machine-readable `treehouse status --json` surface (verified against
 # treehouse v2.1.1 and v2.3.0) rather than the human status table. Each record
 # carries name, path, status, lease_id, lease_holder, leased_at and processes;
-# the full recorded shape is in docs/verification/runtime-backends.md. The
-# entry's "path" and "status" are paired by scanning the key stream in document
-# order and emitting a pair once both have been seen, so neither key order
-# within an entry nor the nested "processes" objects (which carry neither key)
-# can mispair them.
+# the full recorded shape is in docs/verification/runtime-backends.md. The key
+# stream is scanned in document order, where a "path" token opens the entry it
+# belongs to and the requested field closes it: an entry that omits the field,
+# or carries it empty as lease_holder does for every unleased slot, can never
+# lend a value to the next entry, and the nested "processes" objects carry
+# neither key.
 #
 # The queried slot is identified by fm_slot_path_matches, which compares
 # physical directories rather than spellings: Treehouse reports the /home alias
 # that it was launched through while task metas record the /var/home path it
 # resolves to, and a string compare would find no entry at all.
-fm_slot_treehouse_status() {  # <slot-dir> <project-dir>
-  local slot cd_dir canon identity json token key value path='' status=''
+fm_slot_treehouse_entry_field() {  # <slot-dir> <project-dir> <field>
+  local slot cd_dir field canon identity json pattern token key value path=''
   slot=$1
   cd_dir=$2
+  field=$3
   canon=$(fm_slot_canonical_dir "$slot") || return 1
   identity=$(fm_slot_pool_identity "$canon") || identity=''
   cd_dir=$(fm_slot_canonical_dir "$cd_dir") || return 1
   command -v treehouse >/dev/null 2>&1 || return 1
   json=$( ( CDPATH='' cd -- "$cd_dir" && treehouse status --json ) 2>/dev/null ) || return 1
+  pattern='"path"[[:space:]]*:[[:space:]]*"[^"]*"\|"'"$field"'"[[:space:]]*:[[:space:]]*"[^"]*"'
   while IFS= read -r token; do
     [ -n "$token" ] || continue
     key=${token%%:*}
-    case "$key" in
-      *'"path"'*) key=path ;;
-      *'"status"'*) key=status ;;
-      *) continue ;;
-    esac
     value=${token#*:}
     value=${value#*\"}
     value=${value%\"}
     case "$key" in
-      path) path=$value ;;
-      status) status=$value ;;
+      *'"path"'*)
+        path=$value
+        continue
+        ;;
+      *"\"$field\""*) ;;
+      *) continue ;;
     esac
-    [ -n "$path" ] && [ -n "$status" ] || continue
-    if fm_slot_path_matches "$path" "$canon" "$identity"; then
-      printf '%s\n' "$status"
-      return 0
-    fi
-    path=''
-    status=''
+    [ -n "$path" ] || continue
+    fm_slot_path_matches "$path" "$canon" "$identity" || { path=''; continue; }
+    [ -n "$value" ] || return 1
+    printf '%s\n' "$value"
+    return 0
   done <<EOF
-$(printf '%s\n' "$json" | grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"\|"status"[[:space:]]*:[[:space:]]*"[^"]*"')
+$(printf '%s\n' "$json" | grep -o "$pattern")
 EOF
   return 1
+}
+
+# What Treehouse currently reports for one slot, printed as a single word:
+#   available - Treehouse holds no live lease for it and would hand it out next
+#   in-use    - Treehouse sees a live process under it
+#   leased    - a durable lease reserves it, so no later get can be handed it
+#   <other>   - whatever else that release of Treehouse reports, passed through
+fm_slot_treehouse_status() {  # <slot-dir> <project-dir>
+  fm_slot_treehouse_entry_field "$1" "$2" status
+}
+
+# The holder label of the DURABLE lease Treehouse records for one slot, or
+# failure when it holds none. A crewmate never takes one - its slot is held by
+# the live process under it - so a holder on a slot a task record names is drift:
+# the lease a refused bin/fm-home-seed.sh acquisition keeps rather than returning
+# (returning cleans and resets the copy it is protecting) reads exactly that way.
+fm_slot_treehouse_lease_holder() {  # <slot-dir> <project-dir>
+  fm_slot_treehouse_entry_field "$1" "$2" lease_holder
 }
 
 # Every state directory on THIS machine whose task records could name a slot

@@ -35,7 +35,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
-- `SLOT_RECONCILE: task <id>'s local copy <path> reads free to Treehouse ...` - a task record still names an isolated copy that the pool now considers free, which is what a host restart leaves behind: the hold on a copy is a live process, the record is not.
+- `SLOT_RECONCILE: task <id>'s local copy <path> ...` - a task record and the pool disagree about one isolated copy, in one of two directions.
+  `reads free to Treehouse` means the pool now considers that copy free, which is what a host restart leaves behind: the hold on a copy is a live process, the record is not.
+  `carries a Treehouse lease held for '<holder>'` means the opposite - the copy is reserved under a label that is not this task, which is the lease a refused secondmate seed keeps on purpose, because returning it would clean and reset the very copy the refusal protected; nothing releases it on its own, so the line stands every session until the records are reconciled and the printed `treehouse return --if-lease-holder` command is run.
   Nothing is lost yet and nothing was changed, so do not tear anything down on this line alone.
   Read the named task's current state with `bin/fm-crew-state.sh <id>`, then reconcile in whichever direction the evidence supports: a task that is genuinely still working keeps its record and its copy, while a finished or dead one is cleaned up normally so the copy returns to the pool.
   Dispatch into that project is safe while the line stands, because a spawn refuses a copy a live record still names rather than preparing it.
