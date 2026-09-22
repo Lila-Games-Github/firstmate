@@ -2,10 +2,12 @@
 # shellcheck disable=SC2034 # scan results are output globals for sourcing callers.
 # Shared reader for the two questions every Treehouse pool slot check asks:
 # which task RECORDS name a slot, and what TREEHOUSE itself currently thinks of
-# it. Both answers are needed in three places - bin/fm-spawn.sh before it
-# prepares a freshly handed-out slot, bin/fm-teardown.sh before it returns one,
-# and bin/fm-bootstrap.sh when it reports a home whose records and pool have
-# drifted apart - so the scan lives here once instead of in each of them.
+# it. Both answers are needed wherever a slot changes hands - bin/fm-spawn.sh
+# before it prepares a freshly handed-out slot, bin/fm-teardown.sh before it
+# returns one, bin/fm-control.sh before it stops an agent it is about to
+# relaunch into the copy its record names, and bin/fm-bootstrap.sh when it
+# reports a home whose records and pool have drifted apart - so the scan lives
+# here once instead of in each of them.
 #
 # Why the two answers are not interchangeable (observed 2026-09-21, after a host
 # reboot): Treehouse records a crewmate slot as a live PROCESS lease, so a
@@ -17,12 +19,15 @@
 # outlives the lease process that a reboot destroys.
 #
 # Side-effect free and safe to source from a read-only detection path: it
-# creates no directories, takes no locks, and writes nothing.
+# creates no directories, takes no locks, and changes nothing on disk. The one
+# refusal helper below prints its verdict to stderr and returns it; whether that
+# ends the process stays with the caller.
 #
 # Prerequisites, by function:
 #   fm_treehouse_pool_slot, fm_slot_project_dir, fm_slot_treehouse_pool_json,
 #     fm_slot_treehouse_entry - git / treehouse only.
-#   fm_slot_record_states, fm_slot_record_other_holder - the caller must have
+#   fm_slot_record_states, fm_slot_record_other_holder,
+#     fm_slot_refuse_relaunch_into_other_record - the caller must have
 #     already sourced bin/fm-wake-lib.sh (fm_firstmate_root_home),
 #     bin/fm-backend.sh (fm_meta_get), and
 #     bin/fm-secondmate-registry-lib.sh (secondmate_registry_parse_line).
@@ -322,5 +327,39 @@ fm_slot_record_other_holder() {  # <slot> <self-meta> <state-dir>
       done
     done
   done
+  return 1
+}
+
+# The relaunch ownership gate, asked at BOTH ends of the relaunch transaction
+# and therefore owned here rather than at either of them: bin/fm-control.sh asks
+# it first, while the agent it is about to replace is still running, and
+# bin/fm-spawn.sh --relaunch asks it again before it drives an endpoint into the
+# recorded copy, so a direct caller is covered too. One wording, because the
+# refusal an operator reads is whichever end they entered by.
+#
+# A relaunch allocates nothing and re-prepares nothing, so there is no hand-out
+# to refuse here. What it does do is put a fresh agent into the copy the task's
+# own record names - and after a restart that copy can be one a DIFFERENT live
+# record now owns, which is the 2026-09-21 state where one slot ended up named
+# by two records. A second agent editing another record's copy is the same class
+# of outcome the allocation guard exists to prevent.
+#
+# Returns 0 when the copy is not a pool slot at all, or when no other record
+# names it; 1 with the refusal already printed to stderr otherwise. A scan that
+# cannot be completed refuses too: "cannot tell" must never become "nobody owns
+# it" at a point where being wrong puts two agents in one copy.
+fm_slot_refuse_relaunch_into_other_record() {  # <id> <project> <slot> <self-meta> <state-dir>
+  local id=$1 project=$2 slot=$3 self_meta=$4 record_state=$5 rc=0
+  fm_treehouse_pool_slot "$project" "$slot" || return 0
+  fm_slot_record_other_holder "$slot" "$self_meta" "$record_state" || rc=$?
+  case "$rc" in
+    1) return 0 ;;
+    2)
+      echo "error: could not check whether task $id's recorded pool slot $slot is also recorded by another task: $FM_SLOT_RECORD_ERROR; refusing to relaunch into a copy whose ownership cannot be read" >&2
+      return 1
+      ;;
+  esac
+  echo "error: task $id records pool slot $slot, but task $FM_SLOT_RECORD_HOLDER_ID records it as its $FM_SLOT_RECORD_HOLDER_FIELD ($FM_SLOT_RECORD_HOLDER_META) too; relaunching would start a second agent in a copy another live record owns, so nothing was launched and nothing was changed." >&2
+  echo "A pool lease does not survive a host restart while a task record does, so one slot can end up named by two records. Reconcile them first - bin/fm-crew-state.sh $FM_SLOT_RECORD_HOLDER_ID, then bin/fm-teardown.sh <id> --reconcile-slot for whichever record's work is provably safe - then relaunch $id again." >&2
   return 1
 }

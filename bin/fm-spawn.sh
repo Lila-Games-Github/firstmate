@@ -2870,33 +2870,18 @@ refuse_slot_owned_by_live_record() { # <inspect-target>
   exit 1
 }
 
-# The same ownership question at the other end of the deadlock. A relaunch
-# allocates nothing - it reuses the copy this task's own record names - so there
-# is no freshen to replace anyone's checkout here. What it does do is put a new
-# agent into that copy, and after a restart the copy a record names can be one a
-# DIFFERENT live record now owns: the 2026-09-21 state, where one slot ended up
-# named by two records. Starting a second agent in another record's copy is the
-# same class of outcome the allocation guard exists to prevent, so the same
-# record scan answers it, from the task's own record's point of view.
+# The same ownership question at the other end of the deadlock, owned by
+# bin/fm-slot-record-lib.sh's fm_slot_refuse_relaunch_into_other_record because
+# both ends of the relaunch transaction ask it. bin/fm-control.sh asks it first,
+# while the agent it is about to replace is still running; this is the launch
+# owner's own line of defence, so a direct `fm-spawn.sh <id> --relaunch` is
+# refused too rather than relying on its caller having asked.
 #
 # Refused before the endpoint is driven into the copy and before any durable
 # record is touched, so both records and the copy are left exactly as they were.
-# A scan that cannot be completed refuses too, for the same reason it does at
-# allocation.
 refuse_relaunch_into_slot_another_record_owns() {
-  local rc=0
-  fm_treehouse_pool_slot "$PROJ_ABS" "$WT" || return 0
-  fm_slot_record_other_holder "$WT" "$STATE/$ID.meta" "$STATE" || rc=$?
-  case "$rc" in
-    1) return 0 ;;
-    2)
-      echo "error: could not check whether task $ID's recorded pool slot $WT is also recorded by another task: $FM_SLOT_RECORD_ERROR; refusing to relaunch into a copy whose ownership cannot be read" >&2
-      exit 1
-      ;;
-  esac
-  echo "error: task $ID records pool slot $WT, but task $FM_SLOT_RECORD_HOLDER_ID records it as its $FM_SLOT_RECORD_HOLDER_FIELD ($FM_SLOT_RECORD_HOLDER_META) too; relaunching would start a second agent in a copy another live record owns, so nothing was launched and nothing was changed." >&2
-  echo "A pool lease does not survive a host restart while a task record does, so one slot can end up named by two records. Reconcile them first - bin/fm-crew-state.sh $FM_SLOT_RECORD_HOLDER_ID, then bin/fm-teardown.sh <id> --reconcile-slot for whichever record's work is provably safe - then relaunch $ID again." >&2
-  exit 1
+  fm_slot_refuse_relaunch_into_other_record "$ID" "$PROJ_ABS" "$WT" "$STATE/$ID.meta" "$STATE" \
+    || exit 1
 }
 
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:

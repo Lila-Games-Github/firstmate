@@ -1551,11 +1551,18 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
 # different live record now owns, which is the 2026-09-21 state where one slot
 # ended up named by two records. A second agent editing another record's copy is
 # the same class of outcome, so the same record scan has to answer it.
+#
+# Both entry points are pinned, because only one of them protects the worker:
+# fm-control stops the running agent and records the note before it delegates to
+# the launch owner, so the scan has to answer at the control plane's own first
+# step, and the launch owner has to answer again for a direct caller.
 
 # make_pooled_relaunch_case <name> <id>: a relaunch case whose recorded copy is
 # a real Treehouse pool slot - the fixed <pool>/<slot>/<repo> shape plus the
 # pool's own state file, which is what bin/fm-slot-record-lib.sh requires before
-# it treats a worktree as a slot - with an agent-free endpoint.
+# it treats a worktree as a slot - with an agent-free endpoint. A case driven
+# through fm-control puts a live agent back on that endpoint, since the point
+# there is that a refusal leaves it running.
 make_pooled_relaunch_case() {  # <name> <id>
   local name=$1 id=$2 dir
   dir=$(new_case "$name" "$id")
@@ -1565,6 +1572,52 @@ make_pooled_relaunch_case() {  # <name> <id>
     > "$dir/pool/treehouse-state.json"
   printf 'zsh' > "$dir/fake/command"
   printf '%s\n' "$dir"
+}
+
+test_control_relaunch_refuses_a_slot_another_record_owns_before_stopping() {
+  local dir out rc owner=live-pipeline meta_before brief_before
+  dir=$(make_pooled_relaunch_case control-owned-slot rl52)
+  printf 'claude' > "$dir/fake/command"
+  fm_write_meta "$dir/home/state/$owner.meta" \
+    "window=fmses:fm-$owner" "endpoint_task_id=$owner" \
+    "worktree=$dir/pool/1/repo" "project=$dir/proj" "kind=ship"
+  meta_before=$(cat "$dir/home/state/rl52.meta")
+  brief_before=$(cat "$dir/home/data/rl52/brief.md")
+
+  out=$(run_control "$dir" rl52 relaunch --note "carry this forward"); rc=$?
+  expect_code 1 "$rc" "relaunching into a copy another live record owns should refuse"$'\n'"$out"
+  assert_contains "$out" "$owner" "the refusal did not name the record that also owns the copy"
+  assert_contains "$out" "$dir/pool/1/repo" "the refusal did not name the copy it declined to enter"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the refused relaunch stopped the agent it exists to protect"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "the refused relaunch drove the endpoint"
+  [ "$(cat "$dir/home/data/rl52/brief.md")" = "$brief_before" ] \
+    || fail "the refused relaunch annotated the instructions"
+  [ "$(cat "$dir/home/state/rl52.meta")" = "$meta_before" ] \
+    || fail "the refused relaunch rewrote the durable record"
+  assert_absent "$dir/home/state/rl52.control-relaunch" \
+    "the refused relaunch opened a transaction journal"
+  pass "fm-control relaunch: a copy another live record owns refuses before the agent is stopped"
+}
+
+test_control_relaunch_into_an_unowned_pool_slot_still_relaunches() {
+  local dir out rc
+  dir=$(make_pooled_relaunch_case control-unowned-slot rl53)
+  printf 'claude' > "$dir/fake/command"
+  mkdir -p "$dir/other-copy"
+  fm_write_meta "$dir/home/state/neighbour.meta" \
+    "window=fmses:fm-neighbour" "endpoint_task_id=neighbour" \
+    "worktree=$dir/other-copy" "project=$dir/proj" "kind=ship"
+
+  out=$(run_control "$dir" rl53 relaunch --note "carry this forward"); rc=$?
+  expect_code 0 "$rc" "a pool slot no other record names should still relaunch"$'\n'"$out"
+  [ "$(meta_field "$dir" rl53 worktree)" = "$dir/pool/1/repo" ] \
+    || fail "the relaunch replaced the recorded copy"
+  [ "$(journal_field "$dir" rl53 phase)" = complete ] \
+    || fail "the relaunch transaction should end complete"
+  assert_grep "encode launch-brief" "$dir/fake/literal" \
+    "the replacement should have been launched"
+  pass "fm-control relaunch: a recorded pool slot no other record names still relaunches"
 }
 
 test_spawn_relaunch_refuses_a_slot_another_record_owns() {
@@ -1821,6 +1874,8 @@ test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
+test_control_relaunch_refuses_a_slot_another_record_owns_before_stopping
+test_control_relaunch_into_an_unowned_pool_slot_still_relaunches
 test_spawn_relaunch_refuses_a_slot_another_record_owns
 test_spawn_relaunch_into_an_unowned_pool_slot_still_launches
 test_spawn_relaunch_refuses_a_live_agent
