@@ -7574,8 +7574,6 @@ const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, '
 if (!value.error?.message.includes('registered main clone is not a root')) process.exit(1);
 NODE
 no_delete_ipc "a mismatched registry project reached workspace:delete"
-mkdir -p "$retire_home/projects"
-ln -s "$FIXTURE_ROOT/worker" "$retire_home/projects/frog"
 set_playbot_root() {
   FIXTURE_ROOT="$FIXTURE_ROOT" PLAYBOT_ROOT="$1" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -7585,6 +7583,19 @@ db.prepare('UPDATE repositories SET path = ? WHERE id = ?').run(process.env.PLAY
 db.close();
 NODE
 }
+mkdir -p "$retire_home/projects/frog"
+git init --initial-branch=main "$retire_home" >/dev/null || fail "could not initialize the controller home repository"
+set_playbot_root "$retire_home/data"
+cleanup_list retirement-local-landing ',"registryProject":"frog"' > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "a plain registered clone directory inherited the controller repository as landing identity"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('registered main clone is not a root')) process.exit(1);
+NODE
+rm -rf "$retire_home/.git"
+rmdir "$retire_home/projects/frog"
+set_playbot_root "$FIXTURE_ROOT/worker"
+pass "fm-playbot-lanes: local landing rejects a registered clone that is not its own worktree top level"
+ln -s "$FIXTURE_ROOT/worker" "$retire_home/projects/frog"
 set_playbot_root "$FIXTURE_ROOT/worker/prototype-game"
 cleanup_list retirement-local-landing ',"registryProject":"frog"' > "$cleanup_out"
 OUT_FILE="$cleanup_out" COMMIT="$local_commit" node --no-warnings <<'NODE' || fail "a Playbot root inside the registered main clone did not use local landing evidence"

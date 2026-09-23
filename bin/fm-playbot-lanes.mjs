@@ -2534,7 +2534,7 @@ function registryLandingOptions(project, registryProject) {
     } catch {
       // A missing or unreadable main clone cannot establish landing identity.
     }
-    const matchingRoot = registeredTop && project.roots.some((root) => {
+    const matchingRoot = registeredTop === registeredClone && project.roots.some((root) => {
       try {
         return canonicalPath(stripTerminalLineEnding(freshnessGit(root.path, ["rev-parse", "--show-toplevel"]))) === registeredTop;
       } catch {
