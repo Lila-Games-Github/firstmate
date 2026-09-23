@@ -7383,6 +7383,76 @@ NODE
 [ ! -e "$files_orphan" ] || fail "the authorized orphan directory survived retirement"
 pass "fm-playbot-lanes: orphaned roots retire as registration cleanup and remove only inventoried directories"
 
+# A missing directory Git still registers keeps its recorded HEAD reachable, and
+# Playbot prunes every such registration when it deletes an orphan, so a
+# detached unlanded HEAD blocks its own retirement and every orphan's.
+detached_missing_ws="$FIXTURE_ROOT/worker/.worktrees/missing-detached"
+git -C "$FIXTURE_ROOT/worker" worktree add --detach "$detached_missing_ws" origin/main >/dev/null \
+  || fail "could not create the detached missing-directory worktree"
+git -C "$detached_missing_ws" -c user.name="Firstmate tests" -c user.email="firstmate-tests@example.invalid" \
+  commit --allow-empty -m "detached unlanded work" >/dev/null
+detached_missing_commit=$(git -C "$detached_missing_ws" rev-parse HEAD)
+rm -rf "$detached_missing_ws"
+add_retirement_workspace ws-retire-missing-detached "$detached_missing_ws" retirement-missing-detached
+bystander_ws="$FIXTURE_ROOT/worker/.worktrees/missing-bystander"
+git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-missing-bystander "$bystander_ws" origin/main >/dev/null \
+  || fail "could not create the bystander missing-directory worktree"
+rm -rf "$bystander_ws"
+add_retirement_workspace ws-retire-missing-bystander "$bystander_ws" retirement-missing-bystander
+cleanup_list main > "$cleanup_out"
+OUT_FILE="$cleanup_out" COMMIT="$detached_missing_commit" DETACHED="$detached_missing_ws" node --no-warnings <<'NODE' || fail "a missing worktree's detached unlanded HEAD was not preserved as blocking evidence"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const byId = Object.fromEntries(value.workspaces.map(workspace => [workspace.workspace.id, workspace]));
+const detached = byId['ws-retire-missing-detached'];
+const blocker = detached.blockers.find(candidate => candidate.code === 'unlanded-commits');
+if (detached.retirable || detached.blockers.length !== 1 || !detached.discard.possible) process.exit(1);
+if (blocker?.commits.map(entry => entry.commit).join(',') !== process.env.COMMIT) process.exit(1);
+if (detached.discard.unlandedCommits.join(',') !== process.env.COMMIT) process.exit(1);
+const recorded = detached.roots[0].orphan.recordedHead;
+if (recorded?.commit !== process.env.COMMIT || recorded.detached !== true || recorded.branch !== null) process.exit(1);
+const bystander = byId['ws-retire-missing-bystander'];
+const prune = bystander.blockers.find(candidate => candidate.code === 'prune-would-drop-unlanded-head');
+if (bystander.retirable || bystander.discard.possible || bystander.blockers.length !== 1) process.exit(1);
+if (prune?.worktrees.map(entry => `${entry.path} ${entry.head}`).join(',') !== `${require('node:fs').realpathSync(require('node:path').dirname(process.env.DETACHED))}/missing-detached ${process.env.COMMIT}`) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+cleanup_retire ws-retire-missing-detached main > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "a missing worktree's unlanded recorded HEAD was retired without authorization"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('unlanded-commits') || !value.error.message.includes('recorded HEAD')) process.exit(1);
+NODE
+cleanup_retire ws-retire-missing-detached main ',"discardLocalChanges":{"authorization":"discard it","allow":["orphaned-files"]}' > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "an authorization that does not name the unlanded commit cleared a missing worktree's recorded HEAD"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('beyond what the discard authorization covers') || !value.error.message.includes('unlanded-commits')) process.exit(1);
+NODE
+cleanup_retire ws-retire-missing-bystander main > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "an orphan retirement would have pruned another worktree's unlanded HEAD"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('prune-would-drop-unlanded-head')) process.exit(1);
+NODE
+no_delete_ipc "a missing worktree holding unlanded work reached workspace:delete"
+git -C "$FIXTURE_ROOT/worker" worktree list --porcelain | grep -F "$detached_missing_ws" >/dev/null \
+  || fail "a refused retirement dropped the missing worktree registration holding unlanded work"
+[ "$(git -C "$FIXTURE_ROOT/worker" cat-file -t "$detached_missing_commit")" = commit ] \
+  || fail "the missing worktree's unlanded commit is no longer present"
+cleanup_retire ws-retire-missing-detached main ",\"discardLocalChanges\":{\"authorization\":\"discard it\",\"allow\":[\"unlanded-commits\"],\"commits\":[\"$detached_missing_commit\"]}" > "$cleanup_out"
+OUT_FILE="$cleanup_out" AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" COMMIT="$detached_missing_commit" node --no-warnings <<'NODE' \
+  || fail "an authorization naming a missing worktree's unlanded commit did not retire and audit it"
+const fs = require('node:fs');
+const value = JSON.parse(fs.readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+if (!value.deleted || !value.postActionComplete) process.exit(1);
+const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+if (audit.workspace.id !== 'ws-retire-missing-detached') process.exit(1);
+if (audit.discard.roots[0].unlandedCommits.map(entry => entry.commit).join(',') !== process.env.COMMIT) process.exit(1);
+NODE
+cleanup_retire ws-retire-missing-bystander main > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "an orphan was not retirable once the unlanded registration was retired"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+if (!value.deleted || !value.postActionComplete) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a missing worktree's unproven recorded HEAD blocks until an authorization names its commits"
+
 # A local-only project lands by advancing its local landing branch without
 # pushing, so its main clone's branch is landing evidence only for that posture.
 git -C "$FIXTURE_ROOT/worker" branch retirement-local-landing origin/main >/dev/null

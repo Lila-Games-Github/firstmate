@@ -106,6 +106,8 @@ const PLAYBOT_TRACKED_CHURN_SET = new Set(PLAYBOT_TRACKED_CHURN_PATHS);
 // them. A path qualifies only when Git itself reports it ignored and one of its
 // exact path segments names a cache directory, or three consecutive segments
 // name addons/playbot/native; tracked and untracked paths never use this rule.
+// An orphaned directory has no Git metadata left, so no ignore evidence exists
+// for its contents; its inventory applies the same path-segment rule alone.
 const DISCARDABLE_IGNORED_CACHE_SEGMENTS = new Set([".godot", "__pycache__", ".task_tmp"]);
 const PLAYBOT_NATIVE_ADDON_SEGMENTS = Object.freeze(["addons", "playbot", "native"]);
 
@@ -1578,11 +1580,11 @@ function projectAwareWorkspaceRoot(project, workspaceRoot, runGit = git) {
   return { worktreePath, projectRoot };
 }
 
-function rootFreshnessAtPath(worktreePath, landingBranch, landingOptions = {}) {
+function rootFreshnessAtPath(worktreePath, landingBranch, landingOptions = {}, recordedHead = null) {
   const shallow = stripTerminalLineEnding(freshnessGit(worktreePath, ["rev-parse", "--is-shallow-repository"]));
   if (shallow === "true") throw new Error("repository is shallow; complete ancestry is required for workspace freshness");
   if (shallow !== "false") throw new Error("Git returned unreadable shallow-repository evidence");
-  const headCommit = String(freshnessGit(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+  const headCommit = String(freshnessGit(worktreePath, ["rev-parse", "--verify", `${recordedHead ?? "HEAD"}^{commit}`])).trim();
   const head = {
     commit: headCommit,
     subject: exactCommitSubject(worktreePath, headCommit, freshnessGit),
@@ -1805,10 +1807,14 @@ function gitWorktreeEntries(projectRootPath) {
   let current = null;
   for (const field of git(projectRootPath, ["worktree", "list", "--porcelain", "-z"], { encoding: "buffer" }).toString("utf8").split("\0")) {
     if (field.startsWith("worktree ")) {
-      current = { path: canonicalPath(field.slice("worktree ".length)), branch: null };
+      current = { path: canonicalPath(field.slice("worktree ".length)), head: null, branch: null, detached: false };
       entries.push(current);
+    } else if (current && field.startsWith("HEAD ")) {
+      current.head = field.slice("HEAD ".length);
     } else if (current && field.startsWith("branch ")) {
       current.branch = field.slice("branch ".length);
+    } else if (current && field === "detached") {
+      current.detached = true;
     }
   }
   return entries;
@@ -1822,8 +1828,18 @@ function discardableIgnoredKind(file) {
   return segments.some((segment) => DISCARDABLE_IGNORED_CACHE_SEGMENTS.has(segment)) ? "build-cache" : null;
 }
 
+const FILE_SHA256_CACHE_LIMIT = 4096;
+const fileSha256Cache = new Map();
+
 function fileSha256(file) {
-  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const stat = fs.statSync(file, { bigint: true });
+  const key = `${file}\0${stat.dev}\0${stat.ino}\0${stat.size}\0${stat.mtimeNs}\0${stat.ctimeNs}`;
+  const cached = fileSha256Cache.get(key);
+  if (cached) return cached;
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  if (fileSha256Cache.size >= FILE_SHA256_CACHE_LIMIT) fileSha256Cache.clear();
+  fileSha256Cache.set(key, digest);
+  return digest;
 }
 
 // Playbot injects the same native addon files into every workspace of a project,
@@ -1958,12 +1974,15 @@ function publicOrphanInventory(inventory) {
 // Playbot's own workspace:delete removes a worktree by looking up the root's
 // BRANCH in the repository's worktree list, not by path. For an orphaned root
 // that lookup must find nothing, or Playbot would force-remove whichever other
-// worktree has that branch checked out.
-function inspectOrphanedRoot(result, projectRoot, rootPath, workspaceRoot, directoryPresent, metadata) {
+// worktree has that branch checked out. A missing directory Git still
+// registers keeps its recorded HEAD reachable until Playbot prunes it, so that
+// HEAD must be proven landed or its ahead commits named like any other root's.
+function inspectOrphanedRoot(result, projectRoot, rootPath, workspaceRoot, directoryPresent, metadata, landingBranch, readFreshness, landingOptions) {
   const entries = gitWorktreeEntries(projectRoot.path);
-  const registered = entries.some((entry) => entry.path === rootPath);
+  const registration = entries.find((entry) => entry.path === rootPath);
+  const registered = Boolean(registration);
   result.gitRegistration = { projectRootPath: canonicalPath(projectRoot.path), registered };
-  result.orphan = { directoryPresent, gitMetadata: metadata, registered, inventory: null, storage: null };
+  result.orphan = { directoryPresent, gitMetadata: metadata, registered, recordedHead: null, inventory: null, storage: null };
   if (directoryPresent && registered) {
     result.blockers.push({ code: "git-unreadable", message: `Workspace root ${rootPath} has no readable Git metadata but is still registered as a Git worktree` });
     return result;
@@ -1977,7 +1996,11 @@ function inspectOrphanedRoot(result, projectRoot, rootPath, workspaceRoot, direc
       worktrees: owners,
     });
   }
-  if (!directoryPresent) return result;
+  if (readFreshness) prunableRegistrationBlockers(result, projectRoot, entries, rootPath, landingBranch, landingOptions);
+  if (!directoryPresent) {
+    if (registered && readFreshness) inspectRegisteredMissingHead(result, projectRoot, registration, landingBranch, landingOptions);
+    return result;
+  }
   const storage = playbotWorktreeStorage();
   result.orphan.storage = { root: storage, inside: pathStrictlyInside(storage, rootPath) };
   if (!result.orphan.storage.inside) {
@@ -1998,6 +2021,71 @@ function inspectOrphanedRoot(result, projectRoot, rootPath, workspaceRoot, direc
     });
   }
   return result;
+}
+
+// When Playbot cannot find an orphaned root through Git it prunes the whole
+// repository's stale registrations, which drops every other missing detached
+// worktree's recorded HEAD. Each must be proven landed first.
+function prunableRegistrationBlockers(result, projectRoot, entries, rootPath, landingBranch, landingOptions) {
+  const mainClone = canonicalPath(projectRoot.path);
+  const unproven = [];
+  for (const entry of entries) {
+    if (entry.path === rootPath || !entry.detached || pathPresence(entry.path)) continue;
+    try {
+      if (!/^[0-9a-f]{40,64}$/i.test(entry.head ?? "")) throw new Error("Git records no readable HEAD");
+      const reading = rootFreshnessAtPath(mainClone, landingBranch, { ...landingOptions, mainClone }, entry.head);
+      if (!reading.distanceKnown) {
+        unproven.push({ path: entry.path, head: entry.head, reason: `landing tip ${reading.landingBranchTip.commit} is not present locally` });
+      } else if (reading.unlandedCommits.length > 0) {
+        unproven.push({ path: entry.path, head: entry.head, reason: `${reading.unlandedCommits.length} commit(s) are ahead of ${landingBranch}`, commits: reading.unlandedCommits });
+      }
+    } catch (error) {
+      unproven.push({ path: entry.path, head: entry.head, reason: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  if (unproven.length > 0) {
+    result.blockers.push({
+      code: "prune-would-drop-unlanded-head",
+      message: `Retiring this orphaned root lets Playbot prune ${unproven.length} other missing detached worktree registration(s) whose recorded HEAD is not proven landed; retire those workspaces first: ${unproven.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`,
+      worktrees: unproven,
+    });
+  }
+}
+
+function inspectRegisteredMissingHead(result, projectRoot, registration, landingBranch, landingOptions) {
+  const mainClone = canonicalPath(projectRoot.path);
+  try {
+    if (!/^[0-9a-f]{40,64}$/i.test(registration.head ?? "")) {
+      throw new Error(`Git records no readable HEAD for registered worktree ${registration.path}`);
+    }
+    const reading = rootFreshnessAtPath(mainClone, landingBranch, { ...landingOptions, mainClone }, registration.head);
+    result.head = reading.head;
+    result.landing = reading.landingBranchTip;
+    result.commitsAhead = reading.unlandedCommits;
+    result.commitsBehind = reading.commitsBehind;
+    result.orphan.recordedHead = { commit: registration.head, branch: registration.branch, detached: registration.detached };
+    if (!reading.distanceKnown) {
+      result.blockers.push({
+        code: "landing-tip-not-present-locally",
+        message: `Landing branch ${landingBranch} tip ${reading.landingBranchTip.commit} is not present locally, so the missing worktree's recorded HEAD ${registration.head} cannot be proven landed`,
+      });
+    } else if (reading.unlandedCommits.length > 0) {
+      result.blockers.push({
+        code: "unlanded-commits",
+        message: `${reading.unlandedCommits.length} commit(s) reachable from the missing worktree's recorded HEAD are ahead of ${landingBranch}`,
+        commits: reading.unlandedCommits,
+      });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = freshnessBlockerCode(error);
+    result.blockers.push({
+      code,
+      message: code === "landing-branch-unresolvable"
+        ? `Landing branch ${landingBranch} cannot be verified for the missing worktree ${registration.path}: ${message}`
+        : `The missing worktree ${registration.path} is still registered and its recorded HEAD cannot be proven landed: ${message}`,
+    });
+  }
 }
 
 function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshness = true, landingOptions = {}) {
@@ -2043,7 +2131,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
       return result;
     }
     try {
-      return inspectOrphanedRoot(result, orphanProjectRoot, rootPath, workspaceRoot, false, { kind: "missing-directory" });
+      return inspectOrphanedRoot(result, orphanProjectRoot, rootPath, workspaceRoot, false, { kind: "missing-directory" }, landingBranch, readFreshness, landingOptions);
     } catch (error) {
       result.blockers.push({ code: "missing-root", message: `Workspace root is missing and its orphan cleanup cannot be verified: ${error instanceof Error ? error.message : String(error)}` });
       return result;
@@ -2069,7 +2157,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
       return result;
     }
     try {
-      return inspectOrphanedRoot(result, orphanProjectRoot, rootPath, workspaceRoot, true, metadata);
+      return inspectOrphanedRoot(result, orphanProjectRoot, rootPath, workspaceRoot, true, metadata, landingBranch, readFreshness, landingOptions);
     } catch (orphanError) {
       result.blockers.push({ code: "git-unreadable", message: `${message}; orphan inspection failed: ${orphanError instanceof Error ? orphanError.message : String(orphanError)}` });
       return result;
@@ -3000,7 +3088,7 @@ function verifiedLandingRecord(root) {
 async function retireWorkspace(project, workspace, landingBranch, landingOptions = {}, authorization = null) {
   const inspection = workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions);
   const plan = authorization ? discardPlan(inspection, authorization) : null;
-  if ((!inspection.retirable && !plan?.permitted) || (plan && !plan.permitted)) {
+  if (plan ? !plan.permitted : !inspection.retirable) {
     const refused = plan ? plan.uncovered : inspection.blockers;
     const summary = refused.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
     throw Object.assign(new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck${plan ? " beyond what the discard authorization covers" : ""}: ${summary}`), {
