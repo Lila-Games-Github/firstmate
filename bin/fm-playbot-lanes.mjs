@@ -32,8 +32,10 @@
 // only holding it. On Playbot 0.95.x an explicit forced send promotes that exact
 // held message through threads:steerMessage into the active turn without
 // interrupting it. Guarded workspace retirement uses Playbot's own
-// workspace:delete channel only after a fresh remote, Git, and thread-state
-// inspection, then verifies every Playbot, filesystem, and Git-worktree removal.
+// workspace:delete channel only after a fresh landing, Git, thread-state, and
+// firstmate task-record inspection, removes an inventoried orphaned directory
+// that Playbot cannot find through Git, then verifies every Playbot,
+// filesystem, and Git-worktree removal.
 // It reads
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
@@ -64,7 +66,7 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.7.0";
+const SERVER_VERSION = "0.8.0";
 const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
@@ -97,6 +99,29 @@ const PLAYBOT_TRACKED_CHURN_PATHS = Object.freeze([
   "prototype-game/project.godot",
 ]);
 const PLAYBOT_TRACKED_CHURN_SET = new Set(PLAYBOT_TRACKED_CHURN_PATHS);
+
+// Gitignored build output that Godot, Python, and task tooling regenerate on
+// demand, plus the host-specific native addon tree Playbot injects into every
+// workspace. Retirement reports these as discardable instead of blocking on
+// them. A path qualifies only when Git itself reports it ignored and one of its
+// exact path segments names a cache directory, or three consecutive segments
+// name addons/playbot/native; tracked and untracked paths never use this rule.
+const DISCARDABLE_IGNORED_CACHE_SEGMENTS = new Set([".godot", "__pycache__", ".task_tmp"]);
+const PLAYBOT_NATIVE_ADDON_SEGMENTS = Object.freeze(["addons", "playbot", "native"]);
+
+// The blocker codes an explicit, recorded captain authorization may discard for
+// one confirmed workspace. Every other blocker - active or uncertain chats, the
+// Local workspace, a live firstmate task record, unreadable evidence - is never
+// discardable. unlanded-commits additionally requires every exact commit id.
+const DISCARDABLE_LOCAL_CHANGE_CODES = Object.freeze([
+  "tracked-modifications",
+  "untracked-files",
+  "ignored-files",
+  "orphaned-files",
+  "unlanded-commits",
+]);
+const DISCARDABLE_LOCAL_CHANGE_SET = new Set(DISCARDABLE_LOCAL_CHANGE_CODES);
+const ORPHAN_INVENTORY_SAMPLE_LIMIT = 50;
 
 function desktopDir() {
   if (process.env.PLAYBOT_DESKTOP_DIR) return path.resolve(process.env.PLAYBOT_DESKTOP_DIR);
@@ -1374,13 +1399,19 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
   };
 }
 
-function landingRemote(root, landingBranch) {
+// landingOptions.localLanding is set only for retirement of a project whose
+// firstmate registry posture is local-only: such a project lands by advancing
+// the landing branch in its configured main clone without pushing, so that
+// local branch, not the lagging remote, is the landing evidence. An explicit
+// refs/remotes/<remote>/<branch> name still selects remote evidence.
+function landingRemote(root, landingBranch, landingOptions = {}) {
   const requested = String(landingBranch ?? "").trim();
   if (!requested) throw new Error("landingBranch is required and must name the branch this workspace lands on");
-  remoteGitTimeoutMs();
+  const local = landingOptions.localLanding && !requested.startsWith("refs/remotes/");
+  if (!local) remoteGitTimeoutMs();
   let tip;
   try {
-    tip = landingRemoteTip(root, requested);
+    tip = local ? landingLocalTip(landingOptions, requested) : landingRemoteTip(root, requested);
   } catch (error) {
     throw new LandingBranchUnresolvableError(error);
   }
@@ -1452,6 +1483,33 @@ function landingRemoteTip(root, requested) {
   return { remote, branch, remoteRef, commit, observedAt };
 }
 
+function landingLocalTip(landingOptions, requested) {
+  const mainClone = canonicalPath(landingOptions.mainClone ?? "");
+  if (!mainClone) throw new Error(`landing branch ${requested} has no configured main clone from which to read local landing evidence`);
+  const branch = requested.replace(/^refs\/heads\//, "");
+  freshnessGit(mainClone, ["check-ref-format", "--branch", branch]);
+  const localRef = `refs/heads/${branch}`;
+  const observedAt = nowIso();
+  let commit;
+  try {
+    commit = stripTerminalLineEnding(freshnessGit(mainClone, ["rev-parse", "--verify", "--end-of-options", `${localRef}^{commit}`]));
+  } catch (error) {
+    throw new Error(`local landing branch ${localRef} does not resolve in main clone ${mainClone}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!/^[0-9a-f]{40,64}$/i.test(commit)) throw new Error(`main clone ${mainClone} returned unreadable evidence for ${localRef}`);
+  return {
+    evidence: "local-branch",
+    remote: null,
+    branch,
+    remoteRef: null,
+    localRef,
+    mainClone,
+    registry: landingOptions.registry ?? null,
+    commit,
+    observedAt,
+  };
+}
+
 function aheadCommits(root, landingCommit, headCommit) {
   const raw = freshnessGit(root, ["log", "-z", "--format=%H", `${landingCommit}..${headCommit}`], { encoding: "buffer" });
   return commitRecords(root, raw, "ahead-commit", freshnessGit);
@@ -1520,7 +1578,7 @@ function projectAwareWorkspaceRoot(project, workspaceRoot, runGit = git) {
   return { worktreePath, projectRoot };
 }
 
-function rootFreshnessAtPath(worktreePath, landingBranch) {
+function rootFreshnessAtPath(worktreePath, landingBranch, landingOptions = {}) {
   const shallow = stripTerminalLineEnding(freshnessGit(worktreePath, ["rev-parse", "--is-shallow-repository"]));
   if (shallow === "true") throw new Error("repository is shallow; complete ancestry is required for workspace freshness");
   if (shallow !== "false") throw new Error("Git returned unreadable shallow-repository evidence");
@@ -1529,7 +1587,7 @@ function rootFreshnessAtPath(worktreePath, landingBranch) {
     commit: headCommit,
     subject: exactCommitSubject(worktreePath, headCommit, freshnessGit),
   };
-  const landing = landingRemote(worktreePath, landingBranch);
+  const landing = landingRemote(worktreePath, landingBranch, landingOptions);
   if (!landing.presentLocally) {
     return {
       worktreePath,
@@ -1571,9 +1629,9 @@ function rootFreshnessAtPath(worktreePath, landingBranch) {
   };
 }
 
-function rootFreshness(project, workspaceRoot, landingBranch) {
-  const { worktreePath } = projectAwareWorkspaceRoot(project, workspaceRoot, freshnessGit);
-  return rootFreshnessAtPath(worktreePath, landingBranch);
+function rootFreshness(project, workspaceRoot, landingBranch, landingOptions = {}) {
+  const { worktreePath, projectRoot } = projectAwareWorkspaceRoot(project, workspaceRoot, freshnessGit);
+  return rootFreshnessAtPath(worktreePath, landingBranch, { ...landingOptions, mainClone: projectRoot.path });
 }
 
 function workspaceFreshnessReading(project, workspace, landingBranch, roots) {
@@ -1626,13 +1684,13 @@ function workspaceRootCoverageBlocker(coverage) {
   };
 }
 
-function workspaceFreshness(project, workspace, landingBranch) {
+function workspaceFreshness(project, workspace, landingBranch, landingOptions = {}) {
   const coverage = workspaceRootCoverage(project, workspace);
   if (!coverage.complete) throw new Error(coverage.message);
   if (workspace.roots.length === 0) throw new Error(`workspace ${workspace.id} has no persisted workspace roots`);
   const roots = workspace.roots.map((root) => {
     try {
-      return { projectRootId: root.projectRootId, ...rootFreshness(project, root, landingBranch) };
+      return { projectRootId: root.projectRootId, ...rootFreshness(project, root, landingBranch, landingOptions) };
     } catch (error) {
       const message = `freshness is unreadable for workspace ${workspace.id} root ${root.projectRootId}: ${error instanceof Error ? error.message : String(error)}`;
       throw error instanceof LandingBranchUnresolvableError ? new LandingBranchUnresolvableError(message) : new Error(message);
@@ -1742,7 +1800,207 @@ function gitWorktreePaths(projectRootPath) {
     .map((field) => canonicalPath(field.slice("worktree ".length)));
 }
 
-function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshness = true) {
+function gitWorktreeEntries(projectRootPath) {
+  const entries = [];
+  let current = null;
+  for (const field of git(projectRootPath, ["worktree", "list", "--porcelain", "-z"], { encoding: "buffer" }).toString("utf8").split("\0")) {
+    if (field.startsWith("worktree ")) {
+      current = { path: canonicalPath(field.slice("worktree ".length)), branch: null };
+      entries.push(current);
+    } else if (current && field.startsWith("branch ")) {
+      current.branch = field.slice("branch ".length);
+    }
+  }
+  return entries;
+}
+
+function discardableIgnoredKind(file) {
+  const segments = String(file).split("/").filter(Boolean);
+  for (let index = 0; index + PLAYBOT_NATIVE_ADDON_SEGMENTS.length <= segments.length; index += 1) {
+    if (PLAYBOT_NATIVE_ADDON_SEGMENTS.every((segment, offset) => segments[index + offset] === segment)) return "playbot-native-addon";
+  }
+  return segments.some((segment) => DISCARDABLE_IGNORED_CACHE_SEGMENTS.has(segment)) ? "build-cache" : null;
+}
+
+function fileSha256(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+// Playbot injects the same native addon files into every workspace of a project,
+// including the configured main clone, so a workspace copy that is byte-identical
+// to the main clone's copy is proven to be Playbot's own injection. The identity
+// is evidence only: the tree is gitignored host-specific output either way.
+function nativeAddonIdentity(worktreePath, mainCloneTop, file) {
+  if (file.endsWith("/")) return "directory-entry";
+  if (!mainCloneTop) return "main-clone-unavailable";
+  try {
+    const workspaceStat = fs.lstatSync(path.join(worktreePath, file));
+    const mainPath = path.join(mainCloneTop, file);
+    if (!pathPresence(mainPath)) return "absent-from-main-clone";
+    const mainStat = fs.lstatSync(mainPath);
+    if (!workspaceStat.isFile() || !mainStat.isFile()) return "not-a-regular-file";
+    if (workspaceStat.size !== mainStat.size) return "differs-from-main-clone";
+    return fileSha256(path.join(worktreePath, file)) === fileSha256(mainPath) ? "matches-main-clone" : "differs-from-main-clone";
+  } catch (error) {
+    return `unreadable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function classifyIgnoredPaths(worktreePath, mainCloneTop, ignoredPaths) {
+  const discardable = [];
+  const blocking = [];
+  for (const file of ignoredPaths) {
+    const kind = discardableIgnoredKind(file);
+    if (!kind) {
+      blocking.push(file);
+      continue;
+    }
+    discardable.push(kind === "playbot-native-addon"
+      ? { path: file, kind, identity: nativeAddonIdentity(worktreePath, mainCloneTop, file) }
+      : { path: file, kind });
+  }
+  return { discardable, blocking };
+}
+
+function playbotWorktreeStorage() {
+  return canonicalPath(path.join(desktopDir(), "worktrees"));
+}
+
+function pathStrictlyInside(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+// An orphaned workspace root is a directory whose Git metadata is gone: its
+// .git entry is absent or a gitdir file naming a directory that no longer
+// exists, and Git itself finds no repository there. A real .git directory, a
+// live gitdir target, or an enclosing repository is never an orphan.
+function orphanGitMetadata(rootPath) {
+  const dotGit = path.join(rootPath, ".git");
+  let metadata;
+  let stat = null;
+  try {
+    stat = fs.lstatSync(dotGit);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  if (!stat) {
+    metadata = { kind: "absent" };
+  } else if (stat.isFile()) {
+    const firstLine = fs.readFileSync(dotGit, "utf8").split(/\r?\n/, 1)[0];
+    const match = firstLine.match(/^gitdir: (.+)$/);
+    if (!match) return null;
+    const target = path.resolve(rootPath, match[1]);
+    if (pathPresence(target)) return null;
+    metadata = { kind: "dangling-gitdir-file", target };
+  } else {
+    return null;
+  }
+  try {
+    git(rootPath, ["rev-parse", "--git-dir"]);
+    return null;
+  } catch {
+    return metadata;
+  }
+}
+
+// A deterministic inventory of an orphaned directory's contents. Symlinks are
+// recorded, never followed. The fingerprint binds the root and every entry's
+// type, path, inode, size, and change and modification times so replacement or
+// mutation between inspection and deletion is refused.
+function orphanDirectoryInventory(rootPath) {
+  const rootStat = fs.lstatSync(rootPath, { bigint: true });
+  const entries = [];
+  const walk = (directory, prefix) => {
+    const children = fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    for (const child of children) {
+      const relative = prefix ? `${prefix}/${child.name}` : child.name;
+      const absolute = path.join(directory, child.name);
+      const stat = fs.lstatSync(absolute, { bigint: true });
+      if (stat.isDirectory()) {
+        entries.push({ path: `${relative}/`, type: "directory", dev: stat.dev, ino: stat.ino, size: 0n, ctimeNs: stat.ctimeNs, mtimeNs: stat.mtimeNs });
+        walk(absolute, relative);
+      } else {
+        entries.push({ path: relative, type: stat.isSymbolicLink() ? "symlink" : stat.isFile() ? "file" : "other", dev: stat.dev, ino: stat.ino, size: stat.size, ctimeNs: stat.ctimeNs, mtimeNs: stat.mtimeNs });
+      }
+    }
+  };
+  walk(rootPath, "");
+  const hash = crypto.createHash("sha256");
+  hash.update(`root\0${rootStat.dev}\0${rootStat.ino}\0${rootStat.ctimeNs}\0${rootStat.mtimeNs}\n`);
+  for (const entry of entries) hash.update(`${entry.type}\0${entry.path}\0${entry.dev}\0${entry.ino}\0${entry.size}\0${entry.ctimeNs}\0${entry.mtimeNs}\n`);
+  const content = entries.filter((entry) => entry.type !== "directory" && entry.path !== ".git");
+  const cachePaths = content.filter((entry) => discardableIgnoredKind(entry.path)).map((entry) => entry.path);
+  const otherPaths = content.filter((entry) => !discardableIgnoredKind(entry.path)).map((entry) => entry.path);
+  return {
+    fingerprint: `sha256:${hash.digest("hex")}`,
+    entryCount: entries.length,
+    fileCount: content.length,
+    byteCount: Number(content.reduce((total, entry) => total + entry.size, 0n)),
+    cachePaths,
+    otherPaths,
+  };
+}
+
+function publicOrphanInventory(inventory) {
+  return {
+    fingerprint: inventory.fingerprint,
+    entryCount: inventory.entryCount,
+    fileCount: inventory.fileCount,
+    byteCount: inventory.byteCount,
+    buildCacheFileCount: inventory.cachePaths.length,
+    otherFileCount: inventory.otherPaths.length,
+    otherPathsSample: inventory.otherPaths.slice(0, ORPHAN_INVENTORY_SAMPLE_LIMIT),
+    otherPathsSampleTruncated: inventory.otherPaths.length > ORPHAN_INVENTORY_SAMPLE_LIMIT,
+  };
+}
+
+// Playbot's own workspace:delete removes a worktree by looking up the root's
+// BRANCH in the repository's worktree list, not by path. For an orphaned root
+// that lookup must find nothing, or Playbot would force-remove whichever other
+// worktree has that branch checked out.
+function inspectOrphanedRoot(result, projectRoot, rootPath, workspaceRoot, directoryPresent, metadata) {
+  const entries = gitWorktreeEntries(projectRoot.path);
+  const registered = entries.some((entry) => entry.path === rootPath);
+  result.gitRegistration = { projectRootPath: canonicalPath(projectRoot.path), registered };
+  result.orphan = { directoryPresent, gitMetadata: metadata, registered, inventory: null, storage: null };
+  if (directoryPresent && registered) {
+    result.blockers.push({ code: "git-unreadable", message: `Workspace root ${rootPath} has no readable Git metadata but is still registered as a Git worktree` });
+    return result;
+  }
+  const branchRef = workspaceRoot.branch ? `refs/heads/${workspaceRoot.branch}` : null;
+  const owners = branchRef ? entries.filter((entry) => entry.path !== rootPath && entry.branch === branchRef).map((entry) => entry.path) : [];
+  if (owners.length > 0) {
+    result.blockers.push({
+      code: "orphan-branch-checked-out",
+      message: `Orphaned root branch ${workspaceRoot.branch} is checked out in another worktree that Playbot's branch-keyed deletion would remove: ${owners.join(", ")}`,
+      worktrees: owners,
+    });
+  }
+  if (!directoryPresent) return result;
+  const storage = playbotWorktreeStorage();
+  result.orphan.storage = { root: storage, inside: pathStrictlyInside(storage, rootPath) };
+  if (!result.orphan.storage.inside) {
+    result.blockers.push({
+      code: "orphan-outside-playbot-storage",
+      message: `Orphaned directory ${rootPath} is outside Playbot's worktree storage ${storage}, so retirement will not remove it`,
+    });
+    return result;
+  }
+  const inventory = orphanDirectoryInventory(rootPath);
+  result.orphan.inventory = publicOrphanInventory(inventory);
+  if (inventory.otherPaths.length > 0) {
+    result.blockers.push({
+      code: "orphaned-files",
+      message: `Orphaned directory ${rootPath} holds ${inventory.otherPaths.length} file(s) outside regenerable build output that Git can no longer account for; discarding them needs an explicit recorded authorization`,
+      directory: rootPath,
+      inventory: result.orphan.inventory,
+    });
+  }
+  return result;
+}
+
+function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshness = true, landingOptions = {}) {
   let rootPath = canonicalPath(workspaceRoot.path);
   let projectRoot = null;
   const result = {
@@ -1762,10 +2020,13 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
     },
     untrackedPaths: [],
     ignoredPaths: [],
+    discardableIgnoredPaths: [],
+    blockingIgnoredPaths: [],
     indexFlags: [],
     operations: [],
     submodules: { inspected: [], persisted: [], unreadable: [] },
     gitRegistration: null,
+    orphan: null,
     blockers: [],
   };
   let rootPresent;
@@ -1775,9 +2036,18 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
     result.blockers.push({ code: "git-unreadable", message: `Workspace root cannot be checked at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
     return result;
   }
+  const orphanProjectRoot = project.roots.find((candidate) => candidate.id === workspaceRoot.projectRootId);
   if (!rootPresent) {
-    result.blockers.push({ code: "missing-root", message: `Workspace root is missing: ${workspaceRoot.path || "<empty>"}` });
-    return result;
+    if (!workspaceRoot.path || !orphanProjectRoot?.path) {
+      result.blockers.push({ code: "missing-root", message: `Workspace root is missing: ${workspaceRoot.path || "<empty>"}` });
+      return result;
+    }
+    try {
+      return inspectOrphanedRoot(result, orphanProjectRoot, rootPath, workspaceRoot, false, { kind: "missing-directory" });
+    } catch (error) {
+      result.blockers.push({ code: "missing-root", message: `Workspace root is missing and its orphan cleanup cannot be verified: ${error instanceof Error ? error.message : String(error)}` });
+      return result;
+    }
   }
   try {
     ({ worktreePath: rootPath, projectRoot } = projectAwareWorkspaceRoot(project, workspaceRoot));
@@ -1787,14 +2057,29 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
       subject: exactCommitSubject(rootPath, headCommit),
     };
   } catch (error) {
-    result.blockers.push({ code: "git-unreadable", message: `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}` });
-    return result;
+    const message = `Git state is unreadable at ${rootPath}: ${error instanceof Error ? error.message : String(error)}`;
+    let metadata = null;
+    try {
+      metadata = orphanProjectRoot?.path && fs.lstatSync(rootPath).isDirectory() ? orphanGitMetadata(rootPath) : null;
+    } catch {
+      metadata = null;
+    }
+    if (!metadata) {
+      result.blockers.push({ code: "git-unreadable", message });
+      return result;
+    }
+    try {
+      return inspectOrphanedRoot(result, orphanProjectRoot, rootPath, workspaceRoot, true, metadata);
+    } catch (orphanError) {
+      result.blockers.push({ code: "git-unreadable", message: `${message}; orphan inspection failed: ${orphanError instanceof Error ? orphanError.message : String(orphanError)}` });
+      return result;
+    }
   }
   if (readFreshness) {
     try {
       result.freshness = {
         projectRootId: workspaceRoot.projectRootId,
-        ...rootFreshnessAtPath(rootPath, landingBranch),
+        ...rootFreshnessAtPath(rootPath, landingBranch, { ...landingOptions, mainClone: projectRoot.path }),
       };
       result.head = result.freshness.head;
       result.landing = result.freshness.landingBranchTip;
@@ -1824,6 +2109,15 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
     result.tracked.blockingPaths = status.blockingTrackedPaths;
     result.untrackedPaths = status.untrackedPaths;
     result.ignoredPaths = status.ignoredPaths;
+    let mainCloneTop = null;
+    try {
+      mainCloneTop = canonicalPath(stripTerminalLineEnding(git(projectRoot.path, ["rev-parse", "--show-toplevel"])));
+    } catch {
+      mainCloneTop = null;
+    }
+    const ignored = classifyIgnoredPaths(rootPath, mainCloneTop, status.ignoredPaths);
+    result.discardableIgnoredPaths = ignored.discardable;
+    result.blockingIgnoredPaths = ignored.blocking;
     result.indexFlags = status.indexFlags;
     result.operations = status.operations;
     result.submodules.inspected = status.submodules;
@@ -1896,11 +2190,11 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
       paths: result.untrackedPaths,
     });
   }
-  if (result.ignoredPaths.length > 0) {
+  if (result.blockingIgnoredPaths.length > 0) {
     result.blockers.push({
       code: "ignored-files",
-      message: `${result.ignoredPaths.length} ignored path(s) would be deleted and are never classified as Playbot churn`,
-      paths: result.ignoredPaths,
+      message: `${result.blockingIgnoredPaths.length} ignored path(s) outside regenerable build output and Playbot's native addon tree would be deleted`,
+      paths: result.blockingIgnoredPaths,
     });
   }
   return result;
@@ -1946,7 +2240,102 @@ function retirementThreadBlockers(blockingThreads, uncertainThreads) {
   return blockers;
 }
 
-function localWorkspaceRetirementEvidence(project, workspace, landingBranch) {
+// A workspace a live firstmate task still names is in flight even when its
+// chats read idle, so retirement refuses it. The records are the controller
+// home's state/<task>.meta, .lane-poll, and .check.sh files: a record keyed on
+// the workspace id, a metadata value equal to the workspace id or a path at or
+// inside one of its roots, or an armed lane poll naming one of its chats. A
+// controller root without a state directory is not a firstmate home and holds
+// no task records; any other unreadable record blocks.
+function liveTaskRecordEvidence(workspace) {
+  const state = path.join(controllerRoot(), "state");
+  let names;
+  try {
+    names = fs.readdirSync(state);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { checked: false, stateDir: state, reason: "controller root has no state directory", records: [], unreadable: [] };
+    return { checked: false, stateDir: state, reason: null, records: [], unreadable: [{ file: state, error: error instanceof Error ? error.message : String(error) }] };
+  }
+  const rootPaths = workspace.roots.map((root) => canonicalPath(root.path)).filter(Boolean);
+  const threadIds = new Set(threadRows().filter((row) => row.workspace_id === workspace.id).map((row) => row.thread_id));
+  const records = [];
+  const unreadable = [];
+  for (const name of names.sort()) {
+    const match = name.match(/^(.+)\.(meta|lane-poll|check\.sh)$/);
+    if (!match) continue;
+    const [, taskId, kind] = match;
+    if (taskId === workspace.id) {
+      records.push({ file: name, taskId, reason: "task record is keyed on the workspace id" });
+      continue;
+    }
+    if (kind === "lane-poll") continue;
+    let text;
+    try {
+      text = fs.readFileSync(path.join(state, name), "utf8");
+    } catch (error) {
+      unreadable.push({ file: name, error: error instanceof Error ? error.message : String(error) });
+      continue;
+    }
+    if (kind === "meta") {
+      for (const line of text.split(/\r?\n/)) {
+        const separator = line.indexOf("=");
+        if (separator < 0) continue;
+        const key = line.slice(0, separator);
+        const value = line.slice(separator + 1).trim();
+        if (!value) continue;
+        const named = value === workspace.id
+          || (path.isAbsolute(value) && rootPaths.some((root) => {
+            const candidate = canonicalPath(value);
+            return candidate === root || pathStrictlyInside(root, candidate);
+          }));
+        if (named) {
+          records.push({ file: name, taskId, reason: `metadata ${key} names this workspace` });
+          break;
+        }
+      }
+      continue;
+    }
+    if (!supervisionCheckIsOurs(text)) continue;
+    const thread = text.match(/ --thread '([^']*)'/)?.[1];
+    if (thread && threadIds.has(thread)) records.push({ file: name, taskId, reason: `armed lane poll supervises chat ${thread} in this workspace` });
+  }
+  return { checked: true, stateDir: state, reason: null, records, unreadable };
+}
+
+function liveTaskRecordBlockers(evidence) {
+  const blockers = [];
+  if (evidence.records.length > 0) {
+    blockers.push({
+      code: "live-task-record",
+      message: `${evidence.records.length} live firstmate task record(s) name this workspace`,
+      records: evidence.records,
+    });
+  }
+  if (evidence.unreadable.length > 0) {
+    blockers.push({
+      code: "task-record-unreadable",
+      message: `${evidence.unreadable.length} firstmate task record(s) could not be read, so a live task naming this workspace cannot be ruled out`,
+      records: evidence.unreadable,
+    });
+  }
+  return blockers;
+}
+
+// Which blockers an explicit discard authorization could clear. Advisory only:
+// retire_workspace re-derives this from its own immediate inspection.
+function discardSummary(blockers) {
+  const codes = [...new Set(blockers.map((blocker) => blocker.code))];
+  return {
+    possible: blockers.length > 0 && codes.every((code) => DISCARDABLE_LOCAL_CHANGE_SET.has(code)),
+    codes: codes.filter((code) => DISCARDABLE_LOCAL_CHANGE_SET.has(code)),
+    neverDiscardableCodes: codes.filter((code) => !DISCARDABLE_LOCAL_CHANGE_SET.has(code)),
+    unlandedCommits: blockers
+      .filter((blocker) => blocker.code === "unlanded-commits")
+      .flatMap((blocker) => blocker.commits.map((entry) => entry.commit)),
+  };
+}
+
+function localWorkspaceRetirementEvidence(project, workspace, landingBranch, landingOptions = {}) {
   const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace);
   const blockers = [
     { code: "local-workspace", message: "Local workspaces are never retirable" },
@@ -1958,7 +2347,7 @@ function localWorkspaceRetirementEvidence(project, workspace, landingBranch) {
     blockers.push(workspaceRootCoverageBlocker(coverage));
   } else {
     try {
-      freshness = workspaceFreshness(project, workspace, landingBranch);
+      freshness = workspaceFreshness(project, workspace, landingBranch, landingOptions);
     } catch (error) {
       blockers.push({ code: freshnessBlockerCode(error), message: error instanceof Error ? error.message : String(error) });
     }
@@ -1977,24 +2366,27 @@ function localWorkspaceRetirementEvidence(project, workspace, landingBranch) {
     freshness,
     retirable: false,
     verdict: "blocked",
+    discard: discardSummary(blockers),
   };
 }
 
-function inspectWorkspace(project, workspace, landingBranch) {
+function inspectWorkspace(project, workspace, landingBranch, landingOptions = {}) {
   const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace);
   const coverage = workspaceRootCoverage(project, workspace);
+  const taskRecords = liveTaskRecordEvidence(workspace);
   const evidence = {
     workspace: retirementWorkspaceRecord(project, workspace),
     landingBranch: String(landingBranch ?? ""),
     threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
+    taskRecords,
     roots: [],
-    blockers: retirementThreadBlockers(blockingThreads, uncertainThreads),
+    blockers: [...retirementThreadBlockers(blockingThreads, uncertainThreads), ...liveTaskRecordBlockers(taskRecords)],
   };
   if (!coverage.complete) evidence.blockers.push(workspaceRootCoverageBlocker(coverage));
   if (workspace.roots.length === 0) {
     evidence.blockers.push({ code: "missing-root", message: "Workspace has no persisted workspace roots" });
   } else {
-    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch, coverage.complete));
+    evidence.roots = workspace.roots.map((root) => inspectWorkspaceRoot(project, root, landingBranch, coverage.complete, landingOptions));
     evidence.blockers.push(...evidence.roots.flatMap((root) => root.blockers));
   }
   const rootReadings = evidence.roots.map((root) => root.freshness);
@@ -2003,13 +2395,44 @@ function inspectWorkspace(project, workspace, landingBranch) {
     : null;
   evidence.retirable = evidence.blockers.length === 0;
   evidence.verdict = evidence.retirable ? "retirable" : "blocked";
+  evidence.discard = discardSummary(evidence.blockers);
   return evidence;
 }
 
-function workspaceRetirementEvidence(project, workspace, landingBranch) {
+function workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions = {}) {
   return workspace.kind === "local"
-    ? localWorkspaceRetirementEvidence(project, workspace, landingBranch)
-    : inspectWorkspace(project, workspace, landingBranch);
+    ? localWorkspaceRetirementEvidence(project, workspace, landingBranch, landingOptions)
+    : inspectWorkspace(project, workspace, landingBranch, landingOptions);
+}
+
+// The firstmate registry posture decides which landing evidence retirement
+// reads. It is resolved through bin/fm-project-mode.sh, the registry's one
+// mechanical parser, against the controller home, so a caller names the
+// registered project but cannot choose the posture.
+function registryLandingOptions(project, registryProject) {
+  if (registryProject === undefined || registryProject === null) return { localLanding: false, registry: null };
+  if (typeof registryProject !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(registryProject)) {
+    throw new Error("registryProject must be the exact firstmate registry project name");
+  }
+  const script = path.join(path.dirname(supervisionSelfScript()), "fm-project-mode.sh");
+  const env = { ...process.env, FM_HOME: controllerRoot() };
+  delete env.FM_DATA_OVERRIDE;
+  delete env.FM_ROOT_OVERRIDE;
+  const result = spawnSync("bash", [script, registryProject], { env, encoding: "utf8", timeout: 20_000 });
+  if (result.error || result.status !== 0) {
+    throw new Error(`firstmate registry posture for ${registryProject} could not be read: ${(result.error?.message ?? result.stderr ?? "").trim() || `exit ${result.status}`}`);
+  }
+  const [mode, yolo, ...extra] = String(result.stdout).trim().split(/\s+/);
+  if (!mode || !yolo || extra.length > 0) throw new Error(`firstmate registry posture for ${registryProject} was unreadable`);
+  const warning = String(result.stderr ?? "").trim() || null;
+  const registry = { project: registryProject, home: controllerRoot(), mode, yolo, warning };
+  if (mode === "local-only" && warning === null) {
+    const registeredClone = canonicalPath(path.join(controllerRoot(), "projects", registryProject));
+    if (!project.roots.some((root) => canonicalPath(root.path) === registeredClone)) {
+      throw new Error(`registryProject ${registryProject} is local-only but its registered main clone is not a root of Playbot project ${project.id}`);
+    }
+  }
+  return { localLanding: mode === "local-only" && warning === null, registry };
 }
 
 function retirementAuditPath() {
@@ -2397,8 +2820,12 @@ function captureWorkspaceRetirementBaseline(project, inspection) {
   if (JSON.stringify(workspaceRootRows) !== JSON.stringify(inspectedRoots)) {
     throw new Error("workspace root rows changed after the immediate safety inspection");
   }
-  const directories = inspection.roots.map((root) => ({ path: root.path, present: pathPresence(root.path) }));
-  if (directories.some((entry) => !entry.present)) throw new Error("a workspace directory disappeared after the immediate safety inspection");
+  const directories = inspection.roots.map((root) => ({
+    path: root.path,
+    present: pathPresence(root.path),
+    expectedPresent: root.orphan ? root.orphan.directoryPresent : true,
+  }));
+  if (directories.some((entry) => entry.present !== entry.expectedPresent)) throw new Error("a workspace directory appeared or disappeared after the immediate safety inspection");
   const gitRegistrations = inspection.roots.map((root) => {
     const projectRoot = project.roots.find((candidate) => candidate.id === root.projectRootId);
     if (!projectRoot?.path) throw new Error(`project root ${root.projectRootId} is missing`);
@@ -2420,14 +2847,167 @@ function captureWorkspaceRetirementBaseline(project, inspection) {
   };
 }
 
-async function retireWorkspace(project, workspace, landingBranch) {
-  const inspection = workspaceRetirementEvidence(project, workspace, landingBranch);
-  if (!inspection.retirable) {
-    const summary = inspection.blockers.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
-    throw Object.assign(new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck: ${summary}`), {
-      data: { inspection },
+function validateDiscardAuthorization(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error("discardLocalChanges must be an object");
+  const unknown = Object.keys(value).filter((key) => !["authorization", "allow", "commits"].includes(key));
+  if (unknown.length > 0) throw new Error(`discardLocalChanges has unknown field(s): ${unknown.join(", ")}`);
+  const authorization = typeof value.authorization === "string" ? value.authorization : "";
+  if (!authorization.trim()) throw new Error("discardLocalChanges.authorization must record the captain's authorizing words");
+  if (!Array.isArray(value.allow) || value.allow.length === 0) throw new Error("discardLocalChanges.allow must name at least one discardable blocker code");
+  const allow = [];
+  for (const code of value.allow) {
+    if (!DISCARDABLE_LOCAL_CHANGE_SET.has(code)) {
+      throw new Error(`discardLocalChanges.allow names ${JSON.stringify(code)}, which is not discardable; allowed codes are ${DISCARDABLE_LOCAL_CHANGE_CODES.join(", ")}`);
+    }
+    if (allow.includes(code)) throw new Error(`discardLocalChanges.allow names ${code} more than once`);
+    allow.push(code);
+  }
+  const hasCommits = value.commits !== undefined;
+  if (allow.includes("unlanded-commits") !== hasCommits) {
+    throw new Error("discardLocalChanges.commits is required exactly when allow includes unlanded-commits");
+  }
+  let commits = [];
+  if (hasCommits) {
+    if (!Array.isArray(value.commits) || value.commits.length === 0) throw new Error("discardLocalChanges.commits must list every unlanded commit id");
+    for (const commit of value.commits) {
+      if (typeof commit !== "string" || !/^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(commit)) {
+        throw new Error(`discardLocalChanges.commits entry ${JSON.stringify(commit)} is not a full commit id`);
+      }
+    }
+    commits = [...new Set(value.commits.map((commit) => commit.toLowerCase()))];
+  }
+  return { authorization, allow, commits };
+}
+
+// The authorization clears only the blocker codes it names. Every unlanded
+// commit must be named exactly, and a named commit that is not currently
+// unlanded refuses because the authorization no longer matches the evidence.
+function discardPlan(inspection, authorization) {
+  const uncovered = [];
+  const unlanded = inspection.blockers
+    .filter((blocker) => blocker.code === "unlanded-commits")
+    .flatMap((blocker) => blocker.commits.map((entry) => entry.commit.toLowerCase()));
+  for (const blocker of inspection.blockers) {
+    if (!authorization.allow.includes(blocker.code)) {
+      uncovered.push(blocker);
+      continue;
+    }
+    if (blocker.code === "unlanded-commits") {
+      const missing = blocker.commits.filter((entry) => !authorization.commits.includes(entry.commit.toLowerCase()));
+      if (missing.length > 0) {
+        uncovered.push({ ...blocker, message: `${blocker.message}; the authorization does not name ${missing.map((entry) => entry.commit).join(", ")}` });
+      }
+    }
+  }
+  const stale = authorization.commits.filter((commit) => !unlanded.includes(commit));
+  if (stale.length > 0) {
+    uncovered.push({ code: "discard-authorization-stale", message: `the authorization names commit(s) that are not unlanded in this workspace: ${stale.join(", ")}` });
+  }
+  return { permitted: uncovered.length === 0, uncovered };
+}
+
+function discardRecord(inspection, authorization) {
+  const allowed = new Set(authorization?.allow ?? []);
+  return {
+    authorization: authorization?.authorization ?? null,
+    allow: authorization?.allow ?? [],
+    commits: authorization?.commits ?? [],
+    roots: inspection.roots.map((root) => ({
+      projectRootId: root.projectRootId,
+      path: root.path,
+      trackedPaths: allowed.has("tracked-modifications") ? root.tracked.blockingPaths : [],
+      allowedChurnPaths: root.tracked.allowedChurnPaths,
+      untrackedPaths: allowed.has("untracked-files") ? root.untrackedPaths : [],
+      ignoredPaths: allowed.has("ignored-files") ? root.blockingIgnoredPaths : [],
+      unlandedCommits: allowed.has("unlanded-commits") && Array.isArray(root.commitsAhead) ? root.commitsAhead : [],
+      discardableIgnoredPaths: root.discardableIgnoredPaths,
+      orphanInventory: root.orphan?.inventory ?? null,
+    })),
+  };
+}
+
+// Playbot's workspace:delete cannot remove an orphaned directory, because it
+// finds worktrees through Git and the orphan has no Git metadata left. After
+// Playbot has verifiably removed the workspace rows, the tool removes each
+// orphaned directory itself, but only when it is still an orphan, still inside
+// Playbot's worktree storage, not a symlink, and exactly the directory the
+// immediate inspection inventoried.
+function removeOrphanedDirectories(project, inspection) {
+  const results = [];
+  const orphans = inspection.roots.filter((root) => root.orphan?.directoryPresent);
+  if (orphans.length === 0) return results;
+  let rowsGone = false;
+  try {
+    const db = openDb(appDbPath());
+    try {
+      rowsGone = Number(queryOne(db, "SELECT COUNT(*) AS count FROM workspaces WHERE id = ?", [inspection.workspace.id])?.count ?? -1) === 0
+        && Number(queryOne(db, "SELECT COUNT(*) AS count FROM workspace_roots WHERE workspace_id = ?", [inspection.workspace.id])?.count ?? -1) === 0;
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    return orphans.map((root) => ({ path: root.path, removed: false, error: `workspace rows could not be verified gone: ${error instanceof Error ? error.message : String(error)}` }));
+  }
+  for (const root of orphans) {
+    if (!rowsGone) {
+      results.push({ path: root.path, removed: false, error: "Playbot still holds workspace rows, so the orphaned directory was preserved" });
+      continue;
+    }
+    try {
+      const stat = fs.lstatSync(root.path);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("path is no longer a real directory");
+      if (canonicalPath(root.path) !== root.path) throw new Error("path no longer resolves to the inspected directory");
+      if (!pathStrictlyInside(playbotWorktreeStorage(), root.path)) throw new Error("path is outside Playbot's worktree storage");
+      if (!orphanGitMetadata(root.path)) throw new Error("directory is no longer an orphan without Git metadata");
+      const projectRoot = project.roots.find((candidate) => candidate.id === root.projectRootId);
+      if (!projectRoot?.path || gitWorktreeEntries(projectRoot.path).some((entry) => entry.path === root.path)) {
+        throw new Error("directory is registered as a Git worktree");
+      }
+      const inventory = orphanDirectoryInventory(root.path);
+      if (inventory.fingerprint !== root.orphan.inventory?.fingerprint) throw new Error("directory contents changed after the immediate safety inspection");
+      fs.rmSync(root.path, { recursive: true, force: false, maxRetries: 2 });
+      results.push({
+        path: root.path,
+        removed: !pathPresence(root.path),
+        fingerprint: inventory.fingerprint,
+        removedFiles: [
+          ...(root.orphan.gitMetadata.kind === "dangling-gitdir-file" ? [".git"] : []),
+          ...inventory.otherPaths,
+          ...inventory.cachePaths,
+        ].sort(),
+      });
+    } catch (error) {
+      results.push({ path: root.path, removed: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return results;
+}
+
+function verifiedLandingRecord(root) {
+  if (!root.landing) return { projectRootId: root.projectRootId, orphan: Boolean(root.orphan), evidence: null };
+  return {
+    projectRootId: root.projectRootId,
+    evidence: root.landing.evidence ?? "remote",
+    remote: root.landing.remote,
+    remoteRef: root.landing.remoteRef,
+    ...(root.landing.localRef ? { localRef: root.landing.localRef, mainClone: root.landing.mainClone, registry: root.landing.registry } : {}),
+    commit: root.landing.commit,
+    observedAt: root.landing.observedAt,
+  };
+}
+
+async function retireWorkspace(project, workspace, landingBranch, landingOptions = {}, authorization = null) {
+  const inspection = workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions);
+  const plan = authorization ? discardPlan(inspection, authorization) : null;
+  if ((!inspection.retirable && !plan?.permitted) || (plan && !plan.permitted)) {
+    const refused = plan ? plan.uncovered : inspection.blockers;
+    const summary = refused.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
+    throw Object.assign(new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck${plan ? " beyond what the discard authorization covers" : ""}: ${summary}`), {
+      data: { inspection, ...(plan ? { uncoveredBlockers: plan.uncovered } : {}) },
     });
   }
+  const discard = discardRecord(inspection, authorization);
   let baseline;
   try {
     baseline = captureWorkspaceRetirementBaseline(project, inspection);
@@ -2462,13 +3042,8 @@ async function retireWorkspace(project, workspace, landingBranch) {
       remainingPaths: reconciliation.remaining.directories,
       heads: inspection.roots.map((root) => ({ projectRootId: root.projectRootId, path: root.path, ...root.head })),
       landingBranch: inspection.landingBranch,
-      verifiedLandingCommits: inspection.roots.map((root) => ({
-        projectRootId: root.projectRootId,
-        remote: root.landing.remote,
-        remoteRef: root.landing.remoteRef,
-        commit: root.landing.commit,
-        observedAt: root.landing.observedAt,
-      })),
+      verifiedLandingCommits: inspection.roots.map(verifiedLandingRecord),
+      discard,
       affectedLaneRoutes: routes.affected,
       ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: false, error: ipcError },
       baseline,
@@ -2491,6 +3066,7 @@ async function retireWorkspace(project, workspace, landingBranch) {
       partialAction: deletionObserved && !verification.complete,
       workspace: inspection.workspace,
       landingBranch: inspection.landingBranch,
+      discard,
       ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: false, error: ipcError },
       baseline,
       verification,
@@ -2510,6 +3086,7 @@ async function retireWorkspace(project, workspace, landingBranch) {
     throw Object.assign(new Error(`Playbot workspace:delete rejected for ${workspace.id}; ${outcome}. ${retryWarning}`), { data: failure });
   }
 
+  const orphanCleanup = removeOrphanedDirectories(project, inspection);
   const verification = verifyWorkspaceRetirement(project, inspection);
   const reconciliation = retirementReconciliation(verification, baseline);
   const routes = verification.complete
@@ -2529,15 +3106,11 @@ async function retireWorkspace(project, workspace, landingBranch) {
     remainingPaths: reconciliation.remaining.directories,
     heads: inspection.roots.map((root) => ({ projectRootId: root.projectRootId, path: root.path, ...root.head })),
     landingBranch: inspection.landingBranch,
-    verifiedLandingCommits: inspection.roots.map((root) => ({
-      projectRootId: root.projectRootId,
-      remote: root.landing.remote,
-      remoteRef: root.landing.remoteRef,
-      commit: root.landing.commit,
-      observedAt: root.landing.observedAt,
-    })),
+    verifiedLandingCommits: inspection.roots.map(verifiedLandingRecord),
+    discard,
     affectedLaneRoutes: routes.affected,
     ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: true },
+    orphanCleanup,
     baseline,
     verification,
     reconciliation,
@@ -2554,6 +3127,7 @@ async function retireWorkspace(project, workspace, landingBranch) {
     auditResult = { appended: false, path: retirementAuditPath(), error: error instanceof Error ? error.message : String(error) };
   }
   const problems = [
+    ...orphanCleanup.filter((entry) => !entry.removed).map((entry) => `Orphaned directory ${entry.path} was not removed: ${entry.error ?? "still present"}`),
     ...verification.problems,
     ...routes.problems,
     ...(auditResult.appended ? [] : [`Audit record could not be appended: ${auditResult.error}`]),
@@ -2564,6 +3138,8 @@ async function retireWorkspace(project, workspace, landingBranch) {
     workspace: inspection.workspace,
     landingBranch: inspection.landingBranch,
     ipc: { channel: "workspace:delete", payload: ipcPayload, succeeded: true },
+    discard,
+    orphanCleanup,
     baseline,
     verification,
     reconciliation,
@@ -4924,20 +5500,41 @@ function toolDefinitions() {
     },
     {
       name: "list_retirable_workspaces",
-      description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence, unarchived thread states, commits and subjects ahead, and exact tracked and untracked paths. Local workspaces and any workspace with uncertain evidence are reported blocked.",
+      description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence (or the main clone's local branch for a local-only registry project), unarchived thread states, live firstmate task records, commits and subjects ahead, exact tracked, untracked, and ignored paths, and orphaned roots whose Git metadata is gone. Local workspaces and any workspace with uncertain evidence are reported blocked, with which blockers an explicit discard authorization could clear.",
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
         landingBranch: string("Explicit branch these workspaces must already be landed on; use refs/remotes/<remote>/<branch> to name a remote branch unambiguously"),
+        registryProject: string("Optional exact firstmate registry project name; when its registered posture is local-only, the main clone's local landing branch is the landing evidence"),
       }, ["project", "landingBranch"]),
       annotations: { readOnlyHint: true },
     },
     {
       name: "retire_workspace",
-      description: "Delete one exact non-Local Playbot workspace only after immediately re-running the complete landing, thread, and Git safety inspection. Requires confirm=true, invokes workspace:delete with preserveWorktrees=false, verifies every database, directory, and Git-worktree removal, deactivates matching lane routes, and appends a private audit record.",
+      description: "Delete one exact non-Local Playbot workspace only after immediately re-running the complete landing, thread, task-record, and Git safety inspection. Requires confirm=true, invokes workspace:delete with preserveWorktrees=false, removes an inventoried orphaned directory Playbot cannot, verifies every database, directory, and Git-worktree removal, deactivates matching lane routes, and appends a private audit record. An explicit discardLocalChanges authorization may clear only the local-change blockers it names.",
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
         workspace: string("Exact active workspace id from list_retirable_workspaces"),
         landingBranch: string("Explicit branch this workspace must already be landed on; use the same value just inspected"),
+        registryProject: string("Optional exact firstmate registry project name; use the same value just inspected"),
+        discardLocalChanges: {
+          type: "object",
+          description: "Optional captain authorization to discard this one workspace's local changes, recorded verbatim with every discarded path in the audit. Active or uncertain chats, the Local workspace, live firstmate task records, and unreadable evidence are never discardable.",
+          properties: {
+            authorization: string("The captain's authorizing words, recorded verbatim in the audit"),
+            allow: {
+              type: "array",
+              description: "Blocker codes to discard",
+              items: { type: "string", enum: [...DISCARDABLE_LOCAL_CHANGE_CODES] },
+            },
+            commits: {
+              type: "array",
+              description: "Every exact unlanded commit id; required exactly when allow includes unlanded-commits",
+              items: { type: "string" },
+            },
+          },
+          required: ["authorization", "allow"],
+          additionalProperties: false,
+        },
         confirm: { type: "boolean", const: true },
       }, ["project", "workspace", "landingBranch", "confirm"]),
       annotations: { destructiveHint: true },
@@ -5105,14 +5702,18 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
   if (name === "list_retirable_workspaces") {
     const landingBranch = explicitLandingBranch(name, args.landingBranch);
+    const landingOptions = registryLandingOptions(project, args.registryProject);
     const workspaces = project.workspaces
       .filter((workspace) => workspace.archiveState === "active")
-      .map((workspace) => workspaceRetirementEvidence(project, workspace, landingBranch));
+      .map((workspace) => workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions));
     return {
       project: { id: project.id, name: project.name },
       landingBranch,
+      landingEvidence: { kind: landingOptions.localLanding ? "local-branch" : "remote", registry: landingOptions.registry },
       trackedChurnAllowlist: PLAYBOT_TRACKED_CHURN_PATHS,
       untrackedBoundary: "Untracked files are reported and block retirement; the tracked-churn allowlist never applies to them.",
+      ignoredBoundary: "Ignored build output under .godot, __pycache__, or .task_tmp and Playbot's addons/playbot/native tree are discardable; every other ignored path blocks.",
+      discardableCodes: DISCARDABLE_LOCAL_CHANGE_CODES,
       workspaces,
     };
   }
@@ -5122,8 +5723,10 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     if (!selector) throw new Error("retire_workspace requires one exact workspace selector from list_retirable_workspaces");
     const landingBranch = String(args.landingBranch ?? "").trim();
     if (!landingBranch) throw new Error("retire_workspace requires an explicit landingBranch");
+    const authorization = validateDiscardAuthorization(args.discardLocalChanges);
+    const landingOptions = registryLandingOptions(project, args.registryProject);
     const workspace = resolveRetirementWorkspace(project, selector);
-    return retireWorkspace(project, workspace, landingBranch);
+    return retireWorkspace(project, workspace, landingBranch, landingOptions, authorization);
   }
   if (name === "create_workspace") {
     return { workspace: await createWorkspace(project, args) };
