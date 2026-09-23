@@ -1,0 +1,8 @@
+== AFTER fix (target 5894f53): bash tests/fm-playbot-lanes.test.sh -> exit 0
+ok - fm-playbot-lanes: local landing rejects a registered clone that is not its own worktree top level
+ok - fm-playbot-lanes: local landing accepts a subdirectory root but rejects another repository or worktree
+ok - fm-playbot-lanes: a local-only registry posture accepts the main clone's local landing branch as landing evidence
+
+== BEFORE fix (bin/fm-playbot-lanes.mjs from 85af140, same tests) -> exit 1
+ok - fm-playbot-lanes: local landing rejects a registered clone that is not its own worktree top level
+not ok - a Playbot root inside the registered main clone did not use local landing evidence
