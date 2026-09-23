@@ -7576,6 +7576,37 @@ NODE
 no_delete_ipc "a mismatched registry project reached workspace:delete"
 mkdir -p "$retire_home/projects"
 ln -s "$FIXTURE_ROOT/worker" "$retire_home/projects/frog"
+set_playbot_root() {
+  FIXTURE_ROOT="$FIXTURE_ROOT" PLAYBOT_ROOT="$1" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('UPDATE repositories SET path = ? WHERE id = ?').run(process.env.PLAYBOT_ROOT, 'repo-project-worker');
+db.close();
+NODE
+}
+set_playbot_root "$FIXTURE_ROOT/worker/prototype-game"
+cleanup_list retirement-local-landing ',"registryProject":"frog"' > "$cleanup_out"
+OUT_FILE="$cleanup_out" COMMIT="$local_commit" node --no-warnings <<'NODE' || fail "a Playbot root inside the registered main clone did not use local landing evidence"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (value.error || value.result?.structuredContent?.landingEvidence.kind !== 'local-branch') process.exit(1);
+const workspace = value.result.structuredContent.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-local-landed');
+if (workspace.roots[0].landing?.commit !== process.env.COMMIT) process.exit(1);
+NODE
+set_playbot_root "$FIXTURE_ROOT/controller"
+cleanup_list retirement-local-landing ',"registryProject":"frog"' > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "a Playbot root in another repository used local landing evidence"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('registered main clone is not a root')) process.exit(1);
+NODE
+set_playbot_root "$local_ws/prototype-game"
+cleanup_list retirement-local-landing ',"registryProject":"frog"' > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "a Playbot root in another worktree used local landing evidence"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('registered main clone is not a root')) process.exit(1);
+NODE
+set_playbot_root "$FIXTURE_ROOT/worker"
+pass "fm-playbot-lanes: local landing accepts a subdirectory root but rejects another repository or worktree"
 cleanup_list retirement-local-landing ',"registryProject":"frog"' > "$cleanup_out"
 OUT_FILE="$cleanup_out" COMMIT="$local_commit" MAIN="$FIXTURE_ROOT/worker" node --no-warnings <<'NODE' || fail "a local-only registry project did not use its main clone's local landing branch"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
