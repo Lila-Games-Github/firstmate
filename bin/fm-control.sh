@@ -52,6 +52,16 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#              Relaunch allocates no worktree: it reuses the copy the task's own
+#              record already names, and refuses when that path is missing
+#              rather than taking a fresh one. Nothing is re-prepared, but a
+#              copy a record names can be one another live record owns after a
+#              restart, so the pool-slot ownership scan runs here FIRST - before
+#              the checkpoint, the note, and the exit - and its refusal leaves
+#              both records untouched AND the running agent still running.
+#              bin/fm-spawn.sh --relaunch repeats the same scan in the same
+#              words before it drives the endpoint into that copy, so a direct
+#              caller is refused too.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -138,6 +148,10 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-slot-record-lib.sh
+. "$SCRIPT_DIR/fm-slot-record-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -700,6 +714,27 @@ resolve_relaunch_profile() {
   fi
 }
 
+# refuse_relaunch_into_slot_another_record_owns: the transaction's first gate,
+# asked while the agent it protects is still running. The launch owner asks the
+# same question (bin/fm-spawn.sh's guard of the same name, both wired to
+# bin/fm-slot-record-lib.sh), but it is only reached after the old agent has
+# been stopped and the note recorded - so a refusal there would cost the
+# operator the very worker the gate exists to protect, on exactly the two-record
+# slot collision it is meant to detect. The scan is a pure read of task records
+# - no locks, nothing written - so asking it here keeps the refusal on the
+# pre-stop side of the transaction, where nothing has changed yet, for the same
+# reason the harness-capability check above is asked here too.
+#
+# The pool the slot belongs to is read from the record's own project, falling
+# back to the checkout the slot's git common directory names, so a record whose
+# project field no longer resolves still gets the gate rather than skipping it.
+refuse_relaunch_into_slot_another_record_owns() {
+  local project
+  project=$(fm_meta_get "$META" project)
+  [ -d "$project" ] || project=$(fm_slot_project_dir "$WT" 2>/dev/null) || return 0
+  fm_slot_refuse_relaunch_into_other_record "$ID" "$project" "$WT" "$META" "$STATE" || exit 1
+}
+
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
 # must preserve is actually there and recoverable afterwards. Fills
 # CHECKPOINT_LINES with the journal lines describing what it proved, and
@@ -803,6 +838,7 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
+  refuse_relaunch_into_slot_another_record_owns
   require_state_verified_backend relaunch
   resolve_relaunch_profile
 

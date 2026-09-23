@@ -228,6 +228,16 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
+#   Isolated is not the same as unowned. A Treehouse slot is leased to a live
+#   process, so a host restart frees every slot while the task records naming
+#   them survive and their panes are restored. Between the isolation check and
+#   the slot claim, spawn therefore scans every locally reachable task record
+#   for one that still names this slot as its worktree= or a secondmate home=,
+#   and refuses when it finds one, naming that task and how to reconcile it -
+#   the base freshen below would otherwise replace that task's copy. A scan it
+#   cannot complete refuses the same way. Ownership evidence and the scan are
+#   owned by bin/fm-slot-record-lib.sh; bin/fm-teardown.sh's --reconcile-slot
+#   is the sanctioned way out of a collision that has already happened.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the task's recorded landing branch when it has one and otherwise
@@ -513,12 +523,18 @@ fi
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# Pool-slot recognition and the live-record slot scan the guard below reads.
+# shellcheck source=bin/fm-slot-record-lib.sh
+. "$SCRIPT_DIR/fm-slot-record-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# Read by the live-record slot guard's scan of every locally registered home.
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -2816,6 +2832,58 @@ validate_spawn_worktree() { # <source> <inspect-target>
   fi
 }
 
+# Refuse a pool slot that a LIVE task record still names as its own.
+#
+# Treehouse decides a crewmate slot is free from the processes running under it,
+# because the interactive `treehouse get` this spawn sends to the pane records a
+# live process lease rather than a durable one (bin/fm-slot-record-lib.sh owns
+# why the two answers differ). Every one of those leases dies with a host
+# reboot, so after a restart Treehouse offers slots whose tasks are still live:
+# their records are untouched on disk and the backend restores their panes.
+# Handing one out is destructive the moment the spawn continues, because
+# freshen_spawn_worktree_base immediately re-prepares the slot to this task's
+# base and replaces the other task's checkout (observed 2026-09-21: slot 8 was
+# taken from a live task whose branch happened to be clean and pushed).
+#
+# The task records are the evidence Treehouse cannot have, so they are consulted
+# here, before the slot is claimed - claiming would overwrite the other task's
+# own claim on it - and before any of it is prepared. This refuses rather than
+# looping for another slot: the pane already holds this one, releasing it is a
+# state-changing action on a slot another task owns, and an operator reconciling
+# two records is exactly the case that must not be automated past.
+#
+# A scan that cannot be completed refuses too: "cannot tell" must never become
+# "nobody owns it" at the one point where being wrong destroys a worker's copy.
+refuse_slot_owned_by_live_record() { # <inspect-target>
+  local inspect_target=$1 rc=0
+  fm_treehouse_pool_slot "$PROJ_ABS" "$WT" || return 0
+  fm_slot_record_other_holder "$WT" "$STATE/$ID.meta" "$STATE" || rc=$?
+  case "$rc" in
+    1) return 0 ;;
+    2)
+      echo "error: could not check whether Treehouse pool slot $WT is already recorded by another task: $FM_SLOT_RECORD_ERROR; refusing to prepare a slot whose ownership cannot be read. Inspect target $inspect_target" >&2
+      exit 1
+      ;;
+  esac
+  echo "error: Treehouse handed task $ID pool slot $WT, but task $FM_SLOT_RECORD_HOLDER_ID still records it as its $FM_SLOT_RECORD_HOLDER_FIELD ($FM_SLOT_RECORD_HOLDER_META); preparing it would replace that task's copy, so nothing was launched." >&2
+  echo "A pool lease does not survive a host restart while a task record does, so Treehouse can offer a slot its task still owns. Reconcile the two records first - bin/fm-crew-state.sh $FM_SLOT_RECORD_HOLDER_ID, then bin/fm-teardown.sh $FM_SLOT_RECORD_HOLDER_ID once its work is landed - then spawn $ID again. Inspect target $inspect_target" >&2
+  exit 1
+}
+
+# The same ownership question at the other end of the deadlock, owned by
+# bin/fm-slot-record-lib.sh's fm_slot_refuse_relaunch_into_other_record because
+# both ends of the relaunch transaction ask it. bin/fm-control.sh asks it first,
+# while the agent it is about to replace is still running; this is the launch
+# owner's own line of defence, so a direct `fm-spawn.sh <id> --relaunch` is
+# refused too rather than relying on its caller having asked.
+#
+# Refused before the endpoint is driven into the copy and before any durable
+# record is touched, so both records and the copy are left exactly as they were.
+refuse_relaunch_into_slot_another_record_owns() {
+  fm_slot_refuse_relaunch_into_other_record "$ID" "$PROJ_ABS" "$WT" "$STATE/$ID.meta" "$STATE" \
+    || exit 1
+}
+
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
 # an earlier refresh moved the superproject and left the submodule checkout on
 # the pin the previous base recorded. The refusal still stands and this gate
@@ -3084,6 +3152,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a
   # fresh secondmate spawn uses; every other kind takes the recorded worktree.
   [ "$KIND" = secondmate ] || WT=$RELAUNCH_WT
+  refuse_relaunch_into_slot_another_record_owns
   WT_TARGET=$T
   SES=${T%%:*}
 else
@@ -3756,6 +3825,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  refuse_slot_owned_by_live_record "$T"
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable

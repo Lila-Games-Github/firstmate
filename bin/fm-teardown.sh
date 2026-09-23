@@ -139,6 +139,11 @@
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
+# When BOTH records are genuinely stuck on one slot - the reuse collision that a
+# host reboot creates, where the exclusivity refusal blocks each record because
+# of the other - --reconcile-slot is the one sanctioned way out, on the proofs
+# named in the usage block above. bin/fm-spawn.sh now refuses to prepare a slot a
+# live record already names, so new collisions of this shape do not form.
 # Orca is not a pool slot and proves its path through
 # require_orca_worktree_path_match instead.
 # Orca tasks use the same safety checks, then close the recorded terminal and
@@ -169,7 +174,7 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--reconcile-slot]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -183,6 +188,14 @@
 #   an abandoned attempt left behind never counts as a published incarnation:
 #   the record still reads as a legacy record, so the endpoint gate runs again
 #   and the retry still needs --legacy-record.
+#   --reconcile-slot retires ONE record of a two-record pool-slot deadlock
+#   without touching the slot, after proving that the slot's own claim names a
+#   different task and that this record's work is already safe outside the
+#   worktree (a scout's report, or a ship's landed branch in the shared
+#   repository). The surviving record still returns the slot on its own ordinary
+#   teardown. It discards nothing and cannot be combined with --force, which
+#   authorizes the opposite; require_reconcilable_slot_collision owns the four
+#   proofs and every refusal.
 #
 # Path-alias tolerant treehouse return: on systems where the recorded worktree
 # path and treehouse's own record are different spellings of the same directory
@@ -327,11 +340,13 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+RECONCILE_SLOT=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --reconcile-slot) RECONCILE_SLOT=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -345,6 +360,9 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# Pool-slot recognition and the live-record slot scan the ownership gates read.
+# shellcheck source=bin/fm-slot-record-lib.sh
+. "$SCRIPT_DIR/fm-slot-record-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -357,6 +375,13 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
+fi
+# --reconcile-slot proves this record's work is already safe; --force authorizes
+# discarding work that is not. They answer opposite questions, so a caller that
+# passes both has not decided which one this teardown is.
+if [ "$RECONCILE_SLOT" = 1 ] && [ "$FORCE" = --force ]; then
+  echo "error: --reconcile-slot and --force cannot be combined: --reconcile-slot retires a record whose own work is proved landed, while --force discards work that is not. Choose the one that matches the evidence" >&2
+  exit 2
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
 
@@ -1364,13 +1389,24 @@ retire_busy_state() {
   fi
 }
 
+# The repository and revision every landed-work question below is asked about.
+# They default to the task's own worktree at HEAD, which is what an ordinary
+# teardown inspects. --reconcile-slot repoints them at the project clone and the
+# task's own branch instead, because a slot that has already been handed to
+# another task no longer holds the record's checkout to inspect - only its
+# branch in the shared repository still carries the committed work. Nothing else
+# changes: the same merged-PR containment and landing-target content proofs run
+# against whatever these two name.
+WORK_LANDED_REPO=
+WORK_LANDED_REV=HEAD
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
 pr_number_from_branch() {
   local branch=$1 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
+  out=$( cd "$WORK_LANDED_REPO" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
   [ -n "$n" ] || return 1
   printf '%s' "$n"
@@ -1395,26 +1431,26 @@ pr_number_from_target() {
 
 ensure_commit_object() {
   local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  git -C "$WORK_LANDED_REPO" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+  git -C "$WORK_LANDED_REPO" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WORK_LANDED_REPO" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WORK_LANDED_REPO" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
 patch_id_for_commit() {
   local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+  git -C "$WORK_LANDED_REPO" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --stable 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
 unpushed_patches_are_in_pr_head() {
   local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
+  current=$(git -C "$WORK_LANDED_REPO" rev-parse --verify "$WORK_LANDED_REV" 2>/dev/null) || return 1
+  base=$(git -C "$WORK_LANDED_REPO" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
+    git -C "$WORK_LANDED_REPO" log --format=%H "$base..$pr_head" -- 2>/dev/null \
       | while IFS= read -r commit; do
           patch_id_for_commit "$commit"
         done \
@@ -1422,7 +1458,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$WORK_LANDED_REPO" log --format=%H "$WORK_LANDED_REV" --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1447,7 +1483,7 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  view=$(cd "$WORK_LANDED_REPO" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
@@ -1460,8 +1496,8 @@ pr_is_merged() {
   esac
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
+  current=$(git -C "$WORK_LANDED_REPO" rev-parse --verify "$WORK_LANDED_REV" 2>/dev/null) || return 1
+  if git -C "$WORK_LANDED_REPO" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
   elif unpushed_patches_are_in_pr_head "$head"; then
     landed=1
@@ -1495,21 +1531,21 @@ content_in_default() {
   else
     name=$(default_branch) || return 1
   fi
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    if ! git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1; then
+  if git -C "$WORK_LANDED_REPO" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$WORK_LANDED_REPO" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1; then
       LANDING_TARGET_UNRESOLVED=1
       return 1
     fi
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif git -C "$WORK_LANDED_REPO" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     LANDING_TARGET_UNRESOLVED=1
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  default_tree=$(git -C "$WORK_LANDED_REPO" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$WORK_LANDED_REPO" merge-tree --write-tree "$ref" "$WORK_LANDED_REV" 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -1840,6 +1876,10 @@ teardown_treehouse_return() {
 
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT DEFAULT_REF unmerged_raw unmerged branch
+  # This gate asks about the task's own checkout, so the landed-work family it
+  # calls is scoped back to that checkout at HEAD.
+  WORK_LANDED_REPO=$WT
+  WORK_LANDED_REV=HEAD
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2304,80 +2344,162 @@ teardown_live_slot_path() {
   canonical_existing_dir "$WT"
 }
 
-collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
-    return 1
-  }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
-}
-
+# The state directories whose records could name this slot, and the first other
+# record that does. Both scans are owned by bin/fm-slot-record-lib.sh, which
+# bin/fm-spawn.sh reads through the same functions so a slot is refused at
+# allocation on exactly the evidence teardown refuses to return it on. Only the
+# refusal wording is teardown's own.
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot rc=0
   slot=$(canonical_existing_dir "$worktree") || return 0
-  collect_local_firstmate_states "$record_state" || return 1
-  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
-    for other in "$state_dir"/*.meta; do
-      [ -f "$other" ] && [ ! -L "$other" ] || continue
-      [ "$other" != "$record_meta" ] || continue
-      other_id=$(basename "$other" .meta)
-      for field in worktree home; do
-        other_path=$(fm_meta_get "$other" "$field")
-        [ -n "$other_path" ] || continue
-        other_slot=$(canonical_existing_dir "$other_path") || continue
-        [ "$other_slot" = "$slot" ] || continue
-        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        return 1
-      done
-    done
-  done
+  fm_slot_record_other_holder "$slot" "$record_meta" "$record_state" || rc=$?
+  case "$rc" in
+    1) return 0 ;;
+    2)
+      echo "REFUSED: $FM_SLOT_RECORD_ERROR; nothing was changed" >&2
+      return 1
+      ;;
+  esac
+  echo "REFUSED: task $record_id's recorded worktree $slot is also task $FM_SLOT_RECORD_HOLDER_ID's recorded $FM_SLOT_RECORD_HOLDER_FIELD." >&2
+  echo "Returning that pool slot would kill $FM_SLOT_RECORD_HOLDER_ID's processes and reset its copy, so nothing was changed - not even with --force." >&2
+  echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $FM_SLOT_RECORD_HOLDER_ID), then re-run teardown." >&2
+  echo "When both records are genuinely stuck on one slot, bin/fm-teardown.sh --reconcile-slot retires the record whose own work is provably safe without touching the slot." >&2
+  return 1
 }
 
 require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+}
+
+# --reconcile-slot: the one sanctioned way out of a two-record slot deadlock.
+#
+# The deadlock (observed 2026-09-21): a host reboot freed a pool slot whose task
+# was still live, the next spawn was handed the same slot and re-prepared it, and
+# two task records now name one slot. The exclusivity refusal above then blocks
+# BOTH records forever - the stale one because the live record names its slot,
+# the live one because the stale record does - and --force cannot help, because
+# --force authorizes discarding this task's work and the refusal is about the
+# other task's.
+#
+# This path breaks that by retiring one record without touching the slot at all:
+# no process kill, no dirty or landed inspection of it, no branch or hook removal
+# in it, no Treehouse return, and never the other record's claim. It reaches that
+# state through the existing reassigned-slot determination rather than a second
+# mechanism, so exactly the steps that are already proven safe to skip are
+# skipped. The surviving record still names the slot and still returns it on its
+# own ordinary teardown, so the slot cannot leak: requiring a live collision is
+# what guarantees someone is still responsible for it.
+#
+# Four things must be proved before that is allowed, and each refuses with its
+# own evidence rather than a generic message:
+#
+#   1. The record has a live pool slot. Nothing else can deadlock this way.
+#   2. Another live task record names the same slot. Without a collision there is
+#      no deadlock to reconcile, and ordinary teardown is the correct command.
+#   3. The slot's own owner claim names a DIFFERENT task. That claim is written
+#      under the project lock that allocates the slot, so it is the one piece of
+#      positive evidence that this record is the stale one rather than the live
+#      one. A claim naming this task means the operator picked the wrong record:
+#      reconcile the other one first, then tear this one down normally. An absent
+#      or unreadable claim proves nothing, and guessing here would retire the
+#      record of a live worker and leave its slot with nobody to return it.
+#   4. This record's own work is already safe WITHOUT the worktree, because the
+#      worktree no longer holds it - a scout's report is in the Firstmate home,
+#      and a ship's committed work is on its branch in the shared repository.
+#      The ship proof runs the ordinary merged-PR and landing-target content
+#      checks against that branch instead of the reassigned checkout.
+#
+# Nothing here discards anything: every refusal leaves both records untouched.
+RECONCILE_SLOT_BRANCH=
+require_reconcilable_slot_collision() {
+  local slot rc=0 branch report slot_branch unlanded
+
+  # Before the slot gate, which refuses a secondmate for the generic reason that
+  # teardown_live_slot_path resolves no slot for one: the specific reason is the
+  # one an operator who typed a secondmate id needs to read.
+  if [ "$KIND" = secondmate ]; then
+    echo "REFUSED: --reconcile-slot is for crewmate task records; secondmate $ID is retired explicitly instead." >&2
+    return 1
+  fi
+
+  slot=$(teardown_live_slot_path) || {
+    echo "REFUSED: --reconcile-slot needs a live Treehouse pool slot, and task $ID records ${WT:-no worktree}." >&2
+    echo "Only a shared pool slot can deadlock two records this way; tear this task down with the ordinary command." >&2
+    return 1
+  }
+
+  fm_slot_record_other_holder "$slot" "$META" "$STATE" || rc=$?
+  case "$rc" in
+    2)
+      echo "REFUSED: $FM_SLOT_RECORD_ERROR; nothing was changed" >&2
+      return 1
+      ;;
+    1)
+      echo "REFUSED: no other task record names $slot, so there is no slot collision for --reconcile-slot to reconcile." >&2
+      echo "Tear task $ID down with the ordinary command, which returns the slot to the pool." >&2
+      return 1
+      ;;
+  esac
+
+  fm_treehouse_slot_owner_state "$slot" "$ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    other) ;;
+    mine)
+      echo "REFUSED: $slot still carries task $ID's own slot claim, so this record is the slot's current holder, not the stale one." >&2
+      echo "Reconcile task $FM_SLOT_RECORD_HOLDER_ID's record first (bin/fm-teardown.sh $FM_SLOT_RECORD_HOLDER_ID --reconcile-slot once its work is landed), then tear task $ID down with the ordinary command." >&2
+      return 1
+      ;;
+    absent)
+      echo "REFUSED: $slot carries no slot-owner claim, so which of task $ID and task $FM_SLOT_RECORD_HOLDER_ID currently holds it cannot be proved." >&2
+      echo "Read both records (bin/fm-crew-state.sh $ID; bin/fm-crew-state.sh $FM_SLOT_RECORD_HOLDER_ID) and correct the stale worktree line by hand; --reconcile-slot never guesses an owner." >&2
+      return 1
+      ;;
+    *)
+      echo "REFUSED: $slot carries a slot-owner claim that cannot be read, so its holder cannot be proved." >&2
+      echo "Inspect or repair the claim file at $(fm_treehouse_slot_owner_marker "$slot" 2>/dev/null || printf 'beside %s' "$slot") (task= and home= lines), then re-run." >&2
+      return 1
+      ;;
+  esac
+
+  case "$KIND" in
+    scout)
+      report="$DATA/$ID/report.md"
+      if [ ! -f "$report" ] || [ ! -s "$report" ]; then
+        echo "REFUSED: scout task $ID has no report at $report, and its worktree was reassigned to task $FM_SLOT_RECORD_HOLDER_ID, so its work cannot be recovered from either place." >&2
+        echo "Nothing was changed. The report is the work product; there is no safe reconciliation without it." >&2
+        return 1
+      fi
+      ;;
+    *)
+      branch="fm/$ID"
+      slot_branch=$(git -C "$slot" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+      if [ "$slot_branch" = "$branch" ]; then
+        echo "REFUSED: $slot is still checked out on task $ID's own branch $branch, which contradicts its claim naming task $FM_TREEHOUSE_SLOT_OWNER_ID." >&2
+        echo "The slot may still hold this task's working copy, so nothing was changed; reconcile the two records by hand before retiring either." >&2
+        return 1
+      fi
+      if ! git -C "$PROJ" rev-parse --quiet --verify "refs/heads/$branch^{commit}" >/dev/null 2>&1; then
+        echo "REFUSED: task $ID has no branch $branch in $PROJ, and its worktree was reassigned to task $FM_SLOT_RECORD_HOLDER_ID, so whether its work landed cannot be proved from either place." >&2
+        echo "Nothing was changed. Restore or identify the branch that carries this task's commits, then re-run." >&2
+        return 1
+      fi
+      WORK_LANDED_REPO=$PROJ
+      WORK_LANDED_REV="refs/heads/$branch"
+      if ! work_is_landed "$branch"; then
+        echo "REFUSED: task $ID's branch $branch is not landed, so retiring its record would leave unlanded work with nothing pointing at it." >&2
+        unlanded=$(git -C "$PROJ" log --oneline "refs/heads/$branch" --not --remotes -- 2>/dev/null | head -5 || true)
+        [ -z "$unlanded" ] || printf 'commits not on any remote:\n%s\n' "$unlanded" >&2
+        echo "Land the branch (or get the captain's explicit OK to discard it), then re-run. Nothing was changed." >&2
+        return 1
+      fi
+      RECONCILE_SLOT_BRANCH=$branch
+      ;;
+  esac
+
+  echo "teardown: reconciling task $ID's record against pool slot $slot, which task $FM_TREEHOUSE_SLOT_OWNER_ID now holds${RECONCILE_SLOT_BRANCH:+ (branch $RECONCILE_SLOT_BRANCH is landed)}; the slot, its processes, its copy, and its claim are left untouched." >&2
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
@@ -3311,7 +3433,11 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
+if [ "$RECONCILE_SLOT" = 1 ]; then
+  require_reconcilable_slot_collision || exit 1
+else
+  require_exclusive_task_worktree_slot || exit 1
+fi
 require_owned_task_worktree_slot || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1

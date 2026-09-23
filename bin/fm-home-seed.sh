@@ -7,7 +7,22 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       "treehouse return". A leased worktree that ANY task record still names -
+#       a crewmate's worktree or a secondmate home, including a record whose id
+#       is this same <id> - is refused before anything is seeded over it: the
+#       crewmate and secondmate pools are one pool whenever the project is the
+#       firstmate repo itself, and a host restart frees every crewmate slot while
+#       the record naming it survives. Seeding <id> at all is refused up front
+#       when <id> already names a crewmate task record in this home, because that
+#       record and a secondmate route cannot both own one id.
+#       The refusal keeps the lease rather than returning it, because "treehouse
+#       return" cleans, resets and terminates processes under the worktree -
+#       exactly the work the refusal exists to protect - and treehouse v2.1.1
+#       offers no release that does less; a held lease is never handed out again,
+#       so holding it is also what keeps a third allocation off that copy. It is
+#       released by hand with "treehouse return --if-lease-holder <id> <path>"
+#       once the two records are reconciled, and bin/fm-bootstrap.sh reports a
+#       SLOT_RECONCILE line every session until then. Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -49,6 +64,10 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-slot-record-lib.sh
+. "$SCRIPT_DIR/fm-slot-record-lib.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -387,6 +406,72 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
+# Refuse a secondmate id that a crewmate task record in this home already holds.
+#
+# A ship or scout record and a secondmate route cannot both own one id: the
+# state meta, the window name and every selector that resolves them are keyed by
+# it. It is also the allocation bypass the record scan alone cannot close -
+# `fm-home-seed.sh <live-task-id> -` after a restart can be handed exactly the
+# copy <live-task-id> is working in, and a scan that skipped the seed's own id
+# would call that copy unowned. Refused before the lease is taken, so a colliding
+# id never strands one.
+refuse_crewmate_id_collision() {  # <id>
+  local id=$1 kind meta
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  kind=$(fm_meta_get "$meta" kind)
+  [ "$kind" != secondmate ] || return 0
+  echo "error: cannot seed secondmate $id: task $id already has a ${kind:-crewmate} record in this home ($meta), and one id cannot be both a task and a secondmate route. Confirm it with bin/fm-crew-state.sh $id and tear it down with bin/fm-teardown.sh $id once its work is landed, or seed the secondmate under a different id." >&2
+  return 1
+}
+
+# Refuse a durably leased home that a LIVE task record still names as its own.
+#
+# Treehouse decides a crewmate slot is free from the processes running under it,
+# because a crewmate acquires its slot through the interactive pane-driven
+# `treehouse get` (bin/fm-slot-record-lib.sh owns why the two answers differ).
+# Every one of those process leases dies with a host reboot, so after a restart
+# the pool offers slots whose tasks are still live: their records are untouched
+# on disk and the backend restores their panes. This lease draws from that same
+# pool whenever the project is the firstmate repo itself, and a crewmate slot
+# checkout of it passes verify_firstmate_home, so seeding would create the
+# secondmate operational directories over a live task's copy and leave two
+# records - one worktree=, one home= - naming one path: the collision
+# bin/fm-teardown.sh then refuses to break. bin/fm-spawn.sh refuses on the same
+# evidence at the crewmate allocation point.
+#
+# NO record is excluded from the scan, not even one whose id is this seed's own
+# id: this runs before the secondmate has a record of its own, so a meta already
+# holding that id is another task's, and excluding it would let exactly the
+# reported bypass through - `fm-home-seed.sh <live-task-id> -` seeding over the
+# copy that task is working in. refuse_crewmate_id_collision refuses that id up
+# front; this scan is what still refuses when the colliding record is of some
+# other shape.
+#
+# The lease is deliberately NOT returned on refusal. `treehouse return` cleans,
+# resets and terminates lingering processes under the worktree, which is the
+# work this refusal exists to protect, and treehouse v2.1.1 has no release that
+# does less; a leased worktree is never handed out by a later get, so holding it
+# is also what keeps a third allocation off the same copy. The refusal names the
+# owning record, the remedy for it, and the exact release command, and
+# bin/fm-bootstrap.sh reports that held lease every session until it is released.
+#
+# A scan that cannot be completed refuses too: "cannot tell" must never become
+# "nobody owns it" at the one point where being wrong overwrites a worker's copy.
+refuse_leased_home_owned_by_live_record() {  # <id> <leased-home>
+  local id=$1 home=$2 rc=0
+  fm_slot_record_other_holder "$home" "" "$STATE" || rc=$?
+  [ "$rc" != 1 ] || return 0
+  if [ "$rc" = 2 ]; then
+    echo "error: could not check whether the firstmate home $home leased for secondmate $id is already recorded by another task: $FM_SLOT_RECORD_ERROR; refusing to seed a home whose ownership cannot be read" >&2
+  else
+    echo "error: treehouse leased secondmate $id the firstmate home $home, but task $FM_SLOT_RECORD_HOLDER_ID still records it as its $FM_SLOT_RECORD_HOLDER_FIELD ($FM_SLOT_RECORD_HOLDER_META); seeding it would write over that task's copy, so nothing was seeded." >&2
+    echo "A pool lease does not survive a host restart while a task record does, so Treehouse can offer a copy its task still owns. Reconcile or tear down the owning task first - bin/fm-crew-state.sh $FM_SLOT_RECORD_HOLDER_ID, then bin/fm-teardown.sh $FM_SLOT_RECORD_HOLDER_ID once its work is landed - then seed $id again." >&2
+  fi
+  echo "The lease on $home is still held for $id and was deliberately not returned, because 'treehouse return' cleans and resets that copy and terminates the processes under it, and treehouse has no release that does less; a held lease is never handed out again. Once the owning record is reconciled, release it by hand with 'treehouse return --if-lease-holder $id $home' run from $FM_ROOT. Until then session start reports it as a SLOT_RECONCILE line." >&2
+  return 1
+}
+
 acquire_treehouse_home() {
   local id=$1 home
   # Durably lease a firstmate worktree from the pool. The lease persists with no
@@ -398,6 +483,7 @@ acquire_treehouse_home() {
     return 1
   }
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
+  refuse_leased_home_owned_by_live_record "$id" "$home" || return 1
   printf '%s\n' "$home"
 }
 
@@ -830,6 +916,7 @@ seed_home() {
   trap seed_exit_cleanup EXIT
 
   validate_registry
+  refuse_crewmate_id_collision "$id" || return 1
   for project in "$@"; do
     validate_seed_project "$project"
   done

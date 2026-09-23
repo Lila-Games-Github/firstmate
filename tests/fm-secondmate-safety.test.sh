@@ -295,6 +295,158 @@ test_home_seed_uses_treehouse_acquired_home() {
   pass "home seeding durably leases treehouse-acquired dash homes under the secondmate id"
 }
 
+# The secondmate lease and a crewmate slot come from one pool whenever the
+# project is the firstmate repo itself, and a crewmate's hold on its slot is a
+# live process that a host restart destroys while its record survives. Treehouse
+# can therefore lease a copy a live task still owns; seeding it would create the
+# secondmate operational dirs over that task's work and leave two records naming
+# one path, the collision teardown refuses to break.
+test_home_seed_refuses_leased_home_a_live_task_records() {
+  local home acquired acquired_abs fakebin log err lease
+  home="$TMP_ROOT/dash-owned-home"
+  acquired="$TMP_ROOT/dash-owned-acquired-home"
+  err="$TMP_ROOT/dash-owned.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-owned-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  git clone --quiet "$ROOT" "$acquired"
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  printf 'live crewmate work\n' > "$acquired/live-work.txt"
+  fm_write_meta "$home/state/pipeline.meta" \
+    "window=firstmate:fm-pipeline" "endpoint_task_id=pipeline" \
+    "worktree=$acquired_abs" "project=$home/projects/alpha" "kind=ship"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-owned-fake")
+  log="$TMP_ROOT/dash-owned-fake/tmux.log"
+  lease="$TMP_ROOT/dash-owned-fake/lease"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    FM_SECONDMATE_CHARTER='dash owned scope' FM_SECONDMATE_SCOPE='dash owned scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a leased home that a live task record still names"
+  fi
+  grep -F "task pipeline still records it as its worktree" "$err" >/dev/null \
+    || fail "seed did not name the task still recording the leased home (got: $(cat "$err"))"
+  grep -F "treehouse return --if-lease-holder dash" "$err" >/dev/null \
+    || fail "seed did not say how to release the lease it kept"
+  [ -f "$acquired/live-work.txt" ] || fail "refused seed touched the recorded task's copy"
+  [ ! -f "$acquired/.fm-secondmate-home" ] || fail "refused seed still marked the home"
+  [ ! -d "$acquired/state" ] || fail "refused seed still created operational dirs in the copy"
+  grep -F 'treehouse return' "$log" >/dev/null \
+    && fail "refused seed returned the lease, which cleans and resets a live task's copy"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
+    fail "refused seed left a registry route"
+  fi
+  pass "home seeding refuses a leased home a live task record still owns, and keeps the lease"
+}
+
+# One id cannot be both a crewmate task and a secondmate route, and the seed that
+# reuses a live task's id is the allocation bypass a slot scan alone cannot see:
+# after a restart `fm-home-seed.sh <live-task-id> -` can be handed exactly the
+# copy that task is working in. Refused before a lease is taken, so a colliding
+# id never strands one.
+test_home_seed_refuses_id_a_crewmate_record_holds() {
+  local home acquired fakebin log err
+  home="$TMP_ROOT/dash-idclash-home"
+  acquired="$TMP_ROOT/dash-idclash-acquired-home"
+  err="$TMP_ROOT/dash-idclash.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-idclash-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  git clone --quiet "$ROOT" "$acquired"
+  fm_write_meta "$home/state/dash.meta" \
+    "window=firstmate:fm-dash" "endpoint_task_id=dash" \
+    "worktree=$TMP_ROOT/dash-idclash-worktree" "project=$home/projects/alpha" "kind=ship"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-idclash-fake")
+  log="$TMP_ROOT/dash-idclash-fake/tmux.log"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_SECONDMATE_CHARTER='dash idclash scope' FM_SECONDMATE_SCOPE='dash idclash scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
+    fail "seed accepted an id a crewmate task record already holds"
+  fi
+  grep -F 'task dash already has a ship record in this home' "$err" >/dev/null \
+    || fail "seed did not explain the id collision (got: $(cat "$err"))"
+  grep -F 'bin/fm-teardown.sh dash' "$err" >/dev/null \
+    || fail "seed did not say how to clear the colliding task record"
+  grep -F 'treehouse get' "$log" >/dev/null \
+    && fail "seed leased a copy before refusing a colliding id"
+  if [ -f "$home/data/secondmates.md" ] && grep -F -- '- dash ' "$home/data/secondmates.md" >/dev/null; then
+    fail "refused seed left a registry route"
+  fi
+  pass "home seeding refuses an id a crewmate task record already holds, before leasing"
+}
+
+# The acquisition scan excludes no record, not even one already holding the
+# seed's own id: the secondmate has no record of its own yet, so such a meta is
+# another task's and excluding it would call its copy unowned.
+test_home_seed_refuses_leased_home_its_own_id_records() {
+  local home acquired acquired_abs fakebin log err
+  home="$TMP_ROOT/dash-selfrec-home"
+  acquired="$TMP_ROOT/dash-selfrec-acquired-home"
+  err="$TMP_ROOT/dash-selfrec.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-selfrec-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  git clone --quiet "$ROOT" "$acquired"
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  printf 'live secondmate work\n' > "$acquired/live-work.txt"
+  fm_write_meta "$home/state/dash.meta" \
+    "window=firstmate:fm-dash" "kind=secondmate" "harness=claude" \
+    "home=$acquired_abs" "worktree=$acquired_abs"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-selfrec-fake")
+  log="$TMP_ROOT/dash-selfrec-fake/tmux.log"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_SECONDMATE_CHARTER='dash selfrec scope' FM_SECONDMATE_SCOPE='dash selfrec scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha >/dev/null 2>"$err"; then
+    fail "seed accepted a leased home a record under its own id already names"
+  fi
+  grep -F 'but task dash still records it as its' "$err" >/dev/null \
+    || fail "seed did not name the record holding the leased home (got: $(cat "$err"))"
+  grep -F "$home/state/dash.meta" "$err" >/dev/null \
+    || fail "seed did not name the record file holding the leased home"
+  [ -f "$acquired/live-work.txt" ] || fail "refused seed touched the recorded copy"
+  [ ! -f "$acquired/.fm-secondmate-home" ] || fail "refused seed still marked the home"
+  grep -F 'treehouse return' "$log" >/dev/null \
+    && fail "refused seed returned the lease, which cleans and resets the recorded copy"
+  pass "home seeding excludes no record from the acquisition scan, not even its own id's"
+}
+
+# The gate is evidence-driven, not a blanket refusal: records naming OTHER
+# copies leave the lease seedable.
+test_home_seed_accepts_leased_home_no_record_names() {
+  local home acquired acquired_abs other fakebin log lease out
+  home="$TMP_ROOT/dash-unowned-home"
+  acquired="$TMP_ROOT/dash-unowned-acquired-home"
+  other="$TMP_ROOT/dash-unowned-other-copy"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$other"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/dash-unowned-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  git clone --quiet "$ROOT" "$acquired"
+  acquired_abs=$(cd "$acquired" && pwd -P)
+  fm_write_meta "$home/state/pipeline.meta" \
+    "window=firstmate:fm-pipeline" "endpoint_task_id=pipeline" \
+    "worktree=$(cd "$other" && pwd -P)" "project=$home/projects/alpha" "kind=ship"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/dash-unowned-fake")
+  log="$TMP_ROOT/dash-unowned-fake/tmux.log"
+  lease="$TMP_ROOT/dash-unowned-fake/lease"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TREEHOUSE_HOME="$acquired" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TREEHOUSE_LEASE_FILE="$lease" \
+    FM_SECONDMATE_CHARTER='dash unowned scope' FM_SECONDMATE_SCOPE='dash unowned scope' \
+    "$ROOT/bin/fm-home-seed.sh" dash - alpha) \
+    || fail "seed refused a leased home no task record names"
+  printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report the acquired home"
+  [ "$(cat "$acquired/.fm-secondmate-home")" = dash ] || fail "seed did not mark the acquired home"
+  grep -F "home: $acquired_abs" "$home/data/secondmates.md" >/dev/null || fail "registry did not record the acquired home"
+  pass "home seeding accepts a leased home that only other copies' records name"
+}
+
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure() {
   local home acquired acquired_abs fakebin log err
   home="$TMP_ROOT/dash-fail-home"
@@ -2964,6 +3116,10 @@ test_home_seed_validate_rejects_duplicate_homes
 test_home_seed_validate_rejects_duplicate_ids
 test_home_seed_validate_rejects_nested_homes
 test_home_seed_uses_treehouse_acquired_home
+test_home_seed_refuses_leased_home_a_live_task_records
+test_home_seed_refuses_id_a_crewmate_record_holds
+test_home_seed_refuses_leased_home_its_own_id_records
+test_home_seed_accepts_leased_home_no_record_names
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home

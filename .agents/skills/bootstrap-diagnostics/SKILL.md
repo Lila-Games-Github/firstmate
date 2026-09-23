@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, SLOT_RECONCILE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or any other BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -35,6 +35,14 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `TANGLE: <remediation>` - the primary checkout is stranded on a feature branch instead of its default branch; `AGENTS.md` section 8 explains why this guard exists and what it protects.
   The work is safe on that branch ref; restore the primary to its default branch with the printed `git -C <root> checkout <default>`, then re-validate that branch in a proper worktree.
   This is the only sanctioned firstmate-initiated git write to the primary, and it is a non-destructive branch switch that strands nothing.
+- `SLOT_RECONCILE: task <id>'s local copy <path> ...` - a task record and the pool disagree about one isolated copy, in one of two directions.
+  `reads free to Treehouse` means the pool now considers that copy free, which is what a host restart leaves behind: the hold on a copy is a live process, the record is not.
+  `carries a Treehouse lease held for '<holder>'` means the opposite - the copy is reserved under a label that is neither this record's own nor a hold it took, which is the lease a refused secondmate seed keeps on purpose, because returning it would clean and reset the very copy the refusal protected; nothing releases it on its own, so the line stands every session until the records are reconciled and the printed `treehouse return --if-lease-holder` command is run.
+  That second form is reported for a secondmate home record too, not only a crewmate worktree.
+  Nothing is lost yet and nothing was changed, so do not tear anything down on this line alone.
+  Read the named task's current state with `bin/fm-crew-state.sh <id>`, then reconcile in whichever direction the evidence supports: a task that is genuinely still working keeps its record and its copy, while a finished or dead one is cleaned up normally so the copy returns to the pool.
+  Dispatch into that project is safe while the line stands, because a spawn refuses a copy a live record still names rather than preparing it.
+  When the copy has ALREADY been handed to a second task, cleanup of both records refuses instead, and `bin/fm-teardown.sh --reconcile-slot` is the one sanctioned way out; its header owns the proofs it requires, and it never discards work.
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it.
   Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; stop profile-based dispatch, report the actionable error, and require correction of the malformed schema, unverified harness name, or invalid harness/effort pair rather than falling back around it or selecting a bad profile.

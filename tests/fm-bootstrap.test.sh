@@ -251,6 +251,291 @@ assert_timeout_report() {
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
+# --- freed-slot detection ---------------------------------------------------
+#
+# A crewmate's Treehouse slot is held by a live process lease, so a host restart
+# releases every slot while the task records naming them survive. Treehouse then
+# reports the slot available and the next spawn can be handed a live task's copy
+# (observed 2026-09-21). Bootstrap reports that drift, and only when Treehouse
+# gives a definite answer: "cannot tell" is not evidence a record has drifted.
+
+# make_slot_case <name> <slot-status>: a home with one task record naming a real
+# Treehouse pool slot, and a treehouse whose `status --json` reports that slot
+# with <slot-status>, in the record shape real treehouse prints (recorded in
+# docs/verification/runtime-backends.md). The reported status and the reported
+# path spelling are overridable per run via FM_FAKE_TREEHOUSE_SLOT_STATUS and
+# FM_FAKE_TREEHOUSE_SLOT_PATH, because real treehouse records the spelling it
+# was launched through rather than the one the meta holds, and the durable lease
+# holder via FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER, which is empty for every slot
+# no one has leased.
+# Echoes "<case-dir>|<home>|<project>|<worktree>|<fakebin>".
+make_slot_case() {
+  local name=$1 status=$2 case_dir home proj pool wt fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  pool="$case_dir/pool"
+  wt="$pool/1/repo"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$pool/1"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  git init -q "$proj"
+  git -C "$proj" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm slot-fixture
+  git -C "$proj" worktree add -q --detach "$wt"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$wt" > "$pool/treehouse-state.json"
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  exit 0
+fi
+if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
+  [ "\${FM_FAKE_TREEHOUSE_STATUS_FAILS:-0}" != 1 ] || exit 1
+  printf '[{"name":"1","path":"%s","status":"%s","lease_id":"","lease_holder":"%s","leased_at":null,"processes":[{"pid":1,"name":"sh"}]}]\n' \
+    "\${FM_FAKE_TREEHOUSE_SLOT_PATH:-$wt}" "\${FM_FAKE_TREEHOUSE_SLOT_STATUS:-$status}" \
+    "\${FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER:-}"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+run_slot_bootstrap() {  # <home> <fakebin> [VAR=value ...]
+  local home=$1 fakebin=$2
+  shift 2
+  env "$@" PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_recorded_slot_that_reads_free_is_reported() {
+  local rec case_dir home proj wt fakebin out id=slot-drift-task
+
+  rec=$(make_slot_case slot-free available)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$proj" "kind=ship"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin")
+  printf '%s\n' "$out" | grep -F "SLOT_RECONCILE: task $id's local copy $wt" >/dev/null \
+    || fail "bootstrap did not report a recorded slot Treehouse reports free (got: $out)"
+  assert_contains "$out" "bin/fm-crew-state.sh $id" \
+    "the diagnostic did not say how to confirm the task"
+
+  # A slot Treehouse still holds is the healthy case and stays silent.
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_STATUS=in-use)
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported a slot Treehouse still reports in use"
+
+  # A status read that failed proves nothing either way, so it says nothing.
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_STATUS_FAILS=1)
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported drift from a Treehouse status read that failed"
+
+  # A record whose worktree is an ordinary directory is not a pool slot at all.
+  rec=$(make_slot_case slot-not-pooled available)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  mkdir -p "$case_dir/plain-worktree"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$case_dir/plain-worktree" "project=$proj" "kind=ship"
+  out=$(run_slot_bootstrap "$home" "$fakebin")
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported drift for a worktree that is not a Treehouse pool slot"
+
+  pass "bootstrap reports a recorded pool slot Treehouse reports free, and only on a definite answer"
+}
+
+# Treehouse records the path spelling it was launched through, which on an
+# ostree host is the /home alias of the /var/home path the meta records
+# (docs/verification/runtime-backends.md). Both spellings name one slot, so the
+# drift report must still recognise it - while a record that names a DIFFERENT
+# slot of the pool stays as silent as it would with no record at all.
+test_recorded_slot_is_identified_through_a_path_alias() {
+  local rec case_dir home proj wt fakebin out id=slot-alias-task alias_wt gone
+
+  rec=$(make_slot_case slot-alias available)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$proj" "kind=ship"
+
+  # The meta records the physical slot; treehouse reports it through a symlinked
+  # prefix that resolves to that same directory.
+  ln -s "$case_dir/pool" "$case_dir/pool-alias"
+  alias_wt="$case_dir/pool-alias/1/repo"
+  [ "$alias_wt" != "$wt" ] || fail "the alias spelling must differ from the recorded worktree"
+  out=$(run_slot_bootstrap "$home" "$fakebin" "FM_FAKE_TREEHOUSE_SLOT_PATH=$alias_wt")
+  printf '%s\n' "$out" | grep -F "SLOT_RECONCILE: task $id's local copy $wt" >/dev/null \
+    || fail "bootstrap did not recognise its own slot through a path alias (got: $out)"
+
+  # A recorded spelling whose prefix resolves nowhere on this host is still that
+  # pool slot...
+  gone="$case_dir/vanished-alias/pool/1/repo"
+  [ ! -e "$gone" ] || fail "the vanished-alias fixture path must not exist"
+  out=$(run_slot_bootstrap "$home" "$fakebin" "FM_FAKE_TREEHOUSE_SLOT_PATH=$gone")
+  printf '%s\n' "$out" | grep -F "SLOT_RECONCILE: task $id's local copy $wt" >/dev/null \
+    || fail "bootstrap did not identify an unresolvable spelling by its pool slot (got: $out)"
+
+  # ...but slot 2 of that pool is a different slot, and reports nothing.
+  out=$(run_slot_bootstrap "$home" "$fakebin" \
+    "FM_FAKE_TREEHOUSE_SLOT_PATH=$case_dir/vanished-alias/pool/2/repo")
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported drift from a Treehouse record for a different slot"
+
+  pass "bootstrap identifies a recorded slot through a path alias, and only that slot"
+}
+
+# The other direction of the same drift: a copy a task record names that carries
+# a DURABLE lease for someone else. A crewmate never takes one, so the holder is
+# the lease a refused secondmate seed keeps rather than returning it - returning
+# cleans and resets the copy the refusal protected - and nothing releases it on
+# its own, so session start has to keep saying so.
+test_recorded_slot_with_foreign_lease_is_reported() {
+  local rec case_dir home proj wt fakebin out id=slot-lease-task
+
+  rec=$(make_slot_case slot-lease leased)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$proj" "kind=ship"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=seeded-mate)
+  printf '%s\n' "$out" \
+    | grep -F "SLOT_RECONCILE: task $id's local copy $wt carries a Treehouse lease held for 'seeded-mate'" >/dev/null \
+    || fail "bootstrap did not report a durable lease held on a recorded copy (got: $out)"
+  assert_contains "$out" "treehouse return --if-lease-holder seeded-mate $wt" \
+    "the diagnostic did not print the command that releases the stranded lease"
+
+  # A copy Treehouse holds no durable lease on is the healthy live case.
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_STATUS=in-use)
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported drift for a copy carrying no durable lease"
+
+  # A lease under the recording task's own id is not another allocation's hold.
+  out=$(run_slot_bootstrap "$home" "$fakebin" "FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=$id")
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported a durable lease the recording task holds itself"
+
+  # `treehouse return` matches its path argument against its own records as a
+  # string, so a remedy built from the meta's spelling is refused wherever the
+  # two differ. The command has to carry the spelling treehouse recorded.
+  ln -s "$case_dir/pool" "$case_dir/pool-alias"
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=seeded-mate \
+    "FM_FAKE_TREEHOUSE_SLOT_PATH=$case_dir/pool-alias/1/repo")
+  assert_contains "$out" "treehouse return --if-lease-holder seeded-mate $case_dir/pool-alias/1/repo" \
+    "the remedy did not print the spelling treehouse records for the copy"
+  assert_not_contains "$out" "--if-lease-holder seeded-mate $wt" \
+    "the remedy printed the meta's spelling, which treehouse's string match refuses"
+
+  pass "bootstrap reports a durable lease stranded on a recorded copy, and only another holder's"
+}
+
+# Stock macOS ships a BSD grep, whose basic regular expressions have no
+# alternation: the GNU-only `\|` is an escaped ordinary character there. An
+# extraction that relies on it yields no tokens at all, and BOTH SLOT_RECONCILE
+# directions then go silent with no error anywhere - which is how this defect
+# survived two rounds unnoticed on a GNU host. These cases drive a real bootstrap
+# through a grep that reproduces exactly that one difference.
+install_bsd_grep_shim() {  # <fakebin> <real-grep>
+  local fakebin=$1 real=$2
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'REAL_GREP=%s\n' "$real"
+    cat <<'SH'
+extended=0
+for a in "$@"; do
+  case "$a" in
+    --extended-regexp|--perl-regexp) extended=1 ;;
+    --*) ;;
+    -*) case "$a" in *E*|*P*) extended=1 ;; esac ;;
+  esac
+done
+args=()
+for a in "$@"; do
+  [ "$extended" = 1 ] || a=${a//\\|/[|]}
+  args+=("$a")
+done
+exec "$REAL_GREP" "${args[@]}"
+SH
+  } > "$fakebin/grep"
+  chmod +x "$fakebin/grep"
+}
+
+test_slot_drift_survives_a_grep_without_bre_alternation() {
+  local rec case_dir home proj wt fakebin out real_grep id=slot-posix-grep-task
+
+  rec=$(make_slot_case slot-posix-grep available)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$proj" "kind=ship"
+  real_grep=$(PATH="$BASE_PATH" command -v grep) || fail "no grep on the hermetic PATH"
+  install_bsd_grep_shim "$fakebin" "$real_grep"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin")
+  printf '%s\n' "$out" | grep -F "SLOT_RECONCILE: task $id's local copy $wt reads free" >/dev/null \
+    || fail "the freed-slot report went silent on a grep without BRE alternation (got: $out)"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_STATUS=leased \
+    FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=refused-seed)
+  printf '%s\n' "$out" | grep -F "carries a Treehouse lease held for 'refused-seed'" >/dev/null \
+    || fail "the stranded-lease report went silent on a grep without BRE alternation (got: $out)"
+
+  pass "bootstrap reports both slot-drift directions on a grep with no BRE alternation"
+}
+
+# A secondmate seeded onto an explicit path that is itself a pool slot leaves
+# that slot unleased, so a later seed can be handed it and refused - and the
+# refused seed keeps its lease on purpose. The only record naming that copy is
+# then a kind=secondmate one, so the stranded lease is reported from it or it is
+# never reported at all.
+test_secondmate_home_with_foreign_lease_is_reported() {
+  local rec case_dir home proj wt fakebin out id=mate-on-a-slot
+
+  rec=$(make_slot_case slot-secondmate-lease leased)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "kind=secondmate" "harness=claude" \
+    "home=$wt" "worktree=$wt"
+
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=refused-seed)
+  [ "$(printf '%s\n' "$out" | grep -c SLOT_RECONCILE)" = 1 ] \
+    || fail "a stranded lease on a secondmate home must report exactly one line (got: $out)"
+  printf '%s\n' "$out" \
+    | grep -F "task $id's local copy $wt carries a Treehouse lease held for 'refused-seed'" >/dev/null \
+    || fail "the line did not name both the secondmate record and the lease holder (got: $out)"
+  assert_contains "$out" "treehouse return --if-lease-holder refused-seed $wt" \
+    "the diagnostic did not print the command that releases the stranded lease"
+
+  # The lease a secondmate home is held by is its own, and says nothing.
+  out=$(run_slot_bootstrap "$home" "$fakebin" "FM_FAKE_TREEHOUSE_SLOT_LEASE_HOLDER=$id")
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported the durable lease that holds a secondmate home for itself"
+
+  # The freed-slot half stays crewmate-only: a dispatch re-prepares a crewmate
+  # copy, and nothing re-prepares a secondmate home.
+  out=$(run_slot_bootstrap "$home" "$fakebin" FM_FAKE_TREEHOUSE_SLOT_STATUS=available)
+  assert_not_contains "$out" SLOT_RECONCILE \
+    "bootstrap reported a secondmate home as a freed dispatch slot"
+
+  pass "bootstrap reports a lease stranded on a secondmate home record, and only another holder's"
+}
+
 test_bootstrap_reporting() {
   local label lease tasks quota backend mode expect notcontains case_dir fakebin out n archive_body multi_id
   n=0
@@ -1234,6 +1519,11 @@ ROWS
 }
 
 test_bootstrap_reporting
+test_recorded_slot_that_reads_free_is_reported
+test_recorded_slot_is_identified_through_a_path_alias
+test_recorded_slot_with_foreign_lease_is_reported
+test_secondmate_home_with_foreign_lease_is_reported
+test_slot_drift_survives_a_grep_without_bre_alternation
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
