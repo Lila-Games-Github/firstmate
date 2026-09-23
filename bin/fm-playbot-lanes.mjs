@@ -114,15 +114,22 @@ const PLAYBOT_NATIVE_ADDON_SEGMENTS = Object.freeze(["addons", "playbot", "nativ
 // The blocker codes an explicit, recorded captain authorization may discard for
 // one confirmed workspace. Every other blocker - active or uncertain chats, the
 // Local workspace, a live firstmate task record, unreadable evidence - is never
-// discardable. unlanded-commits additionally requires every exact commit id.
+// discardable. unlanded-commits and prune-would-drop-unlanded-head additionally
+// require every exact commit id they would drop.
 const DISCARDABLE_LOCAL_CHANGE_CODES = Object.freeze([
   "tracked-modifications",
   "untracked-files",
   "ignored-files",
   "orphaned-files",
   "unlanded-commits",
+  "prune-would-drop-unlanded-head",
 ]);
 const DISCARDABLE_LOCAL_CHANGE_SET = new Set(DISCARDABLE_LOCAL_CHANGE_CODES);
+const COMMIT_NAMING_DISCARD_CODES = new Set(["unlanded-commits", "prune-would-drop-unlanded-head"]);
+
+function blockerDroppedCommits(blocker) {
+  return COMMIT_NAMING_DISCARD_CODES.has(blocker.code) ? (blocker.commits ?? []) : [];
+}
 const ORPHAN_INVENTORY_SAMPLE_LIMIT = 50;
 
 function desktopDir() {
@@ -2043,11 +2050,15 @@ function prunableRegistrationBlockers(result, projectRoot, entries, rootPath, la
       unproven.push({ path: entry.path, head: entry.head, reason: error instanceof Error ? error.message : String(error) });
     }
   }
+  result.prunableRegistrations = unproven;
   if (unproven.length > 0) {
+    const discardable = unproven.every((entry) => Array.isArray(entry.commits));
     result.blockers.push({
       code: "prune-would-drop-unlanded-head",
-      message: `Retiring this orphaned root lets Playbot prune ${unproven.length} other missing detached worktree registration(s) whose recorded HEAD is not proven landed; retire those workspaces first: ${unproven.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`,
+      message: `Retiring this orphaned root lets Playbot prune ${unproven.length} other missing detached worktree registration(s) whose recorded HEAD is not proven landed; retire those workspaces first${discardable ? " or name every commit they hold in the discard authorization" : ""}: ${unproven.map((entry) => `${entry.path} (${entry.reason})`).join("; ")}`,
       worktrees: unproven,
+      commits: unproven.flatMap((entry) => entry.commits ?? []),
+      discardable,
     });
   }
 }
@@ -2115,6 +2126,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
     submodules: { inspected: [], persisted: [], unreadable: [] },
     gitRegistration: null,
     orphan: null,
+    prunableRegistrations: [],
     blockers: [],
   };
   let rootPresent;
@@ -2412,14 +2424,14 @@ function liveTaskRecordBlockers(evidence) {
 // Which blockers an explicit discard authorization could clear. Advisory only:
 // retire_workspace re-derives this from its own immediate inspection.
 function discardSummary(blockers) {
+  const clearable = (blocker) => DISCARDABLE_LOCAL_CHANGE_SET.has(blocker.code) && blocker.discardable !== false;
   const codes = [...new Set(blockers.map((blocker) => blocker.code))];
+  const neverDiscardableCodes = [...new Set(blockers.filter((blocker) => !clearable(blocker)).map((blocker) => blocker.code))];
   return {
-    possible: blockers.length > 0 && codes.every((code) => DISCARDABLE_LOCAL_CHANGE_SET.has(code)),
-    codes: codes.filter((code) => DISCARDABLE_LOCAL_CHANGE_SET.has(code)),
-    neverDiscardableCodes: codes.filter((code) => !DISCARDABLE_LOCAL_CHANGE_SET.has(code)),
-    unlandedCommits: blockers
-      .filter((blocker) => blocker.code === "unlanded-commits")
-      .flatMap((blocker) => blocker.commits.map((entry) => entry.commit)),
+    possible: blockers.length > 0 && blockers.every(clearable),
+    codes: codes.filter((code) => !neverDiscardableCodes.includes(code)),
+    neverDiscardableCodes,
+    unlandedCommits: [...new Set(blockers.flatMap((blocker) => blockerDroppedCommits(blocker).map((entry) => entry.commit)))],
   };
 }
 
@@ -2952,8 +2964,8 @@ function validateDiscardAuthorization(value) {
     allow.push(code);
   }
   const hasCommits = value.commits !== undefined;
-  if (allow.includes("unlanded-commits") !== hasCommits) {
-    throw new Error("discardLocalChanges.commits is required exactly when allow includes unlanded-commits");
+  if (allow.some((code) => COMMIT_NAMING_DISCARD_CODES.has(code)) !== hasCommits) {
+    throw new Error("discardLocalChanges.commits is required exactly when allow includes unlanded-commits or prune-would-drop-unlanded-head");
   }
   let commits = [];
   if (hasCommits) {
@@ -2973,15 +2985,13 @@ function validateDiscardAuthorization(value) {
 // unlanded refuses because the authorization no longer matches the evidence.
 function discardPlan(inspection, authorization) {
   const uncovered = [];
-  const unlanded = inspection.blockers
-    .filter((blocker) => blocker.code === "unlanded-commits")
-    .flatMap((blocker) => blocker.commits.map((entry) => entry.commit.toLowerCase()));
+  const unlanded = inspection.blockers.flatMap((blocker) => blockerDroppedCommits(blocker).map((entry) => entry.commit.toLowerCase()));
   for (const blocker of inspection.blockers) {
-    if (!authorization.allow.includes(blocker.code)) {
+    if (!authorization.allow.includes(blocker.code) || blocker.discardable === false) {
       uncovered.push(blocker);
       continue;
     }
-    if (blocker.code === "unlanded-commits") {
+    if (COMMIT_NAMING_DISCARD_CODES.has(blocker.code)) {
       const missing = blocker.commits.filter((entry) => !authorization.commits.includes(entry.commit.toLowerCase()));
       if (missing.length > 0) {
         uncovered.push({ ...blocker, message: `${blocker.message}; the authorization does not name ${missing.map((entry) => entry.commit).join(", ")}` });
@@ -3009,6 +3019,7 @@ function discardRecord(inspection, authorization) {
       untrackedPaths: allowed.has("untracked-files") ? root.untrackedPaths : [],
       ignoredPaths: allowed.has("ignored-files") ? root.blockingIgnoredPaths : [],
       unlandedCommits: allowed.has("unlanded-commits") && Array.isArray(root.commitsAhead) ? root.commitsAhead : [],
+      prunedRegistrations: allowed.has("prune-would-drop-unlanded-head") ? root.prunableRegistrations : [],
       discardableIgnoredPaths: root.discardableIgnoredPaths,
       orphanInventory: root.orphan?.inventory ?? null,
     })),
@@ -5616,7 +5627,7 @@ function toolDefinitions() {
             },
             commits: {
               type: "array",
-              description: "Every exact unlanded commit id; required exactly when allow includes unlanded-commits",
+              description: "Every exact commit id the retirement would drop, including other missing registrations' commits a prune would drop; required exactly when allow includes unlanded-commits or prune-would-drop-unlanded-head",
               items: { type: "string" },
             },
           },

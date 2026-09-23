@@ -7075,7 +7075,7 @@ const discard = retire.inputSchema.properties.discardLocalChanges;
 if (!discard || retire.inputSchema.required.includes('discardLocalChanges')) process.exit(1);
 if (discard.required.join(',') !== 'authorization,allow' || discard.additionalProperties !== false) process.exit(1);
 const codes = discard.properties.allow.items.enum;
-if (codes.join(',') !== 'tracked-modifications,untracked-files,ignored-files,orphaned-files,unlanded-commits') process.exit(1);
+if (codes.join(',') !== 'tracked-modifications,untracked-files,ignored-files,orphaned-files,unlanded-commits,prune-would-drop-unlanded-head') process.exit(1);
 if (['active-threads', 'thread-state-uncertain', 'local-workspace', 'live-task-record'].some(code => codes.includes(code))) process.exit(1);
 NODE
 pass "fm-playbot-lanes: retirement cleanup exposes registry posture and discard authorization inputs"
@@ -7412,7 +7412,9 @@ const recorded = detached.roots[0].orphan.recordedHead;
 if (recorded?.commit !== process.env.COMMIT || recorded.detached !== true || recorded.branch !== null) process.exit(1);
 const bystander = byId['ws-retire-missing-bystander'];
 const prune = bystander.blockers.find(candidate => candidate.code === 'prune-would-drop-unlanded-head');
-if (bystander.retirable || bystander.discard.possible || bystander.blockers.length !== 1) process.exit(1);
+if (bystander.retirable || !bystander.discard.possible || bystander.blockers.length !== 1) process.exit(1);
+if (prune?.discardable !== true || prune.commits.map(entry => entry.commit).join(',') !== process.env.COMMIT) process.exit(1);
+if (bystander.discard.unlandedCommits.join(',') !== process.env.COMMIT) process.exit(1);
 if (prune?.worktrees.map(entry => `${entry.path} ${entry.head}`).join(',') !== `${require('node:fs').realpathSync(require('node:path').dirname(process.env.DETACHED))}/missing-detached ${process.env.COMMIT}`) process.exit(1);
 NODE
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
@@ -7452,6 +7454,82 @@ const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, '
 if (!value.deleted || !value.postActionComplete) process.exit(1);
 NODE
 pass "fm-playbot-lanes: a missing worktree's unproven recorded HEAD blocks until an authorization names its commits"
+
+# Two missing detached registrations each hold unlanded work, and retiring
+# either lets Playbot prune both, so one authorization must name every commit.
+make_missing_detached() {  # <path> <subject>
+  git -C "$FIXTURE_ROOT/worker" worktree add --detach "$1" origin/main >/dev/null \
+    || fail "could not create the detached missing-directory worktree $1"
+  git -C "$1" -c user.name="Firstmate tests" -c user.email="firstmate-tests@example.invalid" \
+    commit --allow-empty -m "$2" >/dev/null
+  git -C "$1" rev-parse HEAD
+  rm -rf "$1"
+}
+pair_a_ws="$FIXTURE_ROOT/worker/.worktrees/missing-pair-a"
+pair_b_ws="$FIXTURE_ROOT/worker/.worktrees/missing-pair-b"
+pair_a_commit=$(make_missing_detached "$pair_a_ws" "pair a unlanded work")
+pair_b_commit=$(make_missing_detached "$pair_b_ws" "pair b unlanded work")
+add_retirement_workspace ws-retire-pair-a "$pair_a_ws" retirement-pair-a
+add_retirement_workspace ws-retire-pair-b "$pair_b_ws" retirement-pair-b
+cleanup_list main > "$cleanup_out"
+OUT_FILE="$cleanup_out" A="$pair_a_commit" B="$pair_b_commit" node --no-warnings <<'NODE' || fail "paired missing detached registrations did not each name the other's prunable commits"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const byId = Object.fromEntries(value.workspaces.map(workspace => [workspace.workspace.id, workspace]));
+for (const [id, own, other] of [['ws-retire-pair-a', process.env.A, process.env.B], ['ws-retire-pair-b', process.env.B, process.env.A]]) {
+  const workspace = byId[id];
+  if (workspace.retirable || !workspace.discard.possible) process.exit(1);
+  if (workspace.blockers.map(blocker => blocker.code).sort().join(',') !== 'prune-would-drop-unlanded-head,unlanded-commits') process.exit(1);
+  const unlanded = workspace.blockers.find(blocker => blocker.code === 'unlanded-commits');
+  const prune = workspace.blockers.find(blocker => blocker.code === 'prune-would-drop-unlanded-head');
+  if (unlanded.commits.map(entry => entry.commit).join(',') !== own) process.exit(1);
+  if (prune.commits.map(entry => entry.commit).join(',') !== other) process.exit(1);
+  if (workspace.discard.unlandedCommits.slice().sort().join(',') !== [own, other].sort().join(',')) process.exit(1);
+  if (workspace.roots[0].prunableRegistrations[0]?.commits[0]?.commit !== other) process.exit(1);
+}
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+pair_allow='"allow":["unlanded-commits","prune-would-drop-unlanded-head"]'
+for attempt in \
+  "ws-retire-pair-a|$pair_allow,\"commits\":[\"$pair_a_commit\"]" \
+  "ws-retire-pair-a|$pair_allow,\"commits\":[\"$pair_b_commit\"]" \
+  "ws-retire-pair-a|\"allow\":[\"unlanded-commits\"],\"commits\":[\"$pair_a_commit\",\"$pair_b_commit\"]" \
+  "ws-retire-pair-b|$pair_allow,\"commits\":[\"$pair_b_commit\"]" \
+  "ws-retire-pair-b|$pair_allow,\"commits\":[\"$pair_a_commit\"]"; do
+  cleanup_retire "${attempt%%|*}" main ",\"discardLocalChanges\":{\"authorization\":\"discard it\",${attempt#*|}}" > "$cleanup_out"
+  OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "an authorization missing a prunable commit retired a paired registration: $attempt"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('beyond what the discard authorization covers')) process.exit(1);
+NODE
+done
+no_delete_ipc "an authorization missing a prunable commit reached workspace:delete"
+for registered in "$pair_a_ws" "$pair_b_ws"; do
+  git -C "$FIXTURE_ROOT/worker" worktree list --porcelain | grep -F "$registered" >/dev/null \
+    || fail "a refused retirement dropped the paired registration $registered"
+done
+cleanup_retire ws-retire-pair-a main ",\"discardLocalChanges\":{\"authorization\":\"discard both\",$pair_allow,\"commits\":[\"$pair_a_commit\",\"$pair_b_commit\"]}" > "$cleanup_out"
+OUT_FILE="$cleanup_out" AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" A="$pair_a_commit" B="$pair_b_commit" node --no-warnings <<'NODE' \
+  || fail "an authorization naming every prunable commit did not retire and audit the paired registration"
+const fs = require('node:fs');
+const value = JSON.parse(fs.readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+if (!value.deleted || !value.postActionComplete) process.exit(1);
+const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+if (audit.workspace.id !== 'ws-retire-pair-a' || audit.discard.authorization !== 'discard both') process.exit(1);
+if (audit.discard.commits.slice().sort().join(',') !== [process.env.A, process.env.B].sort().join(',')) process.exit(1);
+const root = audit.discard.roots[0];
+if (root.unlandedCommits.map(entry => entry.commit).join(',') !== process.env.A) process.exit(1);
+if (root.prunedRegistrations.flatMap(entry => entry.commits.map(commit => commit.commit)).join(',') !== process.env.B) process.exit(1);
+NODE
+cleanup_retire ws-retire-pair-b main > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "the second paired registration retired without naming its own unlanded commit"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('unlanded-commits')) process.exit(1);
+NODE
+cleanup_retire ws-retire-pair-b main ",\"discardLocalChanges\":{\"authorization\":\"discard both\",\"allow\":[\"unlanded-commits\"],\"commits\":[\"$pair_b_commit\"]}" > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "the second paired workspace did not retire with an authorization naming its commit"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+if (!value.deleted || !value.postActionComplete) process.exit(1);
+NODE
+pass "fm-playbot-lanes: paired missing detached registrations retire only when one authorization names every prunable commit"
 
 # A local-only project lands by advancing its local landing branch without
 # pushing, so its main clone's branch is landing evidence only for that posture.
