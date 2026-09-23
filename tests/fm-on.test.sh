@@ -289,7 +289,10 @@ pass "the entrypoint composes a deduplicated discovered child PATH (kept $PRESEN
 
 WORKER_PID=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
 kill -TERM "$WORKER_PID"
-for _ in $(seq 1 100); do
+# Shutdown quarantines ownership and stops the active lane tree before it
+# removes worker.pid, which can exceed a few seconds on a loaded CI runner, so
+# bound the wait generously rather than racing it.
+for _ in $(seq 1 600); do
   [ ! -f "$TMP_ROOT/remote-jobs/worker.pid" ] && break
   sleep 0.05
 done
