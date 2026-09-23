@@ -2528,7 +2528,20 @@ function registryLandingOptions(project, registryProject) {
   const registry = { project: registryProject, home: controllerRoot(), mode, yolo, warning };
   if (mode === "local-only" && warning === null) {
     const registeredClone = canonicalPath(path.join(controllerRoot(), "projects", registryProject));
-    if (!project.roots.some((root) => canonicalPath(root.path) === registeredClone)) {
+    let registeredTop = null;
+    try {
+      registeredTop = canonicalPath(stripTerminalLineEnding(freshnessGit(registeredClone, ["rev-parse", "--show-toplevel"])));
+    } catch {
+      // A missing or unreadable main clone cannot establish landing identity.
+    }
+    const matchingRoot = registeredTop === registeredClone && project.roots.some((root) => {
+      try {
+        return canonicalPath(stripTerminalLineEnding(freshnessGit(root.path, ["rev-parse", "--show-toplevel"]))) === registeredTop;
+      } catch {
+        return false;
+      }
+    });
+    if (!matchingRoot) {
       throw new Error(`registryProject ${registryProject} is local-only but its registered main clone is not a root of Playbot project ${project.id}`);
     }
   }
