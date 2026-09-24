@@ -3611,8 +3611,20 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
 // reports the affected field as null and warns naming the projection.
 const UNREADABLE_PROJECTION = Symbol("unreadable projection");
 
+// Playbot 0.117.0 wraps the thread state in a stream envelope. Earlier
+// snapshots are the state itself. Only the observed envelope markers select
+// the nested state, so a genuinely missing projection still fails closed.
+function snapshotState(snapshot) {
+  if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      && Object.hasOwn(snapshot, "streamId")) {
+    return snapshot.state;
+  }
+  return snapshot;
+}
+
 function snapshotProjection(snapshot, key, unreadable) {
-  const value = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) ? snapshot[key] : undefined;
+  const state = snapshotState(snapshot);
+  const value = state && typeof state === "object" && !Array.isArray(state) ? state[key] : undefined;
   if (Array.isArray(value)) return value;
   if (unreadable && !unreadable.includes(key)) unreadable.push(key);
   return UNREADABLE_PROJECTION;
@@ -3901,7 +3913,7 @@ async function sendMessage(row, text, force = false) {
 // missing rather than answer from a half-understood shape.
 // ---------------------------------------------------------------------------
 
-const VERIFIED_PLAYBOT_VERSIONS = "0.95.x";
+const VERIFIED_PLAYBOT_VERSIONS = "0.95.x and 0.117.0";
 const SNAPSHOT_REQUIRED_KEYS = ["agentStatus", "phase"];
 // Every projection below must be a list. One that arrives as anything else is
 // as unreadable as a removed one, and reading it as empty would report a card
@@ -3955,15 +3967,16 @@ function assertSnapshotShape(snapshot, threadId, version) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     throw new Error(`Playbot returned no thread snapshot for ${threadId}; expected an object from 'threads:getSnapshot'`);
   }
+  const state = snapshotState(snapshot);
   const missing = [
-    ...SNAPSHOT_REQUIRED_KEYS.filter((key) => snapshot[key] === undefined),
+    ...SNAPSHOT_REQUIRED_KEYS.filter((key) => state?.[key] === undefined),
     ...unreadableProjections(snapshot, SNAPSHOT_REQUIRED_LIST_KEYS),
   ];
   if (missing.length > 0) {
     throw new Error(`${playbotVersionLabel(version)} returned a thread snapshot without ${missing.join(", ")}. `
       + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape before trusting these tools.`);
   }
-  return snapshot;
+  return state;
 }
 
 // Reading a snapshot resumes a chat that has not been resumed in this Playbot
@@ -6064,8 +6077,8 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       unansweredQuestions: unanswered,
       alreadyResponding: card.responding,
       sentAnswers: response.answers,
-      statusAfter: after?.agentStatus ?? null,
-      phaseAfter: after?.phase ?? null,
+      statusAfter: snapshotState(after)?.agentStatus ?? null,
+      phaseAfter: snapshotState(after)?.phase ?? null,
       cardsRemaining: remaining,
       warnings,
     };
