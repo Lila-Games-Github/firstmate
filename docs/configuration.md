@@ -474,8 +474,8 @@ The resolver returns an actionable configuration error before any request when s
 A profile `floor` contains only `scope` and `min_percent`, always uses that profile's provider, and makes that one candidate ineligible below `min_percent` on the named scope.
 An absent or unknown named row also makes the candidate unrankable and is reported as an unverifiable floor, not as a known shortfall.
 `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
-At spawn time, codex `max` is valid for whatever model the installed catalog at `${CODEX_HOME:-~/.codex}/models_cache.json` advertises it for, read fresh by `bin/fm-codex-catalog-lib.sh`, never one hard-coded model (`bin/fm-spawn.sh` refuses the spawn when it cannot confirm support, never silently omitting the flag).
-This bootstrap linter and `bin/fm-dispatch-resolve.sh` validate a profile before any worker is provisioned, without reading that catalog, so today they only accept `gpt-5.6-luna` for codex `max` - a known narrower check than the spawn-time catalog read above.
+Codex `max` is valid for whatever model the installed catalog at `${CODEX_HOME:-~/.codex}/models_cache.json` advertises it for, read by `bin/fm-codex-catalog-lib.sh`, never one hard-coded model.
+This bootstrap linter, `bin/fm-dispatch-resolve.sh`, and the spawn (`bin/fm-spawn.sh`) all apply that identical catalog read before any worker is provisioned: an unreadable catalog or an unlisted model is reported here like any other unsupported effort (a `CREW_DISPATCH` diagnostic or a rules error) and refused outright at spawn time, never silently omitted.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.

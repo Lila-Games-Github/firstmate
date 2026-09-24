@@ -27,14 +27,16 @@
 #   2  the catalog is readable and valid, but the named model is absent from
 #      it or does not list <level>.
 #
-# config/crew-dispatch.json's static bootstrap and typed-dispatch validation
-# (bin/fm-bootstrap.sh, bin/fm-dispatch-resolve.sh) keep their own separate,
-# catalog-independent allow-list for codex max: they check a profile before
-# any worker is provisioned, on hosts that may never have run codex CLI, and
-# a config-linter that started rejecting or accepting profiles based on
-# whether a catalog file happens to be present would be a materially
-# different contract than the deterministic one their tests already pin.
-# This library's job is the live spawn-time decision in bin/fm-spawn.sh only.
+# fm_codex_model_supports_level_json <level>
+#   Prints a JSON array of every catalog model slug whose
+#   supported_reasoning_levels lists <level>, always returning 0. A missing,
+#   unreadable, or invalid catalog, or no jq on PATH, prints [] - an
+#   unverifiable answer is deliberately indistinguishable from a verified-empty
+#   one, so a membership test never accepts a model it could not confirm.
+#
+# config/crew-dispatch.json's bootstrap linter (bin/fm-bootstrap.sh), the
+# typed-dispatch resolver (bin/fm-dispatch-resolve.sh), and the spawn
+# (bin/fm-spawn.sh) all read this same catalog for codex max.
 
 fm_codex_catalog_path() {
   printf '%s/models_cache.json\n' "${CODEX_HOME:-$HOME/.codex}"
@@ -54,4 +56,18 @@ fm_codex_model_supports_level() {  # <model> <level>
   ' "$catalog" 2>/dev/null) || return 1
   [ "$result" = supported ] && return 0
   return 2
+}
+
+fm_codex_model_supports_level_json() {  # <level>
+  local level=$1 catalog result
+  catalog=$(fm_codex_catalog_path)
+  if command -v jq >/dev/null 2>&1 && [ -r "$catalog" ] \
+    && result=$(jq -c --arg l "$level" '
+      [(.models // [])[] | select((.supported_reasoning_levels // []) | map(.effort) | index($l)) | .slug]
+    ' "$catalog" 2>/dev/null) && [ -n "$result" ]; then
+    printf '%s\n' "$result"
+  else
+    printf '[]\n'
+  fi
+  return 0
 }
