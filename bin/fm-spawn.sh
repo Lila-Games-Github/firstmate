@@ -77,9 +77,12 @@
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed. Ultra is the explicit
-#   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
-#   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
+#   from that harness's launch rather than guessed. Ultra and codex max are the
+#   explicit exceptions that REFUSE the spawn instead of omitting: bin/fm-harness.sh
+#   validate-native-effort owns ultra's model scope, supported Pi launches receive
+#   --codex-effort ultra never --thinking ultra, and bin/fm-codex-catalog-lib.sh
+#   owns codex max's live model-catalog scope so a silent effort downgrade can
+#   never reach a launched worker.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -555,6 +558,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-codex-catalog-lib.sh
+. "$SCRIPT_DIR/fm-codex-catalog-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2122,6 +2127,28 @@ if [ "$EFFORT" = ultra ]; then
     exit 1
   }
 fi
+# Codex max is a live model-catalog capability, never a silent no-op: a worker
+# launched at the catalog default instead of the requested max effort is the
+# failure this refuses before provisioning (bin/fm-codex-catalog-lib.sh).
+if [ "$HARNESS" = codex ] && [ "$EFFORT" = max ]; then
+  if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+    echo "error: --effort max for codex requires an explicit --model whose installed catalog entry lists max; none was given so support cannot be confirmed" >&2
+    exit 1
+  fi
+  codex_max_rc=0
+  fm_codex_model_supports_level "$MODEL" max || codex_max_rc=$?
+  case "$codex_max_rc" in
+  0) ;;
+  1)
+    echo "error: codex model catalog ($(fm_codex_catalog_path)) is missing, unreadable, or invalid; cannot confirm '$MODEL' supports max effort" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: codex model '$MODEL' does not list max in the installed model catalog ($(fm_codex_catalog_path)); choose a supported effort or a model whose catalog entry lists max" >&2
+    exit 1
+    ;;
+  esac
+fi
 if [ "$HARNESS" = omp ]; then
   omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
 fi
@@ -2265,13 +2292,21 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # The installed codex config schema uses model_reasoning_effort. max is
+    # scoped to whatever the installed model catalog advertises for the
+    # requested model (bin/fm-codex-catalog-lib.sh) rather than one hard-coded
+    # model, and refuses rather than silently omitting the flag: the caller's
+    # early validation (before worktree provisioning) already confirmed this
+    # exact combination, so reaching an unsupported max here would mean that
+    # guard was bypassed, and dropping the flag silently would launch the
+    # worker at the wrong effort with no signal that it happened.
     case "$effort" in
     low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      [ "$model" = gpt-5.6-luna ] || return 0
+      if ! fm_codex_model_supports_level "$model" max; then
+        echo "error: codex model '$model' does not list max in the installed model catalog ($(fm_codex_catalog_path))" >&2
+        return 1
+      fi
       printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
       ;;
     esac

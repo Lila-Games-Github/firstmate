@@ -14,6 +14,7 @@ set -u
 
 TOOL="$ROOT/bin/fm-dispatch-resolve.sh"
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-resolve)
+CODEX_MAX_CATALOG_DIR="$TMP_ROOT/codex-home"
 HOME_DIR="$TMP_ROOT/home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 NO_CURL_BIN="$TMP_ROOT/no-curl-bin"
@@ -163,7 +164,7 @@ reset_log() {
 run() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" CODEX_HOME="$CODEX_MAX_CATALOG_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -173,7 +174,7 @@ run() {
 run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" CODEX_HOME="$CODEX_MAX_CATALOG_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -483,6 +484,20 @@ assert_contains "$out" '  note: no rule matched' "default is explained"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "default resolves by argmax"
 pass "default: no rule matched resolves among the default profiles"
 
+# --- codex max follows the installed catalog ------------------------------------
+reset_log
+mkdir -p "$CODEX_MAX_CATALOG_DIR"
+printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"medium"},{"effort":"max"}]}]}' > "$CODEX_MAX_CATALOG_DIR/models_cache.json"
+printf '%s\n' '{"rules":[],"default":{"harness":"codex","model":"gpt-6-luna","effort":"max"}}' > "$RULES"
+write_response "$RESPONSE" default 0.88
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "catalog-listed codex max profile is not a configuration error"
+assert_not_contains "$err" 'malformed rules file' "catalog-listed codex max profile passes rules validation"
+assert_contains "$out" '  status: ' "catalog-listed codex max profile reaches resolution"
+rm -rf "$CODEX_MAX_CATALOG_DIR"
+cp "$BASE_RULES" "$RULES"
+pass "codex max is accepted for a model the installed catalog lists with max"
+
 # --- genuine tie escalates ---------------------------------------------------------
 reset_log
 TIE="$TMP_ROOT/tie.json"
@@ -613,6 +628,7 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|use profiles whose harness lacks one authoritative provider family require provider: opencode' \
   '{"rules":[{"when":"x","use":{"harness":"rovo"}}]}|use profiles whose harness lacks one authoritative provider family require provider: rovo' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|default profiles whose harness lacks one authoritative provider family require provider: pi'; do

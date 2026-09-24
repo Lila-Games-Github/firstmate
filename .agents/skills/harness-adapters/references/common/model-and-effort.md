@@ -18,6 +18,7 @@ If an adapter lacks `xhigh`, cap at its highest supported non-`max` level rather
 Never select `max` through this fallback; only an explicit per-task or standing captain preference permits it.
 
 The explicit native `ultra` value follows the model-scoped refusal contract in `../../../bin/fm-harness.sh validate-native-effort`; it is never silently omitted or mapped to a Pi level.
+Codex `max` follows its own model-scoped refusal contract in `../../../bin/fm-codex-catalog-lib.sh`: the spawn refuses rather than emitting no flag when the installed model catalog cannot confirm the requested model supports it.
 For other values, if requested effort is outside the adapter's accepted set, the spawn records `effort=` in task metadata but emits no effort flag.
 This preserves launch success instead of passing a known-bad value.
 A harness with no verified interactive effort flag follows the same record-and-omit contract.

@@ -1390,7 +1390,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
 }
 
 test_crew_dispatch_validation() {
-  local label body expect mode case_dir fakebin out child_env n
+  local label body expect mode case_dir fakebin out child_env n codex_home
   n=0
   while IFS='^' read -r label body mode expect; do
     [ -n "$label" ] || continue
@@ -1401,8 +1401,20 @@ test_crew_dispatch_validation() {
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
+    codex_home="$case_dir/codex-home"
+    case "$label" in
+      "codex Luna max effort is accepted via catalog")
+        mkdir -p "$codex_home"
+        printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"}]}]}' > "$codex_home/models_cache.json" ;;
+      "codex gpt-6-luna max effort is accepted via catalog")
+        mkdir -p "$codex_home"
+        printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"medium"},{"effort":"max"}]}]}' > "$codex_home/models_cache.json" ;;
+      "codex catalog model without max is flagged")
+        mkdir -p "$codex_home"
+        printf '%s\n' '{"models":[{"slug":"gpt-5","supported_reasoning_levels":[{"effort":"high"},{"effort":"xhigh"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"max"}]}]}' > "$codex_home/models_cache.json" ;;
+    esac
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+      CODEX_HOME="$codex_home" TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
@@ -1414,8 +1426,10 @@ test_crew_dispatch_validation() {
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
-codex Luna max effort is accepted^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
-codex unsupported model max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+codex Luna max effort is accepted via catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
+codex gpt-6-luna max effort is accepted via catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-6-luna","effort":"max"}}]}^empty^
+codex Luna max effort is flagged without a readable catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+codex catalog model without max is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
 unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
 native pi ultra is accepted^{"rules":[],"default":{"harness":"pi","model":"codex-native/gpt-6-astra","effort":"ultra","provider":"codex"}}^empty^
