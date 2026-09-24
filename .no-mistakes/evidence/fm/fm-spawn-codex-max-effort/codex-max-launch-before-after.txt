@@ -1,0 +1,22 @@
+# fm-spawn --model gpt-6-luna --effort max (fake codex, fixture catalog listing max for gpt-6-luna)
+
+## BEFORE (base 2d78d81 bin/fm-spawn.sh): no model_reasoning_effort flag
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --model 'gpt-6-luna' --dangerously-bypass-approvals-and-sandbox --disable hooks ...
+not ok - codex launch did not thread the catalog-confirmed max reasoning effort config
+
+## AFTER (2bdbfa4):
+LAUNCH: env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --model 'gpt-6-luna' -c 'model_reasoning_effort="max"' --dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bas
+ ...
+ok - codex threads model_reasoning_effort max when the installed catalog lists it for the requested model
+ok - codex refuses max for a model the catalog confirms does not support it, instead of silently dropping the flag
+ok - codex refuses max effort when the installed model catalog cannot be read, instead of silently omitting the flag
+ok - grok omits unsupported max reasoning effort
+ok - pi receives --model and --thinking max profile flags
+
+## Installed catalog (~/.codex/models_cache.json) via bin/fm-codex-catalog-lib.sh
+gpt-6-luna: max supported
+gpt-6-sol: max supported
+gpt-6-astra: max supported
+gpt-5.6-sol: max supported
+gpt-5.6-terra: max supported
+fm_codex_model_supports_level_json max -> ["gpt-6-astra","gpt-6-sol","gpt-6-luna","gpt-reserve","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","codex-auto-review"]
