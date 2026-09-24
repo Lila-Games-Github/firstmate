@@ -484,6 +484,20 @@ assert_contains "$out" '  note: no rule matched' "default is explained"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "default resolves by argmax"
 pass "default: no rule matched resolves among the default profiles"
 
+# --- codex max follows the installed catalog ------------------------------------
+reset_log
+mkdir -p "$CODEX_MAX_CATALOG_DIR"
+printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"medium"},{"effort":"max"}]}]}' > "$CODEX_MAX_CATALOG_DIR/models_cache.json"
+printf '%s\n' '{"rules":[],"default":{"harness":"codex","model":"gpt-6-luna","effort":"max"}}' > "$RULES"
+write_response "$RESPONSE" default 0.88
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "catalog-listed codex max profile is not a configuration error"
+assert_not_contains "$err" 'malformed rules file' "catalog-listed codex max profile passes rules validation"
+assert_contains "$out" '  status: ' "catalog-listed codex max profile reaches resolution"
+rm -rf "$CODEX_MAX_CATALOG_DIR"
+cp "$BASE_RULES" "$RULES"
+pass "codex max is accepted for a model the installed catalog lists with max"
+
 # --- genuine tie escalates ---------------------------------------------------------
 reset_log
 TIE="$TMP_ROOT/tie.json"

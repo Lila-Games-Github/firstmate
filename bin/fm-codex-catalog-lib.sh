@@ -63,7 +63,7 @@ fm_codex_model_supports_level_json() {  # <level>
   catalog=$(fm_codex_catalog_path)
   if command -v jq >/dev/null 2>&1 && [ -r "$catalog" ] \
     && result=$(jq -c --arg l "$level" '
-      [(.models // [])[] | select((.supported_reasoning_levels // []) | map(.effort) | index($l)) | .slug]
+      [(.models // [])[] | select((.supported_reasoning_levels // []) | map(.effort) | index($l)) | .slug | strings]
     ' "$catalog" 2>/dev/null) && [ -n "$result" ]; then
     printf '%s\n' "$result"
   else
