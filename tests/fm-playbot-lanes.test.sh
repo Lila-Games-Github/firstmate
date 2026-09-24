@@ -18,6 +18,7 @@ export PLAYBOT_HARNESS_HOME="$FIXTURE_ROOT/harness"
 export PLAYBOT_LANES_STATE_DIR="$FIXTURE_ROOT/lanes"
 export PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/controller"
 SCRIPT="$ROOT/bin/fm-playbot-lanes.mjs"
+export PLAYBOT_0117_SNAPSHOT_FIXTURE="$ROOT/tests/fixtures/playbot-0.117.0-thread-snapshot.json"
 
 mkdir -p "$PLAYBOT_DESKTOP_DIR" "$PLAYBOT_HARNESS_HOME" "$PLAYBOT_LANES_CONTROLLER_ROOT" "$FIXTURE_ROOT/worker" "$FIXTURE_ROOT/worker-two"
 
@@ -1311,6 +1312,7 @@ const desktop = path.join(process.env.FIXTURE_ROOT, 'desktop');
 const callsFile = path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl');
 const modeFile = path.join(process.env.FIXTURE_ROOT, 'ipc-mode');
 const snapshotFile = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const capturedEnvelope = JSON.parse(fs.readFileSync(process.env.PLAYBOT_0117_SNAPSHOT_FIXTURE, 'utf8'));
 const versionFile = path.join(process.env.FIXTURE_ROOT, 'app-version');
 const missingFile = path.join(process.env.FIXTURE_ROOT, 'ipc-missing');
 const reconcileFile = path.join(process.env.FIXTURE_ROOT, 'send-reconciles');
@@ -1408,6 +1410,14 @@ function applyDropSpec(snapshot, spec) {
   if (mode === 'null') partial[key] = null;
   else delete partial[key];
   return partial;
+}
+
+function projectedSnapshot(snapshot, drop = '') {
+  if (!readFileOr(path.join(process.env.FIXTURE_ROOT, 'snapshot-envelope'), '')) {
+    return drop ? applyDropSpec(snapshot, drop) : snapshot;
+  }
+  const state = { ...capturedEnvelope.state, ...snapshot };
+  return { ...capturedEnvelope, state: drop ? applyDropSpec(state, drop) : state };
 }
 
 function loadSnapshots() {
@@ -1577,8 +1587,7 @@ async function electronInvoke(channel, payload) {
     if (channel === 'threads:getSnapshot') {
       const snapshot = snapshotFor(payload.threadId);
       const drop = readFileOr(path.join(process.env.FIXTURE_ROOT, 'snapshot-drop-key'), '');
-      if (drop) return applyDropSpec(snapshot, drop);
-      return snapshot;
+      return projectedSnapshot(snapshot, drop);
     }
     if (channel === 'threads:respondToUserInput') {
       const store = loadSnapshots();
@@ -1590,7 +1599,7 @@ async function electronInvoke(channel, payload) {
       store[payload.threadId] = snapshot;
       saveSnapshots(store);
       const afterDrop = readFileOr(afterDropFile, '');
-      return afterDrop ? applyDropSpec(snapshot, afterDrop) : snapshot;
+      return projectedSnapshot(snapshot, afterDrop);
     }
     if (channel === 'threads:recallMessage') {
       const store = loadSnapshots();
@@ -1599,7 +1608,7 @@ async function electronInvoke(channel, payload) {
       // The knob is read on BOTH outcomes: an unreadable projection has to be
       // reachable alongside not-recallable, not only alongside a recall.
       const afterDrop = readFileOr(afterDropFile, '');
-      const projected = (value) => (afterDrop ? applyDropSpec(value, afterDrop) : value);
+      const projected = (value) => projectedSnapshot(value, afterDrop);
       if (index < 0) return { outcome: 'not-recallable', snapshot: projected(snapshot) };
       const [message] = snapshot.pendingMessages.splice(index, 1);
       store[payload.threadId] = snapshot;
@@ -1710,14 +1719,14 @@ async function electronInvoke(channel, payload) {
       }
       const responseMode = readFileOr(steerResponseFile, '');
       if (responseMode === 'omit') {
-        return {
+        return projectedSnapshot({
           ...snapshot,
           pendingMessages: snapshot.pendingMessages.filter((candidate) => candidate.id !== payload.messageId),
           outboundMessages: snapshot.outboundMessages.filter((candidate) => candidate.id !== payload.messageId),
-        };
+        });
       }
       if (responseMode === 'substitute') {
-        return {
+        return projectedSnapshot({
           ...snapshot,
           pendingMessages: snapshot.pendingMessages.map((candidate) => candidate.id === payload.messageId
             ? { ...candidate, id: `substitute-${payload.messageId}` }
@@ -1725,9 +1734,9 @@ async function electronInvoke(channel, payload) {
           outboundMessages: snapshot.outboundMessages.map((candidate) => candidate.id === payload.messageId
             ? { ...candidate, id: `substitute-${payload.messageId}` }
             : candidate),
-        };
+        });
       }
-      return snapshot;
+      return projectedSnapshot(snapshot);
     }
     if (channel === 'threads:send') {
       // A legacy Playbot returns nothing here, which is what leaves delivery
@@ -1770,8 +1779,7 @@ async function electronInvoke(channel, payload) {
           .run('ready', completesAt, payload.threadId);
       }
       const sendDrop = readFileOr(sendDropFile, '');
-      if (sendDrop) return applyDropSpec(snapshot, sendDrop);
-      return snapshot;
+      return projectedSnapshot(snapshot, sendDrop);
     }
     throw new Error(`fixture does not implement channel ${channel}`);
   } finally {
@@ -7639,6 +7647,102 @@ const landing = audit.verifiedLandingCommits[0];
 if (landing.evidence !== 'local-branch' || landing.commit !== process.env.COMMIT || landing.registry.project !== 'frog') process.exit(1);
 NODE
 pass "fm-playbot-lanes: a local-only registry posture accepts the main clone's local landing branch as landing evidence"
+
+# The envelope below was captured from a fresh Playbot 0.117.0 chat. Its ids
+# and workspace path are sanitized in the fixture; the server overlays live
+# fixture state so each tool still exercises its public interface and IPC path.
+printf '0.117.0\n' > "$FIXTURE_ROOT/app-version"
+printf 'on\n' > "$FIXTURE_ROOT/snapshot-envelope"
+FIXTURE_ROOT="$FIXTURE_ROOT" PLAYBOT_0117_SNAPSHOT_FIXTURE="$PLAYBOT_0117_SNAPSHOT_FIXTURE" node --no-warnings <<'NODE' || fail "could not seed the 0.117.0 snapshot fixture"
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const envelope = JSON.parse(fs.readFileSync(process.env.PLAYBOT_0117_SNAPSHOT_FIXTURE, 'utf8'));
+const file = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
+const snapshots = JSON.parse(fs.readFileSync(file, 'utf8'));
+const threadId = 'chat-0117-probe';
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = '2026-09-24T07:00:00.000Z';
+db.prepare(`INSERT INTO workspace_threads (
+  id, workspace_id, title, position, is_active, session_id, approval_mode,
+  plan_mode, ephemeral, draft_input, pending_queue_json, agent_status,
+  has_unread, last_user_activity_at, created_at, updated_at, archived
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  threadId, 'ws-worker', '0.117 snapshot probe', 0, 0, 'session-0117', 'full-access',
+  0, 0, '', JSON.stringify({ messages: [{ id: 'msg-117', text: 'Earlier steer', state: { type: 'pending' } }] }),
+  'pending_input', 0, now, now, now, 0,
+);
+db.close();
+snapshots[threadId] = {
+  ...envelope.state,
+  threadId,
+  agentStatus: 'pending_input',
+  phase: { kind: 'prompting', turnId: 'turn-117' },
+  userInputRequests: [{
+    id: 117,
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'worker-alt-session', turnId: 'turn-117', itemId: 'call-117',
+      questions: [{ id: 'choice', header: 'Choice', question: 'Proceed?', options: [{ label: 'Proceed' }] }],
+    },
+  }],
+  pendingMessages: [{ id: 'msg-117', text: 'Earlier steer' }],
+};
+fs.writeFileSync(file, `${JSON.stringify(snapshots, null, 2)}\n`);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "get_thread_card could not read the captured 0.117.0 envelope"
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.playbot.version !== '0.117.0' || value.parked !== true
+    || value.status !== 'pending_input' || value.cards?.[0]?.requestId !== 117
+    || value.queue.queued?.[0]?.id !== 'msg-117'
+    || value.playbot.verifiedVersions !== '0.95.x and 0.117.0') {
+  console.error(process.env.OUT);
+  process.exit(1);
+}
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_queued_messages\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "list_queued_messages could not read the captured 0.117.0 envelope"
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.queued?.[0]?.id !== 'msg-117' || value.sending?.length !== 0) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"message\":\"0.117 send\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "send_message could not read the 0.117.0 delivery envelope"
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.delivery?.state !== 'queued' || !value.delivery.messageId || value.delivery.queuedTotal !== 2) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"message\":\"0.117 dispatch\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch could not read the 0.117.0 delivery envelope"
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.delivery?.state !== 'queued' || value.delivery.queuedTotal !== 3) process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"messageId\":\"msg-117\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "drop_queued_message could not read the 0.117.0 post-action envelope"
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.outcome !== 'recalled' || value.queueAfter?.queued?.length !== 2
+    || value.playbot.verifiedVersions !== '0.95.x') process.exit(1);
+NODE
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"requestId\":117,\"answers\":{\"choice\":\"Proceed\"}}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "answer_thread_card could not read the 0.117.0 post-action envelope"
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.answered !== true || value.statusAfter !== 'working' || value.cardsRemaining?.length !== 0) process.exit(1);
+NODE
+printf 'pendingMessages\n' > "$FIXTURE_ROOT/snapshot-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_queued_messages\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the 0.117.0 envelope hid a genuinely missing queue field"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('without pendingMessages')) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/snapshot-drop-key"
+printf 'pendingMessages:null\n' > "$FIXTURE_ROOT/send-drop-key"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"message\":\"0.117 unreadable send\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the 0.117.0 envelope hid an unreadable send verdict"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('without pendingMessages')
+    || !value.error.message.includes("'threads:send' return snapshot is verified against Playbot 0.95.x,")) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/send-drop-key" "$FIXTURE_ROOT/snapshot-envelope" "$FIXTURE_ROOT/app-version"
+pass "fm-playbot-lanes: captured Playbot 0.117.0 envelope supports card, queue, recall, answer, send, and dispatch while missing fields fail closed"
 
 # ---------------------------------------------------------------------------
 # The shared node resolver must name what it rejected.

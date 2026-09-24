@@ -3611,8 +3611,20 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
 // reports the affected field as null and warns naming the projection.
 const UNREADABLE_PROJECTION = Symbol("unreadable projection");
 
+// Playbot 0.117.0 wraps the thread state in a stream envelope. Earlier
+// snapshots are the state itself. Only the observed envelope markers select
+// the nested state, so a genuinely missing projection still fails closed.
+function snapshotState(snapshot) {
+  if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      && Object.hasOwn(snapshot, "streamId")) {
+    return snapshot.state;
+  }
+  return snapshot;
+}
+
 function snapshotProjection(snapshot, key, unreadable) {
-  const value = snapshot && typeof snapshot === "object" && !Array.isArray(snapshot) ? snapshot[key] : undefined;
+  const state = snapshotState(snapshot);
+  const value = state && typeof state === "object" && !Array.isArray(state) ? state[key] : undefined;
   if (Array.isArray(value)) return value;
   if (unreadable && !unreadable.includes(key)) unreadable.push(key);
   return UNREADABLE_PROJECTION;
@@ -3647,7 +3659,7 @@ async function deliveryVerdict(response, text, threadId) {
   const missing = unreadableProjections(response, SEND_SNAPSHOT_REQUIRED_KEYS);
   if (missing.length > 0) {
     throw new Error(`${playbotVersionLabel(await playbotVersion())} returned a send snapshot for ${threadId} without ${missing.join(", ")}, so whether the message was delivered or is only held cannot be read. `
-      + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape, and check list_queued_messages before resending.`);
+      + `The 'threads:send' return snapshot is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}, and only the 'threads:getSnapshot' read against Playbot ${SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape, and check list_queued_messages before resending.`);
   }
   const queued = snapshotProjection(response, "pendingMessages");
   const outbound = snapshotProjection(response, "outboundMessages");
@@ -3902,6 +3914,7 @@ async function sendMessage(row, text, force = false) {
 // ---------------------------------------------------------------------------
 
 const VERIFIED_PLAYBOT_VERSIONS = "0.95.x";
+const SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS = "0.95.x and 0.117.0";
 const SNAPSHOT_REQUIRED_KEYS = ["agentStatus", "phase"];
 // Every projection below must be a list. One that arrives as anything else is
 // as unreadable as a removed one, and reading it as empty would report a card
@@ -3944,7 +3957,7 @@ async function cardInvoke(channel, payload) {
     const message = error instanceof Error ? error.message : String(error);
     if (/No handler registered/i.test(message)) {
       throw new Error(`${playbotVersionLabel(await playbotVersion())} does not register the '${channel}' channel this tool needs. `
-        + `The card, snapshot, and queue tools are verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC. `
+        + `The 'threads:getSnapshot' read is verified against Playbot ${SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS} internal IPC, and the card-answer, recall, and steer channels against Playbot ${VERIFIED_PLAYBOT_VERSIONS}. `
         + "Answer or clear the card in the Playbot window and re-verify the channel names against the installed Playbot before using this tool again.");
     }
     throw error;
@@ -3955,15 +3968,16 @@ function assertSnapshotShape(snapshot, threadId, version) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     throw new Error(`Playbot returned no thread snapshot for ${threadId}; expected an object from 'threads:getSnapshot'`);
   }
+  const state = snapshotState(snapshot);
   const missing = [
-    ...SNAPSHOT_REQUIRED_KEYS.filter((key) => snapshot[key] === undefined),
+    ...SNAPSHOT_REQUIRED_KEYS.filter((key) => state?.[key] === undefined),
     ...unreadableProjections(snapshot, SNAPSHOT_REQUIRED_LIST_KEYS),
   ];
   if (missing.length > 0) {
     throw new Error(`${playbotVersionLabel(version)} returned a thread snapshot without ${missing.join(", ")}. `
-      + `This surface is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape before trusting these tools.`);
+      + `The 'threads:getSnapshot' shape is verified against Playbot ${SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape before trusting these tools.`);
   }
-  return snapshot;
+  return state;
 }
 
 // Reading a snapshot resumes a chat that has not been resumed in this Playbot
@@ -5694,7 +5708,7 @@ function toolDefinitions() {
     },
     {
       name: "get_thread_card",
-      description: `Read the pending question, approval, and MCP cards for one named chat, with every question's exact text and option labels, plus its live queued messages. Addresses the chat explicitly and never acts on the visibly selected one. This is the confirming read for list_parked_threads and it RESUMES a chat that has not been resumed since Playbot started, exactly as opening that chat in the Playbot window does; it starts no agent turn. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC and refuses if the channel or snapshot shape has changed.`,
+      description: `Read the pending question, approval, and MCP cards for one named chat, with every question's exact text and option labels, plus its live queued messages. Addresses the chat explicitly and never acts on the visibly selected one. This is the confirming read for list_parked_threads and it RESUMES a chat that has not been resumed since Playbot started, exactly as opening that chat in the Playbot window does; it starts no agent turn. Uses Playbot's internal 'threads:getSnapshot' IPC, verified against Playbot ${SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS}, and refuses if the channel or snapshot shape has changed.`,
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
     },
     {
@@ -5713,7 +5727,7 @@ function toolDefinitions() {
     },
     {
       name: "list_queued_messages",
-      description: `List one named chat's undelivered messages: queued, in flight, and failed. Playbot holds a message it cannot deliver yet and tells the sender nothing, so this is how a pile becomes visible. Resumes an unresumed chat the same way get_thread_card does. Uses Playbot ${VERIFIED_PLAYBOT_VERSIONS} internal IPC.`,
+      description: `List one named chat's undelivered messages: queued, in flight, and failed. Playbot holds a message it cannot deliver yet and tells the sender nothing, so this is how a pile becomes visible. Resumes an unresumed chat the same way get_thread_card does. Uses Playbot's internal 'threads:getSnapshot' IPC, verified against Playbot ${SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS}.`,
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title") }, ["project", "thread"]),
     },
     {
@@ -5999,7 +6013,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const cards = publicCards(snapshot);
     return {
       thread: publicThread(thread),
-      playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
+      playbot: { version, verifiedVersions: SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS },
       parked: cards.length > 0,
       status: snapshot.agentStatus ?? null,
       phase: snapshot.phase ?? null,
@@ -6064,8 +6078,8 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       unansweredQuestions: unanswered,
       alreadyResponding: card.responding,
       sentAnswers: response.answers,
-      statusAfter: after?.agentStatus ?? null,
-      phaseAfter: after?.phase ?? null,
+      statusAfter: snapshotState(after)?.agentStatus ?? null,
+      phaseAfter: snapshotState(after)?.phase ?? null,
       cardsRemaining: remaining,
       warnings,
     };
@@ -6074,7 +6088,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const { snapshot, version } = await threadSnapshot(thread);
     return {
       thread: publicThread(thread),
-      playbot: { version, verifiedVersions: VERIFIED_PLAYBOT_VERSIONS },
+      playbot: { version, verifiedVersions: SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS },
       ...publicQueue(snapshot),
     };
   }
@@ -6255,7 +6269,11 @@ async function doctor() {
     } catch {
       chatCreation = null;
     }
-    playbotApp = { version: await playbotVersion(), verifiedVersions: VERIFIED_PLAYBOT_VERSIONS };
+    playbotApp = {
+      version: await playbotVersion(),
+      verifiedVersions: VERIFIED_PLAYBOT_VERSIONS,
+      snapshotVerifiedVersions: SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS,
+    };
   }
   const buildIdentity = serverBuildIdentity();
   const installation = readJson(path.join(stateDir(), "installation.json"));
