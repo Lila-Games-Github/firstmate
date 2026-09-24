@@ -474,11 +474,12 @@ The resolver returns an actionable configuration error before any request when s
 A profile `floor` contains only `scope` and `min_percent`, always uses that profile's provider, and makes that one candidate ineligible below `min_percent` on the named scope.
 An absent or unknown named row also makes the candidate unrankable and is reported as an unverifiable floor, not as a known shortfall.
 `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
-Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
+At spawn time, codex `max` is valid for whatever model the installed catalog at `${CODEX_HOME:-~/.codex}/models_cache.json` advertises it for, read fresh by `bin/fm-codex-catalog-lib.sh`, never one hard-coded model (`bin/fm-spawn.sh` refuses the spawn when it cannot confirm support, never silently omitting the flag).
+This bootstrap linter and `bin/fm-dispatch-resolve.sh` validate a profile before any worker is provisioned, without reading that catalog, so today they only accept `gpt-5.6-luna` for codex `max` - a known narrower check than the spawn-time catalog read above.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
-Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
+Except for `ultra` and codex `max`, which refuse unsupported profiles under the native-effort and catalog contracts above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
 Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 When the file exists, bootstrap validates it with `jq`.
