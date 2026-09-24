@@ -270,6 +270,6 @@ Linked planning and execution model selection is verified against Playbot 0.107.
 The card, snapshot, queue, and forced-steering channels were verified against Playbot 0.95.x; the thread snapshot envelope was re-verified against Playbot 0.117.0, and every version-sensitive result names the verified versions or the exact internal mechanism so a mismatch is visible rather than inferred.
 Playbot 0.117.0 wraps the thread state under `state` in a stream envelope; the adapter reads either that observed envelope or the earlier flat snapshot and still refuses missing projections.
 A channel Playbot no longer registers, or a snapshot missing a field these tools read, is refused with the missing channel or field and the observed version named; nothing falls back to driving the visible window.
-`doctor` reports the same observed version as `playbotApp`.
+`doctor` reports the same observed version as `playbotApp`, with `verifiedVersions` naming the 0.95.x channel verification and `snapshotVerifiedVersions` naming the separately verified `threads:getSnapshot` read.
 Playbot's private IPC is not a published compatibility surface, so a Playbot update requires rerunning `doctor` and the focused test before relying on cross-project delivery.
 Current empirical evidence is recorded in [verification/supervision.md](verification/supervision.md#playbot-lanes).

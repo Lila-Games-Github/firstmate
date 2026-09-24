@@ -7695,7 +7695,8 @@ OUT="$out" node --no-warnings <<'NODE' || fail "get_thread_card could not read t
 const value = JSON.parse(process.env.OUT).result?.structuredContent;
 if (value?.playbot.version !== '0.117.0' || value.parked !== true
     || value.status !== 'pending_input' || value.cards?.[0]?.requestId !== 117
-    || value.queue.queued?.[0]?.id !== 'msg-117') {
+    || value.queue.queued?.[0]?.id !== 'msg-117'
+    || value.playbot.verifiedVersions !== '0.95.x and 0.117.0') {
   console.error(process.env.OUT);
   process.exit(1);
 }
@@ -7718,7 +7719,8 @@ NODE
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"drop_queued_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"messageId\":\"msg-117\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "drop_queued_message could not read the 0.117.0 post-action envelope"
 const value = JSON.parse(process.env.OUT).result?.structuredContent;
-if (value?.outcome !== 'recalled' || value.queueAfter?.queued?.length !== 2) process.exit(1);
+if (value?.outcome !== 'recalled' || value.queueAfter?.queued?.length !== 2
+    || value.playbot.verifiedVersions !== '0.95.x') process.exit(1);
 NODE
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"answer_thread_card\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"requestId\":117,\"answers\":{\"choice\":\"Proceed\"}}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "answer_thread_card could not read the 0.117.0 post-action envelope"
@@ -7736,7 +7738,8 @@ printf 'pendingMessages:null\n' > "$FIXTURE_ROOT/send-drop-key"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"send_message\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"message\":\"0.117 unreadable send\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "the 0.117.0 envelope hid an unreadable send verdict"
 const value = JSON.parse(process.env.OUT);
-if (!value.error?.message.includes('without pendingMessages')) process.exit(1);
+if (!value.error?.message.includes('without pendingMessages')
+    || !value.error.message.includes("'threads:send' return snapshot is verified against Playbot 0.95.x,")) process.exit(1);
 NODE
 rm -f "$FIXTURE_ROOT/send-drop-key" "$FIXTURE_ROOT/snapshot-envelope" "$FIXTURE_ROOT/app-version"
 pass "fm-playbot-lanes: captured Playbot 0.117.0 envelope supports card, queue, recall, answer, send, and dispatch while missing fields fail closed"
