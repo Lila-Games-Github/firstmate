@@ -147,7 +147,9 @@ fm_task_spawn_gen_capture() {
 # A terminal lane may mint an identity only for an existing, dispatchable work
 # item with a durable brief. Call under the metadata and publication locks.
 # A pending teardown close or a completed/held/blocked row is never a new task.
-# On refusal FM_TASK_LANE_CREATION_ERROR names the actionable cause.
+# On refusal FM_TASK_LANE_CREATION_ERROR names the actionable cause for
+# callers, including the JavaScript lane dispatcher's shell helper.
+# shellcheck disable=SC2034
 fm_task_lane_creation_allowed() {  # <state-dir> <data-dir> <task-id>
   local state=$1 data=$2 id=$3 lib_dir row_status row_state row_held row_blocked
   FM_TASK_LANE_CREATION_ERROR=

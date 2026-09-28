@@ -5013,14 +5013,20 @@ async function supervisionResolveRecall(prepared, outcome, threadId) {
 // workspace or runtime endpoint. Existing spawn records remain byte-identical.
 function laneMeta(file) {
   const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error("lane metadata is not a private regular file");
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("task metadata is not a regular file");
   const meta = {};
   for (const line of fs.readFileSync(file, "utf8").split("\n")) {
     if (!line) continue;
     const at = line.indexOf("=");
-    if (at < 1 || /[\0\r]/.test(line) || Object.hasOwn(meta, line.slice(0, at))) throw new Error("lane metadata is malformed or ambiguous");
-    meta[line.slice(0, at)] = line.slice(at + 1);
+    if (at < 1 || /[\0\r]/.test(line)) throw new Error("lane metadata is malformed or ambiguous");
+    const key = line.slice(0, at);
+    const identityKey = key === "kind" || key === "spawn_gen" || key.startsWith("playbot_");
+    if (identityKey && Object.hasOwn(meta, key)) throw new Error("lane metadata is malformed or ambiguous");
+    // Existing writers append bookkeeping; match fm_meta_get's last-wins
+    // semantics without allowing an identity field to change ambiguously.
+    meta[key] = line.slice(at + 1);
   }
+  if (meta.kind === "lane" && stat.nlink !== 1) throw new Error("lane metadata is not a private regular file");
   return meta;
 }
 
@@ -5033,10 +5039,13 @@ case "$5" in
   prepare)
     fm_task_lane_creation_allowed "$2" "$4" "$3" || { printf '%s\\n' "$FM_TASK_LANE_CREATION_ERROR" >&2; exit 3; }
     ;;
-  commit)
+  commit|rollback)
     lib_dir=\${1%/*}
     { . "$lib_dir/fm-tasks-axi-lib.sh" && . "$lib_dir/fm-backlog-transition-lib.sh"; } || { echo "task libraries could not be loaded" >&2; exit 2; }
-    if fm_backlog_transition_applies "$FM_HOME/config" "$4" lane; then
+    if [ "$5" = rollback ]; then
+      fm_backlog_dispatch_rollback "$2/$3.meta" "$lib_dir/fm-busy-event.sh" "$2" "$3" "" \\
+        || { printf 'lane identity rollback failed: %s\\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 3; }
+    elif fm_backlog_transition_applies "$FM_HOME/config" "$4" lane; then
       fm_backlog_atomic_transition dispatch "$2/$3.meta" "$4" "$3" "$2" \\
         || { printf 'backlog dispatch transition failed: %s\\n' "\${FM_BACKLOG_TRANSITION_ERROR:-unknown error}" >&2; exit 3; }
     else
@@ -5116,8 +5125,21 @@ async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, capture
     }
     supervisionPublish(state, `${taskId}.meta`, Object.entries(fields).map(([key, value]) => `${key}=${value}\n`).join(""), 0o600);
     // The record and its queue transition use the same owner as shell spawns.
-    // An unreadable commit leaves the identity intact for reconciliation.
-    laneIdentityHelper(helper, state, taskId, "commit");
+    // A failed start cannot leave a record that causes retry to skip its queue
+    // transition. Roll back only the identity published by this locked attempt.
+    try {
+      laneIdentityHelper(helper, state, taskId, "commit");
+    } catch (error) {
+      try {
+        if (laneIdentityHelper(helper, state, taskId) !== `value:${fields.spawn_gen}`) {
+          throw new Error("provisional lane incarnation changed; preserving its record");
+        }
+        laneIdentityHelper(helper, state, taskId, "rollback");
+      } catch (rollbackError) {
+        throw new Error(`${supervisionErrorDetail(error)}; ${supervisionErrorDetail(rollbackError)}`);
+      }
+      throw error;
+    }
   }, true);
 }
 

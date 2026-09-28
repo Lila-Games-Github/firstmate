@@ -9,7 +9,9 @@
 # worktree. Their cleanup requires an idle, landed workspace and a done status,
 # retires local task/poll records through the same locks and backlog transition,
 # holding the check-publication lock from the idle read through record removal,
-# and preserves the Playbot chat, workspace, branches, and durable brief.
+# delivers any parent-channel outcome before removing records, clears task
+# runtime files through the shared cleanup, and preserves the Playbot chat,
+# workspace, branches, and durable brief.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -1106,6 +1108,64 @@ else
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
 
+# Where a harness's firstmate-owned global turn-end registry entry lives is
+# owned by bin/fm-control-lib.sh, so teardown and the control plane's relaunch
+# retire the same artifact rather than each carrying its own copy of the path.
+remove_grok_turnend_auth() {
+  local state_dir=$1 id=$2 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path grok "$state_dir" "$id") || return 1
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
+  path=$(fm_control_harness_turnend_auth_path grok "$token") || return 1
+  [ -n "$path" ] || return 0
+  rm -f -- "$path"
+}
+
+remove_kimi_turnend_auth() {
+  local state_dir=$1 id=$2 token_path token='' path
+  token_path=$(fm_control_harness_turnend_token_path kimi "$state_dir" "$id") || return 1
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
+  fi
+  path=$(fm_control_harness_turnend_auth_path kimi "$token") || return 1
+  [ -n "$path" ] || return 0
+  rm -f -- "$path"
+}
+
+retire_busy_state() {
+  local state_dir=$1 id=$2 gen=${3:-}
+  if [ -n "$gen" ]; then
+    "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --gen "$gen"
+  elif [ -f "$state_dir/$id.busy-gen" ]; then
+    "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --current-gen
+  fi
+}
+
+report_final_task_outcome() {
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then
+    echo "error: $ID's final outcome has not reached the parent channel; retaining every durable task record so a rerun can retry the delivery" >&2
+    return 1
+  fi
+}
+
+remove_task_runtime_files() {
+  local state_dir=$1 id=$2
+  rm -f "$state_dir/$id.turn-ended" "$state_dir/$id.progress" \
+    "$state_dir/$id.pi-ext.ts" "$state_dir/$id.omp-ext.ts" "$state_dir/$id.grok-turnend-token" \
+    "$state_dir/$id.kimi-turnend-token" "$state_dir/$id.muse-session" \
+    "$state_dir/$id.muse-session-current" "$state_dir/$id.cursor-session" \
+    "$state_dir/$id.control-relaunch" "$state_dir/$id.control-relaunch.meta-prior" \
+    "$state_dir/$id.control-relaunch.brief-prior" "$state_dir/$id.control-relaunch.note" \
+    "$state_dir/$id.reconcile-nudged" "$state_dir/$id.gemini-settings.json" \
+    "$state_dir/.$id.branch-outcome-index" || return 1
+  # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
+  # retired endpoint; teardown only runs after landing is confirmed, so any
+  # leftover unhandled steer here is moot rather than unlanded work.
+  rm -rf "$state_dir/$id.inbox"
+}
+
 # Lane tasks have no shell backend endpoint to close. Keep their record
 # cleanup separate so no generic backend or worktree teardown can reach Playbot.
 if [ "$TEARDOWN_META_KIND" = lane ]; then
@@ -1122,6 +1182,12 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
     echo "REFUSED: lane task $ID cannot retire its supervision: $LANE_RETIRE_DETAIL" >&2
     exit 1
   fi
+  report_final_task_outcome || exit 1
+  remove_grok_turnend_auth "$STATE" "$ID" || exit 1
+  remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
+  retire_busy_state "$STATE" "$ID" "$(fm_meta_get "$META" busy_gen)" || exit 1
+  LANE_TASK_TMP=$(fm_meta_get "$META" tasktmp)
+  [ -z "$LANE_TASK_TMP" ] || rm -rf -- "$LANE_TASK_TMP" || exit 1
   LANE_BACKLOG_FLAGS=()
   [ "$TEARDOWN_BACKLOG_TRANSITION" = close ] || LANE_BACKLOG_FLAGS=(--retain)
   if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
@@ -1130,6 +1196,7 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
   fi
   remove_pr_poll_artifacts_locked "$STATE" "$ID" retain || exit 1
   status_retire_presentation_task "$STATE" "$ID" || exit 1
+  remove_task_runtime_files "$STATE" "$ID" || exit 1
   if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     LANE_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
     fm_backlog_atomic_transition "$TEARDOWN_BACKLOG_TRANSITION" "$META" "$LANE_CLOSE_MARKER" \
@@ -1407,40 +1474,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
 fi
-
-# Where a harness's firstmate-owned global turn-end registry entry lives is
-# owned by bin/fm-control-lib.sh, so teardown and the control plane's relaunch
-# retire the same artifact rather than each carrying its own copy of the path.
-remove_grok_turnend_auth() {
-  local state_dir=$1 id=$2 token_path token='' path
-  token_path=$(fm_control_harness_turnend_token_path grok "$state_dir" "$id") || return 1
-  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
-    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
-  fi
-  path=$(fm_control_harness_turnend_auth_path grok "$token") || return 1
-  [ -n "$path" ] || return 0
-  rm -f -- "$path"
-}
-
-remove_kimi_turnend_auth() {
-  local state_dir=$1 id=$2 token_path token='' path
-  token_path=$(fm_control_harness_turnend_token_path kimi "$state_dir" "$id") || return 1
-  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
-    IFS= read -r token < "$token_path" || [ -n "$token" ] || return 1
-  fi
-  path=$(fm_control_harness_turnend_auth_path kimi "$token") || return 1
-  [ -n "$path" ] || return 0
-  rm -f -- "$path"
-}
-
-retire_busy_state() {
-  local state_dir=$1 id=$2 gen=${3:-}
-  if [ -n "$gen" ]; then
-    "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --gen "$gen"
-  elif [ -f "$state_dir/$id.busy-gen" ]; then
-    "$SCRIPT_DIR/fm-busy-event.sh" retire "$state_dir" "$id" --current-gen
-  fi
-}
 
 # The repository and revision every landed-work question below is asked about.
 # They default to the task's own worktree at HEAD, which is what an ordinary
@@ -3863,11 +3896,7 @@ if [ "$BACKEND" = herdr ]; then
   fi
 fi
 if [ "$KIND" != secondmate ]; then
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then
-    echo "error: $ID's final outcome has not reached the parent channel; retaining every durable task record so a rerun can retry the delivery" >&2
-    exit 1
-  fi
+  report_final_task_outcome || exit 1
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
@@ -3925,18 +3954,7 @@ if [ "$KIND" != secondmate ]; then
 fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
-  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
-  "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/.$ID.branch-outcome-index"
-# The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
-# retired endpoint; teardown only runs after landing is confirmed, so any
-# leftover unhandled steer here is moot rather than unlanded work.
-rm -rf "$STATE/$ID.inbox"
+remove_task_runtime_files "$STATE" "$ID" || exit 1
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held

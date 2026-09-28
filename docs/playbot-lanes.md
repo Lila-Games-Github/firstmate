@@ -200,6 +200,7 @@ Firstmate's task teardown removes the poll artifacts with the matching task iden
 For a terminal dispatch with an explicit `taskId`, an existing dispatchable backlog item and durable brief can supply a task that has not been spawned through a shell harness.
 When its metadata is absent, dispatch creates a private `kind=lane` identity before sending, retaining the selected workspace, thread, landing branch, and spawn incarnation under the task locks.
 An existing task record is preserved, and a retired, held, blocked, or otherwise unavailable work item cannot mint a replacement identity.
+Appended bookkeeping fields retain their last value, while duplicate identity fields are refused.
 Eligibility is checked before any workspace or chat is created, and the refusal names its cause (missing brief, missing backlog item, held/blocked/closed row, lock timeout, or unreadable record) without sending.
 If recording the identity fails after a worker was created, the error names that workspace and chat so the task is dispatched to them again instead of to a new pair.
 `bin/fm-crew-state.sh` reads that lane's persisted Playbot state; an idle chat alone does not imply that its task is complete.
@@ -207,6 +208,8 @@ While a poll is armed, its task delivery and post-acceptance completion evidence
 `bin/fm-teardown.sh` retires its local identity and poll only after a completed declaration and an idle, landed workspace, while preserving the Playbot workspace, chat, and durable brief.
 A worker chat that was archived or deleted in Playbot no longer blocks that retirement, but the workspace must still be verified landed; `--force` skips only the declaration check, never the landed-workspace check, and an active chat still has to be idle with an empty queue.
 Dispatch and teardown follow the controller's backlog policy; manual mode leaves backlog transitions to the operator.
+A failed backlog start removes the provisional identity so retry must complete the transition before sending.
+Lane teardown delivers any parent-channel outcome before removing records and clears task runtime files through the shared teardown cleanup.
 The lane metadata and read mechanics are owned by [bin/fm-playbot-lanes.mjs](../bin/fm-playbot-lanes.mjs).
 
 `taskId` is optional and the workspace id is used when it is absent, so `dispatch` still attempts to arm the poll; a workspace-keyed poll is not retired by firstmate's task teardown and the result says so.
