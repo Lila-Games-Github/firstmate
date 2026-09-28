@@ -1385,12 +1385,18 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
 make_collision_case() {
   local name=$1 stale=$2 live=$3 kind=$4 landed=${5:-landed} dir
   dir=$(make_case "$name")
+  # Reconciliation must rely on fixture Git evidence, never the live forge or
+  # the shared no-mistakes daemon.
+  local tool
+  for tool in gh-axi gh no-mistakes; do
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/$tool"
+    chmod +x "$dir/fakebin/$tool"
+  done
   mark_case_as_treehouse_pool "$dir"
   git -C "$dir/project" branch -M main
   if [ "$kind" = ship ]; then
     if [ "$landed" = landed ]; then
-      # Landed: the branch adds nothing the default branch does not already
-      # have, which is exactly what a squash-merged task looks like afterwards.
+      # Ancestor case. Real squash histories are covered separately below.
       git -C "$dir/project" branch "fm/$stale" main
     else
       # Unlanded: a real content change that exists only on the branch. An
@@ -1412,6 +1418,114 @@ make_collision_case() {
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$live" "$dir/home"
   printf '%s\n' "$dir"
+}
+
+# Two commits squashed into the landing branch, or preserved only on a remote.
+# Keep the slot detached on the scout's copy throughout: it is not the ship's
+# checkout and must never be used to decide whether the ship's work is safe.
+make_squash_collision_case() {  # <name> <proof> <stale-id> <live-id>
+  local name=$1 proof=$2 stale=$3 live=$4 dir target=main
+  fm_git_identity
+  dir=$(make_collision_case "$name" "$stale" "$live" ship unlanded)
+  git -C "$dir/project" checkout -q "fm/$stale"
+  printf 'second change\n' > "$dir/project/feature.txt"
+  git -C "$dir/project" add feature.txt
+  git -C "$dir/project" commit -qm second-change
+  git -C "$dir/project" checkout -q main
+  case "$proof" in
+    remote)
+      git init -q --bare "$dir/remote.git"
+      git -C "$dir/project" remote add origin "$dir/remote.git"
+      git -C "$dir/project" push -q origin main "fm/$stale"
+      ;;
+    recorded)
+      target=release
+      git -C "$dir/project" checkout -q -b "$target"
+      printf 'landing_branch=%s\n' "$target" >> "$dir/home/state/$stale.meta"
+      ;;
+  esac
+  if [ "$proof" != remote ]; then
+    git -C "$dir/project" merge --squash "fm/$stale" >/dev/null
+    git -C "$dir/project" commit -qm squash-landing
+    if [ "$proof" = rewritten ]; then
+      # Equal trees remain sufficient evidence after landing history is
+      # rewritten, even though merge-tree cannot find a common ancestor.
+      git -C "$dir/project" checkout -q --orphan rewritten
+      git -C "$dir/project" commit -qm rewritten-landing
+      git -C "$dir/project" branch -M main
+    else
+      printf 'unrelated landing change\n' > "$dir/project/later.txt"
+      git -C "$dir/project" add later.txt
+      git -C "$dir/project" commit -qm later-landing-change
+    fi
+    git -C "$dir/project" merge-base --is-ancestor "fm/$stale" "$target" \
+      && fail "squash fixture accidentally preserved the ship's ancestry"
+  fi
+  mkdir -p "$dir/home/data/$live"
+  printf 'scout findings\n' > "$dir/home/data/$live/report.md"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$live" --none >/dev/null \
+    || fail "could not complete the survivor's captain-call inventory"
+  printf '%s\n' "$dir"
+}
+
+test_reconcile_slot_preserved_ship_and_scout_retire_without_force() {
+  local proof dir stale=squash-pipeline live=research-scout rc
+  for proof in squash remote rewritten recorded; do
+    dir=$(make_squash_collision_case "reconcile-$proof" "$proof" "$stale" "$live")
+    # Reproduce both sides of the deadlock before retiring the stale ship.
+    set +e
+    run_reconcile "$dir" "$live" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$proof: reconciliation retired the slot's scout owner"
+    assert_contains "$(cat "$dir/stderr")" "current holder" "$proof: scout refusal lost ownership evidence"
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+      PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$stale" > "$dir/stdout" 2> "$dir/stderr" \
+      && fail "$proof: ordinary ship teardown did not refuse the shared slot"
+    run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr" \
+      || fail "$proof: preserved ship could not reconcile: $(cat "$dir/stderr")"
+    assert_absent "$dir/home/state/$stale.meta" "$proof: stale ship record survived"
+    assert_present "$dir/home/state/$live.meta" "$proof: scout record was removed"
+    assert_slot_untouched "$dir" "$live" "$proof reconciliation"
+    git -C "$dir/project" rev-parse --verify "refs/heads/fm/$stale" >/dev/null \
+      || fail "$proof: reconciliation deleted the preserved ship branch"
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+      PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$live" > "$dir/stdout" 2> "$dir/stderr" \
+      || fail "$proof: surviving scout could not retire without force: $(cat "$dir/stderr")"
+    assert_absent "$dir/home/state/$live.meta" "$proof: scout record survived ordinary teardown"
+    assert_absent "$dir/pool/1/.fm-slot-owner" "$proof: returned slot retained its claim"
+    grep -Fq 'treehouse <return>' "$dir/runtime.log" \
+      || fail "$proof: scout teardown did not return the slot"
+  done
+  pass "fm-teardown: remote-preserved and squash-landed ships reconcile, then their scout slot owners retire without force"
+}
+
+test_reconcile_slot_refuses_work_beyond_preserved_ship() {
+  local proof dir stale=squash-pipeline live=research-scout rc before
+  fm_git_identity
+  for proof in remote squash rewritten recorded; do
+    dir=$(make_squash_collision_case "reconcile-extra-$proof" "$proof" "$stale" "$live")
+    git -C "$dir/project" checkout -q "fm/$stale"
+    # Same paths and a preserved prefix prove nothing about this later edit.
+    printf 'unlanded replacement\n' > "$dir/project/feature.txt"
+    git -C "$dir/project" add feature.txt
+    git -C "$dir/project" commit -qm unlanded-follow-up
+    git -C "$dir/project" checkout -q main
+    before=$(cat "$dir/home/state/$stale.meta")
+    set +e
+    run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$proof: reconciliation discarded an unlanded follow-up"
+    assert_contains "$(cat "$dir/stderr")" "not landed" "$proof: refusal did not identify unlanded work"
+    [ "$(cat "$dir/home/state/$stale.meta")" = "$before" ] \
+      || fail "$proof: refusal changed the ship's metadata"
+    assert_present "$dir/home/state/$live.meta" "$proof: refusal removed the scout record"
+    assert_slot_untouched "$dir" "$live" "$proof unlanded follow-up"
+    [ ! -s "$dir/runtime.log" ] || fail "$proof: refusal reached a runtime mutation"
+  done
+  pass "fm-teardown: reconciliation refuses unlanded follow-ups beyond either a remote or squash proof"
 }
 
 run_reconcile() {  # <case> <id> [extra args...]
@@ -1621,6 +1735,8 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_reconcile_slot_retires_the_landed_record_and_frees_the_survivor
+test_reconcile_slot_preserved_ship_and_scout_retire_without_force
+test_reconcile_slot_refuses_work_beyond_preserved_ship
 test_reconcile_slot_accepts_a_scout_whose_report_exists
 test_reconcile_slot_refuses_a_secondmate_record_by_its_own_reason
 test_reconcile_slot_refuses_without_proof
