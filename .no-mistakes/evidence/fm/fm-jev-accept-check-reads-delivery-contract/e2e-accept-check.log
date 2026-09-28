@@ -1,0 +1,30 @@
+=== mode=local-only  extractor=base ===
+verdict: accepted
+  criterion_1 met=true: Delivery contract: mode=local-only ⏎ This task ships **local-only**: no remote, no PR, no pipeline. ⏎ The task
+=== mode=local-only  extractor=new ===
+verdict: accepted
+  criterion_1 met=true: Done when the level-0 region fills the phone viewport with no letterbox.
+  criterion_2 met=true: Scale the region to the viewport.
+  criterion_3 met=true: Add a regression test covering phone aspect ratios.
+=== mode=no-mistakes  extractor=base ===
+verdict: accepted
+  criterion_1 met=true: Delivery contract: mode=no-mistakes ⏎ The task is complete only when committed on your branch. ⏎ When you beli
+  criterion_2 met=true: You drive no-mistakes by responding to its gates, not by implementing fixes. ⏎ Follow the guidance no-mistakes
+  criterion_3 met=true: One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single
+  criterion_4 met=true: Two firstmate-specific rules layer on top of that guidance:
+  criterion_5 met=true: ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop. ⏎ 
+  criterion_6 met=true: NEVER pass `--yes` (or `-y`) to `no-mistakes axi run` or `no-mistakes axi respond`. It is banned fleet-wide. ⏎
+  criterion_7 met=true: After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the 
+=== mode=no-mistakes  extractor=new ===
+verdict: accepted
+  criterion_1 met=true: Done when the level-0 region fills the phone viewport with no letterbox.
+  criterion_2 met=true: Scale the region to the viewport.
+  criterion_3 met=true: Add a regression test covering phone aspect ratios.
+=== mode=direct-PR  extractor=base ===
+verdict: accepted
+  criterion_1 met=true: Delivery contract: mode=direct-PR ⏎ This task ships **direct-PR**: you raise the PR yourself, without the no-m
+=== mode=direct-PR  extractor=new ===
+verdict: accepted
+  criterion_1 met=true: Done when the level-0 region fills the phone viewport with no letterbox.
+  criterion_2 met=true: Scale the region to the viewport.
+  criterion_3 met=true: Add a regression test covering phone aspect ratios.
