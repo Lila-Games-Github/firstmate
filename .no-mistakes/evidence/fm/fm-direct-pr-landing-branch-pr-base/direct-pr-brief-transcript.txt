@@ -1,0 +1,23 @@
+$ printf "landing_branch=proto/lila\n" > $FM_HOME/state/demo.meta
+$ FM_HOME=$H bin/fm-brief.sh demo fixture-project --mode direct-PR
+scaffolded: /tmp/tmp.8IA0TCQTAW/data/demo/brief.md (ship, mode=direct-PR; replace {TASK} and {FIRSTMATE_SPEC})
+exit=0
+--- Definition of done / direct-PR base contract in generated brief.md:
+When it is implemented and committed, push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+
+# Current direct-PR base contract
+This section supersedes earlier brief guidance about the direct-PR base.
+The recorded landing branch is `proto/lila`.
+When opening the PR, run `gh-axi pr create --base proto/lila` with an explicit repository scope and the other PR arguments.
+Before appending `done: PR {url}`, use `gh-axi` with an explicit repository scope to verify the forge PR base (`base.ref`) equals `proto/lila`.
+Never infer the base from the head branch or PR title.
+If the base differs or cannot be verified, stop and report `blocked: direct-PR base verification failed` with the evidence; do not report that PR as ready.
+
+$ # default (no landing branch recorded):
+0
+(no --base line: PR targets default branch as before)
+
+$ # invalid landing branch refused:
+error: direct-PR landing branch is not a valid branch name: bad..name
+exit=1
