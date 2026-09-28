@@ -1,0 +1,22 @@
+## New 3-lane split (refreshed 2026-09-28 CI hints), from bin/fm-test-run.sh --list-scheduled
+portable-parallel-1: 11 scripts, hint sum 365815 ms (~365s) vs 600s cap
+portable-parallel-2: 5 scripts, hint sum 366047 ms (~366s) vs 600s cap
+portable-parallel-3: 8 scripts, hint sum 366068 ms (~366s) vs 600s cap
+
+## Old 2-lane split (base c637ee8 memberships) re-weighted with the same refreshed hints
+old portable-parallel-1: 11 scripts, hint sum 597785 ms (~597s)
+old portable-parallel-2: 13 scripts, hint sum 500145 ms (~500s)
+
+## bin/fm-test-run.sh --check-coverage
+FM_TEST_COVERAGE ok total=227 parallel=24 parallel_max_ms=366068 parallel_imbalance_ms=253 parallel_unhinted=0 serial=187 serial_shards=9 serial_unhinted=11 herdr=16
+
+## bin/fm-test-run.sh --list-lanes (parallel)
+portable-parallel-1
+portable-parallel-2
+portable-parallel-3
+
+## ci.yml parallel job timeouts (parsed YAML via python)
+tests-portable-parallel-1 Behavior portable parallel 1 timeout-minutes= 10
+tests-portable-parallel-2 Behavior portable parallel 2 timeout-minutes= 10
+tests-portable-parallel-3 Behavior portable parallel 3 timeout-minutes= 10
+aggregate needs: ['tests-portable-parallel-1', 'tests-portable-parallel-2', 'tests-portable-parallel-3', 'tests-portable-serial', 'tests-herdr']
