@@ -6,10 +6,10 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin tip, launches a clean origin-less
 # pool as-is, or stops when a configured origin is unusable.
-# A ship task given --landing-branch must instead start from that branch's
-# fetched origin tip, or from the project clone's local branch of that name when
-# origin has no such branch, and must refuse rather than fall back to the default
-# branch when the landing branch resolves nowhere or the refreshed HEAD does not match it.
+# A ship task given --landing-branch must start from the descendant of that
+# branch's fetched origin and local tips (or the local tip when origin lacks the
+# branch). Divergence, unresolved landing branches, and a mismatched reset
+# refuse rather than falling back to the default branch.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -286,6 +286,160 @@ test_local_only_landing_branch_bases_task_on_local_tip() {
   pass "a landing branch missing from origin bases the spawn on the project clone's local branch tip"
 }
 
+test_local_and_origin_landing_tips_select_descendant() {
+  local relation rec id out status remote_tip local_tip expected before primary_before
+  for relation in behind behind-shadow equal ahead diverged; do
+    id="pool-landing-$relation"
+    rec=$(make_case "landing-$relation" "$id")
+    read_case_record "$rec"
+    remote_tip=$(add_landing_branch "$CASE_DIR" "$DEFAULT_BRANCH")
+    git -C "$PROJECT_DIR" checkout --quiet -b "$LANDING" "$remote_tip"
+    case "$relation" in
+      ahead|diverged)
+        printf 'unpushed local landing\n' > "$PROJECT_DIR/local-landing.txt"
+        git -C "$PROJECT_DIR" add local-landing.txt
+        git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+          commit -qm local-landing
+        ;;
+    esac
+    local_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$LANDING")
+    case "$relation" in
+      behind|behind-shadow|diverged)
+        git -C "$CASE_DIR/publisher" checkout --quiet "$LANDING"
+        printf 'new remote landing\n' > "$CASE_DIR/publisher/remote-landing.txt"
+        git -C "$CASE_DIR/publisher" add remote-landing.txt
+        git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+          commit -qm remote-landing
+        git -C "$CASE_DIR/publisher" push --quiet origin "$LANDING"
+        remote_tip=$(git -C "$CASE_DIR/publisher" rev-parse HEAD)
+        # Leave the tracking ref stale and exclude the landing branch from the
+        # generic fetch: only the explicit landing-branch fetch can refresh it.
+        [ "$(git -C "$PROJECT_DIR" rev-parse "refs/remotes/origin/$LANDING")" != "$remote_tip" ] \
+          || fail "fixture did not leave the remote-tracking tip stale"
+        git -C "$PROJECT_DIR" config remote.origin.fetch "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+        ;;
+    esac
+    if [ "$relation" = behind-shadow ]; then
+      # A local branch named origin/<landing> must not shadow the fetched ref.
+      git -C "$PROJECT_DIR" branch "origin/$LANDING" "$local_tip"
+    fi
+    expected=$remote_tip
+    [ "$relation" != ahead ] || expected=$local_tip
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    primary_before=$(git -C "$PROJECT_DIR" reflog)
+
+    out=$(run_spawn "$id" --mode local-only --yolo off --landing-branch "$LANDING")
+    status=$?
+    [ "$(git -C "$PROJECT_DIR" rev-parse HEAD)" = "$local_tip" ] \
+      || fail "$relation spawn moved the primary checkout's HEAD"
+    [ "$(git -C "$PROJECT_DIR" reflog)" = "$primary_before" ] \
+      || fail "$relation spawn changed the primary checkout's reflog"
+    [ "$(git -C "$PROJECT_DIR" rev-parse "refs/remotes/origin/$LANDING")" = "$remote_tip" ] \
+      || fail "$relation spawn did not fetch the current origin landing tip"
+    if [ "$relation" = diverged ]; then
+      [ "$status" -ne 0 ] || fail "spawn launched with diverged local and origin landing tips"
+      assert_contains "$out" 'diverged' "refusal did not diagnose divergent landing histories: $out"
+      assert_contains "$out" "$local_tip" "refusal did not name the local landing commit: $out"
+      assert_contains "$out" "$remote_tip" "refusal did not name the fetched origin commit: $out"
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+        || fail "diverged spawn reset the pooled worktree before refusing"
+      assert_no_half_launched_task "$id" "diverged landing tips"
+    else
+      expect_code 0 "$status" "$relation landing tips should launch"$'\n'"$out"
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$expected" ] \
+        || fail "$relation spawn did not select descendant landing tip $expected"
+      if [ "$relation" = ahead ]; then
+        assert_grep 'unpushed local landing' "$POOL_DIR/local-landing.txt" "spawn omitted unpushed local landings"
+      fi
+      git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+      printf 'worker change\n' > "$POOL_DIR/worker.txt"
+      git -C "$POOL_DIR" add worker.txt
+      git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm worker
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD^)" = "$expected" ] \
+        || fail "$relation worker branch did not descend from the selected tip"
+    fi
+    pass "$relation local and origin landing tips select the descendant or refuse divergence"
+  done
+}
+
+test_pr_modes_base_ahead_landing_on_origin_tip_and_warn() {
+  local mode rec id out status remote_tip local_tip n
+  for mode in no-mistakes direct-PR; do
+    id="pool-landing-ahead-$mode"
+    rec=$(make_case "landing-ahead-$mode" "$id")
+    read_case_record "$rec"
+    remote_tip=$(add_landing_branch "$CASE_DIR" "$DEFAULT_BRANCH")
+    git -C "$PROJECT_DIR" checkout --quiet -b "$LANDING" "$remote_tip"
+    for n in 1 2; do
+      printf 'unpushed local landing %s\n' "$n" > "$PROJECT_DIR/local-landing-$n.txt"
+      git -C "$PROJECT_DIR" add "local-landing-$n.txt"
+      git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+        commit -qm "local-landing-$n"
+    done
+    local_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$LANDING")
+
+    out=$(run_spawn "$id" --mode "$mode" --yolo off --landing-branch "$LANDING")
+    status=$?
+    expect_code 0 "$status" "$mode spawn with an ahead local landing branch should launch"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$remote_tip" ] \
+      || fail "$mode spawn did not base on the origin landing tip $remote_tip"
+    [ ! -e "$POOL_DIR/local-landing-1.txt" ] || fail "$mode spawn carried unpushed local landings into the base"
+    [ "$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$LANDING")" = "$local_tip" ] \
+      || fail "$mode spawn moved the local landing branch"
+    assert_contains "$out" 'warning:' "$mode spawn did not warn about unpushed local commits: $out"
+    assert_contains "$out" '2 commit(s) ahead' "$mode warning did not count the unpushed local commits: $out"
+    assert_contains "$out" "$local_tip" "$mode warning did not name the local landing commit: $out"
+    assert_contains "$out" "$remote_tip" "$mode warning did not name the origin landing commit: $out"
+    pass "$mode bases an ahead local landing branch on the origin tip and warns with the unpushed count"
+  done
+}
+
+test_landing_ancestry_errors_refuse_without_reset() {
+  local direction rec id remote_tip local_tip from to real_git before out status
+  for direction in forward reverse; do
+    id="pool-landing-ancestry-$direction"
+    rec=$(make_case "landing-ancestry-$direction" "$id")
+    read_case_record "$rec"
+    remote_tip=$(add_landing_branch "$CASE_DIR" "$DEFAULT_BRANCH")
+    git -C "$PROJECT_DIR" checkout --quiet -b "$LANDING" "$remote_tip"
+    printf 'local landing\n' > "$PROJECT_DIR/local.txt"
+    git -C "$PROJECT_DIR" add local.txt
+    git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+      commit -qm local-landing
+    local_tip=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+    from=$local_tip
+    to=$remote_tip
+    if [ "$direction" = reverse ]; then
+      from=$remote_tip
+      to=$local_tip
+    fi
+    real_git=$(command -v git)
+    cat > "$FAKEBIN_DIR/git" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *" merge-base --is-ancestor $from $to") exit 128 ;;
+esac
+exec "$real_git" "\$@"
+SH
+    chmod +x "$FAKEBIN_DIR/git"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    out=$(run_spawn "$id" --mode local-only --yolo off --landing-branch "$LANDING")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn launched after a $direction ancestry comparison error"
+    assert_contains "$out" 'could not compare landing branch' "comparison error was not diagnosed: $out"
+    assert_contains "$out" "$local_tip" "comparison error did not name the local commit: $out"
+    assert_contains "$out" "$remote_tip" "comparison error did not name the remote commit: $out"
+    assert_not_contains "$out" 'has diverged' "Git comparison error was misreported as divergence: $out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "spawn reset the pool after a $direction ancestry comparison error"
+    [ "$(git -C "$PROJECT_DIR" rev-parse HEAD)" = "$local_tip" ] \
+      || fail "spawn moved the primary after a $direction ancestry comparison error"
+    assert_no_half_launched_task "$id" "a $direction ancestry comparison error"
+    pass "a $direction landing ancestry error refuses before reset and names both commits"
+  done
+}
+
 test_unresolvable_landing_branch_refuses_before_touching_worktree() {
   local rec id out status before nowhere
   id='pool-landing-nowhere-r9'
@@ -323,10 +477,10 @@ test_landing_base_mismatch_refuses_naming_both_commits() {
   cat > "$FAKEBIN_DIR/git" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *" reset --hard origin/$LANDING")
+  *" reset --hard $landing_tip")
     rewritten=()
     for arg in "\$@"; do
-      [ "\$arg" != "origin/$LANDING" ] || arg="origin/$DEFAULT_BRANCH"
+      [ "\$arg" != "$landing_tip" ] || arg="$main_tip"
       rewritten+=("\$arg")
     done
     set -- "\${rewritten[@]}" ;;
@@ -941,6 +1095,9 @@ test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_landing_branch_bases_task_on_landing_tip
 test_local_only_landing_branch_bases_task_on_local_tip
+test_local_and_origin_landing_tips_select_descendant
+test_pr_modes_base_ahead_landing_on_origin_tip_and_warn
+test_landing_ancestry_errors_refuse_without_reset
 test_unresolvable_landing_branch_refuses_before_touching_worktree
 test_landing_base_mismatch_refuses_naming_both_commits
 test_originless_pool_launches_without_a_freshness_fetch

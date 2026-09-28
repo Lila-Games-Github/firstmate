@@ -36,12 +36,17 @@
 #   the default branch; absent means default-branch behavior exactly.
 #   The same field selects the task's BASE: a fresh ship spawn refreshes its
 #   clean pooled worktree by fetching +refs/heads/<branch>:refs/remotes/origin/<branch>
-#   and hard-resetting to origin/<branch>, so the worker's task branch starts at
-#   that branch's live tip rather than origin's default branch; without the flag
-#   the refresh resolves and fetches origin's default branch exactly as before.
-#   After the reset the spawn asserts HEAD equals the fetched tip and descends
-#   from it, and refuses to launch naming both commits when they differ. When
-#   origin has no such branch but the project clone holds a local refs/heads/<branch>
+#   and comparing that fetched commit with local refs/heads/<branch>, if present.
+#   Equal tips or a local tip behind origin select the fetched tip. A local tip
+#   ahead of origin selects that local descendant only for mode=local-only,
+#   preserving unpushed local landings; no-mistakes and direct-PR keep the
+#   fetched tip and warn with the count of unpushed local commits left out, so
+#   the worker's PR against origin never carries them. Diverged tips or an unreadable ancestry comparison refuse before
+#   reset, naming both commits. The clean pool is hard-reset to the selected
+#   commit, with HEAD equality and ancestry asserted before launch; a mismatch
+#   refuses naming both commits. Without the flag the refresh resolves and fetches
+#   origin's default branch exactly as before. When origin has no such branch but
+#   the project clone holds a local refs/heads/<branch>
 #   (the linked pooled worktree shares its refs), the base is that local tip under
 #   the same clean-check, reset, and tip assertion; a landing branch that resolves
 #   nowhere, or an origin that cannot be queried, refuses the same way, and a
@@ -2984,14 +2989,9 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 freshen_spawn_worktree_base() { # <worktree>
-  # Base selection: the task's recorded landing branch when one is set (the
-  # branch its work must land on, so a lane starts from that branch's live
-  # tip), otherwise origin's resolved default branch. The legs share the same
-  # clean-check, reset, and tip assertion; only the base ref differs
-  # (origin/<branch>, or the project clone's local refs/heads/<branch> when
-  # origin has no such branch), and a landing branch never falls back to the
-  # default branch on any failure.
-  local worktree=$1 base target expected actual status probe
+  # The header's landing-branch contract owns descendant selection; all bases
+  # share the same clean check, reset to a captured commit, and HEAD assertion.
+  local worktree=$1 base target expected actual status probe local_ref local_tip ancestry unpushed
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -3020,7 +3020,7 @@ freshen_spawn_worktree_base() { # <worktree>
   fi
   if [ -n "$LANDING_BRANCH" ]; then
     base=$LANDING_BRANCH
-    target="origin/$base"
+    target="refs/remotes/origin/$base"
     probe=0
     git -C "$worktree" ls-remote --exit-code --heads origin "refs/heads/$base" >/dev/null 2>&1 || probe=$?
     if [ "$probe" -eq 2 ]; then
@@ -3043,9 +3043,9 @@ freshen_spawn_worktree_base() { # <worktree>
       echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     }
-    target="origin/$base"
+    target="refs/remotes/origin/$base"
   fi
-  if [ "$target" = "origin/$base" ] \
+  if [ "$target" = "refs/remotes/origin/$base" ] \
     && ! git -C "$worktree" fetch --quiet origin "+refs/heads/$base:refs/remotes/origin/$base"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
@@ -3054,7 +3054,41 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+  if [ -n "$LANDING_BRANCH" ] && [ "$target" = "refs/remotes/origin/$base" ]; then
+    local_ref="refs/heads/$base"
+    probe=0
+    git -C "$worktree" show-ref --verify --quiet "$local_ref" || probe=$?
+    if [ "$probe" -eq 0 ]; then
+      local_tip=$(git -C "$worktree" rev-parse --verify --quiet "$local_ref^{commit}") || {
+        echo "error: could not resolve local landing branch '$local_ref' for pooled worktree '$worktree'; refusing to launch from an unverified base" >&2
+        return 1
+      }
+      ancestry=0
+      git -C "$worktree" merge-base --is-ancestor "$local_tip" "$expected" || ancestry=$?
+      if [ "$ancestry" -eq 1 ]; then
+        ancestry=0
+        git -C "$worktree" merge-base --is-ancestor "$expected" "$local_tip" || ancestry=$?
+        if [ "$ancestry" -eq 0 ] && [ "$MODE" = local-only ]; then
+          target=$local_ref
+          expected=$local_tip
+        elif [ "$ancestry" -eq 0 ]; then
+          unpushed=$(git -C "$worktree" rev-list --count "$expected..$local_tip") || unpushed=unknown
+          echo "warning: local landing branch '$local_ref' ($local_tip) is $unpushed commit(s) ahead of '$target' ($expected); mode=$MODE bases pooled worktree '$worktree' on '$target' and leaves those unpushed local commits out" >&2
+        elif [ "$ancestry" -eq 1 ]; then
+          echo "error: landing branch '$base' has diverged: '$local_ref' ($local_tip) and '$target' ($expected); refusing to reset pooled worktree '$worktree' or launch" >&2
+          return 1
+        fi
+      fi
+      if [ "$ancestry" -gt 1 ]; then
+        echo "error: could not compare landing branch '$base' commits '$local_ref' ($local_tip) and '$target' ($expected); refusing to reset pooled worktree '$worktree' or launch" >&2
+        return 1
+      fi
+    elif [ "$probe" -ne 1 ]; then
+      echo "error: could not inspect local landing branch '$local_ref' for pooled worktree '$worktree'; refusing to launch from an unverified base" >&2
+      return 1
+    fi
+  fi
+  if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
