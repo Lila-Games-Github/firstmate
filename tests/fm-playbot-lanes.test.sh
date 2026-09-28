@@ -7646,6 +7646,67 @@ files_proof > /dev/null || fail "listing failed while pruning superseded invento
 rm "$inventory_dir/unmanaged.txt"
 pass "fm-playbot-lanes: complete inventories are verified before reuse, pruned when superseded, and kept while audited"
 
+publish_shim="$FIXTURE_ROOT/pause-inventory-publication.cjs"
+publish_ready="$FIXTURE_ROOT/inventory-publication-ready"
+publish_go="$FIXTURE_ROOT/inventory-publication-go"
+publish_one_out="$FIXTURE_ROOT/inventory-publication-one.json"
+publish_two_out="$FIXTURE_ROOT/inventory-publication-two.json"
+files_root_key=$(basename "$first_file")
+files_root_key=${files_root_key%%-*}
+cat > "$publish_shim" <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const originalRenameSync = fs.renameSync;
+const wait = new Int32Array(new SharedArrayBuffer(4));
+let paused = false;
+fs.renameSync = function pauseAfterInventoryPublication(from, to, ...rest) {
+  const result = originalRenameSync.call(fs, from, to, ...rest);
+  const name = path.basename(String(to));
+  if (!paused && name.startsWith(`${process.env.FM_TEST_ROOT_KEY}-`) && name.endsWith('.jsonl')) {
+    paused = true;
+    fs.writeFileSync(process.env.FM_TEST_PUBLISH_READY, 'ready\n');
+    const deadline = Date.now() + 8_000;
+    while (!fs.existsSync(process.env.FM_TEST_PUBLISH_GO) && Date.now() < deadline) Atomics.wait(wait, 0, 0, 20);
+  }
+  return result;
+};
+NODE
+rm -f "$publish_ready" "$publish_go"
+printf 'published while paused\n' > "$files_orphan/prototype-game/paused.txt"
+(
+  FM_TEST_ROOT_KEY="$files_root_key" FM_TEST_PUBLISH_READY="$publish_ready" FM_TEST_PUBLISH_GO="$publish_go" \
+    NODE_OPTIONS="--require=$publish_shim" cleanup_list main > "$publish_one_out"
+) &
+publish_one_pid=$!
+for _ in $(seq 1 1000); do
+  [ -f "$publish_ready" ] && break
+  sleep 0.02
+done
+[ -f "$publish_ready" ] || fail "the first listing did not pause after publishing its changed inventory"
+rm "$files_orphan/prototype-game/paused.txt"
+( cleanup_list main > "$publish_two_out" ) &
+publish_two_pid=$!
+for _ in $(seq 1 150); do
+  kill -0 "$publish_two_pid" 2>/dev/null || break
+  sleep 0.02
+done
+touch "$publish_go"
+wait "$publish_one_pid" || fail "the paused inventory listing failed"
+wait "$publish_two_pid" || fail "the concurrent inventory listing failed"
+RECEIPT="$inventory_dir/$files_root_key.json" OUT_ONE="$publish_one_out" OUT_TWO="$publish_two_out" node --no-warnings <<'NODE' \
+  || fail "concurrent inventory publication left a receipt naming a pruned or mismatched inventory"
+const fs = require('node:fs');
+for (const file of [process.env.OUT_ONE, process.env.OUT_TWO]) {
+  if (!JSON.parse(fs.readFileSync(file, 'utf8')).result?.structuredContent?.workspaces) process.exit(1);
+}
+const receipt = JSON.parse(fs.readFileSync(process.env.RECEIPT, 'utf8'));
+const bytes = fs.readFileSync(receipt.file);
+if (require('node:crypto').createHash('sha256').update(bytes).digest('hex') !== receipt.sha256) process.exit(1);
+NODE
+[ -f "$first_file" ] || fail "the listing that ran last did not keep the inventory its receipt names"
+rm -f "$publish_shim" "$publish_ready" "$publish_go" "$publish_one_out" "$publish_two_out"
+pass "fm-playbot-lanes: concurrent listings cannot leave a receipt naming a pruned inventory"
+
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 orphan_discard=',"discardLocalChanges":{"authorization":"discard it","allow":["orphaned-files"]}'

@@ -2152,7 +2152,7 @@ function retainAuditedPathInventories(inspection) {
   const problems = [];
   for (const root of inspection.roots) {
     try {
-      writeRetirementPathInventoryFile(retirementPathInventory(root));
+      withRoutesLock(() => writeRetirementPathInventoryFile(retirementPathInventory(root)));
     } catch (error) {
       problems.push(`Audited path inventory for ${root.path} could not be retained: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -2162,7 +2162,6 @@ function retainAuditedPathInventories(inspection) {
 
 function publishRetirementPathInventory(root) {
   const inventory = retirementPathInventory(root);
-  writeRetirementPathInventoryFile(inventory);
   const evidence = {
     root: root.path, file: inventory.file, sha256: inventory.sha256, pathCount: inventory.paths.length,
     counts: {
@@ -2182,8 +2181,11 @@ function publishRetirementPathInventory(root) {
     truncated: inventory.paths.length > RETIREMENT_PATH_SAMPLE_LIMIT,
     fingerprint: root.orphan?.inventory?.fingerprint ?? null,
   };
-  atomicWriteJson(inventory.receipt, evidence);
-  return evidence;
+  return withRoutesLock(() => {
+    writeRetirementPathInventoryFile(inventory);
+    atomicWriteJson(inventory.receipt, evidence);
+    return evidence;
+  });
 }
 
 function verifyRetirementPathInventory(root) {
@@ -2215,7 +2217,6 @@ function publicRetirementEvidence(inspection) {
     pathSummary.pathCount += root.pathEvidence.pathCount;
     for (const [kind, count] of Object.entries(root.pathEvidence.counts)) pathSummary.counts[kind] = (pathSummary.counts[kind] ?? 0) + count;
   }
-  pruneRetirementPathInventories();
   return boundedRetirementPaths({ ...inspection, roots, pathSummary });
 }
 
@@ -6210,6 +6211,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const workspaces = project.workspaces
       .filter((workspace) => workspace.archiveState === "active")
       .map((workspace) => publicRetirementEvidence(workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions)));
+    pruneRetirementPathInventories();
     return {
       project: { id: project.id, name: project.name },
       landingBranch,
