@@ -3876,6 +3876,417 @@ watch_for_wake() {  # <seconds> <output-file>
   return 1
 }
 
+# A failed backlog start must roll back only the provisional lane record, so
+# retry can establish the paired task identity and transition before sending.
+lane_rollback_original_home=$FM_HOME_FIXTURE
+FM_HOME_FIXTURE="$FIXTURE_ROOT/lane-rollback-home"
+mkdir -p "$FM_HOME_FIXTURE/state" "$FM_HOME_FIXTURE/data/fm-lane-rollback" "$FM_HOME_FIXTURE/config" "$FIXTURE_ROOT/lane-rollback-bin"
+printf 'Rollback lane brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-rollback/brief.md"
+tasks-axi add fm-lane-rollback "Lane backlog rollback" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage rollback lane"
+cat > "$FIXTURE_ROOT/lane-rollback-bin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = start ] && [ "${2:-}" = fm-lane-rollback ]; then
+  printf 'injected lane backlog start failure\n' >&2
+  exit 1
+fi
+exec "$FM_TEST_LANE_TASKS_AXI" "$@"
+SH
+chmod 0700 "$FIXTURE_ROOT/lane-rollback-bin/tasks-axi"
+lane_rollback_ipc_before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 FM_TEST_LANE_TASKS_AXI="$(command -v tasks-axi)" \
+  PATH="$FIXTURE_ROOT/lane-rollback-bin:$PATH" home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Rollback lane task\",\"taskId\":\"fm-lane-rollback\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "failed lane backlog transition was not reported: $out"
+if (!JSON.parse(process.env.OUT).error?.message.includes('injected lane backlog start failure')) process.exit(1);
+NODE
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-rollback.meta" "failed lane backlog commit retained provisional metadata"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-rollback.check.sh" "failed lane backlog commit armed a poll"
+[ "$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")" -eq "$lane_rollback_ipc_before" ] \
+  || fail "failed lane backlog commit still sent the task"
+tasks-axi show fm-lane-rollback --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-rollback-row.out" \
+  || fail "could not read rollback lane backlog"
+assert_grep 'state: queued' "$FIXTURE_ROOT/lane-rollback-row.out" "failed lane backlog commit changed its row"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Retry rollback lane task\",\"taskId\":\"fm-lane-rollback\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "rollback lane retry did not arm: $out"
+if (JSON.parse(process.env.OUT).result?.structuredContent?.supervision?.armed !== true) process.exit(1);
+NODE
+tasks-axi show fm-lane-rollback --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-rollback-row.out" \
+  || fail "could not read retried lane backlog"
+assert_grep 'state: in_flight' "$FIXTURE_ROOT/lane-rollback-row.out" "rollback lane retry did not commit its backlog start"
+pass "fm-playbot-lanes: failed backlog commit rolls back its lane identity and retry starts supervision"
+FM_HOME_FIXTURE=$lane_rollback_original_home
+
+# Ordinary spawn metadata is append-only and need not satisfy lane-file
+# exclusivity. Dispatch must preserve that existing task record byte for byte.
+FM_HOME_FIXTURE="$FIXTURE_ROOT/lane-spawn-compat-home"
+mkdir -p "$FM_HOME_FIXTURE/state"
+printf 'kind=ship\nspawn_gen=spawn-compat\ndecisions_reviewed=0\ndecisions_reviewed=1\ndecision_keys=old\ndecision_keys=current\n' \
+  > "$FM_HOME_FIXTURE/state/fm-lane-spawn-compat.meta"
+ln "$FM_HOME_FIXTURE/state/fm-lane-spawn-compat.meta" "$FIXTURE_ROOT/spawn-compat.link"
+lane_spawn_before=$(cat "$FM_HOME_FIXTURE/state/fm-lane-spawn-compat.meta")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Existing spawn compatibility\",\"taskId\":\"fm-lane-spawn-compat\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "append-only ordinary spawn record prevented dispatch: $out"
+if (JSON.parse(process.env.OUT).result?.structuredContent?.supervision?.armed !== true) process.exit(1);
+NODE
+[ "$(cat "$FM_HOME_FIXTURE/state/fm-lane-spawn-compat.meta")" = "$lane_spawn_before" ] \
+  || fail "lane dispatch rewrote an existing spawn record"
+pass "fm-playbot-lanes: append-only shared spawn metadata remains usable and byte-identical"
+FM_HOME_FIXTURE=$lane_rollback_original_home
+
+# PL-021: real terminal dispatch starts with a brief/backlog but no spawn meta.
+original_fm_home=$FM_HOME_FIXTURE
+FM_HOME_FIXTURE="$FIXTURE_ROOT/lane-task-home"
+mkdir -p "$FM_HOME_FIXTURE/state" "$FM_HOME_FIXTURE/data/fm-lane-identity" "$FM_HOME_FIXTURE/config"
+printf 'Lane task brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-identity/brief.md"
+tasks-axi add fm-lane-identity "Lane identity regression" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not create lane backlog fixture"
+lane_engine_ipc_before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"engineDependent\":true,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-identity\"},\"title\":\"Lane engine refusal\",\"message\":\"Validate the engine\",\"taskId\":\"fm-lane-identity\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "lane identity bypassed the engine readiness refusal: $out"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('cannot target newWorkspace')) process.exit(1);
+NODE
+[ "$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")" -eq "$lane_engine_ipc_before" ] \
+  || fail "engine-refused lane dispatch contacted Playbot"
+[ ! -e "$FM_HOME_FIXTURE/state/fm-lane-identity.meta" ] \
+  || fail "engine-refused dispatch created a lane identity"
+tasks-axi show fm-lane-identity --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-engine-refused.out" \
+  || fail "could not read engine-refused lane backlog"
+assert_grep 'state: queued' "$FIXTURE_ROOT/lane-engine-refused.out" "engine-refused dispatch changed the lane backlog"
+pass "fm-playbot-lanes: engine refusal precedes lane creation and leaves task identity untouched"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-identity\"},\"title\":\"Lane identity\",\"message\":\"Do the lane task\",\"taskId\":\"fm-lane-identity\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "PL-021: brief/backlog dispatch without metadata failed to arm: $out"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== true) process.exit(1);
+NODE
+pass "fm-playbot-lanes: brief/backlog terminal dispatch creates a supervised task identity"
+tasks-axi show fm-lane-identity --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-started.out" \
+  || fail "could not read dispatched lane backlog"
+assert_grep 'state: in_flight' "$FIXTURE_ROOT/lane-started.out" "lane identity did not move its queued task into flight"
+lane_identity_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+lane_identity_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
+META="$FM_HOME_FIXTURE/state/fm-lane-identity.meta" THREAD="$lane_identity_thread" WORKSPACE="$lane_identity_workspace" node <<'NODE' || fail "lane metadata did not bind the dispatched worker"
+const fs = require('node:fs');
+const meta = Object.fromEntries(fs.readFileSync(process.env.META, 'utf8').trim().split('\n').map(line => {
+  const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)];
+}));
+if (meta.kind !== 'lane' || meta.playbot_thread !== process.env.THREAD || meta.playbot_workspace !== process.env.WORKSPACE) process.exit(1);
+if (meta.landing_branch !== 'main' || !meta.spawn_gen || !fs.existsSync(meta.worktree)) process.exit(1);
+NODE
+mkdir -p "$FIXTURE_ROOT/lane-append-meta"
+lane_append_meta="$FIXTURE_ROOT/lane-append-meta/fm-lane-identity.meta"
+cp "$FM_HOME_FIXTURE/state/fm-lane-identity.meta" "$lane_append_meta"
+printf 'decisions_reviewed=0\ndecision_keys=old\ndecisions_reviewed=1\ndecision_keys=current\n' >> "$lane_append_meta"
+FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-state "$lane_append_meta" \
+  > "$FIXTURE_ROOT/lane-append-state.out" 2>&1 || fail "lane reader rejected appended decision bookkeeping"
+printf 'kind=lane\n' >> "$lane_append_meta"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-state "$lane_append_meta" \
+    > "$FIXTURE_ROOT/lane-duplicate-identity.out" 2>&1; then
+  fail "lane reader accepted a duplicate identity key"
+fi
+cp "$FM_HOME_FIXTURE/state/fm-lane-identity.meta" "$lane_append_meta"
+ln "$lane_append_meta" "$FIXTURE_ROOT/lane-shared.link"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-state "$lane_append_meta" \
+    > "$FIXTURE_ROOT/lane-shared-state.out" 2>&1; then
+  fail "lane reader accepted non-private lane metadata"
+fi
+rm "$FIXTURE_ROOT/lane-shared.link"
+pass "fm-playbot-lanes: appended bookkeeping is accepted while lane identity remains unambiguous and private"
+lane_identity_before=$(cat "$FM_HOME_FIXTURE/state/fm-lane-identity.meta")
+# An earlier done declaration cannot retire a newly sent, unconfirmed task.
+printf 'done: stale declaration before new delivery\n' > "$FM_HOME_FIXTURE/state/fm-lane-identity.status"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-identity.meta" > "$FIXTURE_ROOT/lane-unconfirmed.out" 2>&1; then
+  fail "lane task cleanup accepted a newly dispatched task without delivery/completion evidence"
+fi
+crew=$(FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-crew-state.sh" fm-lane-identity)
+case "$crew" in 'state: unknown'*'source: playbot'*) ;; *) fail "stale done hid unconfirmed lane delivery: $crew" ;; esac
+mkdir -p "$FIXTURE_ROOT/lane-captured-meta"
+cp "$FM_HOME_FIXTURE/state/fm-lane-identity.meta" "$FIXTURE_ROOT/lane-captured-meta/fm-lane-identity.meta"
+crew=$(FM_HOME="$FM_HOME_FIXTURE" FM_CREW_STATE_META_OVERRIDE="$FIXTURE_ROOT/lane-captured-meta/fm-lane-identity.meta" \
+  "$ROOT/bin/fm-crew-state.sh" fm-lane-identity)
+case "$crew" in 'state: unknown'*'source: playbot'*) ;; *) fail "captured metadata missed the live lane delivery record: $crew" ;; esac
+rm "$FM_HOME_FIXTURE/state/fm-lane-identity.status"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Continue this lane task\",\"taskId\":\"fm-lane-identity\"}")
+rm "$FIXTURE_ROOT/send-reconciles"
+[ "$(cat "$FM_HOME_FIXTURE/state/fm-lane-identity.meta")" = "$lane_identity_before" ] \
+  || fail "same-worker redispatch changed the lane incarnation"
+OUT="$out" node --no-warnings <<'NODE' || fail "same-worker redispatch did not rearm the lane task"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed !== true || value.supervision.rearmed !== true) process.exit(1);
+NODE
+[ "$(check_file_mode "$FM_HOME_FIXTURE/state/fm-lane-identity.meta")" = 600 ] || fail "lane metadata is not private"
+printf 'done: stale completion before resumed work\n' > "$FM_HOME_FIXTURE/state/fm-lane-identity.status"
+set_thread_turn "$lane_identity_thread" working 2099-08-25T11:00:00.000Z || fail "could not start identity worker"
+crew=$(FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-crew-state.sh" fm-lane-identity)
+case "$crew" in 'state: working'*'source: playbot'*) ;; *) fail "lane state did not read the live worker: $crew" ;; esac
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-identity > "$FIXTURE_ROOT/lane-active-teardown.out" 2>&1; then
+  fail "lane teardown retired a working worker"
+fi
+assert_grep 'REFUSED' "$FIXTURE_ROOT/lane-active-teardown.out" "active lane teardown did not refuse clearly"
+check_is_registered fm-lane-identity || fail "active lane teardown removed the supervision poll"
+set_thread_turn "$lane_identity_thread" ready 2099-08-25T11:01:00.000Z || fail "could not stop identity worker"
+rm "$FM_HOME_FIXTURE/state/fm-lane-identity.status"
+crew=$(FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-crew-state.sh" fm-lane-identity)
+case "$crew" in 'state: unknown'*'source: playbot'*) ;; *) fail "an idle chat was reported as task completion: $crew" ;; esac
+printf 'done: lane work complete\n' > "$FM_HOME_FIXTURE/state/fm-lane-identity.status"
+lane_identity_worktree=$(bash -c '. "$1/bin/fm-backend.sh"; fm_meta_get "$2" worktree' _ "$ROOT" "$FM_HOME_FIXTURE/state/fm-lane-identity.meta")
+printf 'Uncommitted lane work\n' > "$lane_identity_worktree/uncommitted-lane.txt"
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-identity > "$FIXTURE_ROOT/lane-dirty-teardown.out" 2>&1; then
+  fail "lane teardown retired uncommitted work"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-dirty-teardown.out" "dirty lane refusal did not name the landed-work gate"
+check_is_registered fm-lane-identity || fail "dirty lane teardown removed supervision"
+rm "$lane_identity_worktree/uncommitted-lane.txt"
+lane_identity_head=$(git -C "$lane_identity_worktree" rev-parse HEAD)
+git -C "$lane_identity_worktree" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit --allow-empty -qm 'Unlanded lane fixture' || fail "could not stage unlanded lane commit"
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-identity > "$FIXTURE_ROOT/lane-unlanded-teardown.out" 2>&1; then
+  fail "lane teardown retired an unlanded commit"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-unlanded-teardown.out" "unlanded lane refusal did not name the landed-work gate"
+git -C "$lane_identity_worktree" reset --hard -q "$lane_identity_head" || fail "could not restore the landed fixture"
+crew=$(FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-crew-state.sh" fm-lane-identity)
+case "$crew" in 'state: done'*'source: playbot'*) ;; *) fail "completed idle lane state was unavailable: $crew" ;; esac
+cp "$FM_HOME_FIXTURE/state/fm-lane-identity.meta" "$lane_append_meta"
+printf 'landing_branch=missing-branch\nlanding_branch=main\n' >> "$lane_append_meta"
+FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$lane_append_meta" \
+  > "$FIXTURE_ROOT/lane-append-landing.out" 2>&1 || fail "lane metadata did not use the last appended landing branch"
+pass "fm-playbot-lanes: appended lane metadata uses the last bookkeeping value"
+lane_ipc_before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-identity > "$FIXTURE_ROOT/lane-teardown.out" 2>&1 \
+  || fail "lane task teardown failed: $(cat "$FIXTURE_ROOT/lane-teardown.out")"
+for suffix in meta check.sh check-trust lane-poll; do
+  assert_absent "$FM_HOME_FIXTURE/state/fm-lane-identity.$suffix" "lane teardown stranded $suffix"
+done
+[ "$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")" = "$lane_ipc_before" ] || fail "lane teardown invoked Playbot IPC"
+tasks-axi show fm-lane-identity --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-backlog.out" \
+  || fail "could not read retired lane backlog"
+assert_grep 'state: done' "$FIXTURE_ROOT/lane-backlog.out" "lane teardown did not close its backlog row"
+assert_grep 'Lane task brief' "$FM_HOME_FIXTURE/data/fm-lane-identity/brief.md" "lane teardown removed its durable brief"
+# A completed backlog row cannot recreate an identity after teardown.
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Late duplicate dispatch\",\"taskId\":\"fm-lane-identity\"}")
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-identity.meta" "late dispatch recreated a retired identity"
+OUT="$out" node --no-warnings <<'NODE' || fail "retired lane dispatch did not fail closed"
+if (!JSON.parse(process.env.OUT).error?.message.includes("backlog item is done, not queued or in flight")) process.exit(1);
+NODE
+pass "fm-playbot-lanes: lane state and teardown share the dispatched identity and preserve Playbot work"
+
+# The controller's manual backlog posture applies to both dispatch and cleanup.
+mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-manual"
+printf 'Manual lane brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-manual/brief.md"
+tasks-axi add fm-lane-manual "Manual lane backlog" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage manual lane backlog"
+printf 'manual\n' > "$FM_HOME_FIXTURE/config/backlog-backend"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
+printf '2099-08-25T12:00:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Manual backlog task\",\"taskId\":\"fm-lane-manual\"}")
+rm "$FIXTURE_ROOT/send-reconciles" "$FIXTURE_ROOT/send-accepted-at"
+OUT="$out" node --no-warnings <<'NODE' || fail "manual backlog posture prevented lane supervision"
+if (JSON.parse(process.env.OUT).result.structuredContent.supervision.armed !== true) process.exit(1);
+NODE
+tasks-axi show fm-lane-manual --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-manual.out" \
+  || fail "could not read manual lane backlog"
+assert_grep 'state: queued' "$FIXTURE_ROOT/lane-manual.out" "lane dispatch ignored the manual backlog posture"
+set_thread_turn "$lane_identity_thread" working 2099-08-25T12:01:00.000Z || fail "could not run the manual lane"
+set_thread_turn "$lane_identity_thread" ready 2099-08-25T12:02:00.000Z || fail "could not finish the manual lane"
+printf 'done: manual lane complete\n' > "$FM_HOME_FIXTURE/state/fm-lane-manual.status"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-manual > "$FIXTURE_ROOT/lane-manual-teardown.out" 2>&1 \
+  || fail "manual lane record teardown failed: $(cat "$FIXTURE_ROOT/lane-manual-teardown.out")"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-manual.meta" "manual lane teardown retained its task identity"
+tasks-axi show fm-lane-manual --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-manual.out" \
+  || fail "could not read manual lane backlog after cleanup"
+assert_grep 'state: queued' "$FIXTURE_ROOT/lane-manual.out" "lane teardown ignored the manual backlog posture"
+pass "fm-playbot-lanes: lane dispatch and teardown preserve manual backlog ownership"
+
+# A worker chat the operator archived or deleted cannot block retiring a lane
+# whose workspace is verified landed, and --force never skips that check.
+lane_orphan_meta() {  # <task-id> <thread-id>
+  local target="$FM_HOME_FIXTURE/state/$1.meta"
+  printf '%s\n' "$lane_identity_before" | sed "s/^playbot_thread=.*/playbot_thread=$2/" > "$target.tmp" || return 1
+  chmod 0600 "$target.tmp" && mv "$target.tmp" "$target"
+}
+FIXTURE_ROOT="$FIXTURE_ROOT" WORKSPACE="$lane_identity_workspace" node --no-warnings <<'NODE' || fail "could not stage an archived lane chat"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare(`INSERT INTO workspace_threads (id, workspace_id, title, position, is_active, session_id, approval_mode,
+  plan_mode, ephemeral, draft_input, pending_queue_json, agent_status, has_unread, last_user_activity_at,
+  created_at, updated_at, archived) VALUES (?, ?, ?, 99, 0, NULL, 'default', 0, 0, '', '[]', 'working', 0, NULL, ?, ?, 1)`)
+  .run('chat-lane-archived', process.env.WORKSPACE, 'Archived lane chat', '2099-08-25T12:10:00.000Z', '2099-08-25T12:10:00.000Z');
+db.close();
+NODE
+lane_orphan_meta fm-lane-archived chat-lane-archived || fail "could not stage archived-chat lane record"
+FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-archived.meta" \
+  > "$FIXTURE_ROOT/lane-archived-retirable.out" 2>&1 \
+  || fail "an archived chat blocked retiring a landed lane: $(cat "$FIXTURE_ROOT/lane-archived-retirable.out")"
+printf 'done: archived lane complete\n' > "$FM_HOME_FIXTURE/state/fm-lane-archived.status"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-archived > "$FIXTURE_ROOT/lane-archived-teardown.out" 2>&1 \
+  || fail "archived-chat lane teardown failed: $(cat "$FIXTURE_ROOT/lane-archived-teardown.out")"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-archived.meta" "archived-chat lane teardown retained its task identity"
+pass "fm-playbot-lanes: an archived worker chat retires a landed lane record"
+
+lane_orphan_meta fm-lane-absent chat-lane-deleted || fail "could not stage absent-chat lane record"
+printf 'done: absent lane complete\n' > "$FM_HOME_FIXTURE/state/fm-lane-absent.status"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-absent > "$FIXTURE_ROOT/lane-absent-teardown.out" 2>&1 \
+  || fail "absent-chat lane teardown failed: $(cat "$FIXTURE_ROOT/lane-absent-teardown.out")"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-absent.meta" "absent-chat lane teardown retained its task identity"
+pass "fm-playbot-lanes: a deleted worker chat retires a landed lane record"
+
+lane_orphan_meta fm-lane-active "$lane_identity_thread" || fail "could not stage active-chat lane record"
+set_thread_turn "$lane_identity_thread" working 2099-08-25T12:20:00.000Z || fail "could not start the active-chat lane"
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-active --force > "$FIXTURE_ROOT/lane-active-force.out" 2>&1; then
+  fail "forced lane teardown retired a working chat"
+fi
+assert_grep 'not idle' "$FIXTURE_ROOT/lane-active-force.out" "forced active-chat refusal did not name the busy worker"
+[ -e "$FM_HOME_FIXTURE/state/fm-lane-active.meta" ] || fail "forced active-chat refusal removed the lane record"
+set_thread_turn "$lane_identity_thread" ready 2099-08-25T12:21:00.000Z || fail "could not stop the active-chat lane"
+rm -f "$FM_HOME_FIXTURE/state/fm-lane-active.meta"
+pass "fm-playbot-lanes: an active worker chat still blocks forced lane teardown"
+
+lane_orphan_meta fm-lane-absent-unlanded chat-lane-deleted || fail "could not stage unlanded absent-chat lane record"
+lane_identity_head=$(git -C "$lane_identity_worktree" rev-parse HEAD)
+git -C "$lane_identity_worktree" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit --allow-empty -qm 'Unlanded orphan lane fixture' || fail "could not stage unlanded orphan lane commit"
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-absent-unlanded --force > "$FIXTURE_ROOT/lane-absent-force.out" 2>&1; then
+  fail "forced lane teardown retired an unlanded workspace behind an absent chat"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-absent-force.out" "forced absent-chat refusal did not name the landed-work gate"
+[ -e "$FM_HOME_FIXTURE/state/fm-lane-absent-unlanded.meta" ] || fail "forced unlanded refusal removed the lane record"
+git -C "$lane_identity_worktree" reset --hard -q "$lane_identity_head" || fail "could not restore the orphan lane fixture"
+rm -f "$FM_HOME_FIXTURE/state/fm-lane-absent-unlanded.meta"
+pass "fm-playbot-lanes: --force never bypasses the landed check for an absent worker chat"
+
+# Freeze a successful idle read while another dispatch tries to arm its poll.
+# A teardown may not consume an armed=true result published after that read.
+lane_race_task=fm-lane-retire-race
+mkdir -p "$FM_HOME_FIXTURE/data/$lane_race_task" "$FIXTURE_ROOT/lane-race-bin"
+printf 'Lane retirement race brief\n' > "$FM_HOME_FIXTURE/data/$lane_race_task/brief.md"
+tasks-axi add "$lane_race_task" "Lane retirement publication race" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage lane retirement race"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
+printf '2099-08-25T13:00:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Lane retirement race baseline\",\"taskId\":\"$lane_race_task\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "could not arm the lane retirement race"
+if (JSON.parse(process.env.OUT).result.structuredContent.supervision.armed !== true) process.exit(1);
+NODE
+set_thread_turn "$lane_identity_thread" working 2099-08-25T13:01:00.000Z || fail "could not run the lane retirement race"
+set_thread_turn "$lane_identity_thread" ready 2099-08-25T13:02:00.000Z || fail "could not finish the lane retirement race"
+printf 'done: lane retirement race baseline complete\n' > "$FM_HOME_FIXTURE/state/$lane_race_task.status"
+cat > "$FIXTURE_ROOT/lane-race-bin/node" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${2:-}" = lane-task-retirable ]; then
+  "$FM_TEST_LANE_REAL_NODE" "$@" || exit $?
+  : > "$FM_TEST_LANE_RETIRE_CHECKED"
+  attempts=600
+  while [ ! -e "$FM_TEST_LANE_RETIRE_RELEASE" ]; do
+    attempts=$((attempts - 1))
+    [ "$attempts" -gt 0 ] || exit 1
+    sleep 0.05
+  done
+  exit 0
+fi
+exec "$FM_TEST_LANE_REAL_NODE" "$@"
+SH
+chmod 0700 "$FIXTURE_ROOT/lane-race-bin/node"
+FM_HOME="$FM_HOME_FIXTURE" FM_TEST_LANE_REAL_NODE="$FM_TEST_NODE_BIN" \
+  FM_TEST_LANE_RETIRE_CHECKED="$FIXTURE_ROOT/lane-retire-checked" \
+  FM_TEST_LANE_RETIRE_RELEASE="$FIXTURE_ROOT/lane-retire-release" \
+  PATH="$FIXTURE_ROOT/lane-race-bin:$PATH" "$ROOT/bin/fm-teardown.sh" "$lane_race_task" \
+  > "$FIXTURE_ROOT/lane-race-teardown.out" 2>&1 &
+lane_race_teardown_pid=$!
+wait_for_file "$FIXTURE_ROOT/lane-retire-checked" \
+  || fail "lane teardown never reached its successful idle read: $(cat "$FIXTURE_ROOT/lane-race-teardown.out")"
+lane_race_ipc_before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
+printf '2099-08-25T13:03:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Concurrent lane redispatch\",\"taskId\":\"$lane_race_task\"}")
+: > "$FIXTURE_ROOT/lane-retire-release"
+wait "$lane_race_teardown_pid" \
+  || fail "lane retirement race teardown failed: $(cat "$FIXTURE_ROOT/lane-race-teardown.out")"
+rm "$FIXTURE_ROOT/send-reconciles" "$FIXTURE_ROOT/send-accepted-at"
+OUT="$out" CHECK="$FM_HOME_FIXTURE/state/$lane_race_task.check.sh" node --no-warnings <<'NODE' \
+  || fail "lane teardown consumed an armed=true concurrent redispatch: $out"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.supervision.armed === true) {
+  if (!fs.existsSync(process.env.CHECK)) process.exit(1);
+} else if (value.supervision.armed !== false || !value.warnings?.length) {
+  process.exit(1);
+}
+NODE
+[ "$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")" -eq "$((lane_race_ipc_before + 1))" ] \
+  || fail "lane teardown race invoked Playbot IPC beyond the concurrent send"
+pass "fm-playbot-lanes: lane teardown locks its idle read through retirement against redispatch"
+
+# Every refused lane identity names its cause and never reaches the worker.
+lane_refusal() {  # <task-id> <expected-message> <label>
+  local before result
+  before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
+  result=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Refused lane task\",\"taskId\":\"$1\"}")
+  OUT="$result" EXPECTED="$2" node --no-warnings <<'NODE' || fail "$3 did not refuse with its cause: $result"
+const message = JSON.parse(process.env.OUT).error?.message ?? "";
+if (!message.includes(process.env.EXPECTED)) process.exit(1);
+NODE
+  [ "$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")" = "$before" ] || fail "$3 still sent the message"
+}
+tasks-axi add fm-lane-nobrief "Lane without brief" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage briefless lane backlog"
+lane_refusal fm-lane-nobrief "cannot start a lane task: brief is missing" "missing brief"
+mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-norow"
+printf 'Unlisted lane brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-norow/brief.md"
+lane_refusal fm-lane-norow "cannot start a lane task: backlog item is missing" "missing backlog item"
+mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-held"
+printf 'Held lane brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-held/brief.md"
+tasks-axi add fm-lane-held "Held lane" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage held lane backlog"
+tasks-axi hold fm-lane-held --reason "captain decision pending" --kind captain \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not hold lane backlog"
+lane_refusal fm-lane-held "cannot start a lane task: backlog item is held" "held backlog item"
+mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-locked"
+printf 'Locked lane brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-locked/brief.md"
+tasks-axi add fm-lane-locked "Locked lane" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage locked lane backlog"
+hold_publication_lock "$FM_HOME_FIXTURE/state" fm-lane-locked || fail "could not hold the lane publication lock"
+lane_refusal fm-lane-locked "timed out waiting for the check publication lock" "lock timeout"
+release_publication_lock || fail "could not release the lane publication lock"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-locked.meta" "lock timeout still created a lane identity"
+printf 'kind=ship\nspawn_gen=s1\nspawn_gen=s2\n' > "$FM_HOME_FIXTURE/state/fm-lane-locked.meta"
+lane_refusal fm-lane-locked "cannot start a lane task: state/fm-lane-locked.meta is unreadable or has a malformed spawn generation" "malformed identity"
+rm "$FM_HOME_FIXTURE/state/fm-lane-locked.meta"
+pass "fm-playbot-lanes: refused lane identities name missing brief, missing row, held row, lock timeout and malformed identity"
+# An ineligible task is refused before Playbot creates a workspace or chat.
+before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-held\"},\"title\":\"Held lane\",\"message\":\"Refused lane task\",\"taskId\":\"fm-lane-held\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "ineligible newWorkspace dispatch did not refuse before creation: $out"
+const message = JSON.parse(process.env.OUT).error?.message ?? "";
+if (!message.includes("backlog item is held") || message.includes("were created")) process.exit(1);
+NODE
+[ "$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")" = "$before" ] || fail "ineligible newWorkspace dispatch still created a Playbot worker"
+# A later identity failure names the created pair and how to reach it again.
+hold_publication_lock "$FM_HOME_FIXTURE/state" fm-lane-locked || fail "could not hold the lane publication lock"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-locked\"},\"title\":\"Locked lane\",\"message\":\"Do the locked lane task\",\"taskId\":\"fm-lane-locked\"}")
+release_publication_lock || fail "could not release the lane publication lock"
+recovery=$(OUT="$out" node --no-warnings <<'NODE'
+const message = JSON.parse(process.env.OUT).error?.message ?? "";
+const match = message.match(/^Workspace (\S+) and chat (\S+) were created, but dispatch stopped before sending because the firstmate task identity could not be recorded: .*timed out waiting for the check publication lock.* Both still exist: once task 'fm-lane-locked' can start, dispatch it with workspace \1 and thread \2 rather than creating another worker\.$/);
+if (!match) process.exit(1);
+process.stdout.write(`${match[1]} ${match[2]}`);
+NODE
+) || fail "post-creation identity failure lost the created workspace/chat recovery: $out"
+read -r locked_workspace locked_thread <<<"$recovery"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-locked.meta" "a refused post-creation identity was still recorded"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$locked_workspace\",\"thread\":\"$locked_thread\",\"message\":\"Do the locked lane task\",\"taskId\":\"fm-lane-locked\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "the recovery dispatch did not arm the created worker: $out"
+if (JSON.parse(process.env.OUT).result?.structuredContent?.supervision?.armed !== true) process.exit(1);
+NODE
+META="$FM_HOME_FIXTURE/state/fm-lane-locked.meta" THREAD="$locked_thread" node <<'NODE' || fail "the recovery dispatch did not bind the created worker"
+const fs = require('node:fs');
+if (!fs.readFileSync(process.env.META, 'utf8').split('\n').includes(`playbot_thread=${process.env.THREAD}`)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: lane eligibility is checked before creation and post-creation failures name the created worker"
+FM_HOME_FIXTURE=$original_fm_home
+
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-1\"},\"title\":\"Autoarm task\",\"message\":\"Do the watched work\",\"taskId\":\"fm-autoarm-probe\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an external-terminal dispatch did not report an armed watcher poll"

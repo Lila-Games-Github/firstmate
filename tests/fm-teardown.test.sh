@@ -2240,6 +2240,64 @@ configure_secondmate_home() {  # <case-dir> <local|remote> [<parent-home>]
   fi
 }
 
+test_lane_teardown_delivers_final_line_or_refuses() {
+  local case_dir channel
+  case_dir=$(make_case lane-parent-outcome)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  channel="$case_dir/parent/state/mate-x.status"
+  mkdir -p "$channel"
+  write_meta "$case_dir" local-only lane
+  printf 'done: lane outcome fixture complete\n' > "$case_dir/state/task-x1.status"
+  fm_test_require_node "lane teardown"
+  cat > "$case_dir/fakebin/node" <<'SH'
+#!/usr/bin/env bash
+if [ "${2:-}" = lane-task-retirable ]; then exit 0; fi
+exec "$FM_TEST_NODE_BIN" "$@"
+SH
+  chmod +x "$case_dir/fakebin/node"
+  if FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "lane teardown discarded an undelivered final outcome"
+  fi
+  assert_grep 'has not reached the parent channel' "$case_dir/stderr" "lane final-outcome refusal was not actionable"
+  [ -f "$case_dir/state/task-x1.meta" ] && [ -f "$case_dir/state/task-x1.status" ] \
+    || fail "lane outcome refusal removed durable task records"
+  rmdir "$channel"
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "lane outcome retry failed: $(cat "$case_dir/stderr")"
+  assert_grep 'child task-x1 done: lane outcome fixture complete' "$channel" "lane final outcome did not reach the parent"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "lane outcome retry left the metadata"
+  pass "lane teardown preserves undelivered outcomes and reports them before removing metadata"
+}
+
+test_lane_teardown_removes_runtime_records() {
+  local case_dir artifact
+  case_dir=$(make_case lane-runtime-cleanup)
+  write_meta "$case_dir" local-only lane
+  printf 'done: lane runtime fixture complete\n' > "$case_dir/state/task-x1.status"
+  fm_test_require_node "lane teardown"
+  cat > "$case_dir/fakebin/node" <<'SH'
+#!/usr/bin/env bash
+if [ "${2:-}" = lane-task-retirable ]; then exit 0; fi
+exec "$FM_TEST_NODE_BIN" "$@"
+SH
+  chmod +x "$case_dir/fakebin/node"
+  "$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1 --state idle >/dev/null \
+    || fail "could not stage lane busy records"
+  for artifact in turn-ended progress gemini-settings.json cursor-session reconcile-nudged; do
+    : > "$case_dir/state/task-x1.$artifact"
+  done
+  mkdir -p "$case_dir/state/task-x1.inbox/handled"
+  printf 'fixture steer\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "lane runtime teardown failed: $(cat "$case_dir/stderr")"
+  for artifact in meta busy-state busy-gen turn-ended progress gemini-settings.json cursor-session reconcile-nudged inbox; do
+    [ ! -e "$case_dir/state/task-x1.$artifact" ] \
+      || fail "lane teardown retained runtime artifact task-x1.$artifact"
+  done
+  [ -d "$case_dir/wt" ] || fail "lane runtime cleanup removed its preserved workspace"
+  pass "lane teardown removes busy, progress, harness, and inbox runtime records"
+}
+
 # Registering a PR inside a secondmate home publishes the child's ready line
 # with the canonical URL on the parent channel from fm-pr-check itself, once;
 # a main home publishes nothing.
@@ -4096,6 +4154,8 @@ test_landed_teardown_labels_the_jev_acceptance_row_accepted
 test_refused_teardown_leaves_the_jev_acceptance_row_unlabelled
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
+test_lane_teardown_delivers_final_line_or_refuses
+test_lane_teardown_removes_runtime_records
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
