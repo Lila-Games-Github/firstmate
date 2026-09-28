@@ -9,9 +9,10 @@
 # paragraphs in the former, including a list introduced by a done-when lead-in,
 # and numbered requirements in the latter become Nouls, preserving
 # continuation, nested content, and deeper subheadings. A promoted brief's
-# level-one "Current ship Firstmate spec" replaces the scout-time Firstmate
-# spec. Generated scaffold sections never supply criteria; a brief without
-# task criteria is a no-op.
+# level-one "Current ship Firstmate spec" is generated promotion scaffold: it
+# supplies no criteria and retires the scout-time Firstmate spec, so a promoted
+# task is scored on its Captain's intent alone. Generated scaffold sections
+# never supply criteria; a brief without task criteria is a no-op.
 #
 # When Jev is available, writes data/<id>/acceptance.json atomically. Shadow
 # mode records the criterion verdicts only. Active mode additionally records an
@@ -59,8 +60,7 @@ REPORT_MATERIAL="$TMP_DIR/report.txt"
 awk '
   function keep(value) {
     if (section == "intent") intent[++intents]=value
-    else if (section == "spec") spec[++specs]=value
-    else current[++currents]=value
+    else spec[++specs]=value
   }
   function flush() {
     sub(/\n+$/, "", text)
@@ -112,7 +112,7 @@ awk '
       } else if (level == 2 && tolower(title) == "firstmate spec") {
         in_section=1; section="spec"; section_level=level
       } else if (level == 1 && tolower(title) == "current ship firstmate spec") {
-        in_section=1; section="current"; section_level=level; promoted=1
+        promoted=1
       }
       next
     }
@@ -142,8 +142,7 @@ awk '
   END {
     flush()
     for (i=1; i<=intents; i++) printf "%s%c", intent[i], 0
-    if (promoted) for (i=1; i<=currents; i++) printf "%s%c", current[i], 0
-    else for (i=1; i<=specs; i++) printf "%s%c", spec[i], 0
+    if (!promoted) for (i=1; i<=specs; i++) printf "%s%c", spec[i], 0
   }
 ' "$BRIEF" > "$CRITERIA_LINES"
 [ -s "$CRITERIA_LINES" ] || exit 0

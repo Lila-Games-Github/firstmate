@@ -369,36 +369,60 @@ test_accept_brief_structure_fixtures() {
   write_config "$home" shadow off off off
   write_key "$home"
   make_accept_fixture "$home"
+  mkdir -p "$home/state"
+  printf 'window=fm-task-a\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/task-a.meta"
   cat > "$home/data/task-a/brief.md" <<'MD'
+You are a crewmate.
+
 # Task
 ## Captain's intent
-Done when the report names the changed file.
+Find why the report is wrong. Done when the report names the changed file.
 
 ## Firstmate spec
 1. Scout-time investigation step is not a ship requirement.
-
-# Setup
-1. Create a branch.
-
-
-# Current ship Firstmate spec
-1. The report includes a passing test command.
-2. Preserve existing behavior.
-
-# Current delivery mode contract
-This task is now kind=ship with mode=local-only.
+2. Record the reproduction.
 
 # Definition of done
-1. Generated completion instructions are not task criteria.
+Delivery contract: mode=scout.
 MD
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-promote.sh" task-a --mode local-only --yolo off >/dev/null 2>&1 \
+    || fail "fm-promote.sh could not promote the scout fixture"
+  jq -Rse 'test("(?m)^# Current ship Firstmate spec$")' "$home/data/task-a/brief.md" >/dev/null \
+    || fail "fm-promote.sh did not publish a promoted brief"
   before=$(request_count)
   jev_env "$home" "$ACCEPT" task-a
   [ "$(request_count)" -eq $((before + 1)) ] || fail "promoted brief was not consulted once"
   tail -1 "$REQUEST_LOG" | jq -e '.state.acceptance_criteria == {
-    criterion_1:"Done when the report names the changed file.",
-    criterion_2:"The report includes a passing test command.",
-    criterion_3:"Preserve existing behavior."
-  }' >/dev/null || fail "promoted brief scored the scout spec instead of the current ship spec"
+    criterion_1:"Done when the report names the changed file."
+  }' >/dev/null || fail "promoted brief scored the scout spec or generated promotion steps"
+
+  home="$TMP_ROOT/accept-promoted-no-intent-criteria"
+  write_config "$home" shadow off off off
+  write_key "$home"
+  make_accept_fixture "$home"
+  mkdir -p "$home/state"
+  printf 'window=fm-task-a\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/task-a.meta"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+You are a crewmate.
+
+# Task
+## Captain's intent
+Find why the report is wrong.
+
+## Firstmate spec
+1. Scout-time investigation step is not a ship requirement.
+
+# Definition of done
+Delivery contract: mode=scout.
+MD
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-promote.sh" task-a --mode no-mistakes --yolo off >/dev/null 2>&1 \
+    || fail "fm-promote.sh could not promote the criterion-free scout fixture"
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ "$(request_count)" -eq "$before" ] || fail "promoted brief without intent criteria consulted scaffold"
+  [ ! -e "$home/data/task-a/acceptance.json" ] || fail "promoted brief without intent criteria wrote a verdict"
 
   home="$TMP_ROOT/accept-structure"
   write_config "$home" shadow off off off
@@ -440,7 +464,7 @@ MD
     criterion_4:"Add a regression test.",
     criterion_5:"Document the change."
   }' >/dev/null || fail "done-when list or nested-heading criteria were lost"
-  pass "Jev acceptance: promoted specs, done-when lists, and nested headings extract task criteria"
+  pass "Jev acceptance: promoted briefs score only intent, and done-when lists and nested headings extract task criteria"
 }
 
 test_unicode_triage_keeps_single_request_bound() {
