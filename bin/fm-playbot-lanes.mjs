@@ -2019,6 +2019,7 @@ function orphanDirectoryInventory(rootPath) {
 }
 
 const RETIREMENT_PATH_SAMPLE_LIMIT = 50;
+const RETIREMENT_INVENTORY_BUFFER_BYTES = 64 * 1024;
 
 // Full path evidence lives in a private, content-addressed JSONL file. Responses
 // carry counts and samples, while the destructive recheck hashes the entire
@@ -2036,17 +2037,132 @@ function retirementPathInventory(root) {
   return { paths, sha256, directory, file: path.join(directory, `${rootKey}-${sha256}.jsonl`), receipt: path.join(directory, `${rootKey}.json`) };
 }
 
-function publishRetirementPathInventory(root) {
-  const inventory = retirementPathInventory(root);
+function retirementPathInventoryFileMatches(file, sha256) {
+  let stat;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`path inventory evidence is not a regular file: ${file}`);
+  const fd = fs.openSync(file, "r");
+  const hash = crypto.createHash("sha256");
+  const buffer = Buffer.alloc(RETIREMENT_INVENTORY_BUFFER_BYTES);
+  try {
+    let length;
+    while ((length = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, length));
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex") === sha256;
+}
+
+function writeRetirementPathInventoryFile(inventory) {
   fs.mkdirSync(inventory.directory, { recursive: true, mode: 0o700 });
+  if (retirementPathInventoryFileMatches(inventory.file, inventory.sha256)) return false;
   const temporary = `${inventory.file}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
   const fd = fs.openSync(temporary, "wx", 0o600);
   try {
-    for (const file of inventory.paths) fs.writeFileSync(fd, `${JSON.stringify(file)}\n`);
+    const chunks = [];
+    let pending = 0;
+    for (const file of inventory.paths) {
+      const line = Buffer.from(`${JSON.stringify(file)}\n`, "utf8");
+      chunks.push(line);
+      pending += line.length;
+      if (pending >= RETIREMENT_INVENTORY_BUFFER_BYTES) {
+        writeBufferFully(fd, Buffer.concat(chunks, pending));
+        chunks.length = 0;
+        pending = 0;
+      }
+    }
+    if (pending > 0) writeBufferFully(fd, Buffer.concat(chunks, pending));
+    fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
   }
   fs.renameSync(temporary, inventory.file);
+  return true;
+}
+
+function referencedRetirementInventories(value, found = new Set()) {
+  if (Array.isArray(value)) {
+    for (const entry of value) referencedRetirementInventories(entry, found);
+  } else if (value && typeof value === "object") {
+    for (const [name, entry] of Object.entries(value)) {
+      if (name === "pathEvidence" && typeof entry?.file === "string") found.add(path.basename(entry.file));
+      referencedRetirementInventories(entry, found);
+    }
+  }
+  return found;
+}
+
+const RETIREMENT_INVENTORY_FILE = /^[0-9a-f]{64}-[0-9a-f]{64}\.jsonl$/;
+const RETIREMENT_RECEIPT_FILE = /^[0-9a-f]{64}\.json$/;
+
+// Superseded inventories are removed only when neither a latest per-root
+// receipt nor any retirement audit record names them. An unreadable receipt or
+// audit keeps every inventory.
+function pruneRetirementPathInventories() {
+  return withRoutesLock(() => {
+    const directory = path.join(stateDir(), "retirement-inventories");
+    let names;
+    try {
+      names = fs.readdirSync(directory);
+    } catch (error) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
+    const referenced = new Set();
+    for (const name of names.filter((entry) => RETIREMENT_RECEIPT_FILE.test(entry))) {
+      const receipt = readJson(path.join(directory, name));
+      if (!receipt || typeof receipt.file !== "string") return [];
+      referenced.add(path.basename(receipt.file));
+    }
+    let audit = "";
+    try {
+      audit = fs.readFileSync(retirementAuditPath(), "utf8");
+    } catch (error) {
+      if (error?.code !== "ENOENT") return [];
+    }
+    if (audit && !audit.endsWith("\n")) return [];
+    for (const line of audit.split("\n").slice(0, -1)) {
+      try {
+        referencedRetirementInventories(JSON.parse(line), referenced);
+      } catch {
+        return [];
+      }
+    }
+    const removed = [];
+    for (const name of names) {
+      if (!RETIREMENT_INVENTORY_FILE.test(name) || referenced.has(name)) continue;
+      const file = path.join(directory, name);
+      const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+      if (!stat?.isFile() || stat.isSymbolicLink()) continue;
+      fs.rmSync(file, { force: true });
+      removed.push(file);
+    }
+    return removed;
+  });
+}
+
+// A concurrent listing may prune an inventory between its publication and the
+// audit append, so every audited inventory is re-verified or rewritten after it.
+function retainAuditedPathInventories(inspection) {
+  const problems = [];
+  for (const root of inspection.roots) {
+    try {
+      writeRetirementPathInventoryFile(retirementPathInventory(root));
+    } catch (error) {
+      problems.push(`Audited path inventory for ${root.path} could not be retained: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return problems;
+}
+
+function publishRetirementPathInventory(root) {
+  const inventory = retirementPathInventory(root);
+  writeRetirementPathInventoryFile(inventory);
   const evidence = {
     root: root.path, file: inventory.file, sha256: inventory.sha256, pathCount: inventory.paths.length,
     counts: {
@@ -2078,18 +2194,9 @@ function verifyRetirementPathInventory(root) {
     || receipt.fingerprint !== (root.orphan?.inventory?.fingerprint ?? null)) {
     throw new Error(`complete path inventory changed or is unavailable for ${root.path}; run list_retirable_workspaces again`);
   }
-  const stat = fs.lstatSync(inventory.file);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`path inventory evidence is not a regular file: ${inventory.file}`);
-  const fd = fs.openSync(inventory.file, "r");
-  const hash = crypto.createHash("sha256");
-  const buffer = Buffer.alloc(64 * 1024);
-  try {
-    let length;
-    while ((length = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, length));
-  } finally {
-    fs.closeSync(fd);
+  if (!retirementPathInventoryFileMatches(inventory.file, inventory.sha256)) {
+    throw new Error(`complete path inventory evidence was modified: ${inventory.file}`);
   }
-  if (hash.digest("hex") !== inventory.sha256) throw new Error(`complete path inventory evidence was modified: ${inventory.file}`);
 }
 
 function boundedRetirementPaths(value, key = "") {
@@ -2108,6 +2215,7 @@ function publicRetirementEvidence(inspection) {
     pathSummary.pathCount += root.pathEvidence.pathCount;
     for (const [kind, count] of Object.entries(root.pathEvidence.counts)) pathSummary.counts[kind] = (pathSummary.counts[kind] ?? 0) + count;
   }
+  pruneRetirementPathInventories();
   return boundedRetirementPaths({ ...inspection, roots, pathSummary });
 }
 
@@ -2651,7 +2759,7 @@ function inspectWorkspace(project, workspace, landingBranch, landingOptions = {}
     ? workspaceFreshnessReading(project, workspace, landingBranch, rootReadings)
     : null;
   evidence.retirable = evidence.blockers.length === 0;
-  evidence.verdict = evidence.roots.some((root) => root.orphan?.directoryPresent)
+  evidence.verdict = evidence.roots.some((root) => root.orphan?.directoryPresent && root.orphan.inventory?.fileCount > 0)
     ? "orphaned" : evidence.retirable ? "retirable" : "blocked";
   evidence.discard = discardSummary(evidence.blockers);
   return evidence;
@@ -3342,6 +3450,7 @@ async function retireWorkspace(project, workspace, landingBranch, landingOptions
     } catch (error) {
       auditResult = { appended: false, path: retirementAuditPath(), error: error instanceof Error ? error.message : String(error) };
     }
+    const inventoryProblems = retainAuditedPathInventories(inspection);
     const failure = {
       deleted: verification.complete,
       partialAction: deletionObserved && !verification.complete,
@@ -3361,6 +3470,7 @@ async function retireWorkspace(project, workspace, landingBranch, landingOptions
         ...verification.problems,
         ...routes.problems,
         ...(auditResult.appended ? [] : [`Audit record could not be appended: ${auditResult.error}`]),
+        ...inventoryProblems,
       ],
     };
     const outcome = verification.complete ? "deletion occurred despite the rejection" : deletionObserved ? "partial deletion occurred" : "no removal was verified";
@@ -3407,11 +3517,13 @@ async function retireWorkspace(project, workspace, landingBranch, landingOptions
   } catch (error) {
     auditResult = { appended: false, path: retirementAuditPath(), error: error instanceof Error ? error.message : String(error) };
   }
+  const inventoryProblems = retainAuditedPathInventories(inspection);
   const problems = [
     ...orphanCleanup.filter((entry) => !entry.removed).map((entry) => `Orphaned directory ${entry.path} was not removed: ${entry.error ?? "still present"}`),
     ...verification.problems,
     ...routes.problems,
     ...(auditResult.appended ? [] : [`Audit record could not be appended: ${auditResult.error}`]),
+    ...inventoryProblems,
   ];
   return {
     deleted: verification.complete,

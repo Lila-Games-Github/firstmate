@@ -7524,6 +7524,9 @@ add_retirement_workspace ws-retire-orphan-branch "$branch_orphan" main
 outside_orphan="$FIXTURE_ROOT/outside-orphan"
 make_orphan "$outside_orphan"
 add_retirement_workspace ws-retire-orphan-outside "$outside_orphan" retirement-orphan-outside
+empty_orphan="$orphan_storage/orphan-empty"
+make_orphan "$empty_orphan"
+add_retirement_workspace ws-retire-orphan-empty "$empty_orphan" retirement-orphan-empty
 cleanup_list main > "$cleanup_out"
 OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "orphaned roots were not classified with inventory evidence"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
@@ -7559,6 +7562,9 @@ const outside = byId['ws-retire-orphan-outside'];
 if (outside.retirable || outside.discard.possible || !outside.blockers.some(blocker => blocker.code === 'orphan-outside-playbot-storage')) process.exit(1);
 const corrupt = byId['ws-retire-unreadable'];
 if (!corrupt.blockers.some(blocker => blocker.code === 'git-unreadable') || corrupt.roots[0].orphan !== null) process.exit(1);
+const empty = byId['ws-retire-orphan-empty'];
+if (!empty.retirable || empty.verdict !== 'retirable' || empty.roots[0].orphan.directoryPresent !== true || empty.roots[0].orphan.inventory.fileCount !== 0) process.exit(1);
+if (branch.verdict !== 'blocked' || outside.verdict !== 'blocked') process.exit(1);
 NODE
 pass "fm-playbot-lanes: orphaned roots are classified apart from unreadable Git with an inventory"
 
@@ -7593,6 +7599,52 @@ if (!value.deleted || !value.postActionComplete || value.orphanCleanup[0].remove
 if (value.orphanCleanup[0].removedFiles.length !== 50) process.exit(1);
 NODE
 pass "fm-playbot-lanes: large orphan evidence is bounded, complete, and checked before deletion"
+
+inventory_dir="$PLAYBOT_LANES_STATE_DIR/retirement-inventories"
+files_proof() {
+  cleanup_list main > "$cleanup_out"
+  OUT_FILE="$cleanup_out" node --no-warnings <<'NODE'
+const fs = require('node:fs');
+const value = JSON.parse(fs.readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const proof = value.workspaces.find(workspace => workspace.workspace.id === 'ws-retire-orphan-files').roots[0].pathEvidence;
+const bytes = fs.readFileSync(proof.file);
+if (require('node:crypto').createHash('sha256').update(bytes).digest('hex') !== proof.sha256) process.exit(1);
+console.log(`${proof.file} ${fs.statSync(proof.file).ino}`);
+NODE
+}
+first_proof=$(files_proof) || fail "the orphan inventory was not published with a matching SHA-256"
+reused_proof=$(files_proof) || fail "the republished orphan inventory did not match its SHA-256"
+[ "$reused_proof" = "$first_proof" ] || fail "an unchanged verified inventory was rewritten instead of reused"
+first_file=${first_proof% *}
+node -e 'const fs = require("node:fs"); const bytes = fs.readFileSync(process.argv[1]); bytes[0] ^= 1; fs.writeFileSync(process.argv[1], bytes);' "$first_file"
+repaired_proof=$(files_proof) || fail "a tampered unchanged inventory was reused without verification"
+[ "${repaired_proof% *}" = "$first_file" ] && [ "$repaired_proof" != "$first_proof" ] \
+  || fail "a tampered unchanged inventory was not rewritten in place"
+printf 'more unaccounted work\n' > "$files_orphan/prototype-game/extra.txt"
+changed_proof=$(files_proof) || fail "a changed orphan inventory was not published"
+changed_file=${changed_proof% *}
+[ "$changed_file" != "$first_file" ] || fail "a changed inventory reused the superseded file name"
+[ ! -e "$first_file" ] || fail "a superseded unreferenced inventory was retained"
+rm "$files_orphan/prototype-game/extra.txt"
+restored_proof=$(files_proof) || fail "a restored orphan inventory was not republished"
+[ "${restored_proof% *}" = "$first_file" ] && [ ! -e "$changed_file" ] \
+  || fail "restoring the orphan did not republish its inventory and prune the superseded one"
+audited_file=$(AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" node --no-warnings -e '
+const audit = require("node:fs").readFileSync(process.env.AUDIT_FILE, "utf8").trim().split("\n").map(JSON.parse).at(-1);
+if (audit.workspace.id !== "ws-retire-orphan-large") process.exit(1);
+console.log(audit.discard.roots[0].pathEvidence.file);
+') || fail "the large orphan audit did not link its complete inventory"
+audited_name=$(basename "$audited_file")
+rm "$inventory_dir/${audited_name%%-*}.json"
+stray_inventory="$inventory_dir/$(printf '0%.0s' $(seq 64))-$(printf '1%.0s' $(seq 64)).jsonl"
+printf '"superseded"\n' > "$stray_inventory"
+printf 'unmanaged\n' > "$inventory_dir/unmanaged.txt"
+files_proof > /dev/null || fail "listing failed while pruning superseded inventories"
+[ -f "$audited_file" ] || fail "an inventory linked from a retirement audit was pruned"
+[ ! -e "$stray_inventory" ] || fail "an unreferenced superseded inventory was retained"
+[ -f "$inventory_dir/unmanaged.txt" ] || fail "pruning removed a file outside the managed inventory names"
+rm "$inventory_dir/unmanaged.txt"
+pass "fm-playbot-lanes: complete inventories are verified before reuse, pruned when superseded, and kept while audited"
 
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
