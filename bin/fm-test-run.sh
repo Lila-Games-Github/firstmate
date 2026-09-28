@@ -8,7 +8,7 @@
 #   fm-test-run.sh --all
 #   fm-test-run.sh --family <name>
 #   fm-test-run.sh --changed [--base <git-ref>]
-#   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-serial
+#   fm-test-run.sh --lane portable-parallel-1|portable-parallel-2|portable-parallel-3|portable-serial
 #   fm-test-run.sh --lane portable-serial-<k>of<n>   (one CI serial shard)
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
@@ -37,8 +37,8 @@
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
 #                   print selected paths longest-hint-first and exit 0.
-#                   Only --lane portable-parallel-1 or portable-parallel-2 uses
-#                   parallel hints, falling back to serial weights if missing.
+#                   Portable parallel lanes use parallel hints, falling back
+#                   to serial weights if missing.
 #                   Every other selection uses serial weights alone.
 #                   Equal weights are ordered by path under LC_ALL=C.
 #   --base <ref>    with --changed, compare against this ref (default: origin/main)
@@ -125,8 +125,8 @@
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
 # duration-balanced partition of that exact set, packed from the measured hints
 # in portable_parallel_weight_hints (see docs/fm-test-portable-shards.md).
-# --check-coverage reports parallel_max_ms (the larger lane hint sum),
-# parallel_imbalance_ms (the absolute difference between the sums), and
+# --check-coverage reports parallel_max_ms (the largest lane hint sum),
+# parallel_imbalance_ms (the largest minus smallest lane hint sum), and
 # parallel_unhinted (the number of members missing a parallel hint).
 # These sums exclude unhinted members and are estimates, not measured job wall
 # times. Missing parallel hints are reported without failing this guard.
@@ -453,6 +453,7 @@ list_known_lanes() {
   local i
   printf '%s\n' portable-parallel-1
   printf '%s\n' portable-parallel-2
+  printf '%s\n' portable-parallel-3
   printf '%s\n' portable-serial
   i=1
   while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
@@ -495,34 +496,34 @@ EOF
 }
 
 # Per-script serial CI duration hints, one "<path> <ms>" per line, used to
-# pack only the two portable parallel lanes. Measurement provenance and the
+# pack only the portable parallel lanes. Measurement provenance and the
 # refresh procedure are owned by docs/fm-test-portable-shards.md.
 portable_parallel_weight_hints() {
   cat <<'EOF'
-tests/fm-arm-pretool-check.test.sh 30898
-tests/fm-backend-herdr.test.sh 22144
-tests/fm-brief.test.sh 1625
-tests/fm-captain-hold-lifecycle.test.sh 296481
-tests/fm-cd-pretool-check.test.sh 16964
-tests/fm-composer-ghost.test.sh 2120
-tests/fm-composer-lib.test.sh 4798
-tests/fm-crew-state.test.sh 11557
-tests/fm-ensure-agents-md.test.sh 901
-tests/fm-grok-harness.test.sh 6563
-tests/fm-herdr-lab.test.sh 9800
-tests/fm-lint.test.sh 164262
-tests/fm-pi-primary-types.test.sh 8624
-tests/fm-pr-merge.test.sh 111145
-tests/fm-review-diff.test.sh 2747
-tests/fm-send-popup-settle.test.sh 4939
-tests/fm-send-settle.test.sh 2051
-tests/fm-send-strict.test.sh 3861
-tests/fm-spawn-batch.test.sh 2265
-tests/fm-supervision-instructions.test.sh 297
-tests/fm-test-run.test.sh 92944
-tests/fm-tmux-submit-busy.test.sh 2477
-tests/fm-transition-lib.test.sh 99
-tests/fm-x-mode.test.sh 31870
+tests/fm-arm-pretool-check.test.sh 31909
+tests/fm-backend-herdr.test.sh 30582
+tests/fm-brief.test.sh 8871
+tests/fm-captain-hold-lifecycle.test.sh 340826
+tests/fm-cd-pretool-check.test.sh 16307
+tests/fm-composer-ghost.test.sh 2159
+tests/fm-composer-lib.test.sh 6436
+tests/fm-crew-state.test.sh 35278
+tests/fm-ensure-agents-md.test.sh 891
+tests/fm-grok-harness.test.sh 7022
+tests/fm-herdr-lab.test.sh 17030
+tests/fm-lint.test.sh 217379
+tests/fm-pi-primary-types.test.sh 3673
+tests/fm-pr-merge.test.sh 204286
+tests/fm-review-diff.test.sh 2964
+tests/fm-send-popup-settle.test.sh 5436
+tests/fm-send-settle.test.sh 2244
+tests/fm-send-strict.test.sh 4162
+tests/fm-spawn-batch.test.sh 2593
+tests/fm-supervision-instructions.test.sh 343
+tests/fm-test-run.test.sh 126195
+tests/fm-tmux-submit-busy.test.sh 2493
+tests/fm-transition-lib.test.sh 96
+tests/fm-x-mode.test.sh 28755
 EOF
 }
 
@@ -546,35 +547,41 @@ portable_parallel_lane_weight() {
 list_portable_parallel_1() {
   cat <<'EOF'
 tests/fm-lint.test.sh
-tests/fm-pr-merge.test.sh
-tests/fm-test-run.test.sh
-tests/fm-cd-pretool-check.test.sh
-tests/fm-pi-primary-types.test.sh
-tests/fm-grok-harness.test.sh
-tests/fm-composer-lib.test.sh
-tests/fm-review-diff.test.sh
-tests/fm-tmux-submit-busy.test.sh
-tests/fm-composer-ghost.test.sh
+tests/fm-crew-state.test.sh
+tests/fm-arm-pretool-check.test.sh
+tests/fm-backend-herdr.test.sh
+tests/fm-x-mode.test.sh
 tests/fm-brief.test.sh
+tests/fm-composer-lib.test.sh
+tests/fm-pi-primary-types.test.sh
+tests/fm-tmux-submit-busy.test.sh
+tests/fm-supervision-instructions.test.sh
+tests/fm-transition-lib.test.sh
 EOF
 }
 
-# Portable parallel shard 2: the complementary LPT half of the proven set.
+# Portable parallel shard 2: the second LPT partition of the proven set.
 list_portable_parallel_2() {
   cat <<'EOF'
 tests/fm-captain-hold-lifecycle.test.sh
-tests/fm-x-mode.test.sh
-tests/fm-arm-pretool-check.test.sh
-tests/fm-backend-herdr.test.sh
-tests/fm-crew-state.test.sh
-tests/fm-herdr-lab.test.sh
-tests/fm-send-popup-settle.test.sh
+tests/fm-cd-pretool-check.test.sh
 tests/fm-send-strict.test.sh
 tests/fm-spawn-batch.test.sh
+tests/fm-composer-ghost.test.sh
+EOF
+}
+
+# Portable parallel shard 3: the final LPT partition of the proven set.
+list_portable_parallel_3() {
+  cat <<'EOF'
+tests/fm-pr-merge.test.sh
+tests/fm-test-run.test.sh
+tests/fm-herdr-lab.test.sh
+tests/fm-grok-harness.test.sh
+tests/fm-send-popup-settle.test.sh
+tests/fm-review-diff.test.sh
 tests/fm-send-settle.test.sh
 tests/fm-ensure-agents-md.test.sh
-tests/fm-supervision-instructions.test.sh
-tests/fm-transition-lib.test.sh
 EOF
 }
 
@@ -962,6 +969,13 @@ select_lane() {
         found=1
       done < <(list_portable_parallel_2)
       ;;
+    portable-parallel-3)
+      while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        add_script "$s"
+        found=1
+      done < <(list_portable_parallel_3)
+      ;;
     portable-serial)
       while IFS= read -r s; do
         [ -n "$s" ] || continue
@@ -993,7 +1007,7 @@ select_lane() {
 
 run_coverage_guard() {
   local tmp missing extra a b shard unhinted serial_total
-  local p1_ms p1_unhinted p2_ms p2_unhinted parallel_max_ms parallel_imbalance_ms
+  local lane lane_ms lane_unhinted parallel_min_ms parallel_max_ms parallel_imbalance_ms parallel_unhinted
   local -a saved_scripts=()
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-coverage.XXXXXX")
 
@@ -1001,15 +1015,16 @@ run_coverage_guard() {
   list_proven_isolated | LC_ALL=C sort -u >"$tmp/proven"
   list_portable_parallel_1 | LC_ALL=C sort -u >"$tmp/s1"
   list_portable_parallel_2 | LC_ALL=C sort -u >"$tmp/s2"
+  list_portable_parallel_3 | LC_ALL=C sort -u >"$tmp/s3"
 
-  cat "$tmp/s1" "$tmp/s2" | LC_ALL=C sort | uniq -d >"$tmp/shard_dups"
+  cat "$tmp/s1" "$tmp/s2" "$tmp/s3" | LC_ALL=C sort | uniq -d >"$tmp/shard_dups"
   if [ -s "$tmp/shard_dups" ]; then
     log "coverage guard: portable parallel shards share scripts:"
     cat "$tmp/shard_dups" >&2
     rm -rf "$tmp"
     return 1
   fi
-  cat "$tmp/s1" "$tmp/s2" | LC_ALL=C sort -u >"$tmp/shards_union"
+  cat "$tmp/s1" "$tmp/s2" "$tmp/s3" | LC_ALL=C sort -u >"$tmp/shards_union"
   missing=$(comm -23 "$tmp/proven" "$tmp/shards_union" || true)
   extra=$(comm -13 "$tmp/proven" "$tmp/shards_union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
@@ -1125,19 +1140,25 @@ run_coverage_guard() {
 
   # Keep these estimates derived from the membership and hint owners; see the
   # header for the distinction between packed weights and measured job time.
-  read -r p1_ms p1_unhinted <<<"$(list_portable_parallel_1 | portable_parallel_lane_weight)"
-  read -r p2_ms p2_unhinted <<<"$(list_portable_parallel_2 | portable_parallel_lane_weight)"
-  parallel_max_ms=$p1_ms
-  [ "$p2_ms" -le "$parallel_max_ms" ] || parallel_max_ms=$p2_ms
-  parallel_imbalance_ms=$((p1_ms - p2_ms))
-  [ "$parallel_imbalance_ms" -ge 0 ] || parallel_imbalance_ms=$((-parallel_imbalance_ms))
+  parallel_min_ms=0
+  parallel_max_ms=0
+  parallel_unhinted=0
+  for lane in 1 2 3; do
+    read -r lane_ms lane_unhinted <<<"$(portable_parallel_lane_weight <"$tmp/s$lane")"
+    [ "$lane_ms" -le "$parallel_max_ms" ] || parallel_max_ms=$lane_ms
+    if [ "$lane" -eq 1 ] || [ "$lane_ms" -lt "$parallel_min_ms" ]; then
+      parallel_min_ms=$lane_ms
+    fi
+    parallel_unhinted=$((parallel_unhinted + lane_unhinted))
+  done
+  parallel_imbalance_ms=$((parallel_max_ms - parallel_min_ms))
 
   printf 'FM_TEST_COVERAGE ok total=%s parallel=%s parallel_max_ms=%s parallel_imbalance_ms=%s parallel_unhinted=%s serial=%s serial_shards=%s serial_unhinted=%s herdr=%s\n' \
     "$(wc -l <"$tmp/all" | tr -d ' ')" \
     "$(wc -l <"$tmp/shards_union" | tr -d ' ')" \
     "$parallel_max_ms" \
     "$parallel_imbalance_ms" \
-    "$((p1_unhinted + p2_unhinted))" \
+    "$parallel_unhinted" \
     "$(wc -l <"$tmp/serial" | tr -d ' ')" \
     "$PORTABLE_SERIAL_SHARDS" \
     "$unhinted" \
@@ -2128,7 +2149,7 @@ if [ "$LIST_ONLY" -eq 1 ] || [ "$LIST_SCHEDULED" -eq 1 ]; then
   if [ "$LIST_SCHEDULED" -eq 1 ]; then
     for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
       case "$MODE:$LANE" in
-        lane:portable-parallel-1|lane:portable-parallel-2)
+        lane:portable-parallel-1|lane:portable-parallel-2|lane:portable-parallel-3)
           printf '%s\t%s\n' "$(portable_parallel_weight_for "$s")" "$s"
           ;;
         *)
