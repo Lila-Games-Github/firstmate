@@ -160,49 +160,6 @@ If Playbot rejects the deletion after removing anything, the tool compares every
 
 ## Lane lifecycle
 
-### Engine readiness
-
-Before engine-dependent dispatch, `get_engine_readiness` reads one exact project's workspace without activating a project, resuming a chat, or starting an engine session.
-It reports app and bundled addon versions, Playbot's detected Godot projects, workspace addon versions and every required file's byte identity against that bundle (including native files), stored and canonical project paths, and the executable selected by an existing headless session when its launch log is readable.
-`PLAYBOT_LANES_APP_RESOURCES` can identify the packaged app's resources directory when running-process discovery is unavailable; the script header owns its discovery and version-binding mechanics.
-An editor preference or PATH candidate is insufficient selection evidence because Playbot checks executable compatibility before choosing it.
-Unreadable evidence remains `unconfirmed`; the tool never runs the candidate executable to fill that gap.
-The engine snapshot reader is verified for Playbot 0.117.0; other app versions return `unconfirmed` without calling unverified engine IPC.
-The diagnostic distinguishes `addon-drift`, `missing-addon-files`, `startup-pending`, `identity-admission-risk`, an observed `identity-admission-rejected`, generic `engine-failure`, and `unconfirmed`, retaining all reasons when several apply.
-A Flatpak or other observed namespace launcher and differing stored/canonical paths are admission risks, while `connectionBlocked` alone does not prove a PID rejection.
-Readiness requires an existing routed connected session reporting the current loaded addon, complete matching disk bytes, and a readable native launch executable with no reported failure or identity risk.
-
-`dispatch` requires confirmed readiness by default and re-reads the destination immediately before sending.
-Set `engineDependent: false` only for work whose completion needs no engine execution, capture, or validation; omission and `true` both enforce the guard, and non-booleans are rejected.
-Existing workspaces are checked before chat creation and re-read before sending.
-Engine-dependent `newWorkspace` dispatch is refused before anything is created, because a freshly created workspace has no connected engine session; file-only `newWorkspace` dispatch retains the root-settle/freshness guard.
-Do not bypass a readiness refusal through `send_message`; use that tool for engine work only after a fresh readiness verdict is confirmed.
-Choose `newWorkspace` for isolation, and verify capability separately: it provides no shell-permission or engine-policy workaround.
-When readiness fails or remains unconfirmed, dispatch engine-dependent validation to an ordinary worker whose instructions permit the project's pinned native validation route, recording the exact commit and workspace validated and the engine assertions still unverified.
-File-only work can proceed under its explicit declaration.
-This diagnostic does not authorize changing Playbot settings, executable selection, or PID records.
-
-When an engine call yields `Script running`, poll that existing call within the chosen execution budget and preserve its final underlying result.
-The yield means the call is pending; it is not an engine error or proof of an engine timeout.
-If the budget ends and the call is terminated, report cancellation and the elapsed budget, preserving any observed diagnostic without inventing a final failure.
-Avoid repeated engine calls while readiness is already known to fail, and keep bridge repair and capture-pipeline repair in separate work records.
-
-### Addon preservation
-
-Lane workers run `node --no-warnings <Firstmate-code-root>/bin/fm-playbot-lanes.mjs addon-guard reset <ref>` for a base-check-authorized reset and `addon-guard stash` for stashing, rather than raw Git reset/stash commands.
-The command binds the current Git worktree to one registered Playbot workspace, discovers every Git-visible Godot project with an `addons/playbot` tree, and requires each such addon to be complete and match the observed app bundle before mutation.
-It reads only `app:metadata` and the packaged bundle, so it does not depend on the version-pinned engine snapshot IPC; a worktree with no addon tree preserves nothing and still applies every other check.
-Reset preserves every tracked, untracked, and ignored addon file, including native files, restores their exact bytes and modes after Git, and verifies them against a fresh app-bundle read.
-Stash excludes the exact addon trees from its pathspec and verifies their bytes afterward; it does not stash the injected helpers.
-The reset guard additionally refuses backward/divergent history, hidden index flags, untracked product files, and tracked product changes outside the addon trees.
-The only tracked changes it reverts outside those trees are paths on the tracked-churn allowlist (such as `prototype-game/project.godot`), whose diff it prints before resetting; the lane brief requires disclosing that diff first.
-An incomplete or stale addon requires a supported Playbot update before either operation; the guard does not silently install files from a different app version.
-Its header and CLI help own supported flags and backup mechanics; any failed operation names the retained complete backup for recovery.
-This preservation is independent of the retirement churn allowlist and grants no permission to discard addon or product edits.
-Before engine validation, run `addon-guard verify` and obtain a fresh confirmed engine-readiness verdict.
-Before every product commit, run `addon-guard check-index`, which refuses staged addon changes; stage product paths explicitly so injected files stay out of the commit.
-Keep failed guards and engine validation still needed in the work record.
-
 `dispatch` resolves an existing worker chat or creates an empty one and sends the task through Playbot's own `threads:send` IPC, whose payload is unchanged across 0.93.x through 0.95.x.
 Dispatch returns `workspace.roots` from fresh Playbot registration, including the branch names Playbot actually created; use those names to regenerate a named brief when Playbot ignores the requested branch, or omit `--lane-branch` to keep the workspace's own branch.
 If that read-back fails after dispatch created a chat, it stops before sending and names the created workspace and chat, which stay in place for a deliberate `send_message` once the workspace reads back; into an existing thread it still sends, returning `workspace: null` with a warning that no branch was observed.
@@ -281,6 +238,49 @@ An `unknown` verdict is classified by the chat-creation API this Playbot exposes
 
 `close_lane` disables notification without archiving either chat.
 `archive_chat` is a separate explicit action and requires `confirm=true`.
+
+### Engine readiness
+
+Before engine-dependent dispatch, `get_engine_readiness` reads one exact project's workspace without activating a project, resuming a chat, or starting an engine session.
+It reports app and bundled addon versions, Playbot's detected Godot projects, workspace addon versions and every required file's byte identity against that bundle (including native files), stored and canonical project paths, and the executable selected by an existing headless session when its launch log is readable.
+`PLAYBOT_LANES_APP_RESOURCES` can identify the packaged app's resources directory when running-process discovery is unavailable; the script header owns its discovery and version-binding mechanics.
+An editor preference or PATH candidate is insufficient selection evidence because Playbot checks executable compatibility before choosing it.
+Unreadable evidence remains `unconfirmed`; the tool never runs the candidate executable to fill that gap.
+The engine snapshot reader is verified for Playbot 0.117.0; other app versions return `unconfirmed` without calling unverified engine IPC.
+The diagnostic distinguishes `addon-drift`, `missing-addon-files`, `startup-pending`, `identity-admission-risk`, an observed `identity-admission-rejected`, generic `engine-failure`, and `unconfirmed`, retaining all reasons when several apply.
+A Flatpak or other observed namespace launcher and differing stored/canonical paths are admission risks, while `connectionBlocked` alone does not prove a PID rejection.
+Readiness requires an existing routed connected session reporting the current loaded addon, complete matching disk bytes, and a readable native launch executable with no reported failure or identity risk.
+
+`dispatch` requires confirmed readiness by default and re-reads the destination immediately before sending.
+Set `engineDependent: false` only for work whose completion needs no engine execution, capture, or validation; omission and `true` both enforce the guard, and non-booleans are rejected.
+Existing workspaces are checked before chat creation and re-read before sending.
+Engine-dependent `newWorkspace` dispatch is refused before anything is created, because a freshly created workspace has no connected engine session; file-only `newWorkspace` dispatch retains the root-settle/freshness guard.
+Do not bypass a readiness refusal through `send_message`; use that tool for engine work only after a fresh readiness verdict is confirmed.
+Choose `newWorkspace` for isolation, and verify capability separately: it provides no shell-permission or engine-policy workaround.
+When readiness fails or remains unconfirmed, dispatch engine-dependent validation to an ordinary worker whose instructions permit the project's pinned native validation route, recording the exact commit and workspace validated and the engine assertions still unverified.
+File-only work can proceed under its explicit declaration.
+This diagnostic does not authorize changing Playbot settings, executable selection, or PID records.
+
+When an engine call yields `Script running`, poll that existing call within the chosen execution budget and preserve its final underlying result.
+The yield means the call is pending; it is not an engine error or proof of an engine timeout.
+If the budget ends and the call is terminated, report cancellation and the elapsed budget, preserving any observed diagnostic without inventing a final failure.
+Avoid repeated engine calls while readiness is already known to fail, and keep bridge repair and capture-pipeline repair in separate work records.
+
+### Addon preservation
+
+Lane workers run `node --no-warnings <Firstmate-code-root>/bin/fm-playbot-lanes.mjs addon-guard reset <ref>` for a base-check-authorized reset and `addon-guard stash` for stashing, rather than raw Git reset/stash commands.
+The command binds the current Git worktree to one registered Playbot workspace, discovers every Git-visible Godot project with an `addons/playbot` tree, and requires each such addon to be complete and match the observed app bundle before mutation.
+It reads only `app:metadata` and the packaged bundle, so it does not depend on the version-pinned engine snapshot IPC; a worktree with no addon tree preserves nothing and still applies every other check.
+Reset preserves every tracked, untracked, and ignored addon file, including native files, restores their exact bytes and modes after Git, and verifies them against a fresh app-bundle read.
+Stash excludes the exact addon trees from its pathspec and verifies their bytes afterward; it does not stash the injected helpers.
+The reset guard additionally refuses backward/divergent history, hidden index flags, untracked product files, and tracked product changes outside the addon trees.
+The only tracked changes it reverts outside those trees are paths on the tracked-churn allowlist (such as `prototype-game/project.godot`), whose diff it prints before resetting; the lane brief requires disclosing that diff first.
+An incomplete or stale addon requires a supported Playbot update before either operation; the guard does not silently install files from a different app version.
+Its header and CLI help own supported flags and backup mechanics; any failed operation names the retained complete backup for recovery.
+This preservation is independent of the retirement churn allowlist and grants no permission to discard addon or product edits.
+Before engine validation, run `addon-guard verify` and obtain a fresh confirmed engine-readiness verdict.
+Before every product commit, run `addon-guard check-index`, which refuses staged addon changes; stage product paths explicitly so injected files stay out of the commit.
+Keep failed guards and engine validation still needed in the work record.
 
 ## Question cards and held messages
 
