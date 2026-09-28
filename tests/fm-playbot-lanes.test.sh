@@ -169,6 +169,9 @@ printf 'worktree: filtered work\n' > "$FIXTURE_ROOT/worker/prototype-game/filter
 printf 'prototype-game/filtered-work.txt filter=retirement-test\n' > "$FIXTURE_ROOT/worker/.gitattributes"
 ln -s real-work.txt "$FIXTURE_ROOT/worker/prototype-game/real-link"
 printf 'tracked backslash work\n' > "$FIXTURE_ROOT/worker/prototype-game/addons/playbot\\plugin.gd.uid"
+mkdir -p "$FIXTURE_ROOT/worker/prototype-game/addons/playbot_extra" "$FIXTURE_ROOT/worker/prototype-game/addons/playbotx"
+printf 'neighbour work\n' > "$FIXTURE_ROOT/worker/prototype-game/addons/playbot_extra/x.gd"
+printf 'neighbour work\n' > "$FIXTURE_ROOT/worker/prototype-game/addons/playbotx/y.gd"
 printf 'prototype-game/ignored-retirement.txt\nprototype-game/ignored-retirement-dir/\n' > "$FIXTURE_ROOT/worker/.gitignore"
 git -C "$FIXTURE_ROOT/worker" add .
 git -C "$FIXTURE_ROOT/worker" commit -m "fixture baseline" >/dev/null \
@@ -1345,6 +1348,9 @@ const probeAcceptedFile = path.join(process.env.FIXTURE_ROOT, 'launch-accepts-pr
 // threads:launch requested, the way a catalog fallback or clamp would: the
 // adapter's read-back has to report what was persisted, not echo the request.
 const launchPersistedExecutionLevelFile = path.join(process.env.FIXTURE_ROOT, 'launch-persisted-execution-level');
+// A Playbot whose workspace stops resolving as active right after a chat is
+// launched into it, so dispatch's post-creation branch read-back fails.
+const launchDeactivatesWorkspaceFile = path.join(process.env.FIXTURE_ROOT, 'launch-deactivates-workspace');
 // Playbot's own creation race: the workspaces row can be readable before its
 // workspace_roots rows are committed. "never" leaves them uncommitted forever;
 // a millisecond count commits them from a later tick of this long-lived server,
@@ -1555,6 +1561,9 @@ function launchThread(db, payload) {
     .run(thread.planningModel ?? null, thread.planningReasoningLevel ?? null,
       thread.executionModel ?? null, readFileOr(launchPersistedExecutionLevelFile, '') || (thread.executionReasoningLevel ?? null),
       thread.modeProfilesLinked === undefined ? null : Number(thread.modeProfilesLinked), id);
+  if (readFileOr(launchDeactivatesWorkspaceFile, '')) {
+    db.prepare("UPDATE workspaces SET archive_state = 'archiving' WHERE id = ?").run(workspace.id);
+  }
   const activate = payload.activate !== false;
   return {
     workspace: { id: workspace.id, name: workspace.name ?? null },
@@ -2100,6 +2109,35 @@ if (!message.includes('persisted model gpt-6-astra at effort medium instead of t
 if (!message.includes('No task was sent to it') || !message.includes(`archive chat ${rows[0].id} with archive_chat`)) process.exit(1);
 NODE
 pass "fm-playbot-lanes: dispatch refuses to send when Playbot persisted a different effort than requested"
+
+# The created chat's workspace stops reading back as active. Dispatch must not
+# echo a requested branch or leave a bare topology error: it names the created
+# chat and workspace and the deliberate send_message recovery, and sends nothing.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+printf 'yes\n' > "$FIXTURE_ROOT/launch-deactivates-workspace"
+printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
+  | node --no-warnings "$SCRIPT" hook-pretool
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Readback lost task\",\"message\":\"Do the readback work\"}}}")
+rm -f "$FIXTURE_ROOT/launch-deactivates-workspace"
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch did not preserve the created chat with a send_message recovery when read-back failed: $out"
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const calls = fs.readFileSync(path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.some(call => call.channel === 'threads:send')) process.exit(1);
+const value = JSON.parse(process.env.OUT);
+if (value.result) process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const rows = db.prepare('SELECT id, archived, pending_queue_json FROM workspace_threads WHERE workspace_id = ? AND title = ?').all('ws-worker', 'Readback lost task');
+db.prepare("UPDATE workspaces SET archive_state = 'active' WHERE id = ?").run('ws-worker');
+db.close();
+if (rows.length !== 1 || rows[0].archived !== 0 || rows[0].pending_queue_json !== null) process.exit(1);
+const message = value.error?.message ?? '';
+if (!message.includes(`Chat ${rows[0].id} was created in workspace ws-worker`)) process.exit(1);
+if (!message.includes('Workspace not found')) process.exit(1);
+if (!message.includes(`deliver this task with send_message against chat ${rows[0].id} rather than dispatching again`)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: a failed post-creation read-back keeps the chat and names the send_message recovery"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'medium\n' > "$FIXTURE_ROOT/launch-persisted-execution-level"
@@ -5751,6 +5789,20 @@ if (!blocker || blocker.paths.join(',') !== 'prototype-game/addons/playbot\\plug
 NODE
 git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore 'prototype-game/addons/playbot\plugin.gd.uid'
 pass "fm-playbot-lanes: POSIX backslashes remain literal blocking path characters"
+
+printf 'neighbour edit\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/addons/playbot_extra/x.gd"
+printf 'neighbour edit\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/addons/playbotx/y.gd"
+retirement_list main > "$retirement_inventory"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "a neighbouring addons directory was treated as Playbot churn"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
+const blocker = workspace.blockers.find(candidate => candidate.code === 'tracked-modifications');
+if (workspace.retirable) process.exit(1);
+if (!blocker || blocker.paths.join(',') !== 'prototype-game/addons/playbot_extra/x.gd,prototype-game/addons/playbotx/y.gd') process.exit(1);
+if (workspace.roots[0].tracked.allowedChurnPaths.some(file => !file.startsWith('prototype-game/addons/playbot/') && file !== 'prototype-game/project.godot')) process.exit(1);
+NODE
+git -C "$FIXTURE_ROOT/worker/.worktrees/alt" restore prototype-game/addons/playbot_extra/x.gd prototype-game/addons/playbotx/y.gd
+pass "fm-playbot-lanes: neighbouring addons directories are blocking tracked work, not churn"
 
 printf 'real tracked edit\n' >> "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/real-work.txt"
 retirement_list main > "$retirement_inventory"

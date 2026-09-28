@@ -883,6 +883,27 @@ test_addon_injection_is_disclosed_as_tracked_churn() {
   pass "fm-lane-base-check: addon injection is tracked churn, with untracked files protected"
 }
 
+test_neighbouring_addon_trees_are_not_churn() {
+  local dir out neighbour
+  for neighbour in playbot_extra playbotx; do
+    dir=$(make_case "neighbour-$neighbour")
+    mkdir -p "$dir/repo/prototype-game/addons/$neighbour"
+    printf 'neighbour source\n' > "$dir/repo/prototype-game/addons/$neighbour/x.gd"
+    git -C "$dir/repo" add -A
+    git -C "$dir/repo" commit -qm "neighbouring addon"
+    git -C "$dir/wt" reset --hard refs/heads/landing/frog-pile >/dev/null
+    land_locally "$dir" "new landing"
+    printf 'real work\n' > "$dir/wt/prototype-game/addons/$neighbour/x.gd"
+    printf 'uid://rewritten\n' > "$dir/wt/prototype-game/addons/playbot/plugin.gd.uid"
+    out=$(run_check "$dir/wt" landing/frog-pile)
+    expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+      "a tracked edit under addons/$neighbour must not be treated as Playbot churn"
+    assert_contains "$out" "prototype-game/addons/$neighbour/x.gd" "the block does not name the neighbouring path"
+    assert_grep "real work" "$dir/wt/prototype-game/addons/$neighbour/x.gd" "the check discarded neighbouring work"
+  done
+  pass "fm-lane-base-check: neighbouring addon directories are not Playbot churn"
+}
+
 test_not_a_worktree_has_a_workable_remedy() {
   local dir out
   dir="$TMP_ROOT/non-git"
@@ -896,6 +917,7 @@ test_not_a_worktree_has_a_workable_remedy() {
 }
 
 test_addon_injection_is_disclosed_as_tracked_churn
+test_neighbouring_addon_trees_are_not_churn
 test_not_a_worktree_has_a_workable_remedy
 test_usage_is_refused_without_a_landing_branch
 test_current_and_ahead_only_proceed_untouched

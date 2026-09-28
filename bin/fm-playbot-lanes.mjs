@@ -5904,6 +5904,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     if (worker && workerProfile) {
       throw new Error("dispatch model and reasoningEffort only apply when creating a worker chat; the resolved existing chat was left unchanged");
     }
+    const createdChat = !worker;
     if (!worker) {
       const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, workerProfile });
       worker = resolveThread(project.id, created.workspaceId, created.id);
@@ -5932,7 +5933,21 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     }
     // Re-read Playbot's registered roots after creation/settling. Playbot can
     // ignore newWorkspace.branch, so the request is never branch evidence.
-    const workspace = resolveWorkspace(resolveProject(project.id), worker.workspace_id);
+    let workspace = null;
+    const warnings = [];
+    try {
+      workspace = resolveWorkspace(resolveProject(project.id), worker.workspace_id);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const stop = reason.endsWith(".") ? "" : ".";
+      if (createdChat && wantsNewWorkspace) {
+        throw new Error(`Workspace ${worker.workspace_id} and chat ${worker.thread_id} were created, but dispatch stopped before sending because their registered branch could not be read back: ${reason}${stop} Both still exist: once workspace ${worker.workspace_id} reads back, deliver this task with send_message against chat ${worker.thread_id} rather than dispatching again.`);
+      }
+      if (createdChat) {
+        throw new Error(`Chat ${worker.thread_id} was created in workspace ${worker.workspace_id}, but dispatch stopped before sending because the workspace's registered branch could not be read back: ${reason}${stop} The chat still exists: once workspace ${worker.workspace_id} reads back, deliver this task with send_message against chat ${worker.thread_id} rather than dispatching again.`);
+      }
+      warnings.push(`Workspace ${worker.workspace_id} could not be read back (${reason}), so workspace is null and no branch was observed; read it with get_workspace_freshness before relying on a branch name.`);
+    }
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
@@ -5949,6 +5964,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
             laneId: lane.id,
             note: "This caller is a Playbot chat, so the worker's completed turns wake it through the registered lane and no watcher poll was armed.",
           },
+          ...(warnings.length ? { warnings } : {}),
         };
       }
       const acceptedBaseline = supervisionAcceptance?.acceptanceMs === null
@@ -5962,7 +5978,8 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         delivery: acceptedBaseline ? sent.delivery : null,
       });
       const result = { lane: null, ...sent, workspace, ...(freshness ? { freshness } : {}), ...(workspaceSettle ? { workspaceSettle } : {}), supervision };
-      if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
+      if (!supervision.armed) warnings.push(supervisionArmWarning(supervision));
+      if (warnings.length) result.warnings = warnings;
       return result;
     } catch (error) {
       // Only a send that never reached Playbot may tear the lane down. When the
