@@ -549,6 +549,29 @@ Observed output:
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
 ## Playbot lanes
 
+On 2026-09-28, Linux with Node v26.7.0 passed all 204 checks in the lane suite, including terminal dispatch from a brief and backlog item without preexisting task metadata.
+The refresh command is:
+
+```sh
+bin/fm-test-run.sh tests/fm-playbot-lanes.test.sh
+```
+
+The relevant exact output was:
+
+```text
+ok - fm-playbot-lanes: engine refusal precedes lane creation and leaves task identity untouched
+ok - fm-playbot-lanes: brief/backlog terminal dispatch creates a supervised task identity
+ok - fm-playbot-lanes: lane state and teardown share the dispatched identity and preserve Playbot work
+ok - fm-playbot-lanes: lane dispatch and teardown preserve manual backlog ownership
+ok - fm-playbot-lanes: lane teardown locks its idle read through retirement against redispatch
+```
+
+These checks use stubbed Playbot endpoints and scratch Firstmate homes, not a live dispatch.
+They verify private lane metadata, poll arming, same-worker redispatch, persisted worker-state reads, refusal to retire active or unlanded work, and local record cleanup that preserves the workspace, chat, and brief.
+They also verify that unconfirmed delivery defeats an earlier completion declaration and that manual backlog ownership survives dispatch and cleanup.
+An engine-dependent new-workspace refusal leaves the lane metadata absent and its backlog item queued, without contacting Playbot.
+The concurrency check pauses teardown after its successful idle read, redispatches through the public MCP interface, and verifies that teardown cannot consume a newly armed poll using that earlier reading.
+
 On 2026-07-29, Playbot 0.80.0 on Windows was verified to expose `threads:openThread`, `threads:send`, `threads:archiveThread`, and `codex:mcpServers:reload` through its Electron IPC bridge.
 The installed application persisted the Playbot chat id and Codex session id together in `workspace_threads`, while the Codex rollout recorded a stable completed turn id and final agent message before the Stop hook returned.
 

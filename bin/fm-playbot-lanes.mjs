@@ -6,7 +6,7 @@
 // caller without one is an external terminal that dispatches without a lane
 // and supervises by polling.
 //
-// This executable has ten entry points:
+// This executable has twelve entry points:
 //   serve             Run the stdio MCP server.
 //   call              Invoke one MCP tool from a terminal and print the same
 //                     result object the stdio transport returns.
@@ -15,6 +15,9 @@
 //   hook-stop         Wake a routed controller after a worker turn completes.
 //   supervision-poll  Report one dispatched worker's persisted state as the
 //                     firstmate watcher check that dispatch armed for it.
+//   lane-task-state   Read a lane metadata record's persisted worker state.
+//   lane-task-retirable  Refuse local record cleanup while its worker or queue
+//                     is active or unreadable; never changes Playbot state.
 //   setup             Install, reload, and verify the complete integration.
 //   doctor            Print bounded local integration diagnostics.
 //   tracked-churn-allowlist
@@ -4756,10 +4759,10 @@ function supervisionReadSidecar(state, taskId) {
   };
 }
 
-function supervisionCheckLockAcquire(state, taskId) {
+function supervisionCheckLockAcquire(state, taskId, taskRecord = false) {
   const helper = path.join(path.dirname(supervisionSelfScript()), "fm-check-publish-lock.sh");
   return new Promise((resolve, reject) => {
-    const child = spawn(helper, [state, taskId], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(helper, [state, taskId, ...(taskRecord ? ["--task-record"] : [])], { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -4773,7 +4776,7 @@ function supervisionCheckLockAcquire(state, taskId) {
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
       finish(new Error(`timed out acquiring the shared publication lock for state/${taskId}.check.sh`));
-    }, 6_500);
+    }, 12_000);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
       if (stdout === "locked\n") finish();
@@ -4784,7 +4787,7 @@ function supervisionCheckLockAcquire(state, taskId) {
     });
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     child.once("error", (error) => finish(new Error(`could not acquire the shared publication lock for state/${taskId}.check.sh: ${supervisionErrorDetail(error)}`)));
-    child.once("exit", (status) => {
+    child.once("close", (status) => {
       if (!settled) finish(new Error(`could not acquire the shared publication lock for state/${taskId}.check.sh: ${stderr.trim() || `exit ${status}`}`));
     });
   });
@@ -4809,8 +4812,8 @@ function supervisionCheckLockRelease(held, taskId) {
   });
 }
 
-async function supervisionWithCheckLock(state, taskId, callback) {
-  const held = await supervisionCheckLockAcquire(state, taskId);
+async function supervisionWithCheckLock(state, taskId, callback, taskRecord = false) {
+  const held = await supervisionCheckLockAcquire(state, taskId, taskRecord);
   let result;
   let problem = null;
   try {
@@ -5004,6 +5007,160 @@ async function supervisionResolveRecall(prepared, outcome, threadId) {
     }
   }
   return problems;
+}
+
+// Lane records are Firstmate task identities, not ownership of Playbot's
+// workspace or runtime endpoint. Existing spawn records remain byte-identical.
+function laneMeta(file) {
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error("lane metadata is not a private regular file");
+  const meta = {};
+  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+    if (!line) continue;
+    const at = line.indexOf("=");
+    if (at < 1 || /[\0\r]/.test(line) || Object.hasOwn(meta, line.slice(0, at))) throw new Error("lane metadata is malformed or ambiguous");
+    meta[line.slice(0, at)] = line.slice(at + 1);
+  }
+  return meta;
+}
+
+function laneIdentityHelper(helper, state, taskId, phase = "capture") {
+  const data = path.join(controllerRoot(), "data");
+  const result = spawnSync("bash", [
+    "-c",
+    `. "$1" || { echo "task libraries could not be loaded" >&2; exit 2; }
+case "$5" in
+  prepare)
+    fm_task_lane_creation_allowed "$2" "$4" "$3" || { printf '%s\\n' "$FM_TASK_LANE_CREATION_ERROR" >&2; exit 3; }
+    ;;
+  commit)
+    lib_dir=\${1%/*}
+    { . "$lib_dir/fm-tasks-axi-lib.sh" && . "$lib_dir/fm-backlog-transition-lib.sh"; } || { echo "task libraries could not be loaded" >&2; exit 2; }
+    if fm_backlog_transition_applies "$FM_HOME/config" "$4" lane; then
+      fm_backlog_atomic_transition dispatch "$2/$3.meta" "$4" "$3" "$2" \\
+        || { printf 'backlog dispatch transition failed: %s\\n' "\${FM_BACKLOG_TRANSITION_ERROR:-unknown error}" >&2; exit 3; }
+    else
+      [ "$?" -eq 1 ] || { printf 'backlog posture could not be read: %s\\n' "\${FM_BACKLOG_TRANSITION_ERROR:-unknown error}" >&2; exit 3; }
+    fi
+    ;;
+  capture) fm_task_spawn_gen_capture "$2" "$3" || { printf 'state/%s.meta is unreadable or has a malformed spawn generation\\n' "$3" >&2; exit 3; } ;;
+  *) exit 2 ;;
+esac`,
+    "fm-playbot-lane-identity", helper, state, taskId, data, phase,
+  ], { env: { ...process.env, FM_HOME: controllerRoot(), FM_STATE_OVERRIDE: state, FM_DATA_OVERRIDE: data }, encoding: "utf8", timeout: 20_000 });
+  if (result.error?.code === "ETIMEDOUT" || result.signal) {
+    throw new Error(`firstmate task '${taskId}' identity ${phase} timed out; retry the dispatch`);
+  }
+  if (result.error || result.status !== 0) {
+    const detail = (result.stderr ?? "").trim().split("\n").filter(Boolean).pop()
+      ?? (result.error ? supervisionErrorDetail(result.error) : `exit ${result.status}`);
+    throw new Error(`firstmate task '${taskId}' cannot start a lane task: ${detail}`);
+  }
+  return result.stdout;
+}
+
+function laneIdentityHelperPath() {
+  return path.join(path.dirname(supervisionSelfScript()), "fm-pr-lib.sh");
+}
+
+function laneIdentityBoundElsewhere(state, taskId, worker) {
+  const meta = laneMeta(path.join(state, `${taskId}.meta`));
+  if (meta.kind === "lane" && (!worker || meta.playbot_workspace !== worker.workspace_id || meta.playbot_thread !== worker.thread_id)) {
+    throw new Error(`firstmate lane task '${taskId}' already names another workspace or thread`);
+  }
+}
+
+// Runs before any workspace or chat exists, so an ineligible task is refused
+// without leaving a Playbot pair behind. The lock-held recheck stays authoritative.
+function preflightTerminalLaneIdentity(taskId, worker) {
+  const state = supervisionStateDir();
+  const helper = laneIdentityHelperPath();
+  // Capture before waiting: a task removed while this dispatch waits is retired,
+  // not permission to recreate the same id against another worker.
+  const captured = laneIdentityHelper(helper, state, taskId);
+  if (captured !== "missing") laneIdentityBoundElsewhere(state, taskId, worker);
+  else laneIdentityHelper(helper, state, taskId, "prepare");
+  return captured;
+}
+
+async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, captured) {
+  const state = supervisionStateDir();
+  const helper = laneIdentityHelperPath();
+  if (captured !== "missing") {
+    laneIdentityBoundElsewhere(state, taskId, worker);
+    return;
+  }
+  await supervisionWithCheckLock(state, taskId, () => {
+    const current = laneIdentityHelper(helper, state, taskId);
+    if (current !== captured) throw new Error(`firstmate task '${taskId}' incarnation changed during dispatch`);
+    laneIdentityHelper(helper, state, taskId, "prepare");
+    const project = resolveProject(worker.project_id);
+    const workspace = resolveWorkspace(project, worker.workspace_id);
+    const root = workspace.roots.find((candidate) => candidate.projectRootId === project.defaultWorkingRootId) ?? workspace.roots[0];
+    const projectRoot = project.roots.find((candidate) => candidate.id === root?.projectRootId);
+    if (!root || !projectRoot) throw new Error("lane workspace has no registered project root");
+    const fields = {
+      kind: "lane",
+      spawn_gen: `s${Date.now()}.${process.pid}.${crypto.randomBytes(16).toString("hex")}`,
+      playbot_project: worker.project_id,
+      playbot_workspace: worker.workspace_id,
+      playbot_thread: worker.thread_id,
+      playbot_desktop: desktopDir(),
+      playbot_harness_home: harnessDir(),
+      project: supervisionPath(projectRoot.path, "lane project root"),
+      worktree: supervisionPath(root.path, "lane workspace root"),
+      landing_branch: landingBranch ?? projectRoot.defaultBranch,
+    };
+    if (Object.values(fields).some((value) => typeof value !== "string" || !value || /[\0\r\n]/.test(value))) {
+      throw new Error("lane task identity has an empty or malformed field");
+    }
+    supervisionPublish(state, `${taskId}.meta`, Object.entries(fields).map(([key, value]) => `${key}=${value}\n`).join(""), 0o600);
+    // The record and its queue transition use the same owner as shell spawns.
+    // An unreadable commit leaves the identity intact for reconciliation.
+    laneIdentityHelper(helper, state, taskId, "commit");
+  }, true);
+}
+
+// Reads only persisted Playbot rows. A ready chat is idle, not proof of task
+// completion; the lane's resolved status declaration supplies that distinction.
+function laneTaskState(file, retirable = false, state = path.dirname(file)) {
+  const meta = laneMeta(file);
+  if (meta.kind !== "lane" || !meta.spawn_gen || !meta.playbot_project || !meta.playbot_workspace || !meta.playbot_thread) throw new Error("lane task identity is incomplete");
+  process.env.PLAYBOT_DESKTOP_DIR = supervisionPath(meta.playbot_desktop, "lane desktop directory");
+  process.env.PLAYBOT_HARNESS_HOME = supervisionPath(meta.playbot_harness_home, "lane harness directory");
+  const row = threadRowById(meta.playbot_thread);
+  if (!row || row.project_id !== meta.playbot_project || row.workspace_id !== meta.playbot_workspace || row.archived || row.archive_state !== "active") {
+    throw new Error("lane worker is absent or its workspace identity changed");
+  }
+  const messages = queuedMessages(row.pending_queue_json);
+  const queued = messages === null ? null : messages.length;
+  const taskId = path.basename(file, ".meta");
+  if (!supervisionTaskIdValid(taskId)) throw new Error("lane metadata filename does not identify a task");
+  let completedDelivery = true;
+  if (row.agent_status === "ready" && pathPresence(supervisionSidecarPath(state, taskId))) {
+    const previous = supervisionReadSidecar(state, taskId);
+    completedDelivery = Boolean(previous && supervisionPollDecision(taskId, meta.playbot_thread, previous, row).retire);
+  }
+  if (retirable) {
+    if (row.agent_status !== "ready" || queued !== 0) throw new Error(`lane worker is not idle with an empty queue (status ${row.agent_status}, queued ${queued ?? "unreadable"})`);
+    if (!completedDelivery) throw new Error("lane task delivery or post-acceptance completion is still unconfirmed; preserving supervision");
+    const project = resolveProject(meta.playbot_project);
+    const workspace = resolveWorkspace(project, meta.playbot_workspace);
+    const coverage = workspaceRootCoverage(project, workspace);
+    if (!coverage.complete) throw new Error("lane workspace root coverage is incomplete");
+    if (!meta.landing_branch) throw new Error("lane task has no recorded landing branch");
+    for (const root of workspace.roots) {
+      const reading = inspectWorkspaceRoot(project, root, meta.landing_branch);
+      // Ignored files are retained with the workspace; every other blocker
+      // prevents declaring the task landed and retiring its supervision.
+      const blockers = reading.blockers.filter((blocker) => blocker.code !== "ignored-files");
+      if (blockers.length) throw new Error(`lane workspace is not safely landed: ${blockers.map((blocker) => blocker.message).join("; ")}`);
+    }
+    return;
+  }
+  const workerState = row.agent_status === "working" ? "working" : row.agent_status === "pending_input" ? "parked" : row.agent_status === "error" ? "failed" : "unknown";
+  const completion = row.agent_status === "ready" && !completedDelivery ? " completion=unconfirmed" : "";
+  console.log(`${workerState} ${row.agent_status} queued=${queued ?? "unreadable"}${completion}`);
 }
 
 // Arm one worker's watcher poll and report exactly what happened. Never throws
@@ -5238,8 +5395,7 @@ function supervisionRolloutAcceptanceMs(row, messageKey, acceptanceMs) {
 // pending_input, which keeps firing every interval on purpose: a parked card is
 // resolved by the supervisor answering it, so that repeated wake is actionable
 // where a queue firstmate has already seen is not.
-function supervisionPollDecision(taskId, threadId, previous) {
-  const row = threadRowById(threadId);
+function supervisionPollDecision(taskId, threadId, previous, row = threadRowById(threadId)) {
   const messages = row ? queuedMessages(row.pending_queue_json) : [];
   const queued = messages === null ? null : messages.length;
   const taskQueued = Array.isArray(messages)
@@ -6021,6 +6177,10 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     if (worker && workerProfile) {
       throw new Error("dispatch model and reasoningEffort only apply when creating a worker chat; the resolved existing chat was left unchanged");
     }
+    // An unconfigured controller still receives the established send result
+    // with a loud arming warning; it is not a home that can mint task records.
+    const laneIdentityHome = !caller && requestedTaskId !== null && fs.existsSync(path.join(controllerRoot(), "state"));
+    const laneCapture = laneIdentityHome ? preflightTerminalLaneIdentity(requestedTaskId, worker) : null;
     const createdChat = !worker;
     if (!worker) {
       const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, workerProfile });
@@ -6070,6 +6230,20 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       : null;
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
+    if (laneIdentityHome) {
+      try {
+        await ensureTerminalLaneIdentity(requestedTaskId, worker, landingBranch, laneCapture);
+      } catch (error) {
+        if (!createdChat) throw error;
+        const reason = supervisionErrorDetail(error);
+        const stop = reason.endsWith(".") ? "" : ".";
+        const created = wantsNewWorkspace
+          ? `Workspace ${worker.workspace_id} and chat ${worker.thread_id} were created`
+          : `Chat ${worker.thread_id} was created in workspace ${worker.workspace_id}`;
+        const exist = wantsNewWorkspace ? "Both still exist" : "The chat still exists";
+        throw new Error(`${created}, but dispatch stopped before sending because the firstmate task identity could not be recorded: ${reason}${stop} ${exist}: once task '${requestedTaskId}' can start, dispatch it with workspace ${worker.workspace_id} and thread ${worker.thread_id} rather than creating another worker.`);
+      }
+    }
     try {
       const { supervisionAcceptance, ...sent } = await sendMessage(worker, args.message, args.force === true);
       if (caller) {
@@ -6369,6 +6543,8 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs setup|doctor|install",
     "  fm-playbot-lanes.mjs tracked-churn-allowlist",
     "  fm-playbot-lanes.mjs addon-guard verify|check-index|reset <ref>|stash [--all|--include-untracked] [--message text]",
+    "  fm-playbot-lanes.mjs lane-task-state <task.meta> [state-dir]",
+    "  fm-playbot-lanes.mjs lane-task-retirable <task.meta> [state-dir]",
     "",
     `MCP tools: ${toolDefinitions().map((tool) => tool.name).join(", ")}`,
   ].join("\n");
@@ -6528,6 +6704,10 @@ async function main() {
     return;
   }
   if (command === "supervision-poll") return await supervisionPoll(process.argv.slice(3));
+  if (command === "lane-task-state" || command === "lane-task-retirable") {
+    if (![4, 5].includes(process.argv.length)) throw new Error(`${command} requires a lane metadata path and optional state directory`);
+    return laneTaskState(process.argv[3], command === "lane-task-retirable", process.argv[4]);
+  }
   if (command === "hook-pretool") {
     try {
       recordCaller(await readStdinJson());

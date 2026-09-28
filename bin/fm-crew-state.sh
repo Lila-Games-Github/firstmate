@@ -22,9 +22,12 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|playbot|none> · <detail>
 #
 # Logic, in order:
+#   Lane records (kind=lane) read persisted Playbot state through
+#   fm-playbot-lanes.mjs lane-task-state before any runtime backend probe.
+#   An idle chat requires a resolved status declaration to report completion.
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
 #      live on that host, so the local worktree and pane reads are skipped and
@@ -170,7 +173,7 @@ REMOTE_HOST=$(meta_value remote_host)
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
 # probe proves nothing for it - the remote arm below reads the true source.
-if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
+if [ "$KIND" != lane ] && [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
   emit unknown none "worktree gone (torn down?)"
 fi
 
@@ -198,6 +201,23 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(status_current_line "$LOG" "$KIND")
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+
+if [ "$KIND" = lane ]; then
+  LANE_STATE=$(node "$SCRIPT_DIR/fm-playbot-lanes.mjs" lane-task-state "$META" "$STATE" 2>/dev/null) \
+    || emit unknown playbot "lane worker state unreadable"
+  case "$LANE_STATE" in
+    working\ *) emit working playbot "$LANE_STATE" ;;
+    parked\ *) emit parked playbot "$LANE_STATE" ;;
+    failed\ *) emit failed playbot "$LANE_STATE" ;;
+    'unknown ready queued=0')
+      LANE_LOG_STATE=$(map_log_state "$LOG_LINE")
+      case "$LANE_LOG_STATE" in
+        done|blocked|paused|failed|parked) emit "$LANE_LOG_STATE" playbot "$(status_line_note "$LOG_LINE")" ;;
+      esac
+      ;;
+  esac
+  emit unknown playbot "$LANE_STATE"
+fi
 
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1

@@ -5,6 +5,11 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# kind=lane records own only Firstmate supervision, not the Playbot endpoint or
+# worktree. Their cleanup requires an idle, landed workspace and a done status,
+# retires local task/poll records through the same locks and backlog transition,
+# holding the check-publication lock from the idle read through record removal,
+# and preserves the Playbot chat, workspace, branches, and durable brief.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -396,7 +401,7 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   [ -n "$TEARDOWN_LOCK_BACKEND" ] || TEARDOWN_LOCK_BACKEND=tmux
   TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
-  if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
+  if [ "$TEARDOWN_LOCK_KIND" != secondmate ] && [ "$TEARDOWN_LOCK_KIND" != lane ] \
      && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
      && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
     TREEHOUSE_SLOT_LOCK_REQUIRED=1
@@ -963,8 +968,16 @@ validate_pr_poll_cleanup() {
 # the unlink. A "retain" disposition keeps the lock for the caller's remaining
 # record cleanup; every failure releases it before returning.
 remove_pr_poll_artifacts() {
+  fm_pr_poll_lock_acquire "$1" "$2" || return 1
+  remove_pr_poll_artifacts_locked "$@"
+}
+
+# Reuse a caller's publication lock without releasing and reacquiring it.
+# fm_lock_try_acquire intentionally reclaims a self-held lock, which would let
+# a concurrent publisher enter between a lane's idle read and its cleanup.
+remove_pr_poll_artifacts_locked() {
   local state_dir=$1 id=$2 lock_disposition=${3:-release} status=0
-  fm_pr_poll_lock_acquire "$state_dir" "$id" || return 1
+  [ "$FM_PR_POLL_LOCK_DIR" = "$state_dir/.$id.check-publish.lock" ] || return 1
   validate_pr_poll_cleanup "$state_dir" "$id" || status=1
   if [ "$status" -eq 0 ]; then
     fm_pr_poll_retirement_recover_one "$state_dir" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || status=1
@@ -1092,6 +1105,46 @@ else
   remote_teardown_rc=$?
 fi
 [ "$remote_teardown_rc" -eq 3 ] || exit "$remote_teardown_rc"
+
+# Lane tasks have no shell backend endpoint to close. Keep their record
+# cleanup separate so no generic backend or worktree teardown can reach Playbot.
+if [ "$TEARDOWN_META_KIND" = lane ]; then
+  fm_pr_poll_lock_acquire "$STATE" "$ID" || {
+    echo "REFUSED: cannot lock lane task $ID publication; preserving supervision." >&2
+    exit 1
+  }
+  LANE_TERMINAL_LINE=$(status_current_line "$STATE/$ID.status" lane)
+  if [ "$FORCE" != --force ] && [ "$(status_line_verb "$LANE_TERMINAL_LINE")" != "done" ]; then
+    echo "REFUSED: lane task $ID has no resolved done declaration; preserving supervision." >&2
+    exit 1
+  fi
+  if ! LANE_RETIRE_DETAIL=$(node "$SCRIPT_DIR/fm-playbot-lanes.mjs" lane-task-retirable "$META" "$STATE" 2>&1); then
+    echo "REFUSED: lane task $ID cannot retire its supervision: $LANE_RETIRE_DETAIL" >&2
+    exit 1
+  fi
+  LANE_BACKLOG_FLAGS=()
+  [ "$TEARDOWN_BACKLOG_TRANSITION" = close ] || LANE_BACKLOG_FLAGS=(--retain)
+  if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+    fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$TEARDOWN_META_SPAWN_GEN" \
+      "${LANE_BACKLOG_FLAGS[@]+"${LANE_BACKLOG_FLAGS[@]}"}" || exit 1
+  fi
+  remove_pr_poll_artifacts_locked "$STATE" "$ID" retain || exit 1
+  status_retire_presentation_task "$STATE" "$ID" || exit 1
+  if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+    LANE_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
+    fm_backlog_atomic_transition "$TEARDOWN_BACKLOG_TRANSITION" "$META" "$LANE_CLOSE_MARKER" \
+      "$DATA" "$ID" "$STATE" || {
+      echo "error: lane $ID record cleanup is incomplete ($FM_BACKLOG_TRANSITION_ERROR); pending backlog transition retained" >&2
+      exit 1
+    }
+  else
+    fm_backlog_atomic_transition remove "$META" "lane task record" "$STATE" || exit 1
+    printf 'Follow-up: update %s backlog manually (%s).\n' "$ID" "$TEARDOWN_BACKLOG_SKIP_REASON"
+  fi
+  fm_pr_poll_lock_release || exit 1
+  printf 'teardown %s complete (lane supervision retired; Playbot workspace and chat preserved)\n' "$ID"
+  exit 0
+fi
 
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,

@@ -144,6 +144,59 @@ fm_task_spawn_gen_capture() {
   esac
 }
 
+# A terminal lane may mint an identity only for an existing, dispatchable work
+# item with a durable brief. Call under the metadata and publication locks.
+# A pending teardown close or a completed/held/blocked row is never a new task.
+# On refusal FM_TASK_LANE_CREATION_ERROR names the actionable cause.
+fm_task_lane_creation_allowed() {  # <state-dir> <data-dir> <task-id>
+  local state=$1 data=$2 id=$3 lib_dir row_status row_state row_held row_blocked
+  FM_TASK_LANE_CREATION_ERROR=
+  if ! fm_task_id_creation_valid "$id"; then
+    FM_TASK_LANE_CREATION_ERROR="task id is not a valid new task id"
+    return 1
+  fi
+  if [ -e "$state/$id.meta" ] || [ -L "$state/$id.meta" ]; then
+    FM_TASK_LANE_CREATION_ERROR="state/$id.meta appeared before the lane identity was created"
+    return 1
+  fi
+  if [ -e "$state/$id.backlog-close" ] || [ -L "$state/$id.backlog-close" ]; then
+    FM_TASK_LANE_CREATION_ERROR="a teardown backlog close is still pending for this task; finish teardown before dispatching it again"
+    return 1
+  fi
+  lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || { FM_TASK_LANE_CREATION_ERROR="task libraries could not be located"; return 1; }
+  # shellcheck source=/dev/null
+  . "$lib_dir/fm-tasks-axi-lib.sh" || { FM_TASK_LANE_CREATION_ERROR="task libraries could not be loaded"; return 1; }
+  # shellcheck source=/dev/null
+  . "$lib_dir/fm-backlog-transition-lib.sh" || { FM_TASK_LANE_CREATION_ERROR="task libraries could not be loaded"; return 1; }
+  if ! fm_backlog_record_present "$data/$id/brief.md" "lane brief" "$data"; then
+    FM_TASK_LANE_CREATION_ERROR="brief is missing: $FM_BACKLOG_TRANSITION_ERROR; write data/$id/brief.md before dispatching"
+    return 1
+  fi
+  fm_backlog_row_probe "$data" "$id"
+  row_status=$?
+  if [ "$row_status" -ne 0 ]; then
+    if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+      FM_TASK_LANE_CREATION_ERROR="backlog item is missing; add $id to the backlog before dispatching"
+    elif [ "$row_status" -eq 124 ] || [ -n "${FM_BACKLOG_ROW_SHOW_WEDGED:-}" ]; then
+      FM_TASK_LANE_CREATION_ERROR="backlog lookup timed out: ${FM_BACKLOG_ROW_ERROR:-tasks-axi show $id did not finish}; retry the dispatch"
+    else
+      FM_TASK_LANE_CREATION_ERROR="backlog item could not be read: ${FM_BACKLOG_ROW_ERROR:-tasks-axi show $id failed}"
+    fi
+    return 1
+  fi
+  if ! fm_backlog_row_dispatchable "$FM_BACKLOG_ROW_STATE"; then
+    read -r row_state row_held row_blocked <<<"$FM_BACKLOG_ROW_STATE"
+    if [ "${row_held:-no}" != no ]; then
+      FM_TASK_LANE_CREATION_ERROR="backlog item is held; release the hold before dispatching"
+    elif [ "${row_blocked:-no}" != no ]; then
+      FM_TASK_LANE_CREATION_ERROR="backlog item is blocked; resolve its blockers before dispatching"
+    else
+      FM_TASK_LANE_CREATION_ERROR="backlog item is ${row_state:-in an unknown state}, not queued or in flight; it cannot start a new lane task"
+    fi
+    return 1
+  fi
+}
+
 fm_task_identity_retired() {
   local state=$1 id=$2 expected_spawn_gen=$3 meta current_spawn_gen kind remote_host lib_dir data_dir registry
   fm_pr_task_id_valid "$id" || return 0
