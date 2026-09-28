@@ -2825,7 +2825,7 @@ pass "a detected ambiguous reused-PID group is not signalled"
 # --- an accidentally orphaned runner is bounded by its owner ----------------
 #
 # Reproduces the shape that wedged a host: a listener detached into its own
-# process group, reparented to init when its session ended, and left running for
+# process group, reparented to init or a subreaper when its session ended, and left running for
 # a day with its blocking child - and everything that child spawned - still
 # executing. The cost was not the runner itself but the process churn under it,
 # which is why this asserts the whole descendant tree stops, not just the leader.
@@ -2940,10 +2940,39 @@ ORPHAN_PID=$(cat "$HORPHAN/state/procevent/orphan-src.runner")
 KEEP_PID=$(cat "$HKEEP/state/procevent/keep-src.runner")
 ORPHAN_DESCENDANT=$(cat "$TMP_ROOT/orphan-dead.descendant")
 
-# The reproduction condition itself: the listener is already an orphan in the
-# kernel's sense before anything is asserted about reaping it.
+# The reproduction condition itself: the listener has left the launching
+# process tree before anything is asserted about reaping it. Linux subreapers
+# may adopt it instead of PID 1, so check ancestry rather than one parent PID.
+listener_is_reparented() {  # <listener-pid> <launching-shell-pid>
+  local pid=$1 owner=$2 parent hop
+  for hop in $(seq 1 64); do
+    [ "$pid" != "$owner" ] || return 1
+    [ "$pid" != 1 ] || return 0
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    case "$parent" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$parent" -gt 0 ] && [ "$parent" != "$pid" ] || return 1
+    pid=$parent
+  done
+  return 1
+}
+
+# A live child must fail the same check; accepting every non-init parent would
+# otherwise let an attached listener satisfy the reproduction condition.
+sleep 120 &
+ATTACHED_PROOF_PID=$!
+if listener_is_reparented "$ATTACHED_PROOF_PID" "$$"; then
+  kill "$ATTACHED_PROOF_PID" 2>/dev/null || true
+  wait "$ATTACHED_PROOF_PID" 2>/dev/null || true
+  fail "the reparenting check accepted an attached child"
+fi
+kill "$ATTACHED_PROOF_PID" 2>/dev/null || true
+wait "$ATTACHED_PROOF_PID" 2>/dev/null || true
+pass "the reparenting check rejects a listener still under its launching shell"
+
 orphan_ppid=$(ps -o ppid= -p "$ORPHAN_PID" 2>/dev/null | tr -d '[:space:]')
-[ "$orphan_ppid" = 1 ] \
+listener_is_reparented "$ORPHAN_PID" "$$" \
   || fail "the listener under test was not reparented away from its session (ppid $orphan_ppid)"
 kill -0 -"$ORPHAN_PID" 2>/dev/null \
   || fail "the listener's process group was not running"

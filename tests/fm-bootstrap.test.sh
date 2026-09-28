@@ -813,7 +813,7 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin out missing_orca hostbin missing_path
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -821,9 +821,23 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" orca)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  # Model a host with Orca installed even when the real host has no Orca binary.
+  # The missing-tool fixture must hide that executable without hiding other tools.
+  hostbin=$(fm_fakebin "$case_dir/host")
+  fm_fake_exit0 "$hostbin" orca
+  PATH="$hostbin:$BASE_PATH" command -v orca >/dev/null \
+    || fail "the host-tool fixture did not expose Orca"
+  missing_path=$(fm_test_base_path_sans "$hostbin:$BASE_PATH" orca)
+  if PATH="$fakebin:$missing_path" command -v orca >/dev/null; then
+    fail "the missing-tool fixture still exposes host Orca"
+  fi
+  out=$(PATH="$fakebin:$missing_path" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
+
+  out=$(PATH="$fakebin:$hostbin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "backend=orca with its CLI present should be silent, got: $out"
 
   case_dir="$TMP_ROOT/orca-backend-not-selected"
   mkdir -p "$case_dir/home/config"
