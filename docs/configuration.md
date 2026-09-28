@@ -17,7 +17,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
-That header includes the optional `landing_branch=` field, which `bin/fm-landing-branch.sh` records or corrects on an existing task, `bin/fm-merge-local.sh` consumes as the local merge target, and `bin/fm-teardown.sh` consumes for its landed-work test.
+That header includes the optional `landing_branch=` field, which `bin/fm-landing-branch.sh` records or corrects on an existing task, `bin/fm-promote.sh --landing-branch` records on a promoted scout, `bin/fm-dod-lib.sh` hands to no-mistakes as the run's target branch, `bin/fm-merge-local.sh` consumes as the local merge target, and `bin/fm-teardown.sh` consumes for its landed-work test.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
