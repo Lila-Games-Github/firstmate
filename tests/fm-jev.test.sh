@@ -363,6 +363,86 @@ MD
   pass "Jev acceptance: local-only, no-mistakes, and scout briefs exclude generated scaffold"
 }
 
+test_accept_brief_structure_fixtures() {
+  local home before
+  home="$TMP_ROOT/accept-promoted"
+  write_config "$home" shadow off off off
+  write_key "$home"
+  make_accept_fixture "$home"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+# Task
+## Captain's intent
+Done when the report names the changed file.
+
+## Firstmate spec
+1. Scout-time investigation step is not a ship requirement.
+
+# Setup
+1. Create a branch.
+
+
+# Current ship Firstmate spec
+1. The report includes a passing test command.
+2. Preserve existing behavior.
+
+# Current delivery mode contract
+This task is now kind=ship with mode=local-only.
+
+# Definition of done
+1. Generated completion instructions are not task criteria.
+MD
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "promoted brief was not consulted once"
+  tail -1 "$REQUEST_LOG" | jq -e '.state.acceptance_criteria == {
+    criterion_1:"Done when the report names the changed file.",
+    criterion_2:"The report includes a passing test command.",
+    criterion_3:"Preserve existing behavior."
+  }' >/dev/null || fail "promoted brief scored the scout spec instead of the current ship spec"
+
+  home="$TMP_ROOT/accept-structure"
+  write_config "$home" shadow off off off
+  write_key "$home"
+  make_accept_fixture "$home"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+# Task
+## Captain's intent
+Fix the requested behavior. Done when:
+- The report names the changed file.
+- The report includes a passing test command.
+  Name the command.
+
+Unrelated follow-up prose is not scored.
+
+### Captain notes
+Done when existing behavior is preserved.
+
+## Firstmate spec
+Context before the requirements.
+
+### Requirements
+1. Keep the public interface stable.
+2. Add a regression test.
+
+#### Detail
+3. Document the change.
+
+# Definition of done
+1. Generated completion instructions are not task criteria.
+MD
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "structured brief was not consulted once"
+  tail -1 "$REQUEST_LOG" | jq -e '.state.acceptance_criteria == {
+    criterion_1:"Done when:\n- The report names the changed file.\n- The report includes a passing test command.\n  Name the command.",
+    criterion_2:"Done when existing behavior is preserved.",
+    criterion_3:"Keep the public interface stable.",
+    criterion_4:"Add a regression test.",
+    criterion_5:"Document the change."
+  }' >/dev/null || fail "done-when list or nested-heading criteria were lost"
+  pass "Jev acceptance: promoted specs, done-when lists, and nested headings extract task criteria"
+}
+
 test_unicode_triage_keeps_single_request_bound() {
   local home="$TMP_ROOT/triage-unicode" before
   write_config "$home" off shadow off off 100 2000
@@ -1320,6 +1400,7 @@ test_report_fixture_and_empty_error() {
 }
 
 test_accept_brief_delivery_fixtures
+test_accept_brief_structure_fixtures
 test_off_is_noop_for_every_adapter
 test_missing_key_diagnostic_names_the_key
 test_absent_config_defaults_active
