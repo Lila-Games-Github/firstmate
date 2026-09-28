@@ -1,0 +1,37 @@
+ok - fm-playbot-lanes: node 26.7.0 resolved at /home/sanchith/.local/bin/node
+To /tmp/fm-playbot-lanes.FbZ2Eb/fixture/worker-remote.git
+ * [new branch]      main -> main
+Preparing worktree (new branch 'alt')
+To /tmp/fm-playbot-lanes.FbZ2Eb/fixture/controller-remote.git
+ * [new branch]      main -> main
+To /tmp/fm-playbot-lanes.FbZ2Eb/fixture/user:freshness-secret-token@freshness-remote.git
+ * [new branch]      main -> main
+Preparing worktree (new branch 'freshness-behind')
+Preparing worktree (new branch 'freshness-diverged')
+To /tmp/fm-playbot-lanes.FbZ2Eb/fixture/user:freshness-secret-token@freshness-remote.git
+   4882ea9..0fd0d29  main -> main
+Preparing worktree (new branch 'freshness-clean')
+Preparing worktree (new branch 'freshness-ahead')
+Preparing worktree (new branch 'freshness-race')
+Preparing worktree (new branch 'freshness-identity')
+HEAD is now at 0fd0d29 landing advance
+Warning: you are leaving 1 commit behind, not connected to
+any of your branches:
+
+  30d784f race moved head
+
+If you want to keep it by creating a new branch, this may be a good time
+to do so with:
+
+ git branch <new-branch-name> 30d784f
+
+Switched to branch 'freshness-race'
+Cloning into '/tmp/fm-playbot-lanes.FbZ2Eb/fixture/freshness-shallow'...
+To /tmp/fm-playbot-lanes.FbZ2Eb/fixture/freshness-partial-remote.git
+ * [new branch]      main -> main
+Cloning into '/tmp/fm-playbot-lanes.FbZ2Eb/fixture/freshness-partial'...
+To /tmp/fm-playbot-lanes.FbZ2Eb/fixture/freshness-partial-remote.git
+   f0e0619..fced2ee  main -> main
+ok - fm-playbot-lanes: node syntax is valid
+Preparing worktree (new branch 'retirement-output-regression')
+not ok - unlisted ignored output or an unidentified addon file was discardable

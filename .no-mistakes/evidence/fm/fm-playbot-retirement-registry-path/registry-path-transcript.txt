@@ -1,0 +1,6 @@
+$ FM_HOME=/home/sanchith/LILA/firstmate bin/fm-project-mode.sh --path prototype-game
+/var/home/sanchith/LILA/ProjectWhite
+exit=0
+$ FM_HOME=/home/sanchith/LILA/firstmate bin/fm-project-mode.sh prototype-game
+local-only on
+exit=0
