@@ -1010,14 +1010,15 @@ The fake DevTools endpoint inside the test serves the 0.94.0 `threads:launch` su
 ### Retirement path evidence (2026-09-28)
 
 With Node v26.7.0, `bin/fm-test-run.sh tests/fm-playbot-lanes.test.sh tests/fm-task-delivery.test.sh` completed both suites without a gate skip.
-The lane regression covers an externally registered clone with a nested Playbot root, duplicate project-name refusal, disposable build output and exact injected addon files beside blocking unlisted ignored output and unidentified addon files, and an 8,295-file orphan whose complete private path inventory is hashed while response samples remain bounded.
+The lane regression covers an externally registered clone with a nested Playbot root, duplicate project-name refusal, disposable build output including `.import/` import caches and `Builds/` exports, exact injected addon files beside blocking unlisted ignored output and unidentified addon files, and an 8,295-file orphan whose complete private path inventory is hashed while response samples remain bounded.
+Similarly named directories and ignored regular files named `.import` or `Builds` remain blockers.
 It also proves that changed workspace contents or tampered private inventory bytes refuse deletion before IPC, and that fresh complete evidence permits authorized retirement.
 The same public retirement fixture rejects the earlier executable before the fix.
 
 ```text
-ok - fm-playbot-lanes: public retirement blocks unlisted ignored output and unidentified addon files but not exact injected files
+ok - fm-playbot-lanes: public retirement discards import/export output and exact injected files while unrelated ignored/addon files block
 ok - fm-playbot-lanes: large orphan evidence is bounded, complete, and checked before deletion
-FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=436300
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=445872
 ```
 
 ## Read-only Playbot engine readiness

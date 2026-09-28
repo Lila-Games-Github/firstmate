@@ -119,7 +119,7 @@ function isTrackedPlaybotChurn(file) {
 // use the exact tracked-churn allowlist. Orphans lack Git ignore evidence and
 // always need an inventory and explicit discard authorization when any file
 // remains, including apparent caches.
-const DISCARDABLE_IGNORED_CACHE_SEGMENTS = new Set([".godot", "__pycache__", ".task_tmp"]);
+const DISCARDABLE_IGNORED_CACHE_SEGMENTS = new Set([".godot", ".import", "__pycache__", ".task_tmp", "Builds"]);
 const PLAYBOT_ADDON_PREFIX = "prototype-game/addons/playbot/";
 const PLAYBOT_NATIVE_ADDON_PREFIX = "prototype-game/addons/playbot/native/";
 const PLAYBOT_INJECTED_ADDON_PATHS = Object.freeze([
@@ -1861,7 +1861,7 @@ function playbotAddonPath(file) {
 
 function discardableIgnoredKind(file) {
   if (String(file).startsWith(PLAYBOT_NATIVE_ADDON_PREFIX)) return "playbot-native-addon";
-  return String(file).split("/").some((segment) => DISCARDABLE_IGNORED_CACHE_SEGMENTS.has(segment)) ? "build-cache" : null;
+  return String(file).split("/").slice(0, -1).some((segment) => DISCARDABLE_IGNORED_CACHE_SEGMENTS.has(segment)) ? "build-cache" : null;
 }
 
 const FILE_SHA256_CACHE_LIMIT = 4096;
@@ -6104,7 +6104,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       landingEvidence: { kind: landingOptions.localLanding ? "local-branch" : "remote", registry: landingOptions.registry },
       trackedChurnAllowlist: PLAYBOT_TRACKED_CHURN_PATHS,
       untrackedBoundary: "Non-ignored untracked files block retirement unless they sit at an exact known Playbot-injected path under prototype-game/addons/playbot/ or are byte-identical to the main clone's copy there; those are reported as discardable.",
-      ignoredBoundary: "Ignored build output under .godot, __pycache__, or .task_tmp, Playbot's prototype-game/addons/playbot/native/ tree, and exact or byte-identified injected addon files are discardable; every other ignored path blocks unless an explicit ignored-files authorization covers it.",
+      ignoredBoundary: "Ignored build output under .godot/, .import/, __pycache__/, .task_tmp/, or Builds/, Playbot's prototype-game/addons/playbot/native/ tree, and exact or byte-identified injected addon files are discardable; every other ignored path blocks unless an explicit ignored-files authorization covers it.",
       discardableCodes: DISCARDABLE_LOCAL_CHANGE_CODES,
       workspaces,
     };

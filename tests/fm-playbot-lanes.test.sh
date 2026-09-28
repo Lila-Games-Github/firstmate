@@ -310,9 +310,17 @@ rpc() {
 quick_ws="$FIXTURE_ROOT/worker/.worktrees/retirement-output-regression"
 git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-output-regression "$quick_ws" origin/main >/dev/null \
   || fail "could not create the output retirement regression worktree"
-printf '.build-output/\n' >> "$(git -C "$FIXTURE_ROOT/worker" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
-mkdir -p "$quick_ws/.build-output" "$quick_ws/prototype-game/addons/playbot"
+printf '.build-output/\n.import/\nBuilds/\n.imported/\nBuilds-source/\n/tools/.import\n/tools/Builds\n' >> "$(git -C "$FIXTURE_ROOT/worker" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+mkdir -p "$quick_ws/.build-output" "$quick_ws/prototype-game/addons/playbot" \
+  "$quick_ws/prototype-game/.import" "$quick_ws/prototype-game/Builds" \
+  "$quick_ws/prototype-game/.imported" "$quick_ws/prototype-game/Builds-source" "$quick_ws/tools"
 printf 'cache\n' > "$quick_ws/.build-output/cache.bin"
+printf 'import cache\n' > "$quick_ws/prototype-game/.import/icon.stex"
+printf 'export output\n' > "$quick_ws/prototype-game/Builds/game.pck"
+printf 'user source\n' > "$quick_ws/prototype-game/.imported/user.gd"
+printf 'user source\n' > "$quick_ws/prototype-game/Builds-source/user.gd"
+printf 'user work\n' > "$quick_ws/tools/.import"
+printf 'user work\n' > "$quick_ws/tools/Builds"
 printf 'injected plugin\n' > "$quick_ws/prototype-game/addons/playbot/plugin.cfg"
 printf 'user tool\n' > "$quick_ws/prototype-game/addons/playbot/my_tool.gd"
 FIXTURE_ROOT="$FIXTURE_ROOT" QUICK_WS="$quick_ws" node --no-warnings <<'NODE'
@@ -325,21 +333,25 @@ db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)').run('ws-output-reg
 db.close();
 NODE
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-worker","landingBranch":"main"}}}')
-OUT="$out" node --no-warnings <<'NODE' || fail "unlisted ignored output or an unidentified addon file was discardable"
+OUT="$out" node --no-warnings <<'NODE' || fail "import/export output was blocked or unrelated ignored/addon files were discardable"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 const workspace = value.workspaces.find(workspace => workspace.workspace.id === 'ws-output-regression');
 const root = workspace.roots[0];
-if (workspace.retirable || root.ignoredPathCount !== 1) process.exit(1);
-if (workspace.blockers.find(blocker => blocker.code === 'ignored-files')?.paths.join(',') !== '.build-output/cache.bin') process.exit(1);
+if (workspace.retirable || root.ignoredPathCount !== 7) process.exit(1);
+if (workspace.blockers.find(blocker => blocker.code === 'ignored-files')?.paths.join(',') !== '.build-output/cache.bin,prototype-game/.imported/user.gd,prototype-game/Builds-source/user.gd,tools/.import,tools/Builds') process.exit(1);
+const output = Object.fromEntries(root.discardableIgnoredPaths.map(entry => [entry.path, entry.kind]));
+if (Object.keys(output).length !== 2 || output['prototype-game/.import/icon.stex'] !== 'build-cache' || output['prototype-game/Builds/game.pck'] !== 'build-cache') process.exit(1);
 if (workspace.blockers.find(blocker => blocker.code === 'untracked-files')?.paths.join(',') !== 'prototype-game/addons/playbot/my_tool.gd') process.exit(1);
 if (root.discardableUntrackedPaths.map(entry => entry.path).join(',') !== 'prototype-game/addons/playbot/plugin.cfg') process.exit(1);
 NODE
-rm -rf "$quick_ws/.build-output" "$quick_ws/prototype-game/addons/playbot/my_tool.gd"
+rm -rf "$quick_ws/.build-output" "$quick_ws/prototype-game/addons/playbot/my_tool.gd" \
+  "$quick_ws/prototype-game/.imported" "$quick_ws/prototype-game/Builds-source" "$quick_ws/tools"
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"project-worker","landingBranch":"main"}}}')
-OUT="$out" node --no-warnings <<'NODE' || fail "an exact injected plugin file still blocks a landed clean workspace"
+OUT="$out" node --no-warnings <<'NODE' || fail "import/export output or an exact injected plugin file still blocks a landed clean workspace"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 const workspace = value.workspaces.find(workspace => workspace.workspace.id === 'ws-output-regression');
 if (!workspace.retirable || workspace.roots[0].discardableUntrackedPaths[0]?.path !== 'prototype-game/addons/playbot/plugin.cfg') process.exit(1);
+if (workspace.roots[0].ignoredPathCount !== 2 || workspace.roots[0].discardableIgnoredPaths.length !== 2) process.exit(1);
 NODE
 git -C "$FIXTURE_ROOT/worker" worktree remove --force "$quick_ws" >/dev/null \
   || fail "could not remove the isolated regression fixture"
@@ -351,7 +363,7 @@ db.prepare('DELETE FROM workspace_roots WHERE workspace_id = ?').run('ws-output-
 db.prepare('DELETE FROM workspaces WHERE id = ?').run('ws-output-regression');
 db.close();
 NODE
-pass "fm-playbot-lanes: public retirement blocks unlisted ignored output and unidentified addon files but not exact injected files"
+pass "fm-playbot-lanes: public retirement discards import/export output and exact injected files while unrelated ignored/addon files block"
 
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "list_projects did not return all fixture projects"
