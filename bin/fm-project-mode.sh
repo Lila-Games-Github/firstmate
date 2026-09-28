@@ -8,8 +8,9 @@
 # yolo are resolved by firstmate at intake and passed explicitly to
 # bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
-# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init), and
-# bin/fm-spawn.sh's advisory registry-deviation notice.
+# bin/fm-home-seed.sh (refuse local-only seeding, run no-mistakes init),
+# bin/fm-spawn.sh's advisory registry-deviation notice, and (via --path)
+# bin/fm-playbot-lanes.mjs's workspace-retirement registry landing check.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
@@ -34,7 +35,12 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh [--raw] <project-name>
+# --path prints the registered clone path without reading or changing that clone.
+# An exact registry entry may name an external absolute path as "at /path" or
+# "at `/path with spaces`" in its description; absent that clause, the path is
+# FM_HOME/projects/<name>. Missing, duplicate, or ambiguous entries fail closed.
+# --path is independent of --raw and leaves default posture output unchanged.
+# Usage: fm-project-mode.sh [--raw|--path] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,11 +49,40 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 RAW=0
+PATH_ONLY=0
 if [ "${1:-}" = "--raw" ]; then
   RAW=1
   shift
 fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+if [ "${1:-}" = "--path" ]; then
+  PATH_ONLY=1
+  shift
+fi
+NAME=${1:?usage: fm-project-mode.sh [--raw|--path] <project-name>}
+
+if [ "$PATH_ONLY" -eq 1 ]; then
+  awk -v n="$NAME" -v fallback="$FM_HOME/projects/$NAME" '
+    $1=="-" && $2==n {
+      count++;
+      rest=$0;
+      while (match(rest, / at (`[^`]+`|\/[^[:space:]]+)/)) {
+        value=substr(rest, RSTART+4, RLENGTH-4);
+        if (value ~ /^`/) { sub(/^`/, "", value); sub(/`$/, "", value) }
+        if (value !~ /^\//) invalid=1;
+        found++; result=value;
+        rest=substr(rest, RSTART+RLENGTH);
+      }
+    }
+    END {
+      if (count!=1 || found>1 || invalid) exit 1;
+      print found==1 ? result : fallback;
+    }
+  ' "$REG" || {
+    echo "error: registered clone path for $NAME is missing or ambiguous in $REG" >&2
+    exit 1
+  }
+  exit 0
+fi
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
