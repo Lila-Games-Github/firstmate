@@ -1,0 +1,4 @@
+=== retire_workspace ws-retire-orphan-alias (stored path via symlinked parent: /tmp/fm-playbot-lanes.80E1Ol/fixture/orphan-storage-alias/orphan-alias) ===
+{
+  "error": "Workspace ws-retire-orphan-alias failed its pre-action retirement baseline: workspace root rows changed after the immediate safety inspection"
+}
