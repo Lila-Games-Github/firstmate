@@ -25,7 +25,7 @@
 #   10  reset-required: <ref>        safe to reset, onto exactly that ref
 #       churn-paths: <paths...>      allowlisted Playbot churn the reset would
 #                                    discard, empty when the working tree is clean
-#   20  blocked: <evidence>          not safe; one line naming the evidence
+#   20  blocked: <evidence>          not safe; evidence and a preservation/repair remedy
 #   2   usage error (message on stderr)
 # The named states, all of them:
 #   current            HEAD is the landing tip.
@@ -54,8 +54,10 @@
 #                      `--untracked-files=all`, so no `status.showUntrackedFiles`
 #                      in the shared config can silence it: a verdict of this
 #                      script never depends on operator configuration.
-#   diverged                                     blocked.
-#   absent local landing branch                  blocked.
+#   diverged                                     blocked; preserve dirty work,
+#                      then rebase the workspace branch onto the landing ref.
+#   absent local landing branch                  blocked; firstmate restores the
+#                      intended local landing ref from published or known history.
 #   --publishes and the local landing branch carries commits its remote tip lacks
 #                      blocked, naming both commits. Strictly ahead: one push of
 #                      the landing branch clears it. DIVERGED, each side carrying
@@ -97,9 +99,9 @@
 # allowlist as its cause and the remedy for the failure it hit - node absent, the
 # owner file missing, or the owner command failing - and explicitly does NOT claim
 # the paths are outside the allowlist, since nothing was compared.
-# Membership is a whole-string comparison of a TRACKED change's pathname against
-# those entries: no pattern, no line matching, no untracked file, and no prefix,
-# extension or basename.
+# Membership compares literal TRACKED pathnames against the owner entries:
+# trailing slash entries name a directory tree; all others name exact paths.
+# No extension, basename, pattern, or untracked file is inferred to be churn.
 set -eu
 
 # The contract above says this script changes no index, and `git status` is the
@@ -186,8 +188,8 @@ EOF
 # preserves a newline inside a pathname exactly, and a matcher that split on
 # newlines would call `scratch<newline>prototype-game/project.godot` churn because
 # one of its lines is an allowlisted entry. The `churn-paths:` line is
-# space-separated, which is safe only because the owned paths carry no whitespace;
-# an exact-match test is what keeps that a property of the data rather than luck.
+# shell-quoted and space-separated, so a tree entry can name a file containing
+# whitespace without losing its exact identity in the disclosure command.
 # The allowlist names TRACKED paths Playbot's editor rewrites, and its owner is
 # explicit that no untracked file is inferred to be churn. An untracked path also
 # cannot be disclosed: `git diff HEAD -- <path>` shows nothing for content git does
@@ -200,7 +202,7 @@ CLASSIFICATION=
 classify_changed_path() {
   local status=$1 candidate=$2 entry listed=0
   for entry in ${CHURN_ALLOWLIST[@]+"${CHURN_ALLOWLIST[@]}"}; do
-    if [ "$candidate" = "$entry" ]; then
+    if [ "$candidate" = "$entry" ] || { [[ "$entry" == */ ]] && [[ "$candidate" == "$entry"* ]]; }; then
       listed=1
       break
     fi
@@ -247,10 +249,10 @@ CHANGED_STATUS=()
 collect_changed_paths() {
   local record pending=0 status='' spool
   spool=$(mktemp) \
-    || blocked "working-tree state of this lane workspace could not be read: no temporary file could be created to read it into"
+    || blocked "working-tree state of this lane workspace could not be read: no temporary file could be created to read it into; make TMPDIR writable with free space, then rerun the check"
   if ! git --no-optional-locks status --porcelain --untracked-files=all -z > "$spool" 2>/dev/null; then
     rm -f "$spool"
-    blocked "working-tree state of this lane workspace could not be read, so no uncommitted work can be shown to be absent and nothing here is safe to discard"
+    blocked "working-tree state of this lane workspace could not be read, so no uncommitted work can be shown to be absent and nothing here is safe to discard; run git status --porcelain --untracked-files=all in this workspace to diagnose and repair the Git read error, then rerun the check"
   fi
   while IFS= read -r -d '' record; do
     if [ "$pending" -eq 1 ]; then
@@ -269,11 +271,11 @@ collect_changed_paths() {
   rm -f "$spool"
 }
 
-git rev-parse --git-dir >/dev/null 2>&1 || blocked "not a git worktree: $(pwd -P)"
+git rev-parse --git-dir >/dev/null 2>&1 || blocked "not a git worktree: $(pwd -P); run this check from the top of the Playbot workspace, or have firstmate repair its Git worktree registration if that directory is already the workspace"
 
 LOCAL_REF="refs/heads/$LANDING"
 LOCAL_TIP=$(git rev-parse --verify --quiet "$LOCAL_REF") || LOCAL_TIP=
-[ -n "$LOCAL_TIP" ] || blocked "local landing branch $LANDING is missing from this repository"
+[ -n "$LOCAL_TIP" ] || blocked "local landing branch $LANDING is missing from this repository; have firstmate fetch the published landing branch into $LOCAL_REF from the correct remote, or restore the intended local landing ref from its known commit, then rerun the check"
 
 if [ "$PUBLISHES" -eq 1 ]; then
   # The whole question is about ONE ref pair: does refs/remotes/<remote>/<landing>
@@ -287,7 +289,7 @@ if [ "$PUBLISHES" -eq 1 ]; then
   # a different remote branch, and neither says anything about this ref pair.
   UPSTREAM_REF=$(git rev-parse --symbolic-full-name --verify --quiet "$LANDING@{upstream}") \
     || UPSTREAM_REF=
-  REMOTES=$(git remote) || blocked "the remotes of this repository could not be listed, so the published tip of landing branch $LANDING cannot be found"
+  REMOTES=$(git remote) || blocked "the remotes of this repository could not be listed, so the published tip of landing branch $LANDING cannot be found; run git remote in this workspace to diagnose and repair the Git configuration/read error, then rerun the check"
   REMOTE_TIP=
   REMOTE_TIP_REF=
   REMOTE_MATCHES=0
@@ -350,7 +352,7 @@ EOF
         [ -n "$UPSTREAM_BRANCH" ] || UPSTREAM_BRANCH=$LANDING
         if [ -n "$UPSTREAM_REMOTE" ] && [ "$UPSTREAM_REMOTE" != "." ]; then
           UNRESOLVED_CAUSE="an upstream of $UPSTREAM_REMOTE/$UPSTREAM_BRANCH is configured but the remote-tracking ref it names does not exist in this repository, so it was deleted upstream and pruned, or never fetched"
-          UNRESOLVED_REMEDY="run git fetch $UPSTREAM_REMOTE $UPSTREAM_BRANCH to pick it up, or push $LANDING if it has never been published"
+          UNRESOLVED_REMEDY="run git fetch $UPSTREAM_REMOTE refs/heads/$LANDING:refs/remotes/$UPSTREAM_REMOTE/$LANDING to pick it up, or push $LANDING if it has never been published"
         else
           UNRESOLVED_CAUSE="it has no upstream configured"
         fi ;;
@@ -363,7 +365,7 @@ EOF
   # that has DIVERGED cannot be - that push is rejected as a non-fast-forward, and
   # prescribing it would send the operator to a command that cannot work.
   PUBLISH_COUNTS=$(git rev-list --left-right --count "$LOCAL_REF...$REMOTE_TIP") \
-    || blocked "distance between $LOCAL_REF and the remote tip $REMOTE_TIP_REF of landing branch $LANDING could not be read"
+    || blocked "distance between $LOCAL_REF and the remote tip $REMOTE_TIP_REF of landing branch $LANDING could not be read; run git rev-list --left-right --count $LOCAL_REF...$REMOTE_TIP_REF to diagnose and repair unreadable Git objects (fetch missing history from the correct remote), then rerun the check"
   read -r RIDE_ALONG REMOTE_ONLY <<EOF
 $PUBLISH_COUNTS
 EOF
@@ -374,7 +376,7 @@ EOF
 fi
 
 COUNTS=$(git rev-list --left-right --count "$LOCAL_REF...HEAD") \
-  || blocked "ahead/behind distance between $LOCAL_REF and HEAD could not be read"
+  || blocked "ahead/behind distance between $LOCAL_REF and HEAD could not be read; run git rev-list --left-right --count $LOCAL_REF...HEAD to diagnose and repair unreadable Git objects (fetch missing history from the correct remote), then rerun the check"
 read -r BEHIND AHEAD <<EOF
 $COUNTS
 EOF
@@ -383,7 +385,7 @@ if [ "$BEHIND" -eq 0 ] && [ "$AHEAD" -eq 0 ]; then
   current "HEAD is the tip of $LANDING ($LOCAL_TIP)"
 fi
 if [ "$BEHIND" -gt 0 ] && [ "$AHEAD" -gt 0 ]; then
-  blocked "lane workspace has diverged from landing branch $LANDING: $BEHIND commit(s) behind, $AHEAD of its own"
+  blocked "lane workspace has diverged from landing branch $LANDING: $BEHIND commit(s) behind, $AHEAD of its own; preserve any uncommitted work separately, then rebase the workspace branch onto $LOCAL_REF and resolve conflicts before rerunning the check - never reset away the lane commits"
 fi
 if [ "$AHEAD" -gt 0 ]; then
   current "the tip of $LANDING ($LOCAL_TIP) is an ancestor of HEAD, which is $AHEAD commit(s) ahead of it"
@@ -400,7 +402,7 @@ for ((i = 0; i < ${#CHANGED_PATHS[@]}; i++)); do
   [ -n "$path" ] || continue
   classify_changed_path "${CHANGED_STATUS[$i]}" "$path"
   case "$CLASSIFICATION" in
-    churn) CHURN_MODIFIED="${CHURN_MODIFIED:+$CHURN_MODIFIED }$path" ;;
+    churn) CHURN_MODIFIED="${CHURN_MODIFIED:+$CHURN_MODIFIED }$(printf '%q' "$path")" ;;
     untracked-at-allowlisted-path)
       UNTRACKED_LISTED="${UNTRACKED_LISTED:+$UNTRACKED_LISTED, }$path" ;;
     *) OUTSIDE="${OUTSIDE:+$OUTSIDE, }$path" ;;
@@ -415,7 +417,7 @@ if [ -n "$OUTSIDE" ] && [ -n "$CHURN_OWNER_UNREADABLE" ]; then
   # allowlist would be the opposite of the truth - some of them may well be on it.
   blocked "lane workspace is behind landing branch $LANDING and carries uncommitted changes, but the Playbot churn allowlist could not be read, so nothing here can be shown to be safe to discard and none of these paths is claimed to be outside that allowlist: $OUTSIDE; $CHURN_OWNER_UNREADABLE"
 fi
-[ -z "$OUTSIDE" ] || EVIDENCE="uncommitted changes outside the Playbot churn allowlist: $OUTSIDE"
+[ -z "$OUTSIDE" ] || EVIDENCE="uncommitted changes outside the Playbot churn allowlist: $OUTSIDE; save a patch of tracked changes with git diff HEAD --binary outside this workspace and copy untracked files outside it, then restore only the saved tracked paths from HEAD in both index and worktree and move the copied untracked files aside before rerunning the check (do not commit these changes on the stale base; reapply the saved work after the base is current)"
 if [ -n "$UNTRACKED_LISTED" ]; then
   EVIDENCE="${EVIDENCE:+$EVIDENCE; and }untracked files at allowlisted churn paths, which are never classified as churn because git diff HEAD records nothing for content git does not track, so they could only be discarded unseen: $UNTRACKED_LISTED (move them out of this workspace, or delete them if they are unwanted - git is not holding this content, so moving them aside is the option that keeps it)"
 fi

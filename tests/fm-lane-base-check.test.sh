@@ -230,14 +230,15 @@ test_modifications_outside_the_allowlist_block() {
   assert_not_contains "$out" "plugin.gd.uid" "the block blames allowlisted churn"
   assert_grep "real work" "$dir/wt/app.txt" "the check discarded work outside the allowlist"
 
-  # A neighbouring path under the same directory is not churn: the allowlist is
-  # literal paths, not a directory prefix.
-  dir=$(make_case behind-neighbour)
-  land_locally "$dir" "sibling lane landed locally, not pushed"
-  printf 'extends Node\n' > "$dir/wt/prototype-game/addons/playbot/plugin.gd"
-  git -C "$dir/wt" add prototype-game/addons/playbot/plugin.gd
-  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
-    "a neighbouring addons path must not be treated as churn"
+  assert_contains "$out" "save a patch" "tracked-modification block names no preservation remedy"
+  assert_not_contains "$out" "commit them" "committing here would cause divergence"
+  git -C "$dir/wt" diff HEAD --binary -- app.txt > "$dir/saved.patch"
+  git -C "$dir/wt" restore --source=HEAD --staged --worktree -- app.txt
+  expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" "saving a patch and restoring must clear the block"
+  git -C "$dir/wt" reset --hard refs/heads/landing/frog-pile >/dev/null
+  git -C "$dir/wt" apply "$dir/saved.patch" || fail "saved patch could not restore the work after reset"
+  assert_grep "real work" "$dir/wt/app.txt" "patch lost the saved work"
+
   pass "fm-lane-base-check.sh: modifications outside the allowlist block the reset"
 }
 
@@ -451,12 +452,18 @@ test_diverged_and_absent_landing_branch_block() {
   out=$(run_check "$dir/wt" landing/frog-pile)
   expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" "a diverged workspace must block"
   assert_contains "$out" "diverged" "the diverged block does not name the state"
+  assert_contains "$out" "rebase" "divergence block lacks a remedy"
+  git -C "$dir/wt" rebase landing/frog-pile >/dev/null 2>&1 || fail "rebase remedy failed"
+  expect_code 0 "$(check_code "$dir/wt" landing/frog-pile)" "rebase did not clear divergence"
 
   out=$(run_check "$dir/wt" landing/no-such-branch)
   expect_code 20 "$(check_code "$dir/wt" landing/no-such-branch)" \
     "an absent local landing branch must block"
   assert_contains "$out" "landing/no-such-branch is missing" \
     "the absent-branch block does not name the branch"
+  assert_contains "$out" "fetch" "missing-branch block lacks a remedy"
+  git -C "$dir/wt" fetch origin landing/frog-pile:refs/heads/landing/no-such-branch >/dev/null 2>&1
+  expect_code 0 "$(check_code "$dir/wt" landing/no-such-branch)" "fetching a local landing ref did not clear the block"
   pass "fm-lane-base-check.sh: a diverged workspace and an absent landing branch block"
 }
 
@@ -736,6 +743,7 @@ test_an_unreadable_working_tree_blocks_instead_of_authorizing_a_reset() {
   # Corrupting the worktree's index makes `git status` fail for real, exactly as a
   # damaged or concurrently written index would; the ref reads it does not touch.
   gitdir=$(git -C "$dir/wt" rev-parse --absolute-git-dir)
+  cp "$gitdir/index" "$dir/saved-index"
   printf 'not an index\n' > "$gitdir/index"
   git -C "$dir/wt" status --porcelain >/dev/null 2>&1 \
     && fail "the fixture did not actually make git status fail"
@@ -748,6 +756,9 @@ test_an_unreadable_working_tree_blocks_instead_of_authorizing_a_reset() {
     "an unreadable working tree was reported as safe to reset"
   assert_grep "work nobody has committed yet" "$dir/wt/app.txt" \
     "the check discarded work it could not even read"
+  assert_contains "$out" "git status" "unreadable-tree block lacks a diagnosis remedy"
+  cp "$dir/saved-index" "$gitdir/index"
+  assert_contains "$(run_check "$dir/wt" landing/frog-pile)" "save a patch" "repairing the index did not clear the read error"
   pass "fm-lane-base-check.sh: an unreadable working tree blocks instead of authorizing a reset"
 }
 
@@ -756,7 +767,7 @@ test_an_unreadable_working_tree_blocks_instead_of_authorizing_a_reset() {
 # matches, so a future edit to the owner's list flows through with no edit here.
 test_churn_classification_comes_from_its_owner() {
   local dir published path out paths count
-  published=$(node "$OWNER" tracked-churn-allowlist) \
+  published=$(node "$OWNER" tracked-churn-allowlist | sed 's@/$@/owner-probe.gd@') \
     || fail "the allowlist owner does not publish its list"
   count=$(printf '%s\n' "$published" | grep -c .)
   [ "$count" -gt 0 ] || fail "the allowlist owner published an empty list"
@@ -849,6 +860,65 @@ SH
   pass "fm-lane-base-check.sh: an unreadable allowlist owner fails safe and names its cause"
 }
 
+test_addon_injection_is_disclosed_as_tracked_churn() {
+  local dir out
+  dir=$(make_case addon-injection)
+  printf 'original addon\n' > "$dir/repo/prototype-game/addons/playbot/plugin.gd"
+  printf 'scope\n' > "$dir/repo/prototype-game/addons/playbot/playbot_embedded_size_scope.gd"
+  printf 'nested source\n' > "$dir/repo/prototype-game/addons/playbot/source with spaces.gd"
+  git -C "$dir/repo" add -A
+  git -C "$dir/repo" commit -qm "tracked addon sources"
+  git -C "$dir/wt" reset --hard refs/heads/landing/frog-pile >/dev/null
+  land_locally "$dir" "new landing"
+  printf 'injected addon\n' > "$dir/wt/prototype-game/addons/playbot/plugin.gd"
+  printf 'rewrite\n' > "$dir/wt/prototype-game/addons/playbot/source with spaces.gd"
+  rm "$dir/wt/prototype-game/addons/playbot/plugin.gd.uid" "$dir/wt/prototype-game/addons/playbot/playbot_embedded_size_scope.gd"
+  out=$(run_check "$dir/wt" landing/frog-pile)
+  expect_code 10 "$(check_code "$dir/wt" landing/frog-pile)" "addon rewrite and deletions should require reset"
+  assert_contains "$out" "playbot_embedded_size_scope.gd" "deleted source was not disclosed"
+  assert_contains "$out" "plugin.gd.uid" "deleted UID was not disclosed"
+  assert_contains "$out" 'source\ with\ spaces.gd' "whitespace path was not shell-quoted for disclosure"
+  printf 'untracked addon\n' > "$dir/wt/prototype-game/addons/playbot/untracked.gd"
+  expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" "untracked addon must still block"
+  pass "fm-lane-base-check: addon injection is tracked churn, with untracked files protected"
+}
+
+test_neighbouring_addon_trees_are_not_churn() {
+  local dir out neighbour
+  for neighbour in playbot_extra playbotx; do
+    dir=$(make_case "neighbour-$neighbour")
+    mkdir -p "$dir/repo/prototype-game/addons/$neighbour"
+    printf 'neighbour source\n' > "$dir/repo/prototype-game/addons/$neighbour/x.gd"
+    git -C "$dir/repo" add -A
+    git -C "$dir/repo" commit -qm "neighbouring addon"
+    git -C "$dir/wt" reset --hard refs/heads/landing/frog-pile >/dev/null
+    land_locally "$dir" "new landing"
+    printf 'real work\n' > "$dir/wt/prototype-game/addons/$neighbour/x.gd"
+    printf 'uid://rewritten\n' > "$dir/wt/prototype-game/addons/playbot/plugin.gd.uid"
+    out=$(run_check "$dir/wt" landing/frog-pile)
+    expect_code 20 "$(check_code "$dir/wt" landing/frog-pile)" \
+      "a tracked edit under addons/$neighbour must not be treated as Playbot churn"
+    assert_contains "$out" "prototype-game/addons/$neighbour/x.gd" "the block does not name the neighbouring path"
+    assert_grep "real work" "$dir/wt/prototype-game/addons/$neighbour/x.gd" "the check discarded neighbouring work"
+  done
+  pass "fm-lane-base-check: neighbouring addon directories are not Playbot churn"
+}
+
+test_not_a_worktree_has_a_workable_remedy() {
+  local dir out
+  dir="$TMP_ROOT/non-git"
+  mkdir -p "$dir"
+  out=$(run_check "$dir" main)
+  expect_code 20 "$(check_code "$dir" main)" "non-git directory must block"
+  assert_contains "$out" "run this check from" "non-git block lacks a remedy"
+  dir=$(make_case nongit-remedy)
+  expect_code 0 "$(check_code "$dir/wt" landing/frog-pile)" "running in the workspace did not clear the block"
+  pass "fm-lane-base-check: non-git block names the workspace remedy"
+}
+
+test_addon_injection_is_disclosed_as_tracked_churn
+test_neighbouring_addon_trees_are_not_churn
+test_not_a_worktree_has_a_workable_remedy
 test_usage_is_refused_without_a_landing_branch
 test_current_and_ahead_only_proceed_untouched
 test_behind_only_with_a_clean_tree_requires_a_reset

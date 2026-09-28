@@ -76,10 +76,10 @@ make_accept_fixture() { # <home>
   cat > "$1/data/task-a/brief.md" <<'MD'
 # Task
 
-## Acceptance criteria
+## Firstmate spec
 
-- The report names the changed file.
-- The report includes a passing test command.
+1. The report names the changed file.
+2. The report includes a passing test command.
 MD
   cat > "$1/data/task-a/report.md" <<'MD'
 Changed bin/example.sh and ran tests/example.test.sh successfully.
@@ -260,18 +260,21 @@ test_accept_preserves_complete_criteria() {
   make_accept_fixture "$home"
   cat > "$home/data/task-a/brief.md" <<'MD'
 # Task
-## Acceptance criteria
-Approval is mandatory.
+## Captain's intent
+Background that should not be scored. Done when approval is mandatory.
 Never infer consent.
 
-- Allow deployment
+## Firstmate spec
+Unnumbered implementation context is not a requirement.
+
+1. Allow deployment
   only after approval
 
   Keep the approval receipt.
   - Require the release signature.
-- Preserve rollback.
+2. Preserve rollback.
 
-Operators must receive a notification.
+3. Operators must receive a notification.
 
 ## Definition of done
 Record the final release identifier.
@@ -284,16 +287,184 @@ MD
   jev_env "$home" "$ACCEPT" task-a
   [ "$(request_count)" -eq $((before + 1)) ] || fail "complete criteria were not consulted once"
   tail -1 "$REQUEST_LOG" | jq -e '.state.acceptance_criteria == {
-    criterion_1:"Approval is mandatory.\nNever infer consent.",
+    criterion_1:"Done when approval is mandatory.\nNever infer consent.",
     criterion_2:"Allow deployment\n  only after approval\n\n  Keep the approval receipt.\n  - Require the release signature.",
     criterion_3:"Preserve rollback.",
-    criterion_4:"Operators must receive a notification.",
-    criterion_5:"Record the final release identifier.\nInclude the verification command."
-  } and (.questions | length) == 5' >/dev/null || fail "request lost criterion conditions or section prose"
-  jq -e '(.criteria | length) == 5 and
+    criterion_4:"Operators must receive a notification."
+  } and (.questions | length) == 4' >/dev/null || fail "request lost criterion conditions or included scaffold prose"
+  jq -e '(.criteria | length) == 4 and
     .criteria[1].text == "Allow deployment\n  only after approval\n\n  Keep the approval receipt.\n  - Require the release signature."' \
     "$home/data/task-a/acceptance.json" >/dev/null || fail "artifact lost complete criterion text"
   pass "Jev acceptance: full list items and prose survive each section"
+}
+
+test_accept_brief_delivery_fixtures() {
+  local mode home before
+  for mode in local-only no-mistakes scout; do
+    home="$TMP_ROOT/accept-$mode"
+    write_config "$home" shadow off off off
+    write_key "$home"
+    make_accept_fixture "$home"
+    cat > "$home/data/task-a/brief.md" <<MD
+# Task
+## Captain's intent
+Fix the requested behavior.
+Done when the report includes a passing test command.
+
+## Firstmate spec
+Implementation context should not be scored.
+1. The report names the changed file.
+   Include the relevant command.
+2. Preserve existing behavior.
+
+# Setup
+1. Create a branch.
+# Rules
+1. Never merge.
+# Definition of done
+Delivery contract: mode=$mode. No remote, no PR, no pipeline for local-only.
+## Acceptance criteria
+- Generated completion instructions are not task criteria.
+# Current no-mistakes intent contract
+## Captain intent authorized for --intent
+Done when this duplicated intent is never extracted.
+MD
+    before=$(request_count)
+    jev_env "$home" "$ACCEPT" task-a
+    [ "$(request_count)" -eq $((before + 1)) ] || fail "$mode brief was not consulted once"
+    tail -1 "$REQUEST_LOG" | jq -e '.state.acceptance_criteria == {
+      criterion_1:"Done when the report includes a passing test command.",
+      criterion_2:"The report names the changed file.\n   Include the relevant command.",
+      criterion_3:"Preserve existing behavior."
+    }' >/dev/null || fail "$mode brief scored scaffold or missed task criteria"
+    jq -e '(.criteria | length) == 3 and .verdict == "accepted"' \
+      "$home/data/task-a/acceptance.json" >/dev/null || fail "$mode artifact has wrong criteria"
+  done
+  home="$TMP_ROOT/accept-no-task-criteria"
+  write_config "$home" shadow off off off
+  write_key "$home"
+  make_accept_fixture "$home"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+# Task
+## Captain's intent
+Investigate the issue.
+## Firstmate spec
+Context without numbered requirements.
+- Unnumbered context is not a criterion.
+# Definition of done
+Delivery contract: mode=local-only.
+## Acceptance criteria
+1. Generated scaffold is not a fallback.
+MD
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ "$(request_count)" -eq "$before" ] || fail "a brief without task criteria consulted scaffold"
+  [ ! -e "$home/data/task-a/acceptance.json" ] || fail "a brief without task criteria wrote a verdict"
+  pass "Jev acceptance: local-only, no-mistakes, and scout briefs exclude generated scaffold"
+}
+
+test_accept_brief_structure_fixtures() {
+  local home before
+  home="$TMP_ROOT/accept-promoted"
+  write_config "$home" shadow off off off
+  write_key "$home"
+  make_accept_fixture "$home"
+  mkdir -p "$home/state"
+  printf 'window=fm-task-a\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/task-a.meta"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+You are a crewmate.
+
+# Task
+## Captain's intent
+Find why the report is wrong. Done when the report names the changed file.
+
+## Firstmate spec
+1. Scout-time investigation step is not a ship requirement.
+2. Record the reproduction.
+
+# Definition of done
+Delivery contract: mode=scout.
+MD
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-promote.sh" task-a --mode local-only --yolo off >/dev/null 2>&1 \
+    || fail "fm-promote.sh could not promote the scout fixture"
+  jq -Rse 'test("(?m)^# Current ship Firstmate spec$")' "$home/data/task-a/brief.md" >/dev/null \
+    || fail "fm-promote.sh did not publish a promoted brief"
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "promoted brief was not consulted once"
+  tail -1 "$REQUEST_LOG" | jq -e '.state.acceptance_criteria == {
+    criterion_1:"Done when the report names the changed file."
+  }' >/dev/null || fail "promoted brief scored the scout spec or generated promotion steps"
+
+  home="$TMP_ROOT/accept-promoted-no-intent-criteria"
+  write_config "$home" shadow off off off
+  write_key "$home"
+  make_accept_fixture "$home"
+  mkdir -p "$home/state"
+  printf 'window=fm-task-a\nkind=scout\nworktree=/tmp/wt\n' > "$home/state/task-a.meta"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+You are a crewmate.
+
+# Task
+## Captain's intent
+Find why the report is wrong.
+
+## Firstmate spec
+1. Scout-time investigation step is not a ship requirement.
+
+# Definition of done
+Delivery contract: mode=scout.
+MD
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-promote.sh" task-a --mode no-mistakes --yolo off >/dev/null 2>&1 \
+    || fail "fm-promote.sh could not promote the criterion-free scout fixture"
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ "$(request_count)" -eq "$before" ] || fail "promoted brief without intent criteria consulted scaffold"
+  [ ! -e "$home/data/task-a/acceptance.json" ] || fail "promoted brief without intent criteria wrote a verdict"
+
+  home="$TMP_ROOT/accept-structure"
+  write_config "$home" shadow off off off
+  write_key "$home"
+  make_accept_fixture "$home"
+  cat > "$home/data/task-a/brief.md" <<'MD'
+# Task
+## Captain's intent
+Fix the requested behavior. Done when:
+- The report names the changed file.
+- The report includes a passing test command.
+  Name the command.
+
+Unrelated follow-up prose is not scored.
+
+### Captain notes
+Done when existing behavior is preserved.
+
+## Firstmate spec
+Context before the requirements.
+
+### Requirements
+1. Keep the public interface stable.
+2. Add a regression test.
+
+#### Detail
+3. Document the change.
+
+# Definition of done
+1. Generated completion instructions are not task criteria.
+MD
+  before=$(request_count)
+  jev_env "$home" "$ACCEPT" task-a
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "structured brief was not consulted once"
+  tail -1 "$REQUEST_LOG" | jq -e '.state.acceptance_criteria == {
+    criterion_1:"Done when:\n- The report names the changed file.\n- The report includes a passing test command.\n  Name the command.",
+    criterion_2:"Done when existing behavior is preserved.",
+    criterion_3:"Keep the public interface stable.",
+    criterion_4:"Add a regression test.",
+    criterion_5:"Document the change."
+  }' >/dev/null || fail "done-when list or nested-heading criteria were lost"
+  pass "Jev acceptance: promoted briefs score only intent, and done-when lists and nested headings extract task criteria"
 }
 
 test_unicode_triage_keeps_single_request_bound() {
@@ -930,13 +1101,13 @@ test_shared_report_under_budget_is_still_not_duplicated() {
   cat > "$home/data/task-a/brief.md" <<'MD'
 # Task
 
-## Acceptance criteria
+## Firstmate spec
 
-- The report names the changed file.
-- The report includes a passing test command.
-- The report names the reviewed branch.
-- The report records the run identifier.
-- The report states the landing outcome.
+1. The report names the changed file.
+2. The report includes a passing test command.
+3. The report names the reviewed branch.
+4. The report records the run identifier.
+5. The report states the landing outcome.
 MD
   awk 'BEGIN { while (length(out) < 7600) out = out "Changed bin/example.sh and ran tests/example.test.sh. "; print substr(out, 1, 7600) }' \
     > "$home/data/task-a/report.md"
@@ -970,8 +1141,8 @@ test_oversized_accept_check_is_one_request_and_one_row() {
   awk 'BEGIN {
     while (length(one) < 9000) one = one "The report names every changed file. "
     while (length(two) < 9000) two = two "The report includes a passing test command. "
-    print "# Task"; print ""; print "## Acceptance criteria"; print ""
-    print "- " one; print "- " two
+    print "# Task"; print ""; print "## Firstmate spec"; print ""
+    print "1. " one; print "2. " two
   }' > "$home/data/task-a/brief.md"
   printf 'Changed bin/example.sh and ran tests/example.test.sh successfully.\n' \
     > "$home/data/task-a/report.md"
@@ -1252,6 +1423,8 @@ test_report_fixture_and_empty_error() {
   pass "Jev report: fixture quality metrics are correct and an empty ledger fails clearly"
 }
 
+test_accept_brief_delivery_fixtures
+test_accept_brief_structure_fixtures
 test_off_is_noop_for_every_adapter
 test_missing_key_diagnostic_names_the_key
 test_absent_config_defaults_active

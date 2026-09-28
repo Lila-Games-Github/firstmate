@@ -12,7 +12,7 @@ A home that already has it therefore turns all four observers active on its next
 
 | Use | What each consultation transmits |
 | --- | --- |
-| Acceptance check | Complete list items and prose criteria from acceptance or definition-of-done sections in `data/<id>/brief.md`, plus `data/<id>/report.md` or the newest `done:` status line when no report exists; the client may shorten this material to fit the request budget. |
+| Acceptance check | Task criteria from `data/<id>/brief.md`, extracted under the section and content rules owned by the header of `bin/fm-jev-accept-check.sh`, plus `data/<id>/report.md` or the newest `done:` status line when no report exists; the client may shorten this material to fit the request budget. |
 | Supervision triage | Each presented status line, wake row, or captured Lavish review element, truncated to 1500 characters per item. |
 | Commit lint | Each branch-only commit's subject, body, and diff, or its `git show --stat` plus leading hunks when the diff exceeds the per-call budget. |
 | Open questions | Each question line and the text of every page those lines reference, each page once per request rather than once per question, shortened when it exceeds the per-call budget. |

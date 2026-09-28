@@ -255,14 +255,19 @@ test_family_map_labels_this_contract() {
 }
 
 test_parallel_shards_consume_the_proven_set() {
-  local proven shards
+  local proven lanes lane combined shards
   proven=$("$PROOF" --list | LC_ALL=C sort -u)
-  shards=$(
-    {
-      "$RUNNER" --list --lane portable-parallel-1
-      "$RUNNER" --list --lane portable-parallel-2
-    } | LC_ALL=C sort -u
+  lanes=$("$RUNNER" --list-lanes | grep -E '^portable-parallel-[0-9]+$' || true)
+  [ "$(printf '%s\n' "$lanes" | grep -c .)" -ge 2 ] \
+    || fail "runner must expose at least two portable parallel lanes"
+  combined=$(
+    for lane in $lanes; do
+      "$RUNNER" --list --lane "$lane"
+    done | LC_ALL=C sort
   )
+  shards=$(printf '%s\n' "$combined" | LC_ALL=C sort -u)
+  [ "$combined" = "$shards" ] \
+    || fail "portable parallel shards must be disjoint"
   [ "$proven" = "$shards" ] \
     || fail "portable parallel shards must equal isolation-proof --list exactly"
   pass "parallel shards consume the proven-isolated set only"
