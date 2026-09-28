@@ -9,33 +9,59 @@ Balance hints come from serial runs of the real lanes on `ubuntu-latest`.
 The concurrent isolation proof in [fm-test-isolation-proof.md](fm-test-isolation-proof.md) establishes concurrency safety, not serial CI duration.
 Local timings are not interchangeable with CI timings: platform and machine load can affect each script differently and change their relative weights.
 
-The retained hints are the slowest completed value each script reached across six CI runs on 2026-09-10: [34459949083](https://github.com/kunchenguid/firstmate/actions/runs/34459949083), [34460760299](https://github.com/kunchenguid/firstmate/actions/runs/34460760299), [34462530836](https://github.com/kunchenguid/firstmate/actions/runs/34462530836), [34462758357](https://github.com/kunchenguid/firstmate/actions/runs/34462758357), [34466966385](https://github.com/kunchenguid/firstmate/actions/runs/34466966385), and [34470382458](https://github.com/kunchenguid/firstmate/actions/runs/34470382458).
-Shard 2 completed in all six, so its scripts come from the uploaded `fm-test-timing-portable-parallel-2` artifacts.
-Shard 1 was cancelled at its job cap in five of the six, so its scripts come from the `FM_TEST_END duration_ms=` markers in each cancelled job's log, which record every script that finished before the cancellation, plus the one complete `fm-test-timing-portable-parallel-1` artifact from run 34462758357.
+The retained parallel hints are the slowest successful completed `duration_ms` for each script across seven fork CI runs on 2026-09-28.
+The real lanes executed serially on `ubuntu-latest`; the six complete pairs supply all 24 candidates, and completed `FM_TEST_END` log records supplement the one cancelled lane that produced no artifact.
+An unfinished invocation supplies no duration hint, and a cancelled job's elapsed time is only a lower bound on its required wall time.
 Observed maxima provide conservative packing weights, not an upper bound on future durations.
 
-The measurements cover all 24 candidates, with six samples per script except:
+| Run | Event | Shard 1 test time / job log span | Shard 2 test time / job log span |
+|---|---|---:|---:|
+| [36384242883](https://github.com/Lila-Games-Github/firstmate/actions/runs/36384242883) | main push | 495870 ms / 509905 ms | 484803 ms / 490590 ms |
+| [36385966013](https://github.com/Lila-Games-Github/firstmate/actions/runs/36385966013) | pull request | 569336 ms / 587379 ms | 472391 ms / 477556 ms |
+| [36386793815](https://github.com/Lila-Games-Github/firstmate/actions/runs/36386793815) | pull request | 596609 ms / 610417 ms (cancelled after test summary) | 359202 ms / 372551 ms |
+| [36386803855](https://github.com/Lila-Games-Github/firstmate/actions/runs/36386803855) | pull request | 568121 ms / 583931 ms | 498274 ms / 505577 ms |
+| [36388084297](https://github.com/Lila-Games-Github/firstmate/actions/runs/36388084297) | pull request | 473277 ms / 489391 ms | 399147 ms / 405378 ms |
+| [36388101228](https://github.com/Lila-Games-Github/firstmate/actions/runs/36388101228) | main push | 573908 ms / 587889 ms | 476330 ms / 481765 ms |
+| [36388606468](https://github.com/Lila-Games-Github/firstmate/actions/runs/36388606468) | main push | no summary / 612367 ms (cancelled) | 497199 ms / 504216 ms |
 
-| Samples | Scripts |
-|---:|---|
-| 4 | `tests/fm-lint.test.sh` |
-| 3 | `tests/fm-pi-primary-types.test.sh`, `tests/fm-review-diff.test.sh` |
-| 1 | `tests/fm-brief.test.sh`, `tests/fm-transition-lib.test.sh` |
+Test times come from the runner's `summary.duration_ms` timing artifacts or matching `FM_TEST_SUMMARY` log lines.
+The job log span is the interval between the first and last timestamped line for that job, including setup and cleanup; it excludes queue delay and is not an API-reported job duration.
+All six completed script inventories report zero failed scripts, including the summary recorded before cancellation in run 36386793815.
+Whole-workflow failure or cancellation does not invalidate those successfully completed per-script measurements.
+The complete inventories provide six measurements per shard 1 script and seven per shard 2 script; completed scripts before the remaining shard 1 cancellation provide one additional sample each.
 
-The two scripts with one sample are the tail of shard 1 that only the complete run reached.
-Collect completed per-script measurements for every member before calculating a split.
-A cancelled lane's elapsed duration is only a lower bound; its unfinished scripts have no completed duration for that invocation.
-The complete historical run supplies tail-script hints, not a completion time for any later cancelled invocation or for the rebalanced jobs.
+Refresh the parallel hints with these exact entry points, once per lane and run:
+
+```sh
+gh-axi run download <run-id> --repo Lila-Games-Github/firstmate \
+  --name fm-test-timing-portable-parallel-<lane> --dir <evidence-dir>
+gh-axi run view <run-id> --repo Lila-Games-Github/firstmate --log
+bin/fm-test-run.sh --check-coverage
+```
+
+The log command names a `full_log` file when its displayed output is truncated; read that file for completed markers and timestamp spans.
+Deduplicate artifact and log records by run and script before counting samples, and retain only `exit=0` durations when calculating maxima.
 
 ## Parallel lanes
 
-The two parallel lanes use longest-processing-time assignment over those hints.
-[`bin/fm-test-run.sh`](../bin/fm-test-run.sh) holds the duration values in `portable_parallel_weight_hints` and the ordered memberships and lane-specific prerequisite constraints beside `list_portable_parallel_1` and `list_portable_parallel_2`.
+The three parallel lanes use longest-processing-time assignment over those hints.
+[`bin/fm-test-run.sh`](../bin/fm-test-run.sh) holds the duration values in `portable_parallel_weight_hints` and the ordered memberships and lane-specific prerequisite constraints beside `list_portable_parallel_1`, `list_portable_parallel_2`, and `list_portable_parallel_3`.
 Read the derived packing estimates with that runner's `--check-coverage`; its header and `--help` own the output fields and the selection-specific `--list-scheduled` weight rules.
 The largest individual hint sets a lower bound on the estimated duration of any split, regardless of how evenly the remaining work is assigned.
 The CI cap and its rationale are owned by [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+Two-way packing of the refreshed maxima produced 549154 ms and 548776 ms; allowing the observed setup and cleanup overhead of about 18 seconds leaves only about 33 seconds under the ten-minute cap.
+Three-way packing produces 365815 ms, 366047 ms, and 366068 ms, a 253 ms spread with every candidate measured.
+The extra separate runner preserves serial execution inside each lane and uses the existing isolation proof set without admitting any new concurrent test.
+The Pi package prerequisite stays with shard 1.
+These are packing estimates; collect the new lanes' completed CI artifacts before claiming measured headroom or latency improvement.
 
-[`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_parallel_lanes_stay_duration_balanced`, requires every parallel member to have a hint and the lane sums to differ by no more than five percent of the larger sum.
+The refreshed coverage check on 2026-09-28 reports:
+
+```text
+FM_TEST_COVERAGE ok total=227 parallel=24 parallel_max_ms=366068 parallel_imbalance_ms=253 parallel_unhinted=0 serial=187 serial_shards=9 serial_unhinted=11 herdr=16
+```
+
+[`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_parallel_lanes_stay_duration_balanced`, requires every parallel member to have a hint and the largest and smallest lane sums to differ by no more than five percent of the larger sum.
 Its scheduling regressions also check stored parallel lane order and preserve serial-weight scheduling for other selections.
 These checks do not detect a script outgrowing an existing hint or establish measured job headroom.
 Refresh `portable_parallel_weight_hints` with the slowest completed `duration_ms` per script from several green CI runs' `fm-test-timing-portable-parallel-*` artifacts whenever the parallel set gains scripts or a member grows materially.
@@ -93,7 +119,7 @@ Measure native-Windows-only scripts through the focused Git Bash runner and reta
 
 ## Coverage guard
 
-`bin/fm-test-run.sh --check-coverage` verifies that both parallel lanes partition the proven-isolated set.
+`bin/fm-test-run.sh --check-coverage` verifies that all parallel lanes partition the proven-isolated set.
 It also verifies that the parallel lanes, portable serial lane, and real-Herdr family are disjoint and cover every `tests/*.test.sh` script.
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
 It reports the unmeasured serial share as `serial_unhinted=` and refuses when that share exceeds `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`, so the shards stay balanced on evidence rather than on the default weight.
@@ -112,7 +138,7 @@ The workflow uploads each partition's quiet telemetry to distinguish analysis co
 No fast mode, path skips, reduced checks, or paid runner provisioning is part of this layout.
 
 The performance objective is a complete green run under fifteen minutes including start delay: roughly twelve minutes of longest-path execution, at most two minutes of runner delay, and less than one minute of other overhead.
-The candidate uses fourteen long-lived Linux jobs (nine serial, two parallel, Herdr, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
+The candidate uses fifteen long-lived Linux jobs (nine serial, three parallel, Herdr, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
 Compare complete before/after runs, preserve cancelled and partial-run evidence, and measure a representative normal-run sample before claiming a P95 improvement.
 The workflow retains per-PR supersession without cancelling main pushes or changing the compliance workflow's event semantics.
 
@@ -125,7 +151,7 @@ The workflow retains per-PR supersession without cancelling main pushes or chang
 
 | Lane | Bound | Rationale |
 |---|---|---|
-| portable parallel 1/2 | See [CI workflow](../.github/workflows/ci.yml) | The workflow owns the parallel cap rationale and its evidence limits. |
+| portable parallel 1/2/3 | See [CI workflow](../.github/workflows/ci.yml) | The workflow owns the parallel cap rationale and its evidence limits. |
 | portable serial shards | See [CI workflow](../.github/workflows/ci.yml) | Packing estimates are not healthy execution bounds; the existing cap remains a hang tripwire. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
