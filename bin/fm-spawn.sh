@@ -2705,6 +2705,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_nm_target_block "$LANDING_BRANCH" &&
           fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      elif [ "$KIND" = ship ] && [ "$MODE" = direct-PR ]; then
+        fm_direct_pr_target_block "$LANDING_BRANCH"
       fi
   } >"$BRIEF_TMP" || {
     rm -f -- "$BRIEF_TMP"

@@ -67,6 +67,30 @@ If either target differs or cannot be verified, stop and report \`blocked: no-mi
 EOF
 }
 
+# fm_direct_pr_target_block <landing-branch> owns the direct-PR base handoff.
+# Brief, launch (including relaunch), and promotion callers supply the recorded
+# landing_branch. Empty emits nothing; commands quote the branch separately
+# from the raw forge equality check, matching fm_nm_target_block above.
+fm_direct_pr_target_block() {
+  local branch=${1:-} base_arg
+  [ -n "$branch" ] || return 0
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || {
+    echo "error: direct-PR landing branch is not a valid branch name: $branch" >&2
+    return 1
+  }
+  printf -v base_arg '%q' "$branch"
+  cat <<EOF
+
+# Current direct-PR base contract
+This section supersedes earlier brief guidance about the direct-PR base.
+The recorded landing branch is \`$branch\`.
+When opening the PR, run \`gh-axi pr create --base $base_arg\` with an explicit repository scope and the other PR arguments.
+Before appending \`done: PR {url}\`, use \`gh-axi\` with an explicit repository scope to verify the forge PR base (\`base.ref\`) equals \`$branch\`.
+Never infer the base from the head branch or PR title.
+If the base differs or cannot be verified, stop and report \`blocked: direct-PR base verification failed\` with the evidence; do not report that PR as ready.
+EOF
+}
+
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
   cat <<'EOF'
@@ -272,6 +296,7 @@ The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
+      fm_direct_pr_target_block "$landing_branch" || return 1
       ;;
     local-only)
       cat <<EOF

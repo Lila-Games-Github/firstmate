@@ -1449,6 +1449,31 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+test_direct_pr_launch_target_overlay() {
+  local rec id out target
+  for target in proto/lila ''; do
+    id="direct-target-${target:+explicit}"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    sed 's/mode=no-mistakes/mode=direct-PR/' "$HOME_DIR/data/$id/brief.md" > "$CASE_DIR/brief"
+    mv "$CASE_DIR/brief" "$HOME_DIR/data/$id/brief.md"
+    if [ -n "$target" ]; then
+      git -C "$PROJ_DIR" branch "$target" HEAD || fail "could not create landing branch"
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" codex --mode direct-PR --yolo off --landing-branch "$target") || fail "direct target launch failed: $out"
+    else
+      out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" codex --mode direct-PR --yolo off) || fail "default direct launch failed: $out"
+    fi
+    if [ -n "$target" ]; then
+      assert_grep 'gh-axi pr create --base proto/lila' "$HOME_DIR/data/$id/launch-brief.md" "direct launch lost recorded PR base"
+      assert_grep 'base.ref' "$HOME_DIR/data/$id/launch-brief.md" "direct launch lost forge base verification"
+      assert_grep 'blocked: direct-PR base verification failed' "$HOME_DIR/data/$id/launch-brief.md" "direct launch lost verification refusal"
+    else
+      assert_no_grep 'gh-axi pr create --base' "$HOME_DIR/data/$id/launch-brief.md" "default direct launch acquired explicit base"
+    fi
+  done
+  pass "direct-PR launches deliver recorded PR bases even with old briefs"
+}
+
 test_launch_target_overlay() {
   local rec id out target
   for target in proto/lila ''; do
@@ -1476,6 +1501,7 @@ test_launch_target_overlay() {
   pass "launch overlay supplies recorded no-mistakes targets to custom briefs"
 }
 
+test_direct_pr_launch_target_overlay
 test_launch_target_overlay
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults

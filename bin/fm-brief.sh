@@ -672,7 +672,7 @@ esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
 # Ordinary briefs may precede metadata creation; spawn's overlay supplies the
 # final recorded target even for a custom/older brief (bin/fm-dod-lib.sh).
-if [ "$LANE" -eq 0 ] && [ "$MODE" = no-mistakes ]; then
+if [ "$LANE" -eq 0 ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; }; then
   LANDING_BRANCH=$(fm_meta_get "$STATE/$ID.meta" landing_branch)
 fi
 DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH") || exit 1
@@ -701,13 +701,12 @@ if [ "$LANE" -eq 1 ]; then
   # A lane workspace owns its branch, so every `fm/<id>` instruction is
   # superseded. A PR-shipping lane must also target the landing branch, because a
   # PR opened without it goes to the repository default branch this lane must not
-  # touch. The shared DOD target contract handles no-mistakes; the publication
+  # touch. The shared DOD target contracts handle both PR modes; the publication
   # precondition at Setup step 1b protects both PR-producing modes.
   case "$MODE" in
     direct-PR)
       RULE1="1. Never push to the default branch (push only $LANE_BRANCH_DESC; never create or switch branches). Never merge a PR."
-      LANE_DOD_OVERRIDE="Open that PR with \`gh-axi\`, passing \`--base $LANDING_BRANCH\` explicitly so the PR targets your landing branch.
-That base is not optional: your work is based on \`$LANDING_BRANCH\`, and a PR opened without it targets the repository's default branch instead - a branch this lane must not touch, carrying every commit on the landing branch that the default branch does not have."
+      LANE_DOD_OVERRIDE="Follow the current direct-PR base contract above (owner: bin/fm-dod-lib.sh)."
       ;;
     local-only)
       RULE1="1. Never push to any remote and never open a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches. Firstmate handles the merge into $LANE_LANDING_TARGET."

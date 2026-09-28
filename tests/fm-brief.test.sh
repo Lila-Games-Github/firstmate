@@ -1210,7 +1210,7 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
     "named direct-PR lane brief does not push the workspace branch"
   # A lane's PR must target its landing branch: gh pr create with no --base opens
   # against the repository default, which is not where a lane lands.
-  assert_grep "passing \`--base proto/godot/frog-pile\` explicitly so the PR targets your landing branch" \
+  assert_grep "gh-axi pr create --base proto/godot/frog-pile" \
     "$home/data/lane-named-pr/brief.md" \
     "direct-PR lane brief does not name the landing branch as the PR base"
 
@@ -1383,6 +1383,35 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+test_recorded_direct_pr_base() {
+  local home id brief branch
+  home="$TMP_ROOT/recorded-direct-base"
+  mkdir -p "$home/state"
+  for id in target metachar default; do
+    case "$id" in
+      target) branch=proto/lila ;;
+      metachar) branch='feat/a&b' ;;
+      default) branch='' ;;
+    esac
+    [ -z "$branch" ] || printf 'landing_branch=%s\n' "$branch" > "$home/state/$id.meta"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" fixture-project --mode direct-PR >/dev/null \
+      || fail "ordinary direct-PR $id brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    if [ -n "$branch" ]; then
+      if [ "$id" = metachar ]; then
+        assert_grep 'gh-axi pr create --base feat/a\&b' "$brief" "PR base command lost shell quoting"
+      else
+        assert_grep 'gh-axi pr create --base proto/lila' "$brief" "direct brief lost PR base"
+      fi
+      assert_grep "forge PR base (\`base.ref\`) equals \`$branch\`" "$brief" "direct brief lost raw base verification"
+      assert_grep 'blocked: direct-PR base verification failed' "$brief" "direct brief lost fail-closed reporting"
+    else
+      assert_no_grep 'gh-axi pr create --base' "$brief" "default direct brief acquired explicit base"
+    fi
+  done
+  pass "direct-PR briefs carry recorded PR bases with shell-quoted commands"
+}
+
 test_recorded_no_mistakes_target() {
   local home id brief
   home="$TMP_ROOT/recorded-nm-target"
@@ -1417,6 +1446,7 @@ test_no_mistakes_target_metacharacter_branch() {
   pass "no-mistakes target contract quotes only the command for metacharacter branches"
 }
 
+test_recorded_direct_pr_base
 test_recorded_no_mistakes_target
 test_no_mistakes_target_metacharacter_branch
 test_worker_role_scope

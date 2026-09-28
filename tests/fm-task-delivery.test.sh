@@ -980,6 +980,41 @@ test_promotion_target_contract() {
   pass "promotion records and delivers an explicit no-mistakes landing target"
 }
 
+test_direct_pr_promotion_target_contract() {
+  local home proj id target out
+  home="$TMP_ROOT/direct-promotion-target/home"
+  proj="$TMP_ROOT/direct-promotion-target/proj"
+  mkdir -p "$home/state" "$proj"
+  git -C "$proj" init -q -b main || fail "could not initialize project fixture"
+  git -C "$proj" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init \
+    || fail "could not commit project fixture"
+  git -C "$proj" branch proto/lila || fail "could not create landing branch fixture"
+  scout_meta() {  # <id>
+    printf 'window=fm-%s\nworktree=/tmp/wt\nproject=%s\nharness=claude\nkind=scout\n' "$1" "$proj" \
+      > "$home/state/$1.meta"
+    FM_HOME="$home" "$BRIEF" "$1" fixture-project --scout >/dev/null || fail "scout scaffold failed"
+    fill_brief_subsections "$home/data/$1/brief.md" "Integrate branch routing." "Preserve routing."
+  }
+  for target in proto/lila ''; do
+    id="direct-promotion-target-${target:+explicit}"
+    scout_meta "$id"
+    out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode direct-PR --yolo off ${target:+--landing-branch "$target"} 2>&1) \
+      || fail "promotion failed: $out"
+    if [ -n "$target" ]; then
+      [ "$(FM_HOME="$home" "$ROOT/bin/fm-landing-branch.sh" "$id")" = "$target" ] \
+        || fail "promotion did not record landing_branch"
+      assert_grep 'gh-axi pr create --base proto/lila' "$home/data/$id/ship-instructions.md" "promotion lost target"
+      assert_grep 'gh-axi pr create --base proto/lila' "$home/data/$id/brief.md" "durable promotion lost target"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-landing-branch.sh" "$id" >/dev/null && fail "default promotion recorded a landing branch"
+      assert_no_grep 'gh-axi pr create --base' "$home/data/$id/ship-instructions.md" "default promotion acquired target"
+    fi
+    grep -qx 'kind=ship' "$home/state/$id.meta" || fail "promotion did not flip kind"
+  done
+  pass "promotion records and delivers a direct-PR landing base"
+}
+
+test_direct_pr_promotion_target_contract
 test_promotion_target_contract
 test_promotion_base_follows_landing_branch
 test_authorized_intent_keeps_words_without_composed_address
