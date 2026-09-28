@@ -1,0 +1,9 @@
+ok - fm-teardown: --reconcile-slot retires a landed record without touching the slot, and the survivor then tears down normally
+not ok - remote: preserved ship could not reconcile: WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+REFUSED: task squash-pipeline's branch fm/squash-pipeline is not landed, so retiring its record would leave unlanded work with nothing pointing at it.
+Land the branch (or get the captain's explicit OK to discard it), then re-run. Nothing was changed.
+FAILED: test_reconcile_slot_preserved_ship_and_scout_retire_without_force
+ok - fm-teardown: reconciliation refuses unlanded follow-ups beyond either a remote or squash proof
+ok - fm-teardown: --reconcile-slot accepts a scout whose report is already in the Firstmate home
+ok - fm-teardown: --reconcile-slot refuses a secondmate id for its own reason
+ok - fm-teardown: --reconcile-slot refuses with evidence whenever ownership or work safety cannot be proved

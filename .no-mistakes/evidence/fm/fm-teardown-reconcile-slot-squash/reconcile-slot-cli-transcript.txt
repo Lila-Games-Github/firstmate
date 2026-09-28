@@ -1,0 +1,51 @@
+
+$ git log --oneline --graph --all
+* b076f2f squash landing
+| * 259c54a second-change
+| * 91fc3a4 unlanded-work
+|/  
+* ba36b31 pool-fixture
+
+$ fm-teardown.sh frogpile-jev-usecases-research --reconcile-slot   # scout holds the slot
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  2 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REFUSED: /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/pool/1/project still carries task frogpile-jev-usecases-research's own slot claim, so this record is the slot's current holder, not the stale one.
+Reconcile task frogpile-ui-pipeline's record first (bin/fm-teardown.sh frogpile-ui-pipeline --reconcile-slot once its work is landed), then tear task frogpile-jev-usecases-research down with the ordinary command.
+[exit 1]
+
+$ fm-teardown.sh frogpile-ui-pipeline --reconcile-slot   # squash-landed ship, branch on origin
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+teardown: reconciling task frogpile-ui-pipeline's record against pool slot /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/pool/1/project, which task frogpile-jev-usecases-research now holds (branch fm/frogpile-ui-pipeline is landed); the slot, its processes, its copy, and its claim are left untouched.
+warning: task frogpile-ui-pipeline's recorded worktree /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/pool/1/project was reassigned to task frogpile-jev-usecases-research (home /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/home), which claimed that pool slot after this record was written; that slot is no longer frogpile-ui-pipeline's, so its processes, copy, and claim are left untouched and only frogpile-ui-pipeline's own cleanup runs.
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+/tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/project: STUCK: on diverged main, 0 commits behind origin/main - needs attention
+teardown frogpile-ui-pipeline complete (window firstmate:fm-frogpile-ui-pipeline; pool slot /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/worktree left to task frogpile-jev-usecases-research (home /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/home), which it was reassigned to)
+Backlog: frogpile-ui-pipeline just finished (this home keeps no markdown backlog at /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/home/data/backlog.md). Update /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/home/data/backlog.md - move frogpile-ui-pipeline to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+[exit 0]
+
+$ ls state/
+frogpile-jev-usecases-research.meta
+home-summary.json
+terminal-outcomes
+
+$ fm-teardown.sh frogpile-jev-usecases-research   # ordinary teardown, no --force
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+teardown frogpile-jev-usecases-research complete (window firstmate:fm-frogpile-jev-usecases-research, worktree /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/worktree)
+Backlog: frogpile-jev-usecases-research just finished (this home keeps no markdown backlog at /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/home/data/backlog.md). Update /tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/home/data/backlog.md - move frogpile-jev-usecases-research to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+[exit 0]
+
+$ ls state/ ; slot claim ; runtime log
+home-summary.json
+terminal-outcomes
+ls: cannot access '/tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/pool/1/.fm-slot-owner': No such file or directory
+tmux <kill-window> <-t> <=firstmate:=fm-frogpile-ui-pipeline>
+tmux <display-message> <-p> <-t> <firstmate:fm-frogpile-jev-usecases-research> <#{pane_id}>
+tmux <display-message> <-p> <-t> <firstmate:fm-frogpile-jev-usecases-research> <#{pane_id}>
+treehouse <status> <--json>
+treehouse <return> <--force> </tmp/fm-teardown-endpoint-safety.DMbpEZ/demo/worktree>
+tmux <kill-window> <-t> <=firstmate:=fm-frogpile-jev-usecases-research>

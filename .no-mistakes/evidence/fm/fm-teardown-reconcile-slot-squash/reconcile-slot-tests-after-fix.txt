@@ -1,0 +1,6 @@
+ok - fm-teardown: --reconcile-slot retires a landed record without touching the slot, and the survivor then tears down normally
+ok - fm-teardown: remote-preserved and squash-landed ships reconcile, then their scout slot owners retire without force
+ok - fm-teardown: reconciliation refuses unlanded follow-ups beyond either a remote or squash proof
+ok - fm-teardown: --reconcile-slot accepts a scout whose report is already in the Firstmate home
+ok - fm-teardown: --reconcile-slot refuses a secondmate id for its own reason
+ok - fm-teardown: --reconcile-slot refuses with evidence whenever ownership or work safety cannot be proved
