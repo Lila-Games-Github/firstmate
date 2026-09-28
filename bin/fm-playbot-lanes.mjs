@@ -100,16 +100,13 @@ const PLAYBOT_TRACKED_CHURN_PATHS = Object.freeze([
 ]);
 const PLAYBOT_TRACKED_CHURN_SET = new Set(PLAYBOT_TRACKED_CHURN_PATHS);
 
-// Gitignored build output that Godot, Python, and task tooling regenerate on
-// demand, plus the host-specific native addon tree Playbot injects into every
-// workspace. Retirement reports these as discardable instead of blocking on
-// them. A path qualifies only when Git itself reports it ignored and one of its
-// exact path segments names a cache directory, or three consecutive segments
-// name addons/playbot/native; tracked and untracked paths never use this rule.
-// An orphaned directory has no Git metadata left, so no ignore evidence exists
-// for its contents; its inventory applies the same path-segment rule alone.
+// All Git-ignored output is disposable during retirement. Non-ignored
+// untracked files still block, except the exact addon tree Playbot injects.
+// Tracked modifications continue to use the exact tracked-churn allowlist.
+// Orphans lack Git ignore evidence and always need an inventory and explicit
+// discard authorization when any file remains, including apparent caches.
 const DISCARDABLE_IGNORED_CACHE_SEGMENTS = new Set([".godot", "__pycache__", ".task_tmp"]);
-const PLAYBOT_NATIVE_ADDON_SEGMENTS = Object.freeze(["addons", "playbot", "native"]);
+const PLAYBOT_ADDON_PREFIX = "prototype-game/addons/playbot/";
 
 // The blocker codes an explicit, recorded captain authorization may discard for
 // one confirmed workspace. Every other blocker - active or uncertain chats, the
@@ -130,7 +127,6 @@ const COMMIT_NAMING_DISCARD_CODES = new Set(["unlanded-commits", "prune-would-dr
 function blockerDroppedCommits(blocker) {
   return COMMIT_NAMING_DISCARD_CODES.has(blocker.code) ? (blocker.commits ?? []) : [];
 }
-const ORPHAN_INVENTORY_SAMPLE_LIMIT = 50;
 
 function desktopDir() {
   if (process.env.PLAYBOT_DESKTOP_DIR) return path.resolve(process.env.PLAYBOT_DESKTOP_DIR);
@@ -1827,12 +1823,13 @@ function gitWorktreeEntries(projectRootPath) {
   return entries;
 }
 
+function playbotAddonPath(file) {
+  return String(file).startsWith(PLAYBOT_ADDON_PREFIX);
+}
+
 function discardableIgnoredKind(file) {
-  const segments = String(file).split("/").filter(Boolean);
-  for (let index = 0; index + PLAYBOT_NATIVE_ADDON_SEGMENTS.length <= segments.length; index += 1) {
-    if (PLAYBOT_NATIVE_ADDON_SEGMENTS.every((segment, offset) => segments[index + offset] === segment)) return "playbot-native-addon";
-  }
-  return segments.some((segment) => DISCARDABLE_IGNORED_CACHE_SEGMENTS.has(segment)) ? "build-cache" : null;
+  if (playbotAddonPath(file)) return "playbot-addon";
+  return String(file).split("/").some((segment) => DISCARDABLE_IGNORED_CACHE_SEGMENTS.has(segment)) ? "build-cache" : null;
 }
 
 const FILE_SHA256_CACHE_LIMIT = 4096;
@@ -1849,10 +1846,10 @@ function fileSha256(file) {
   return digest;
 }
 
-// Playbot injects the same native addon files into every workspace of a project,
+// Playbot injects the same addon files into every workspace of a project,
 // including the configured main clone, so a workspace copy that is byte-identical
 // to the main clone's copy is proven to be Playbot's own injection. The identity
-// is evidence only: the tree is gitignored host-specific output either way.
+// is evidence only: the injected tree is disposable either way.
 function nativeAddonIdentity(worktreePath, mainCloneTop, file) {
   if (file.endsWith("/")) return "directory-entry";
   if (!mainCloneTop) return "main-clone-unavailable";
@@ -1873,12 +1870,8 @@ function classifyIgnoredPaths(worktreePath, mainCloneTop, ignoredPaths) {
   const discardable = [];
   const blocking = [];
   for (const file of ignoredPaths) {
-    const kind = discardableIgnoredKind(file);
-    if (!kind) {
-      blocking.push(file);
-      continue;
-    }
-    discardable.push(kind === "playbot-native-addon"
+    const kind = discardableIgnoredKind(file) ?? "git-ignored";
+    discardable.push(kind === "playbot-addon"
       ? { path: file, kind, identity: nativeAddonIdentity(worktreePath, mainCloneTop, file) }
       : { path: file, kind });
   }
@@ -1962,19 +1955,24 @@ function orphanDirectoryInventory(rootPath) {
     byteCount: Number(content.reduce((total, entry) => total + entry.size, 0n)),
     cachePaths,
     otherPaths,
+    entries: entries.map((entry) => ({ path: entry.path, type: entry.type, bytes: Number(entry.size) })),
   };
 }
 
 function publicOrphanInventory(inventory) {
   return {
     fingerprint: inventory.fingerprint,
+    entries: inventory.entries,
     entryCount: inventory.entryCount,
     fileCount: inventory.fileCount,
     byteCount: inventory.byteCount,
     buildCacheFileCount: inventory.cachePaths.length,
     otherFileCount: inventory.otherPaths.length,
-    otherPathsSample: inventory.otherPaths.slice(0, ORPHAN_INVENTORY_SAMPLE_LIMIT),
-    otherPathsSampleTruncated: inventory.otherPaths.length > ORPHAN_INVENTORY_SAMPLE_LIMIT,
+    paths: [...inventory.cachePaths, ...inventory.otherPaths].sort(),
+    buildCachePaths: inventory.cachePaths,
+    otherPaths: inventory.otherPaths,
+    otherPathsSample: inventory.otherPaths.slice(0, 50),
+    otherPathsSampleTruncated: inventory.otherPaths.length > 50,
   };
 }
 
@@ -1990,6 +1988,7 @@ function inspectOrphanedRoot(result, projectRoot, rootPath, workspaceRoot, direc
   const registered = Boolean(registration);
   result.gitRegistration = { projectRootPath: canonicalPath(projectRoot.path), registered };
   result.orphan = { directoryPresent, gitMetadata: metadata, registered, recordedHead: null, inventory: null, storage: null };
+  if (directoryPresent) result.orphan.inventory = publicOrphanInventory(orphanDirectoryInventory(rootPath));
   if (directoryPresent && registered) {
     result.blockers.push({ code: "git-unreadable", message: `Workspace root ${rootPath} has no readable Git metadata but is still registered as a Git worktree` });
     return result;
@@ -2017,12 +2016,11 @@ function inspectOrphanedRoot(result, projectRoot, rootPath, workspaceRoot, direc
     });
     return result;
   }
-  const inventory = orphanDirectoryInventory(rootPath);
-  result.orphan.inventory = publicOrphanInventory(inventory);
-  if (inventory.otherPaths.length > 0) {
+  const inventory = result.orphan.inventory;
+  if (inventory.fileCount > 0) {
     result.blockers.push({
       code: "orphaned-files",
-      message: `Orphaned directory ${rootPath} holds ${inventory.otherPaths.length} file(s) outside regenerable build output that Git can no longer account for; discarding them needs an explicit recorded authorization`,
+      message: `Orphaned directory ${rootPath} holds ${inventory.fileCount} file(s) that Git can no longer account for; discarding them needs an explicit recorded authorization`,
       directory: rootPath,
       inventory: result.orphan.inventory,
     });
@@ -2118,7 +2116,10 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
       allowlist: PLAYBOT_TRACKED_CHURN_PATHS,
     },
     untrackedPaths: [],
+    blockingUntrackedPaths: [],
+    discardableUntrackedPaths: [],
     ignoredPaths: [],
+    ignoredPathCount: 0,
     discardableIgnoredPaths: [],
     blockingIgnoredPaths: [],
     indexFlags: [],
@@ -2209,12 +2210,17 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
     result.tracked.blockingPaths = status.blockingTrackedPaths;
     result.untrackedPaths = status.untrackedPaths;
     result.ignoredPaths = status.ignoredPaths;
+    result.ignoredPathCount = status.ignoredPaths.length;
     let mainCloneTop = null;
     try {
       mainCloneTop = canonicalPath(stripTerminalLineEnding(git(projectRoot.path, ["rev-parse", "--show-toplevel"])));
     } catch {
       mainCloneTop = null;
     }
+    result.blockingUntrackedPaths = status.untrackedPaths.filter((file) => !playbotAddonPath(file));
+    result.discardableUntrackedPaths = status.untrackedPaths.filter(playbotAddonPath).map((file) => ({
+      path: file, kind: "playbot-addon", identity: nativeAddonIdentity(rootPath, mainCloneTop, file),
+    }));
     const ignored = classifyIgnoredPaths(rootPath, mainCloneTop, status.ignoredPaths);
     result.discardableIgnoredPaths = ignored.discardable;
     result.blockingIgnoredPaths = ignored.blocking;
@@ -2283,11 +2289,11 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
       submodules: submoduleLocalHistory,
     });
   }
-  if (result.untrackedPaths.length > 0) {
+  if (result.blockingUntrackedPaths.length > 0) {
     result.blockers.push({
       code: "untracked-files",
-      message: `${result.untrackedPaths.length} untracked path(s) would be deleted and are never classified as Playbot churn`,
-      paths: result.untrackedPaths,
+      message: `${result.blockingUntrackedPaths.length} untracked path(s) outside Playbot's injected addon tree would be deleted`,
+      paths: result.blockingUntrackedPaths,
     });
   }
   if (result.blockingIgnoredPaths.length > 0) {
@@ -2494,7 +2500,8 @@ function inspectWorkspace(project, workspace, landingBranch, landingOptions = {}
     ? workspaceFreshnessReading(project, workspace, landingBranch, rootReadings)
     : null;
   evidence.retirable = evidence.blockers.length === 0;
-  evidence.verdict = evidence.retirable ? "retirable" : "blocked";
+  evidence.verdict = evidence.roots.some((root) => root.orphan?.directoryPresent)
+    ? "orphaned" : evidence.retirable ? "retirable" : "blocked";
   evidence.discard = discardSummary(evidence.blockers);
   return evidence;
 }
@@ -2527,7 +2534,13 @@ function registryLandingOptions(project, registryProject) {
   const warning = String(result.stderr ?? "").trim() || null;
   const registry = { project: registryProject, home: controllerRoot(), mode, yolo, warning };
   if (mode === "local-only" && warning === null) {
-    const registeredClone = canonicalPath(path.join(controllerRoot(), "projects", registryProject));
+    const resolved = spawnSync("bash", [script, "--path", registryProject], { env, encoding: "utf8", timeout: 20_000 });
+    const registeredPath = stripTerminalLineEnding(String(resolved.stdout ?? ""));
+    if (resolved.error || resolved.status !== 0 || !path.isAbsolute(registeredPath) || /[\0\r\n]/.test(registeredPath)) {
+      throw new Error(`firstmate registered clone path for ${registryProject} could not be read: ${resolved.error?.message ?? resolved.stderr ?? "invalid path"}`);
+    }
+    const registeredClone = canonicalPath(registeredPath);
+    registry.path = registeredClone;
     let registeredTop = null;
     try {
       registeredTop = canonicalPath(stripTerminalLineEnding(freshnessGit(registeredClone, ["rev-parse", "--show-toplevel"])));
@@ -3029,7 +3042,8 @@ function discardRecord(inspection, authorization) {
       path: root.path,
       trackedPaths: allowed.has("tracked-modifications") ? root.tracked.blockingPaths : [],
       allowedChurnPaths: root.tracked.allowedChurnPaths,
-      untrackedPaths: allowed.has("untracked-files") ? root.untrackedPaths : [],
+      untrackedPaths: allowed.has("untracked-files") ? root.blockingUntrackedPaths : [],
+      discardableUntrackedPaths: root.discardableUntrackedPaths,
       ignoredPaths: allowed.has("ignored-files") ? root.blockingIgnoredPaths : [],
       unlandedCommits: allowed.has("unlanded-commits") && Array.isArray(root.commitsAhead) ? root.commitsAhead : [],
       prunedRegistrations: allowed.has("prune-would-drop-unlanded-head") ? root.prunableRegistrations : [],
@@ -5837,8 +5851,8 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       landingBranch,
       landingEvidence: { kind: landingOptions.localLanding ? "local-branch" : "remote", registry: landingOptions.registry },
       trackedChurnAllowlist: PLAYBOT_TRACKED_CHURN_PATHS,
-      untrackedBoundary: "Untracked files are reported and block retirement; the tracked-churn allowlist never applies to them.",
-      ignoredBoundary: "Ignored build output under .godot, __pycache__, or .task_tmp and Playbot's addons/playbot/native tree are discardable; every other ignored path blocks.",
+      untrackedBoundary: "Non-ignored untracked files outside prototype-game/addons/playbot/ block retirement; injected addon files are reported as discardable.",
+      ignoredBoundary: "All Git-ignored paths are reported as discardable output and never block retirement; their exact paths and count remain evidence.",
       discardableCodes: DISCARDABLE_LOCAL_CHANGE_CODES,
       workspaces,
     };

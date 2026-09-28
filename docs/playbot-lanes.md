@@ -105,6 +105,8 @@ The parked-chat detection remains a persisted, non-resuming read, while freshnes
 
 ### Workspace retirement
 
+Registered clone paths are resolved by [`fm-project-mode.sh --path`](../bin/fm-project-mode.sh), whose header owns external-path and legacy registry syntax.
+
 `list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
 It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
 An optional `registryProject` names the project in the controller home's firstmate registry, resolved through `bin/fm-project-mode.sh`; only a registered `local-only` posture whose main clone is itself a Git worktree top level that some selected Playbot root resolves to, including a root in a subdirectory of that clone, makes that clone's local `refs/heads/<landingBranch>` the landing evidence instead, because such a project lands without pushing and its remote branch lags.
@@ -123,14 +125,15 @@ Recognized head, autostash, and automatic-merge pseudorefs must parse completely
 Every ordinary local submodule ref outside the reconstructible `refs/remotes/` cache must also match the same ref name and object identity in at least one fresh remote snapshot, while every local symbolic ref blocks because a matching resolved object cannot prove its target metadata was published.
 Revision evidence disables replacement objects, and any `refs/replace/*` or repository graft metadata blocks inspection instead of being allowed to rewrite the ancestry used for a deletion verdict.
 A live firstmate task record is a controller-home `state/<task>.meta`, `.lane-poll`, or `.check.sh` keyed on the workspace id, a metadata value equal to the workspace id or a path at or inside one of its roots, or an armed lane poll naming one of its chats; an unreadable record also blocks, while a controller root with no `state/` directory holds none.
-Untracked files block retirement and are returned in a distinct exact-path field and blocker, because the tracked-churn allowlist never classifies them.
-Every ignored path, including every file beneath an explicitly ignored directory, is returned in `ignoredPaths` and classified: a path with a `.godot`, `__pycache__`, or `.task_tmp` segment, or inside an `addons/playbot/native/` tree, is regenerable build output or Playbot's injected native addon and is listed in `discardableIgnoredPaths` without blocking, and every other ignored path is listed in `blockingIgnoredPaths` and blocks.
-Each native addon entry carries an `identity` saying whether it is byte-identical to the same path in the main clone, which Playbot injects the same way.
+Non-ignored untracked files outside `prototype-game/addons/playbot/` block retirement and are returned in `blockingUntrackedPaths`; injected addon files are returned in `discardableUntrackedPaths`, and `untrackedPaths` preserves the complete inventory.
+Every Git-ignored path, including every file beneath an explicitly ignored directory, is returned in `ignoredPaths`, counted in `ignoredPathCount`, and listed in `discardableIgnoredPaths` without blocking retirement.
+Each injected addon entry carries an `identity` saying whether it is byte-identical to the same path in the main clone, which Playbot injects the same way.
 A root whose Git metadata is gone is an orphan rather than unreadable Git: its directory is missing, or its `.git` is absent or a gitdir file naming a directory that no longer exists and Git finds no repository there.
 A missing orphan directory does not block, because deleting the workspace only removes Playbot's rows and a stale Git registration, unless Git still registers it: that registration's recorded HEAD is compared against the landing tip and blocks as `unlanded-commits` naming every ahead commit, or blocks outright when it cannot be proven landed.
 Because Playbot prunes every stale registration when it cannot find an orphan through Git, any orphan also blocks as `prune-would-drop-unlanded-head` while another missing detached worktree's recorded HEAD is not proven landed; the blocker lists every commit that prune would drop, and it is discardable only when every such registration's ahead commits are known.
-An orphan directory has no Git ignore evidence left, so its inventory classifies build output by the same path segments alone.
-A present orphan directory returns a content inventory with a fingerprint and blocks as `orphaned-files` when it holds anything beyond build output, and it blocks outright when it lies outside Playbot's `worktrees/` storage.
+An orphan directory has no Git ignore evidence left, so apparent build caches cannot establish that its remaining files are disposable.
+A present orphan directory containing files gets the distinct `orphaned` verdict and returns the complete entry and file inventory with a fingerprint, blocking as `orphaned-files` until explicitly authorized for discard, including when all remaining files resemble caches.
+It blocks outright when it lies outside Playbot's `worktrees/` storage.
 Because Playbot's own deletion finds a root's worktree by branch, an orphan whose branch is checked out in any other worktree always blocks.
 Every row carries `discard`, naming which of its blockers an explicit authorization could clear and every unlanded commit id.
 The allowlist is eight literal repository-relative paths returned as `trackedChurnAllowlist`: seven files under `prototype-game/addons/playbot/` plus `prototype-game/project.godot` that Playbot's editor integration rewrites across unrelated worktrees.

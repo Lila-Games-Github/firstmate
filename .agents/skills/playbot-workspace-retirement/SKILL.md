@@ -16,7 +16,8 @@ Use the `playbot_lanes` MCP for the entire retirement workflow.
    Pass `registryProject` with the project's exact name in `data/projects.md`; a registered `local-only` posture makes the main clone's local landing branch the landing evidence when that clone is its own Git worktree top level and a selected Playbot root lies inside it, because such projects never push their landing branch.
 2. Read the returned evidence for every candidate.
    A retirable verdict includes current landing commit evidence, exact head and ahead-commit subjects, every unarchived thread state, no live firstmate task record naming the workspace, tracked paths classified against the tool's exact churn allowlist, and distinct exact-path evidence for every untracked or ignored path.
-   Ignored build output and Playbot's native addon tree are reported as discardable and never block; an orphaned root whose directory is gone is registration cleanup and does not block, unless a Git registration still records a HEAD that is not proven landed.
+   Git-ignored output and Playbot's injected addon tree are reported as discardable and never block; an orphaned root whose directory is gone is registration cleanup and does not block, unless a Git registration still records a HEAD that is not proven landed.
+   An `orphaned` verdict includes the complete file inventory and requires explicit `orphaned-files` discard authorization while files remain, including apparent caches.
    Otherwise stop on any blocker or unreadable evidence and preserve the workspace, including when an unarchived thread state is missing or unrecognized.
    A `live-task-record` blocker names the firstmate record still pointing at the workspace; resolve that task or poll through its own owner, never by deleting the record.
 3. Select one exact workspace id from that fresh result.

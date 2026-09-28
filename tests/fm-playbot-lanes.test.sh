@@ -5733,13 +5733,13 @@ printf 'ignored work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ig
 mkdir -p "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement-dir"
 printf 'nested ignored work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/ignored-retirement-dir/secret.txt"
 retirement_list main > "$retirement_inventory"
-OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "untracked and ignored files were not visible and blocking"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "untracked blockers and disposable ignored evidence were not separated"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const untracked = workspace.blockers.find(candidate => candidate.code === 'untracked-files');
 const ignored = workspace.blockers.find(candidate => candidate.code === 'ignored-files');
 if (!untracked || untracked.paths.join(',') !== 'prototype-game/untracked-work.txt') process.exit(1);
-if (!ignored || ignored.paths.join(',') !== 'prototype-game/ignored-retirement-dir/secret.txt,prototype-game/ignored-retirement.txt') process.exit(1);
+if (ignored || workspace.roots[0].discardableIgnoredPaths.length !== 2) process.exit(1);
 const root = workspace.roots[0];
 if (root.untrackedPaths.join(',') !== 'prototype-game/untracked-work.txt') process.exit(1);
 if (root.ignoredPaths.join(',') !== 'prototype-game/ignored-retirement-dir/secret.txt,prototype-game/ignored-retirement.txt') process.exit(1);
@@ -6036,11 +6036,11 @@ git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:main >/dev/null \
 retirement_head=$(git -C "$FIXTURE_ROOT/worker/.worktrees/alt" rev-parse HEAD)
 printf 'nested ignored work\n' > "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/submodule/ignored.txt"
 retirement_list main > "$retirement_inventory"
-OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an ignored file inside a real submodule was allowed to read clean"
+OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an ignored file inside a real submodule lost its discardable evidence"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-worker-alt');
 const blocker = workspace.blockers.find(candidate => candidate.code === 'ignored-files');
-if (!blocker || !blocker.paths.includes('prototype-game/submodule/ignored.txt')) process.exit(1);
+if (blocker || !workspace.roots[0].discardableIgnoredPaths.some(entry => entry.path === 'prototype-game/submodule/ignored.txt')) process.exit(1);
 if (!workspace.roots[0].submodules.inspected.some(entry => entry.path === 'prototype-game/submodule')) process.exit(1);
 NODE
 rm -f "$FIXTURE_ROOT/worker/.worktrees/alt/prototype-game/submodule/ignored.txt"
@@ -7088,7 +7088,7 @@ if (['active-threads', 'thread-state-uncertain', 'local-workspace', 'live-task-r
 NODE
 pass "fm-playbot-lanes: retirement cleanup exposes registry posture and discard authorization inputs"
 
-# Gitignored build caches and Playbot's native addon tree are discardable, and
+# All Gitignored output and Playbot's addon tree are discardable, and
 # a native file byte-identical to the main clone's copy is identified as such.
 worker_exclude="$(git -C "$FIXTURE_ROOT/worker" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
 mkdir -p "$(dirname "$worker_exclude")"
@@ -7109,27 +7109,27 @@ add_retirement_workspace ws-retire-cache "$cache_ws" retirement-cache-output
 cleanup_list main > "$cleanup_out"
 OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "gitignored build output or the native addon tree still blocked retirement"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
-if (!value.ignoredBoundary.includes('addons/playbot/native')) process.exit(1);
+if (!value.ignoredBoundary.includes('All Git-ignored paths')) process.exit(1);
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-cache');
 if (!workspace.retirable || workspace.blockers.length !== 0) process.exit(1);
 const root = workspace.roots[0];
-if (root.ignoredPaths.length !== 5 || root.blockingIgnoredPaths.length !== 0) process.exit(1);
+if (root.ignoredPathCount !== 5 || root.ignoredPaths.length !== 5 || root.blockingIgnoredPaths.length !== 0) process.exit(1);
 const byPath = Object.fromEntries(root.discardableIgnoredPaths.map(entry => [entry.path, entry]));
 if (byPath['prototype-game/.godot/imported/icon.ctex']?.kind !== 'build-cache') process.exit(1);
 if (byPath['tools/__pycache__/lint.cpython-313.pyc']?.kind !== 'build-cache') process.exit(1);
 if (byPath['.task_tmp/run.log']?.kind !== 'build-cache') process.exit(1);
 if (byPath['prototype-game/addons/playbot/native/lib/libplaybot_rtc.so']?.identity !== 'matches-main-clone') process.exit(1);
 if (byPath['prototype-game/addons/playbot/native/NOTICE.md']?.identity !== 'absent-from-main-clone') process.exit(1);
-if (byPath['prototype-game/addons/playbot/native/NOTICE.md']?.kind !== 'playbot-native-addon') process.exit(1);
+if (byPath['prototype-game/addons/playbot/native/NOTICE.md']?.kind !== 'playbot-addon') process.exit(1);
 NODE
 printf 'ignored work\n' > "$cache_ws/prototype-game/ignored-retirement.txt"
 cleanup_list main > "$cleanup_out"
-OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "an ignored path outside build output stopped blocking beside discardable caches"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "ignored output outside known cache names still blocked beside disposable caches"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-cache');
 const blocker = workspace.blockers.find(candidate => candidate.code === 'ignored-files');
-if (workspace.retirable || blocker?.paths.join(',') !== 'prototype-game/ignored-retirement.txt') process.exit(1);
-if (workspace.roots[0].discardableIgnoredPaths.length !== 5) process.exit(1);
+if (!workspace.retirable || blocker) process.exit(1);
+if (workspace.roots[0].discardableIgnoredPaths.length !== 6) process.exit(1);
 NODE
 rm -f "$cache_ws/prototype-game/ignored-retirement.txt"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
@@ -7150,31 +7150,35 @@ if (audit.workspace.id !== 'ws-retire-cache' || audit.discard.roots[0].discardab
 if (audit.discard.roots[0].trackedPaths.length !== 0 || audit.verifiedLandingCommits[0].evidence !== 'remote') process.exit(1);
 NODE
 [ ! -e "$cache_ws" ] || fail "the build-output workspace directory survived retirement"
-pass "fm-playbot-lanes: gitignored build output and the native addon tree are discardable while other ignored paths block"
+pass "fm-playbot-lanes: all gitignored output is discardable with exact path evidence"
 
-ignored_ws="$FIXTURE_ROOT/worker/.worktrees/ignored-discard"
-git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-ignored-discard "$ignored_ws" origin/main >/dev/null \
-  || fail "could not create the ignored-discard worktree"
-printf 'ignored but not build output\n' > "$ignored_ws/prototype-game/ignored-retirement.txt"
-add_retirement_workspace ws-retire-ignored-discard "$ignored_ws" retirement-ignored-discard
-rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-cleanup_retire ws-retire-ignored-discard main > "$cleanup_out"
-OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "unclassified ignored work was discarded without authorization"
-const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
-if (!value.error?.message.includes('ignored-files')) process.exit(1);
+# An untracked plugin file injected by Playbot is discardable, while a
+# sibling non-ignored source file must still block the same workspace.
+addon_ws="$FIXTURE_ROOT/worker/.worktrees/addon-injected"
+git -C "$FIXTURE_ROOT/worker" worktree add -b retirement-addon-injected "$addon_ws" origin/main >/dev/null \
+  || fail "could not create the addon injection worktree"
+mkdir -p "$addon_ws/prototype-game/addons/playbot" "$addon_ws/prototype-game/addons/playbot-other"
+printf 'injected plugin\n' > "$addon_ws/prototype-game/addons/playbot/plugin.cfg"
+printf 'source work\n' > "$addon_ws/prototype-game/addons/playbot-other/user.gd"
+add_retirement_workspace ws-retire-addon "$addon_ws" retirement-addon-injected
+cleanup_list main > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "injected addon paths and user source were not separated"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const workspace = value.workspaces.find(candidate => candidate.workspace.id === 'ws-retire-addon');
+const root = workspace.roots[0];
+if (workspace.retirable || root.blockingUntrackedPaths.join(',') !== 'prototype-game/addons/playbot-other/user.gd') process.exit(1);
+if (root.discardableUntrackedPaths[0]?.path !== 'prototype-game/addons/playbot/plugin.cfg') process.exit(1);
 NODE
-no_delete_ipc "an unauthorized ignored path reached workspace:delete"
-cleanup_retire ws-retire-ignored-discard main ',"discardLocalChanges":{"authorization":"discard ignored work","allow":["ignored-files"]}' > "$cleanup_out"
-OUT_FILE="$cleanup_out" AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" node --no-warnings <<'NODE' \
-  || fail "an authorized ignored path was not retired and audited"
+rm "$addon_ws/prototype-game/addons/playbot-other/user.gd"
+cleanup_retire ws-retire-addon main > "$cleanup_out"
+OUT_FILE="$cleanup_out" AUDIT_FILE="$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" node --no-warnings <<'NODE' || fail "injected untracked addon files did not retire with audit evidence"
 const fs = require('node:fs');
 const value = JSON.parse(fs.readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
-if (!value.deleted || !value.postActionComplete) process.exit(1);
 const audit = fs.readFileSync(process.env.AUDIT_FILE, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
-if (audit.workspace.id !== 'ws-retire-ignored-discard' || audit.discard.authorization !== 'discard ignored work') process.exit(1);
-if (audit.discard.roots[0].ignoredPaths.join(',') !== 'prototype-game/ignored-retirement.txt') process.exit(1);
+if (!value.deleted || !value.postActionComplete) process.exit(1);
+if (audit.discard.roots[0].discardableUntrackedPaths[0]?.path !== 'prototype-game/addons/playbot/plugin.cfg') process.exit(1);
 NODE
-pass "fm-playbot-lanes: an explicitly authorized ignored path is discarded with its exact path in the audit"
+pass "fm-playbot-lanes: injected untracked addon files are discardable and other untracked files block"
 
 # Discarding local changes needs an explicit authorization naming each blocker
 # code, and unlanded commits need every exact commit id.
@@ -7315,6 +7319,12 @@ make_orphan "$cache_orphan"
 mkdir -p "$cache_orphan/prototype-game/.godot"
 printf 'cache\n' > "$cache_orphan/prototype-game/.godot/cache.bin"
 add_retirement_workspace ws-retire-orphan-cache "$cache_orphan" retirement-orphan-cache
+large_orphan="$orphan_storage/orphan-large"
+make_orphan "$large_orphan"
+for index in $(seq 1 60); do
+  printf 'unaccounted work\n' > "$large_orphan/file-$index.txt"
+done
+add_retirement_workspace ws-retire-orphan-large "$large_orphan" retirement-orphan-large
 branch_orphan="$orphan_storage/orphan-main-branch"
 make_orphan "$branch_orphan"
 add_retirement_workspace ws-retire-orphan-branch "$branch_orphan" main
@@ -7333,8 +7343,15 @@ if (files.retirable || !files.discard.possible || files.blockers.length !== 1) p
 if (files.roots[0].orphan.gitMetadata.kind !== 'dangling-gitdir-file') process.exit(1);
 if (filesBlocker.inventory.otherPathsSample.join(',') !== 'prototype-game/notes.txt') process.exit(1);
 if (filesBlocker.inventory.buildCacheFileCount !== 1 || filesBlocker.inventory.fileCount !== 2) process.exit(1);
+if (files.verdict !== 'orphaned' || filesBlocker.inventory.paths.join(',') !== 'prototype-game/.godot/cache.bin,prototype-game/notes.txt') process.exit(1);
+if (filesBlocker.inventory.otherPaths.join(',') !== 'prototype-game/notes.txt') process.exit(1);
 const cache = byId['ws-retire-orphan-cache'];
-if (!cache.retirable || cache.roots[0].orphan.inventory.otherFileCount !== 0) process.exit(1);
+if (cache.retirable || cache.verdict !== 'orphaned' || cache.blockers[0]?.code !== 'orphaned-files' || cache.roots[0].orphan.inventory.otherFileCount !== 0) process.exit(1);
+const large = byId['ws-retire-orphan-large'];
+const inventory = large.roots[0].orphan.inventory;
+if (large.verdict !== 'orphaned' || inventory.paths.length !== 60 || inventory.otherPaths.length !== 60) process.exit(1);
+if (inventory.entries.length !== 61 || !inventory.entries.some(entry => entry.path === '.git' && entry.type === 'file')) process.exit(1);
+if (!inventory.otherPathsSampleTruncated || inventory.otherPathsSample.length !== 50) process.exit(1);
 const branch = byId['ws-retire-orphan-branch'];
 if (branch.retirable || branch.discard.possible || !branch.blockers.some(blocker => blocker.code === 'orphan-branch-checked-out')) process.exit(1);
 const outside = byId['ws-retire-orphan-outside'];
@@ -7371,7 +7388,7 @@ if (!value.verification.checks.gitRegistrationsGone.every(check => check.gone)) 
 NODE
 git -C "$FIXTURE_ROOT/worker" worktree list --porcelain | grep -F "$missing_ws" >/dev/null \
   && fail "the missing-directory orphan kept its Git registration"
-cleanup_retire ws-retire-orphan-cache main > "$cleanup_out"
+cleanup_retire ws-retire-orphan-cache main "$orphan_discard" > "$cleanup_out"
 OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "a cache-only orphan was not retired and removed"
 const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
 if (!value.deleted || !value.postActionComplete || value.orphanCleanup[0]?.removed !== true) process.exit(1);
@@ -7603,6 +7620,18 @@ rm -rf "$retire_home/.git"
 rmdir "$retire_home/projects/frog"
 set_playbot_root "$FIXTURE_ROOT/worker"
 pass "fm-playbot-lanes: local landing rejects a registered clone that is not its own worktree top level"
+printf '%s\n' "- external [local-only] - Godot subdirectory at $FIXTURE_ROOT/worker (added 2026-09-28)" >> "$retire_home/data/projects.md"
+set_playbot_root "$FIXTURE_ROOT/worker/prototype-game"
+cleanup_list retirement-local-landing ',"registryProject":"external"' > "$cleanup_out"
+OUT_FILE="$cleanup_out" MAIN="$FIXTURE_ROOT/worker" node --no-warnings <<'NODE' || fail "an external registered clone path failed nested-root retirement inspection"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (value.error || value.result.structuredContent.landingEvidence.registry.path !== process.env.MAIN) process.exit(1);
+NODE
+rpc '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_retirable_workspaces","arguments":{"project":"prototype-game","landingBranch":"main"}}}' > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "duplicate project names stopped refusing"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('ambiguous')) process.exit(1);
+NODE
 ln -s "$FIXTURE_ROOT/worker" "$retire_home/projects/frog"
 set_playbot_root "$FIXTURE_ROOT/worker/prototype-game"
 cleanup_list retirement-local-landing ',"registryProject":"frog"' > "$cleanup_out"

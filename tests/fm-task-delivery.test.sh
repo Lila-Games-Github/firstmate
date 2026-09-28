@@ -428,6 +428,21 @@ EOF
   [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
+  printf '%s\n' "- external [local-only] - nested Godot project at $home/ProjectWhite (added 2026-09-28)" >> "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --path external)
+  [ "$out" = "$home/ProjectWhite" ] || fail "registry path did not resolve the explicitly registered external clone"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --path flatproj)
+  [ "$out" = "$home/projects/flatproj" ] || fail "legacy registry path did not default to projects/name"
+  printf '%s\n' "- spaced [local-only] - fixture at \`$home/clone with spaces\` (added 2026-09-28)" >> "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --path spaced)
+  [ "$out" = "$home/clone with spaces" ] || fail "quoted registered clone path lost spaces"
+  if FM_HOME="$home" "$PROJECT_MODE" --path absent > /dev/null 2>&1; then
+    fail "unregistered project acquired a clone path"
+  fi
+  printf '%s\n' '- ambiguous [local-only] - fixture at /one and at /two (added 2026-09-28)' >> "$home/data/projects.md"
+  if FM_HOME="$home" "$PROJECT_MODE" --path ambiguous > /dev/null 2>&1; then
+    fail "ambiguous registered clone paths were accepted"
+  fi
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
