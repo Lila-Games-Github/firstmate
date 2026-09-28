@@ -134,6 +134,14 @@ test_spawn_refuses_a_brief_mode_mismatch() {
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
+  write_brief "$home" delivery-lane-marker direct-PR
+  printf 'Execution contract: workspace=lane\n' >> "$home/data/delivery-lane-marker/brief.md"
+  out=$(run_spawn "$home" "$fakebin" delivery-lane-marker "$proj" claude --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a lane brief launched as an ordinary worker"
+  assert_contains "$out" "workspace mismatch" "spawn did not reject a lane brief"
+  assert_absent "$home/state/delivery-lane-marker.meta" "lane mismatch wrote metadata"
+
   write_brief "$home" delivery-mismatch-b1 no-mistakes
   out=$(run_spawn "$home" "$fakebin" delivery-mismatch-b1 "$proj" claude --mode direct-PR --yolo off)
   status=$?

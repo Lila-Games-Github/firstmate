@@ -818,6 +818,32 @@ The application database row read back `execution_model=gpt-6-astra`, `execution
 The matching harness `threads` query returned zero rows because an empty chat has no Codex session until its first user task; the no-task proof therefore cannot produce a harness row, and the application thread row is the available persisted read-back at this lifecycle stage.
 The exact cleanup command `node --no-warnings bin/fm-playbot-lanes.mjs call archive_chat '{"project":"project_df995db1b164","workspace":"ws_dcea82fc1107","thread":"chat-287f5f34-4d07-4070-a840-b16bc2312a87","confirm":true}'` returned `archived: "chat-287f5f34-4d07-4070-a840-b16bc2312a87"`, and a final database read showed `archived=1`.
 
+### Lane branch readback and injected addon churn, 2026-09-28
+
+With Node `v26.7.0`, the current lane-base and Playbot fixture suites passed using scratch Git repositories and simulated Playbot IPC.
+The Playbot run completed with `exit=0`, `failed=0`, and `skipped_gate=0`; it made no live Playbot lifecycle calls.
+These commands refresh the evidence:
+
+```sh
+bin/fm-test-run.sh tests/fm-lane-base-check.test.sh
+bin/fm-test-run.sh tests/fm-playbot-lanes.test.sh
+```
+
+Selected exact output from those runs:
+
+```text
+ok - fm-lane-base-check: addon injection is tracked churn, with untracked files protected
+ok - fm-lane-base-check: non-git block names the workspace remedy
+ok - fm-playbot-lanes: dispatch sends linked model profiles and reports Playbot's read-back values
+ok - fm-playbot-lanes: tracked addon tree and project settings churn are allowed
+ok - fm-playbot-lanes: addon source injection and tracked deletions are churn
+ok - fm-playbot-lanes: POSIX backslashes remain literal blocking path characters
+```
+
+The dispatch assertion deliberately makes the fixture ignore the requested branch and checks the returned registered branch.
+The base-check assertions execute the printed preservation, rebase, and missing-ref remedies, then verify that the corresponding blocker clears.
+Current churn matching is owned by `bin/fm-playbot-lanes.mjs`; the earlier eight-file result above records the previous allowance.
+
 ### Dispatch-armed supervision poll
 
 On 2026-08-24, `dispatch` from an external-terminal caller was verified to arm that worker's firstmate watcher poll itself, because Playbot offers such a caller no push path at all: `identify_current_thread` returns `{"controller":"external-terminal","thread":null}`, and `register_lane` refuses with `register_lane requires a Playbot controller chat`.

@@ -9,8 +9,10 @@
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
 #   standing posture as context, not as this task's answer, so a spawn never looks
 #   the mode up. A ship spawn additionally reads the brief's recorded
-#   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
-#   instructions and the recorded task delivery cannot drift apart; a brief
+#   "Delivery contract: mode=<mode>" line and REFUSES a mismatch,
+#   and refuses a marked lane brief (`Execution contract: workspace=lane`)
+#   before any endpoint exists. The worker instructions and the recorded task
+#   delivery cannot drift apart; an unmarked legacy brief
 #   scaffolded before that line existed warns once and launches on the flag. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
@@ -2731,6 +2733,13 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
+BRIEF_WORKSPACES=$(sed -n 's/^Execution contract: workspace=//p' "$BRIEF" | sort -u)
+case "$BRIEF_WORKSPACES" in
+  ''|crewmate) ;; # Legacy unmarked briefs remain supported.
+  *)
+    echo "error: workspace mismatch for $ID: the brief says workspace=$BRIEF_WORKSPACES; fm-spawn launches ordinary crewmates, so re-scaffold without --lane or dispatch the lane through Playbot" >&2
+    exit 1 ;;
+esac
 if [ "$KIND" = ship ]; then
   # A recorded landing branch must already exist in the project clone (as a
   # local branch or an origin remote-tracking branch), so the landed-work test
