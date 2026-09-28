@@ -373,6 +373,9 @@ if [ "${1:-}" = --version ]; then
   printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
   exit 0
 fi
+if [ "${1:-} ${2:-} ${3:-}" = 'axi run --help' ]; then
+  printf '%s\n' 'Usage: no-mistakes axi run --target-branch <branch>'
+fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
