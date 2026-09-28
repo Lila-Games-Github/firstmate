@@ -8166,6 +8166,95 @@ NODE
 [ ! -e "$files_orphan" ] || fail "the authorized orphan directory survived retirement"
 pass "fm-playbot-lanes: orphaned roots retire as registration cleanup and remove only inventoried directories"
 
+# Database row identity is the stored spelling, while filesystem identity uses
+# the real directory. A symlinked parent models /home -> /var/home on Linux.
+alias_storage="$FIXTURE_ROOT/orphan-storage-alias"
+ln -s "$orphan_storage" "$alias_storage"
+alias_orphan="$orphan_storage/orphan-alias"
+make_orphan "$alias_orphan"
+printf 'aliased orphan work\n' > "$alias_orphan/notes.txt"
+add_retirement_workspace ws-retire-orphan-alias "$alias_storage/orphan-alias" retirement-orphan-alias
+cleanup_list main > "$cleanup_out"
+OUT_FILE="$cleanup_out" STORED_PATH="$alias_storage/orphan-alias" node --no-warnings <<'NODE' || fail "the orphan alias fixture did not exercise distinct stored and canonical paths"
+const fs = require('node:fs');
+const value = JSON.parse(fs.readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+const root = value.workspaces.find(workspace => workspace.workspace.id === 'ws-retire-orphan-alias').roots[0];
+if (root.path === process.env.STORED_PATH || root.path !== fs.realpathSync.native(process.env.STORED_PATH)) process.exit(1);
+if (!root.orphan || root.branch !== 'retirement-orphan-alias') process.exit(1);
+NODE
+cleanup_retire ws-retire-orphan-alias main "$orphan_discard" > "$cleanup_out"
+OUT_FILE="$cleanup_out" STORED_PATH="$alias_storage/orphan-alias" CANONICAL_PATH="$alias_orphan" node --no-warnings <<'NODE' || fail "an unchanged orphan with an aliased stored path failed retirement"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+if (!value.deleted || !value.postActionComplete || !value.orphanCleanup[0]?.removed) process.exit(1);
+if (value.baseline.database.workspaceRootRows[0].path !== process.env.STORED_PATH) process.exit(1);
+if (value.baseline.directories[0].path !== process.env.CANONICAL_PATH) process.exit(1);
+if (value.reconciliation.removed.workspaceRootRows[0].path !== process.env.STORED_PATH) process.exit(1);
+NODE
+[ ! -e "$alias_orphan" ] || fail "the unchanged aliased orphan directory survived retirement"
+pass "fm-playbot-lanes: unchanged orphan rows with a symlinked parent pass the pre-action baseline"
+
+# Mutate one stored column after topology discovery but during Git inspection.
+# Even replacing the path with its canonical spelling must refuse: it is a
+# real row change, although both spellings identify the same directory.
+row_race_orphan="$orphan_storage/orphan-row-race"
+make_orphan "$row_race_orphan"
+printf 'preserve raced orphan\n' > "$row_race_orphan/notes.txt"
+add_retirement_workspace ws-retire-orphan-row-race "$alias_storage/orphan-row-race" retirement-orphan-row-race
+row_race_bin="$FIXTURE_ROOT/retirement-row-race-bin"
+mkdir -p "$row_race_bin"
+cat > "$row_race_bin/git" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ ! -e "$FM_TEST_ROW_RACE_MARKER" ] && [ "${1:-}" = "-C" ] \
+  && [ "${2:-}" = "$FM_TEST_ROW_RACE_ROOT" ] && [ "${3:-}" = 'rev-parse' ] \
+  && [ "${4:-}" = '--show-toplevel' ]; then
+  : > "$FM_TEST_ROW_RACE_MARKER"
+  node --no-warnings <<'NODE'
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(require('node:path').join(process.env.PLAYBOT_DESKTOP_DIR, 'playbot.db'));
+const values = { path: process.env.FM_TEST_ROW_RACE_ROOT, branch: 'changed-branch', project_root_id: 'changed-root' };
+const column = process.env.FM_TEST_ROW_RACE_COLUMN;
+if (!Object.hasOwn(values, column)) throw new Error('invalid race column');
+db.prepare(`UPDATE workspace_roots SET ${column} = ? WHERE workspace_id = ?`)
+  .run(values[column], 'ws-retire-orphan-row-race');
+db.close();
+NODE
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+chmod 0700 "$row_race_bin/git"
+for row_race_column in path branch project_root_id; do
+  cleanup_list main > "$cleanup_out"
+  rm -f "$FIXTURE_ROOT/retirement-row-race-marker"
+  : > "$FIXTURE_ROOT/ipc-calls.jsonl"
+  FM_TEST_REAL_GIT="$real_git" FM_TEST_ROW_RACE_ROOT="$row_race_orphan" \
+    FM_TEST_ROW_RACE_MARKER="$FIXTURE_ROOT/retirement-row-race-marker" \
+    FM_TEST_ROW_RACE_COLUMN="$row_race_column" PATH="$row_race_bin:$PATH" \
+    cleanup_retire ws-retire-orphan-row-race main "$orphan_discard" > "$cleanup_out"
+  [ -f "$FIXTURE_ROOT/retirement-row-race-marker" ] || fail "the $row_race_column race was not injected"
+  OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "a changed orphan root row passed the pre-action baseline"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8'));
+if (!value.error?.message.includes('workspace root rows changed after the immediate safety inspection')) process.exit(1);
+NODE
+  no_delete_ipc "a $row_race_column row change reached workspace:delete"
+  [ -f "$row_race_orphan/notes.txt" ] || fail "a changed orphan root row lost its directory"
+  STORED_PATH="$alias_storage/orphan-row-race" node --no-warnings <<'NODE' || fail "could not restore the raced orphan row"
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(require('node:path').join(process.env.PLAYBOT_DESKTOP_DIR, 'playbot.db'));
+if (!db.prepare('SELECT id FROM workspaces WHERE id = ?').get('ws-retire-orphan-row-race')) process.exit(1);
+db.prepare('UPDATE workspace_roots SET project_root_id = ?, path = ?, branch = ? WHERE workspace_id = ?')
+  .run('root-worker', process.env.STORED_PATH, 'retirement-orphan-row-race', 'ws-retire-orphan-row-race');
+db.close();
+NODE
+done
+pass "fm-playbot-lanes: changed orphan path, branch, and root id refuse before deletion"
+cleanup_retire ws-retire-orphan-row-race main "$orphan_discard" > "$cleanup_out"
+OUT_FILE="$cleanup_out" node --no-warnings <<'NODE' || fail "restoring the exact orphan row did not permit retirement"
+const value = JSON.parse(require('node:fs').readFileSync(process.env.OUT_FILE, 'utf8')).result.structuredContent;
+if (!value.deleted || !value.postActionComplete) process.exit(1);
+NODE
+pass "fm-playbot-lanes: restoring the exact stored orphan row clears the baseline refusal"
+
 # A missing directory Git still registers keeps its recorded HEAD reachable, and
 # Playbot prunes every such registration when it deletes an orphan, so a
 # detached unlanded HEAD blocks its own retirement and every orphan's.

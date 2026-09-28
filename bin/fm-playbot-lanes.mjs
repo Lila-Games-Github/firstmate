@@ -3157,7 +3157,7 @@ function retirementDeletionObserved(verification, reconciliation) {
     || verification.checks.gitRegistrationsGone.some((entry) => entry.removed);
 }
 
-function captureWorkspaceRetirementBaseline(project, inspection) {
+function captureWorkspaceRetirementBaseline(project, workspace, inspection) {
   const db = openDb(appDbPath());
   let workspaceRows;
   let workspaceRootRows;
@@ -3203,7 +3203,10 @@ function captureWorkspaceRetirementBaseline(project, inspection) {
     return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
   };
   workspaceRootRows.sort(compareRoots);
-  const inspectedRoots = inspection.roots
+  // Compare persisted rows with the exact topology snapshot inspected above.
+  // Inspection paths are canonical filesystem identities, so an unchanged
+  // stored path through a parent symlink can differ from the inspected path.
+  const inspectedRoots = workspace.roots
     .map((root) => ({ projectRootId: root.projectRootId, path: root.path, branch: root.branch }))
     .sort(compareRoots);
   if (JSON.stringify(workspaceRootRows) !== JSON.stringify(inspectedRoots)) {
@@ -3403,7 +3406,7 @@ async function retireWorkspace(project, workspace, landingBranch, landingOptions
   const discard = discardRecord(inspection, authorization);
   let baseline;
   try {
-    baseline = captureWorkspaceRetirementBaseline(project, inspection);
+    baseline = captureWorkspaceRetirementBaseline(project, workspace, inspection);
   } catch (error) {
     throw Object.assign(new Error(`Workspace ${workspace.id} failed its pre-action retirement baseline: ${error instanceof Error ? error.message : String(error)}`), {
       data: { inspection: boundedRetirementPaths(inspection) },
