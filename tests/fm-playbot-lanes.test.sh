@@ -3958,6 +3958,64 @@ tasks-axi show fm-lane-manual --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXT
 assert_grep 'state: queued' "$FIXTURE_ROOT/lane-manual.out" "lane teardown ignored the manual backlog posture"
 pass "fm-playbot-lanes: lane dispatch and teardown preserve manual backlog ownership"
 
+# A worker chat the operator archived or deleted cannot block retiring a lane
+# whose workspace is verified landed, and --force never skips that check.
+lane_orphan_meta() {  # <task-id> <thread-id>
+  local target="$FM_HOME_FIXTURE/state/$1.meta"
+  printf '%s\n' "$lane_identity_before" | sed "s/^playbot_thread=.*/playbot_thread=$2/" > "$target.tmp" || return 1
+  chmod 0600 "$target.tmp" && mv "$target.tmp" "$target"
+}
+FIXTURE_ROOT="$FIXTURE_ROOT" WORKSPACE="$lane_identity_workspace" node --no-warnings <<'NODE' || fail "could not stage an archived lane chat"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare(`INSERT INTO workspace_threads (id, workspace_id, title, position, is_active, session_id, approval_mode,
+  plan_mode, ephemeral, draft_input, pending_queue_json, agent_status, has_unread, last_user_activity_at,
+  created_at, updated_at, archived) VALUES (?, ?, ?, 99, 0, NULL, 'default', 0, 0, '', '[]', 'working', 0, NULL, ?, ?, 1)`)
+  .run('chat-lane-archived', process.env.WORKSPACE, 'Archived lane chat', '2099-08-25T12:10:00.000Z', '2099-08-25T12:10:00.000Z');
+db.close();
+NODE
+lane_orphan_meta fm-lane-archived chat-lane-archived || fail "could not stage archived-chat lane record"
+FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-archived.meta" \
+  > "$FIXTURE_ROOT/lane-archived-retirable.out" 2>&1 \
+  || fail "an archived chat blocked retiring a landed lane: $(cat "$FIXTURE_ROOT/lane-archived-retirable.out")"
+printf 'done: archived lane complete\n' > "$FM_HOME_FIXTURE/state/fm-lane-archived.status"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-archived > "$FIXTURE_ROOT/lane-archived-teardown.out" 2>&1 \
+  || fail "archived-chat lane teardown failed: $(cat "$FIXTURE_ROOT/lane-archived-teardown.out")"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-archived.meta" "archived-chat lane teardown retained its task identity"
+pass "fm-playbot-lanes: an archived worker chat retires a landed lane record"
+
+lane_orphan_meta fm-lane-absent chat-lane-deleted || fail "could not stage absent-chat lane record"
+printf 'done: absent lane complete\n' > "$FM_HOME_FIXTURE/state/fm-lane-absent.status"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-absent > "$FIXTURE_ROOT/lane-absent-teardown.out" 2>&1 \
+  || fail "absent-chat lane teardown failed: $(cat "$FIXTURE_ROOT/lane-absent-teardown.out")"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-absent.meta" "absent-chat lane teardown retained its task identity"
+pass "fm-playbot-lanes: a deleted worker chat retires a landed lane record"
+
+lane_orphan_meta fm-lane-active "$lane_identity_thread" || fail "could not stage active-chat lane record"
+set_thread_turn "$lane_identity_thread" working 2099-08-25T12:20:00.000Z || fail "could not start the active-chat lane"
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-active --force > "$FIXTURE_ROOT/lane-active-force.out" 2>&1; then
+  fail "forced lane teardown retired a working chat"
+fi
+assert_grep 'not idle' "$FIXTURE_ROOT/lane-active-force.out" "forced active-chat refusal did not name the busy worker"
+[ -e "$FM_HOME_FIXTURE/state/fm-lane-active.meta" ] || fail "forced active-chat refusal removed the lane record"
+set_thread_turn "$lane_identity_thread" ready 2099-08-25T12:21:00.000Z || fail "could not stop the active-chat lane"
+rm -f "$FM_HOME_FIXTURE/state/fm-lane-active.meta"
+pass "fm-playbot-lanes: an active worker chat still blocks forced lane teardown"
+
+lane_orphan_meta fm-lane-absent-unlanded chat-lane-deleted || fail "could not stage unlanded absent-chat lane record"
+lane_identity_head=$(git -C "$lane_identity_worktree" rev-parse HEAD)
+git -C "$lane_identity_worktree" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit --allow-empty -qm 'Unlanded orphan lane fixture' || fail "could not stage unlanded orphan lane commit"
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-absent-unlanded --force > "$FIXTURE_ROOT/lane-absent-force.out" 2>&1; then
+  fail "forced lane teardown retired an unlanded workspace behind an absent chat"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-absent-force.out" "forced absent-chat refusal did not name the landed-work gate"
+[ -e "$FM_HOME_FIXTURE/state/fm-lane-absent-unlanded.meta" ] || fail "forced unlanded refusal removed the lane record"
+git -C "$lane_identity_worktree" reset --hard -q "$lane_identity_head" || fail "could not restore the orphan lane fixture"
+rm -f "$FM_HOME_FIXTURE/state/fm-lane-absent-unlanded.meta"
+pass "fm-playbot-lanes: --force never bypasses the landed check for an absent worker chat"
+
 # Freeze a successful idle read while another dispatch tries to arm its poll.
 # A teardown may not consume an armed=true result published after that read.
 lane_race_task=fm-lane-retire-race

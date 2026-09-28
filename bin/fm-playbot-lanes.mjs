@@ -5129,21 +5129,24 @@ function laneTaskState(file, retirable = false, state = path.dirname(file)) {
   process.env.PLAYBOT_DESKTOP_DIR = supervisionPath(meta.playbot_desktop, "lane desktop directory");
   process.env.PLAYBOT_HARNESS_HOME = supervisionPath(meta.playbot_harness_home, "lane harness directory");
   const row = threadRowById(meta.playbot_thread);
-  if (!row || row.project_id !== meta.playbot_project || row.workspace_id !== meta.playbot_workspace || row.archived || row.archive_state !== "active") {
+  if (row ? row.project_id !== meta.playbot_project || row.workspace_id !== meta.playbot_workspace || row.archive_state !== "active" : !retirable) {
     throw new Error("lane worker is absent or its workspace identity changed");
   }
-  const messages = queuedMessages(row.pending_queue_json);
-  const queued = messages === null ? null : messages.length;
+  const chatActive = Boolean(row);
   const taskId = path.basename(file, ".meta");
   if (!supervisionTaskIdValid(taskId)) throw new Error("lane metadata filename does not identify a task");
+  const messages = chatActive ? queuedMessages(row.pending_queue_json) : null;
+  const queued = messages === null ? null : messages.length;
   let completedDelivery = true;
-  if (row.agent_status === "ready" && pathPresence(supervisionSidecarPath(state, taskId))) {
+  if (chatActive && row.agent_status === "ready" && pathPresence(supervisionSidecarPath(state, taskId))) {
     const previous = supervisionReadSidecar(state, taskId);
     completedDelivery = Boolean(previous && supervisionPollDecision(taskId, meta.playbot_thread, previous, row).retire);
   }
   if (retirable) {
-    if (row.agent_status !== "ready" || queued !== 0) throw new Error(`lane worker is not idle with an empty queue (status ${row.agent_status}, queued ${queued ?? "unreadable"})`);
-    if (!completedDelivery) throw new Error("lane task delivery or post-acceptance completion is still unconfirmed; preserving supervision");
+    if (chatActive) {
+      if (row.agent_status !== "ready" || queued !== 0) throw new Error(`lane worker is not idle with an empty queue (status ${row.agent_status}, queued ${queued ?? "unreadable"})`);
+      if (!completedDelivery) throw new Error("lane task delivery or post-acceptance completion is still unconfirmed; preserving supervision");
+    }
     const project = resolveProject(meta.playbot_project);
     const workspace = resolveWorkspace(project, meta.playbot_workspace);
     const coverage = workspaceRootCoverage(project, workspace);
