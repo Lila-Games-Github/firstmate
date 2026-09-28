@@ -57,9 +57,11 @@ if [ -n "${TOP_SECRET:-}" ]; then printf 'secret=leaked\n'; else printf 'secret=
 while IFS= read -r line || [ -n "$line" ]; do printf 'stdin=%s\n' "$line"; done
 exit "${FM_PROBE_EXIT:-0}"
 SH
+# Far longer than any timeout it is staged under, so only the worker's kill can
+# end it: a loaded runner must never let it finish inside the bound first.
 cat > "$REMOTE_ROOT/bin/fm-timeout-job.sh" <<'SH'
 #!/bin/bash
-sleep 3
+sleep 60
 SH
 cat > "$REMOTE_ROOT/bin/fm-delay-job.sh" <<'SH'
 #!/bin/bash
