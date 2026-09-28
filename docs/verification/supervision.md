@@ -980,3 +980,16 @@ ok - fm-playbot-lanes: dispatch falls back to the pre-0.94 channels on a legacy 
 ```
 
 The fake DevTools endpoint inside the test serves the 0.94.0 `threads:launch` surface by default and the pre-0.94 surface in its legacy mode, so both adapter paths and the missing-handler detection between them are enforced hermetically.
+
+### Retirement path evidence (2026-09-28)
+
+With Node v26.7.0, `bin/fm-test-run.sh tests/fm-playbot-lanes.test.sh tests/fm-task-delivery.test.sh` completed both suites without a gate skip.
+The lane regression covers an externally registered clone with a nested Playbot root, duplicate project-name refusal, disposable ignored output and injected untracked addon files, and an 8,295-file orphan whose complete private path inventory is hashed while response samples remain bounded.
+It also proves that changed workspace contents or tampered private inventory bytes refuse deletion before IPC, and that fresh complete evidence permits authorized retirement.
+The same public retirement fixture rejects the earlier executable before the fix.
+
+```text
+ok - fm-playbot-lanes: public retirement preserves ignored output and injected addon evidence without blocking
+ok - fm-playbot-lanes: large orphan evidence is bounded, complete, and checked before deletion
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=436300
+```

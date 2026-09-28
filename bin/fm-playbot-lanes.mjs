@@ -1921,7 +1921,8 @@ function orphanGitMetadata(rootPath) {
 }
 
 // A deterministic inventory of an orphaned directory's contents. Symlinks are
-// recorded, never followed. The fingerprint binds the root and every entry's
+// recorded, never followed. Public responses sample these entries and retain
+// the complete path list in private evidence. The fingerprint binds the root and every entry's
 // type, path, inode, size, and change and modification times so replacement or
 // mutation between inspection and deletion is refused.
 function orphanDirectoryInventory(rootPath) {
@@ -1957,6 +1958,99 @@ function orphanDirectoryInventory(rootPath) {
     otherPaths,
     entries: entries.map((entry) => ({ path: entry.path, type: entry.type, bytes: Number(entry.size) })),
   };
+}
+
+const RETIREMENT_PATH_SAMPLE_LIMIT = 50;
+
+// Full path evidence lives in a private, content-addressed JSONL file. Responses
+// carry counts and samples, while the destructive recheck hashes the entire
+// freshly derived sorted inventory and verifies the saved file before IPC.
+function retirementPathInventory(root) {
+  const paths = [...new Set([
+    ...(root.orphan?.inventory?.entries?.map((entry) => entry.path) ?? []),
+    ...(root.tracked?.paths ?? []), ...(root.untrackedPaths ?? []), ...(root.ignoredPaths ?? []),
+  ])].sort();
+  const hash = crypto.createHash("sha256");
+  for (const file of paths) hash.update(`${JSON.stringify(file)}\n`);
+  const sha256 = hash.digest("hex");
+  const rootKey = crypto.createHash("sha256").update(root.path).digest("hex");
+  const directory = path.join(stateDir(), "retirement-inventories");
+  return { paths, sha256, directory, file: path.join(directory, `${rootKey}-${sha256}.jsonl`), receipt: path.join(directory, `${rootKey}.json`) };
+}
+
+function publishRetirementPathInventory(root) {
+  const inventory = retirementPathInventory(root);
+  fs.mkdirSync(inventory.directory, { recursive: true, mode: 0o700 });
+  const temporary = `${inventory.file}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try {
+    for (const file of inventory.paths) fs.writeFileSync(fd, `${JSON.stringify(file)}\n`);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(temporary, inventory.file);
+  const evidence = {
+    root: root.path, file: inventory.file, sha256: inventory.sha256, pathCount: inventory.paths.length,
+    counts: {
+      tracked: root.tracked?.paths?.length ?? 0,
+      trackedChurn: root.tracked?.allowedChurnPaths?.length ?? 0,
+      blockingTracked: root.tracked?.blockingPaths?.length ?? 0,
+      playbotAddon: [...(root.untrackedPaths ?? []), ...(root.ignoredPaths ?? [])].filter(playbotAddonPath).length,
+      untracked: root.untrackedPaths?.length ?? 0,
+      ignored: root.ignoredPaths?.length ?? 0,
+      discardableUntracked: root.discardableUntrackedPaths?.length ?? 0,
+      blockingUntracked: root.blockingUntrackedPaths?.length ?? 0,
+      orphanFiles: root.orphan?.inventory?.fileCount ?? 0,
+      orphanBuildCaches: root.orphan?.inventory?.buildCacheFileCount ?? 0,
+      orphanOtherFiles: root.orphan?.inventory?.otherFileCount ?? 0,
+    },
+    sample: inventory.paths.slice(0, RETIREMENT_PATH_SAMPLE_LIMIT),
+    truncated: inventory.paths.length > RETIREMENT_PATH_SAMPLE_LIMIT,
+    fingerprint: root.orphan?.inventory?.fingerprint ?? null,
+  };
+  atomicWriteJson(inventory.receipt, evidence);
+  return evidence;
+}
+
+function verifyRetirementPathInventory(root) {
+  const inventory = retirementPathInventory(root);
+  const receipt = readJson(inventory.receipt);
+  if (!receipt && !root.orphan?.directoryPresent && inventory.paths.length <= RETIREMENT_PATH_SAMPLE_LIMIT) return;
+  if (!receipt || receipt.root !== root.path || receipt.sha256 !== inventory.sha256 || receipt.file !== inventory.file
+    || receipt.fingerprint !== (root.orphan?.inventory?.fingerprint ?? null)) {
+    throw new Error(`complete path inventory changed or is unavailable for ${root.path}; run list_retirable_workspaces again`);
+  }
+  const stat = fs.lstatSync(inventory.file);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`path inventory evidence is not a regular file: ${inventory.file}`);
+  const fd = fs.openSync(inventory.file, "r");
+  const hash = crypto.createHash("sha256");
+  const buffer = Buffer.alloc(64 * 1024);
+  try {
+    let length;
+    while ((length = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, length));
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (hash.digest("hex") !== inventory.sha256) throw new Error(`complete path inventory evidence was modified: ${inventory.file}`);
+}
+
+function boundedRetirementPaths(value, key = "") {
+  if (Array.isArray(value)) {
+    const paths = key === "paths" || key === "entries" || /Paths$/.test(key) || key === "removedFiles";
+    return (paths ? value.slice(0, RETIREMENT_PATH_SAMPLE_LIMIT) : value).map((entry) => boundedRetirementPaths(entry));
+  }
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([name, entry]) => [name, boundedRetirementPaths(entry, name)]));
+}
+
+function publicRetirementEvidence(inspection) {
+  const roots = inspection.roots.map((root) => ({ ...root, pathEvidence: publishRetirementPathInventory(root) }));
+  const pathSummary = { pathCount: 0, counts: {} };
+  for (const root of roots) {
+    pathSummary.pathCount += root.pathEvidence.pathCount;
+    for (const [kind, count] of Object.entries(root.pathEvidence.counts)) pathSummary.counts[kind] = (pathSummary.counts[kind] ?? 0) + count;
+  }
+  return boundedRetirementPaths({ ...inspection, roots, pathSummary });
 }
 
 function publicOrphanInventory(inventory) {
@@ -2569,7 +2663,7 @@ function appendRetirementAudit(record) {
   return withRoutesLock(() => {
     ensurePrivateDirs();
     const file = retirementAuditPath();
-    const encoded = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+    const encoded = Buffer.from(`${JSON.stringify(boundedRetirementPaths(record))}\n`, "utf8");
     let descriptor;
     let created = false;
     try {
@@ -3040,6 +3134,7 @@ function discardRecord(inspection, authorization) {
     roots: inspection.roots.map((root) => ({
       projectRootId: root.projectRootId,
       path: root.path,
+      pathEvidence: publishRetirementPathInventory(root),
       trackedPaths: allowed.has("tracked-modifications") ? root.tracked.blockingPaths : [],
       allowedChurnPaths: root.tracked.allowedChurnPaths,
       untrackedPaths: allowed.has("untracked-files") ? root.blockingUntrackedPaths : [],
@@ -3101,7 +3196,9 @@ function removeOrphanedDirectories(project, inspection) {
           ...(root.orphan.gitMetadata.kind === "dangling-gitdir-file" ? [".git"] : []),
           ...inventory.otherPaths,
           ...inventory.cachePaths,
-        ].sort(),
+        ].sort().slice(0, RETIREMENT_PATH_SAMPLE_LIMIT),
+        removedFileCount: inventory.fileCount + (root.orphan.gitMetadata.kind === "dangling-gitdir-file" ? 1 : 0),
+        pathEvidence: readJson(retirementPathInventory(root).receipt),
       });
     } catch (error) {
       results.push({ path: root.path, removed: false, error: error instanceof Error ? error.message : String(error) });
@@ -3130,16 +3227,17 @@ async function retireWorkspace(project, workspace, landingBranch, landingOptions
     const refused = plan ? plan.uncovered : inspection.blockers;
     const summary = refused.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ");
     throw Object.assign(new Error(`Workspace ${workspace.id} failed its immediate retirement safety recheck${plan ? " beyond what the discard authorization covers" : ""}: ${summary}`), {
-      data: { inspection, ...(plan ? { uncoveredBlockers: plan.uncovered } : {}) },
+      data: { inspection: boundedRetirementPaths(inspection), ...(plan ? { uncoveredBlockers: boundedRetirementPaths(plan.uncovered) } : {}) },
     });
   }
+  for (const root of inspection.roots) verifyRetirementPathInventory(root);
   const discard = discardRecord(inspection, authorization);
   let baseline;
   try {
     baseline = captureWorkspaceRetirementBaseline(project, inspection);
   } catch (error) {
     throw Object.assign(new Error(`Workspace ${workspace.id} failed its pre-action retirement baseline: ${error instanceof Error ? error.message : String(error)}`), {
-      data: { inspection },
+      data: { inspection: boundedRetirementPaths(inspection) },
     });
   }
   const routeBaseline = baseline.routes;
@@ -5640,7 +5738,7 @@ function toolDefinitions() {
     },
     {
       name: "list_retirable_workspaces",
-      description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence (or the main clone's local branch for a local-only registry project), unarchived thread states, live firstmate task records, commits and subjects ahead, exact tracked, untracked, and ignored paths, and orphaned roots whose Git metadata is gone. Local workspaces and any workspace with uncertain evidence are reported blocked, with which blockers an explicit discard authorization could clear.",
+      description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence (or the main clone's local branch for a local-only registry project), unarchived thread states, live firstmate task records, commits and subjects ahead, bounded tracked, untracked, and ignored path samples with complete private SHA-256 inventory evidence, and orphaned roots whose Git metadata is gone. Local workspaces and any workspace with uncertain evidence are reported blocked, with which blockers an explicit discard authorization could clear.",
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
         landingBranch: string("Explicit branch these workspaces must already be landed on; use refs/remotes/<remote>/<branch> to name a remote branch unambiguously"),
@@ -5845,14 +5943,14 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const landingOptions = registryLandingOptions(project, args.registryProject);
     const workspaces = project.workspaces
       .filter((workspace) => workspace.archiveState === "active")
-      .map((workspace) => workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions));
+      .map((workspace) => publicRetirementEvidence(workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions)));
     return {
       project: { id: project.id, name: project.name },
       landingBranch,
       landingEvidence: { kind: landingOptions.localLanding ? "local-branch" : "remote", registry: landingOptions.registry },
       trackedChurnAllowlist: PLAYBOT_TRACKED_CHURN_PATHS,
       untrackedBoundary: "Non-ignored untracked files outside prototype-game/addons/playbot/ block retirement; injected addon files are reported as discardable.",
-      ignoredBoundary: "All Git-ignored paths are reported as discardable output and never block retirement; their exact paths and count remain evidence.",
+      ignoredBoundary: "All Git-ignored paths are reported as discardable output and never block retirement; their complete private path inventory, SHA-256, counts, and bounded samples remain evidence.",
       discardableCodes: DISCARDABLE_LOCAL_CHANGE_CODES,
       workspaces,
     };
@@ -5866,7 +5964,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const authorization = validateDiscardAuthorization(args.discardLocalChanges);
     const landingOptions = registryLandingOptions(project, args.registryProject);
     const workspace = resolveRetirementWorkspace(project, selector);
-    return retireWorkspace(project, workspace, landingBranch, landingOptions, authorization);
+    return boundedRetirementPaths(await retireWorkspace(project, workspace, landingBranch, landingOptions, authorization));
   }
   if (name === "create_workspace") {
     return { workspace: await createWorkspace(project, args) };
