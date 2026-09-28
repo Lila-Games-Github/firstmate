@@ -1512,7 +1512,8 @@ pr_is_merged() {
 
 # Is the branch's content already present in the up-to-date landing target? The
 # target is the recorded landing_branch when the task has one, else the default
-# branch. Fetches first, then 3-way merges the target with HEAD: when HEAD
+# branch. Fetches first and accepts an identical tree without requiring common
+# ancestry, then 3-way merges the target with the inspected revision: when it
 # introduces nothing the target does not already contain (e.g. its change landed
 # via squash) the merged tree equals the target's tree. This isolates branch-only
 # changes, so unrelated commits the target gained past the merge-base do not count
@@ -1524,7 +1525,7 @@ pr_is_merged() {
 # branch in its refusal instead of giving generic push-the-branch advice.
 LANDING_TARGET_UNRESOLVED=
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref default_tree current_tree merged_tree
   LANDING_TARGET_UNRESOLVED=
   if [ -n "$LANDING_BRANCH" ]; then
     name=$LANDING_BRANCH
@@ -1545,6 +1546,8 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WORK_LANDED_REPO" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
+  current_tree=$(git -C "$WORK_LANDED_REPO" rev-parse --quiet --verify "$WORK_LANDED_REV^{tree}" 2>/dev/null) || return 1
+  [ "$current_tree" = "$default_tree" ] && return 0
   merged_tree=$(git -C "$WORK_LANDED_REPO" merge-tree --write-tree "$ref" "$WORK_LANDED_REV" 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
@@ -2409,8 +2412,9 @@ require_exclusive_task_worktree_slot() {
 #   4. This record's own work is already safe WITHOUT the worktree, because the
 #      worktree no longer holds it - a scout's report is in the Firstmate home,
 #      and a ship's committed work is on its branch in the shared repository.
-#      The ship proof runs the ordinary merged-PR and landing-target content
-#      checks against that branch instead of the reassigned checkout.
+#      The ship proof first accepts reachability from any remote-tracking
+#      branch, just like ordinary teardown, then falls back to merged-PR and
+#      landing-target content checks against the shared branch.
 #
 # Nothing here discards anything: every refusal leaves both records untouched.
 RECONCILE_SLOT_BRANCH=
@@ -2488,10 +2492,13 @@ require_reconcilable_slot_collision() {
       fi
       WORK_LANDED_REPO=$PROJ
       WORK_LANDED_REV="refs/heads/$branch"
-      if ! work_is_landed "$branch"; then
+      if ! unlanded=$(git -C "$PROJ" log --oneline "$WORK_LANDED_REV" --not --remotes -- 2>/dev/null); then
+        echo "REFUSED: cannot inspect task $ID's branch $branch for commits not on a remote; nothing was changed." >&2
+        return 1
+      fi
+      if [ -n "$unlanded" ] && ! work_is_landed "$branch"; then
         echo "REFUSED: task $ID's branch $branch is not landed, so retiring its record would leave unlanded work with nothing pointing at it." >&2
-        unlanded=$(git -C "$PROJ" log --oneline "refs/heads/$branch" --not --remotes -- 2>/dev/null | head -5 || true)
-        [ -z "$unlanded" ] || printf 'commits not on any remote:\n%s\n' "$unlanded" >&2
+        printf 'commits not on any remote:\n%s\n' "$(printf '%s\n' "$unlanded" | head -5)" >&2
         echo "Land the branch (or get the captain's explicit OK to discard it), then re-run. Nothing was changed." >&2
         return 1
       fi
