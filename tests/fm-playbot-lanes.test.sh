@@ -1276,7 +1276,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup did not fail closed 
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== false || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== false || value.checks.controllerPresent !== true) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 21) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 22) process.exit(1);
 NODE
 threads_after=$(FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -1580,6 +1580,7 @@ async function electronInvoke(channel, payload) {
   if (missingChannels().includes(channel)) throw new Error(`No handler registered for '${channel}'`);
   const db = new DatabaseSync(path.join(desktop, 'playbot.db'));
   try {
+    if (channel === 'engine:listWorkspaceProjects') return [];
     if (channel === 'app:metadata') {
       // One transient failure, then healthy again: a version read must recover
       // inside the same long-lived server process.
@@ -1633,13 +1634,13 @@ async function electronInvoke(channel, payload) {
       };
     }
     if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.8.0\n');
+      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.9.0\n');
       return [{
         name: 'playbot_lanes',
         enabled: true,
         error: null,
-        toolCount: 21,
-        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.8.0') },
+        toolCount: 22,
+        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.9.0') },
       }];
     }
     if (channel === 'threads:launch') {
@@ -1910,16 +1911,16 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup accepted a stale loa
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.toolCount !== 21) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.8.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.8.0' || value.checks.expectedSchemaVersion !== '0.8.0') process.exit(1);
+if (!value.checks.hooks.ready || value.checks.toolCount !== 22) process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.9.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.9.0' || value.checks.expectedSchemaVersion !== '0.9.0') process.exit(1);
 if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
 NODE
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
 OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup reloaded an MCP whose build identity was already current"
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== false) process.exit(1);
-if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 21) process.exit(1);
+if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 22) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project"
 
@@ -1932,8 +1933,8 @@ const value = JSON.parse(process.env.OUT);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 const mcpCalls = calls.filter(call => call.channel.startsWith('codex:mcpServers:'));
 if (value.ready !== true || value.changed !== true) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.8.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.8.0' || value.checks.expectedSchemaVersion !== '0.8.0') process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.9.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.9.0' || value.checks.expectedSchemaVersion !== '0.9.0') process.exit(1);
 if (!value.installation.reload.startsWith('reloaded ')) process.exit(1);
 if (mcpCalls.filter(call => call.channel === 'codex:mcpServers:reload').length !== 1) process.exit(1);
 if (mcpCalls.some(call => !['codex:mcpServers:list', 'codex:mcpServers:reload'].includes(call.channel))) process.exit(1);
@@ -2048,7 +2049,7 @@ rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
 # Dispatch must refuse an ordinary brief before creating or sending anything.
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker\",\"message\":\"Execution contract: workspace=crewmate\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"thread\":\"chat-worker\",\"message\":\"Execution contract: workspace=crewmate\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch accepted an ordinary crewmate brief"
 const error = JSON.parse(process.env.OUT).error;
 if (!error?.message.includes('workspace mismatch')) process.exit(1);
@@ -2057,7 +2058,7 @@ NODE
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
 printf 'yes\n' > "$FIXTURE_ROOT/ignore-requested-branch"
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"develop\",\"branch\":\"fm-branch-3\"},\"title\":\"Isolated task\",\"message\":\"Do the isolated work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"develop\",\"branch\":\"fm-branch-3\"},\"title\":\"Isolated task\",\"message\":\"Do the isolated work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "dispatch did not create the workspace and worker chat in one launch: $out"
 const fs = require('node:fs');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
@@ -2088,7 +2089,7 @@ rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'medium\n' > "$FIXTURE_ROOT/launch-persisted-execution-level"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort task\",\"message\":\"Do the fallback work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Fallback effort task\",\"message\":\"Do the fallback work\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
 rm -f "$FIXTURE_ROOT/launch-persisted-execution-level"
 OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch sent the task on an effort Playbot persisted differently from the request"
 const fs = require('node:fs');
@@ -2117,7 +2118,7 @@ rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'yes\n' > "$FIXTURE_ROOT/launch-deactivates-workspace"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Readback lost task\",\"message\":\"Do the readback work\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Readback lost task\",\"message\":\"Do the readback work\"}}}")
 rm -f "$FIXTURE_ROOT/launch-deactivates-workspace"
 OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "dispatch did not preserve the created chat with a send_message recovery when read-back failed: $out"
 const fs = require('node:fs');
@@ -2204,7 +2205,7 @@ pass "fm-playbot-lanes: null model and reasoningEffort count as omitted while a 
 # silently sending the task on that chat's current model.
 for existing_selector in '"thread":"chat-worker"' '"title":"Greeting"'; do
   rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-  out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\",$existing_selector,\"message\":\"Profile on existing chat\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
+  out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"workspace\":\"ws-worker\",$existing_selector,\"message\":\"Profile on existing chat\",\"model\":\"gpt-6-astra\",\"reasoningEffort\":\"xhigh\"}}}")
   OUT="$out" node --no-warnings <<'NODE' || fail "dispatch with $existing_selector did not refuse a worker profile on an existing chat"
 const value = JSON.parse(process.env.OUT);
 if (value.result) process.exit(1);
@@ -2224,7 +2225,7 @@ NODE
 pass "fm-playbot-lanes: dispatch refuses a worker profile on an existing chat before any IPC"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-branch-4\"},\"title\":\"Terminal task\",\"message\":\"Do the terminal work\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "normal-terminal dispatch did not create and send without a controller chat"
 const fs = require('node:fs');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
@@ -2238,7 +2239,7 @@ NODE
 pass "fm-playbot-lanes: normal-terminal dispatch uses explicit polling supervision"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-no-landing\"},\"title\":\"No landing branch\",\"message\":\"x\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-no-landing\"},\"title\":\"No landing branch\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch guessed a landing branch while creating a workspace"
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('requires an explicit landingBranch')) process.exit(1);
@@ -2247,7 +2248,7 @@ NODE
 pass "fm-playbot-lanes: new-workspace dispatch requires landingBranch before creation"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":{\"branch\":\"main\"},\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-invalid-landing\"},\"title\":\"Invalid landing branch\",\"message\":\"x\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":{\"branch\":\"main\"},\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-invalid-landing\"},\"title\":\"Invalid landing branch\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch coerced a malformed landing branch"
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('requires an explicit landingBranch')) process.exit(1);
@@ -2256,14 +2257,14 @@ NODE
 pass "fm-playbot-lanes: new-workspace dispatch rejects malformed landingBranch before creation"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"x\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch silently ignored landingBranch without newWorkspace"
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('landingBranch is only valid together with newWorkspace')) process.exit(1);
 NODE
 [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch contacted Playbot before rejecting landingBranch without newWorkspace"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":null,\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Ignored landing\",\"message\":\"x\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":null,\"project\":$worker_json,\"workspace\":\"ws-worker\",\"title\":\"Ignored landing\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch silently ignored a null landingBranch without newWorkspace"
 const value = JSON.parse(process.env.OUT);
 if (!value.error?.message.includes('landingBranch is only valid together with newWorkspace')) process.exit(1);
@@ -2271,12 +2272,12 @@ NODE
 [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a chat before rejecting a null landingBranch without newWorkspace"
 pass "fm-playbot-lanes: dispatch rejects landingBranch without newWorkspace before any side effect"
 
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace plus newWorkspace was not rejected"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('not both')) process.exit(1);
 NODE
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{},\"thread\":\"Greeting\",\"message\":\"x\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{},\"thread\":\"Greeting\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "thread plus newWorkspace was not rejected"
 const value = JSON.parse(process.env.OUT);
 if (!value.error || !value.error.message.includes('cannot be combined with newWorkspace')) process.exit(1);
@@ -2328,7 +2329,7 @@ NODE
 pass "fm-playbot-lanes: create_workspace falls back to workspace:create on a legacy Playbot"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-legacy-2\"},\"title\":\"Legacy task\",\"message\":\"Do the legacy work\"}}}")
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-legacy-2\"},\"title\":\"Legacy task\",\"message\":\"Do the legacy work\"}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "legacy dispatch did not fall back to the pre-0.94 create-and-send sequence"
 const fs = require('node:fs');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
@@ -2353,7 +2354,7 @@ printf 'modern\n' > "$FIXTURE_ROOT/ipc-mode"
 
 settle_dispatch() {
   PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" \
-    rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"$2\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$1\"},\"title\":\"Settle $1\",\"message\":\"Do the $1 work\"}}}"
+    rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"$2\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"$1\"},\"title\":\"Settle $1\",\"message\":\"Do the $1 work\"}}}"
 }
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl" "$FIXTURE_ROOT/deferred-write-failure"
@@ -2994,7 +2995,7 @@ if (calls.some(call => ['threads:setActiveThread', 'workspace:select', 'threads:
 NODE
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Immediate dispatch steer\",\"force\":true}}}")
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Immediate dispatch steer\",\"force\":true}}}")
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "dispatch did not expose the same force semantics for an existing busy thread"
 const fs = require('node:fs');
 const value = JSON.parse(process.env.OUT).result.structuredContent;
@@ -3111,7 +3112,7 @@ alt_lane=$(OUT="$out" node -e 'process.stdout.write(JSON.parse(process.env.OUT).
 printf 'pendingMessages\n' > "$FIXTURE_ROOT/send-drop-key"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Unreadable dispatch\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Unreadable dispatch\"}}}")
 rm -f "$FIXTURE_ROOT/send-drop-key"
 OUT="$out" LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$alt_lane.json" node --no-warnings <<'NODE' || fail "an unreadable verdict on an accepted send tore the dispatch lane down"
 const fs = require('node:fs');
@@ -3125,7 +3126,7 @@ pass "fm-playbot-lanes: an unreadable verdict refuses without deactivating the l
 printf 'threads:send\n' > "$FIXTURE_ROOT/ipc-missing"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Undelivered dispatch\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Undelivered dispatch\"}}}")
 rm -f "$FIXTURE_ROOT/ipc-missing"
 OUT="$out" LANE_FILE="$PLAYBOT_LANES_STATE_DIR/routes/$alt_lane.json" node --no-warnings <<'NODE' || fail "a dispatch whose send never reached Playbot left the lane active"
 const fs = require('node:fs');
@@ -3138,7 +3139,7 @@ NODE
 pass "fm-playbot-lanes: a dispatch whose send never reached Playbot deactivates the lane"
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Held task\"}}}")
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Held task\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch reported a task Playbot is only holding as delivered"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.thread.id !== 'chat-worker-alt') process.exit(1);
@@ -3643,7 +3644,7 @@ home_dispatch() {  # <arguments-json>
     printf 'kind=ship\n' > "$FM_HOME_FIXTURE/state/$task_id.meta"
   fi
   PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" \
-    rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":$1}}"
+    rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":$(node -e 'process.stdout.write(JSON.stringify({engineDependent:false,...JSON.parse(process.argv[1])}))' "$1")}}"
 }
 
 # Both read through their own owner rather than by inspecting the trust file's
@@ -4185,6 +4186,8 @@ pass "fm-playbot-lanes: re-dispatching a task re-arms its poll onto the new work
 restore_bin="$FIXTURE_ROOT/restore-bin"
 mkdir -p "$restore_bin"
 cp "$SCRIPT" "$restore_bin/fm-playbot-lanes.mjs"
+cp "$ROOT/bin/fm-playbot-engine-readiness.mjs" "$restore_bin/"
+cp "$ROOT/bin/fm-playbot-addon-guard.mjs" "$restore_bin/"
 cp "$ROOT/bin/fm-check-publish-lock.sh" "$ROOT/bin/fm-wake-lib.sh" \
   "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-backend.sh" \
   "$ROOT/bin/fm-secondmate-registry-lib.sh" "$restore_bin/"
@@ -4222,13 +4225,13 @@ restore_rpc() {
 rm -f "$FIXTURE_ROOT/register-count" "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf 'kind=ship\n' > "$FM_HOME_FIXTURE/state/fm-autoarm-restore.meta"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" restore_rpc \
-  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-restore\"},\"title\":\"Restore binding\",\"message\":\"Do the restore work\",\"taskId\":\"fm-autoarm-restore\"}}}")
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-restore\"},\"title\":\"Restore binding\",\"message\":\"Do the restore work\",\"taskId\":\"fm-autoarm-restore\"}}}")
 restore_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 restore_workspace=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.workspaceId)')
 check_is_registered fm-autoarm-restore || fail "the restoration fixture did not establish its prior binding"
 restore_before=$(cat "$FM_HOME_FIXTURE/state/fm-autoarm-restore.check.sh")
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FM_HOME_FIXTURE" restore_rpc \
-  "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"$restore_workspace\",\"thread\":\"$restore_thread\",\"message\":\"Re-arm the same worker\",\"taskId\":\"fm-autoarm-restore\"}}}")
+  "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"workspace\":\"$restore_workspace\",\"thread\":\"$restore_thread\",\"message\":\"Re-arm the same worker\",\"taskId\":\"fm-autoarm-restore\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a failed restoration re-registration was not surfaced"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== false) process.exit(1);
@@ -4847,7 +4850,7 @@ pass "fm-playbot-lanes: an unusable taskId is refused before any worker is creat
 # beside a warning that says nothing is polling it.
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-firstmate-home" \
-  rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-5\"},\"title\":\"Unarmable\",\"message\":\"Do the unwatched work\",\"taskId\":\"fm-autoarm-unarmable\"}}}")
+  rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-5\"},\"title\":\"Unarmable\",\"message\":\"Do the unwatched work\",\"taskId\":\"fm-autoarm-unarmable\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "an arming failure was not reported loudly beside the delivered task"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== false) process.exit(1);
@@ -5475,7 +5478,7 @@ pass "fm-playbot-lanes: route-absent remote metadata cannot republish after part
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 printf '%s\n' '{"session_id":"controller-session","cwd":"fixture-controller","tool_name":"mcp__playbot_lanes__dispatch"}' \
   | node --no-warnings "$SCRIPT" hook-pretool
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-7\"},\"title\":\"Routed task\",\"message\":\"Do the routed work\",\"taskId\":\"fm-autoarm-routed\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-autoarm-7\"},\"title\":\"Routed task\",\"message\":\"Do the routed work\",\"taskId\":\"fm-autoarm-routed\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "a Playbot-chat dispatch did not report its routed supervision path"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.mode !== 'routed-wake') process.exit(1);
@@ -5516,7 +5519,7 @@ retirement_call() {
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace retirement tools were not exposed with one-at-a-time schemas"
 const tools = JSON.parse(process.env.OUT).result.tools;
-if (tools.length !== 21) process.exit(1);
+if (tools.length !== 22) process.exit(1);
 const freshness = tools.find(tool => tool.name === 'get_workspace_freshness');
 const list = tools.find(tool => tool.name === 'list_retirable_workspaces');
 const retire = tools.find(tool => tool.name === 'retire_workspace');
@@ -7796,7 +7799,7 @@ OUT="$out" node --no-warnings <<'NODE' || fail "send_message could not read the 
 const value = JSON.parse(process.env.OUT).result?.structuredContent;
 if (value?.delivery?.state !== 'queued' || !value.delivery.messageId || value.delivery.queuedTotal !== 2) process.exit(1);
 NODE
-out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"message\":\"0.117 dispatch\"}}}")
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"project\":$worker_json,\"thread\":\"chat-0117-probe\",\"message\":\"0.117 dispatch\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "dispatch could not read the 0.117.0 delivery envelope"
 const value = JSON.parse(process.env.OUT).result?.structuredContent;
 if (value?.delivery?.state !== 'queued' || value.delivery.queuedTotal !== 3) process.exit(1);
@@ -7830,6 +7833,20 @@ rm -f "$FIXTURE_ROOT/send-drop-key" "$FIXTURE_ROOT/snapshot-envelope" "$FIXTURE_
 pass "fm-playbot-lanes: captured Playbot 0.117.0 envelope supports card, queue, recall, answer, send, and dispatch while missing fields fail closed"
 
 # ---------------------------------------------------------------------------
+# Engine dispatch into a new workspace is refused before Playbot creates any
+# workspace or chat, since a fresh workspace cannot have a connected session.
+printf '0.117.0' > "$FIXTURE_ROOT/app-version"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-engine-unconfirmed\"},\"landingBranch\":\"main\",\"title\":\"Engine readiness refusal\",\"message\":\"Validate Godot\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "new-workspace engine dispatch was not refused before creation: $out"
+const value = JSON.parse(process.env.OUT);
+if (!value.error || !/cannot target newWorkspace/.test(value.error.message)) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "new-workspace engine dispatch contacted Playbot before refusing"
+printf '0.95.0' > "$FIXTURE_ROOT/app-version"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+pass "fm-playbot-lanes: new-workspace engine dispatch refuses before creating anything"
+
 # The shared node resolver must name what it rejected.
 #
 # An explicit FM_TEST_NODE stays authoritative and never falls back to another

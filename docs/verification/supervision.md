@@ -1006,3 +1006,39 @@ ok - fm-playbot-lanes: dispatch falls back to the pre-0.94 channels on a legacy 
 ```
 
 The fake DevTools endpoint inside the test serves the 0.94.0 `threads:launch` surface by default and the pre-0.94 surface in its legacy mode, so both adapter paths and the missing-handler detection between them are enforced hermetically.
+
+## Read-only Playbot engine readiness
+
+On 2026-09-28, Node v26.7.0 and Playbot 0.117.0 exercised `get_engine_readiness` through the live lane executable without activating a project, resuming a chat, or invoking an engine command.
+The reader uses `engine:listWorkspaceProjects`, whose installed 0.117.0 handler enumerates projects and snapshots existing sessions; it does not call project activation or engine detection.
+Unknown app versions are covered by a fixture that verifies no engine IPC is called.
+The selected-executable reader consumes the headless launch log's `Godot path` line when present; missing launch evidence remains unconfirmed, as observed in the live read below.
+This token-free diagnostic applies equally to terminal and MCP callers and does not depend on the worker harness or runtime backend.
+Linux running-process discovery was exercised live; other platforms require the explicit resources path described by the script header and fail closed without readable bundle evidence.
+
+Exact live command:
+
+```sh
+node --no-warnings bin/fm-playbot-lanes.mjs call get_engine_readiness \
+  '{"project":"project_df995db1b164","workspace":"ws_1fe04e5351f6"}' \
+  | node -e 'let s="";process.stdin.on("data",x=>s+=x);process.stdin.on("end",()=>{const d=JSON.parse(s).structuredContent;console.log(JSON.stringify({app:d.app.version,bundle:d.bundle.version,verdict:d.verdict,addonByteIdentical:d.projects[0].addon.byteIdentical,executable:d.projects[0].selectedExecutable.kind,reasons:d.projects[0].reasons.map(r=>r.code)}));});'
+```
+
+Exact output:
+
+```text
+{"app":"0.117.0","bundle":"0.7.20","verdict":"identity-admission-risk","addonByteIdentical":true,"executable":"unconfirmed","reasons":["project-path-alias","engine-failure","session-unconfirmed","executable-unconfirmed"]}
+```
+
+The portable public-tool fixture command `bash tests/fm-playbot-engine-readiness.test.sh` covers each readiness verdict, unreadable addon files, duplicate routed-session ids, extra workspace addon files, unknown versions, bounded stalled reads, and a readiness change between preflight and send.
+It also verifies that a confirmed destination reaches one send and that an unconfirmed existing destination reaches neither chat creation nor send.
+The same executable fixture resets a real Git worktree with a tracked old addon, an untracked injected helper, and ignored native files; it proves complete restoration, stash exclusion, staged-addon commit refusal, and refusal to overwrite unlanded product or ignored data outside the addon tree.
+Exact output:
+
+```text
+verified engine readiness fixture verdicts and dispatch refuses unconfirmed readiness
+ok - fm-playbot-engine-readiness: fixture verdicts and dispatch execute through public tools
+```
+
+The same fixture also proves engine-dependent `newWorkspace` dispatch is refused before any Playbot call, that the reset guard reverts only listed tracked churn after printing its diff, that an unknown app version still permits bundle-verified preservation, and that a worktree with no addon tree resets without app-bundle evidence.
+`bash tests/fm-playbot-lanes.test.sh` additionally covers file-only new-workspace dispatch retaining its freshness guard.

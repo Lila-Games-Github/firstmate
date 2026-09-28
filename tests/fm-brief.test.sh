@@ -1097,7 +1097,7 @@ test_lane_brief_verifies_its_base_before_working() {
     "lane brief does not make disclosure a precondition of discarding Playbot churn"
   assert_grep "git diff HEAD -- <exactly those paths>" "$brief" \
     "lane brief's churn record misses staged content because it omits HEAD"
-  assert_grep "working: discarding Playbot churn before base reset:" "$brief" \
+  assert_grep "working: preserving injected addon before guarded base reset:" "$brief" \
     "lane brief does not have the worker name what it discards"
   assert_grep "prototype-game/project.godot" "$brief" \
     "lane brief does not call out the hand-editable settings file by name"
