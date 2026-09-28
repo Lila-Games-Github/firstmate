@@ -28,7 +28,8 @@
 #   the project branch this task's work is expected to land on when the captain's
 #   posture for the project lands work somewhere other than the default branch
 #   (e.g. a long-lived development branch). This header is the field's contract:
-#   landing_branch= is optional, ship-only, and read by bin/fm-teardown.sh, whose
+#   landing_branch= also feeds the worker target overlay owned by fm-dod-lib.sh
+#   on launch and relaunch. It is optional, ship-only, and read by bin/fm-teardown.sh, whose
 #   landed-work test then verifies landing against the recorded branch instead of
 #   the default branch; absent means default-branch behavior exactly.
 #   The same field selects the task's BASE: a fresh ship spawn refreshes its
@@ -2702,7 +2703,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+        fm_nm_target_block "$LANDING_BRANCH" &&
+          fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
   } >"$BRIEF_TMP" || {
     rm -f -- "$BRIEF_TMP"
@@ -2733,9 +2735,7 @@ if [ "$KIND" = ship ]; then
   # A recorded landing branch must already exist in the project clone (as a
   # local branch or an origin remote-tracking branch), so the landed-work test
   # it arms in fm-teardown.sh can never point at a ref that does not resolve.
-  if [ "$LANDING_SET" -eq 1 ] \
-    && ! git -C "$PROJ_ABS" rev-parse --quiet --verify "refs/heads/$LANDING_BRANCH^{commit}" >/dev/null 2>&1 \
-    && ! git -C "$PROJ_ABS" rev-parse --quiet --verify "refs/remotes/origin/$LANDING_BRANCH^{commit}" >/dev/null 2>&1; then
+  if [ "$LANDING_SET" -eq 1 ] && ! fm_landing_branch_check "$PROJ_ABS" "$LANDING_BRANCH"; then
     echo "error: --landing-branch '$LANDING_BRANCH' does not resolve in $PROJ_ABS as a local branch or an origin remote-tracking branch" >&2
     exit 1
   fi

@@ -31,6 +31,10 @@
 # manager's "latest" directory can hold an older build. A copy that will not
 # report a version is reported as a check failure rather than assumed current.
 #
+# A resolved no-mistakes Lila fork build (-lila- version suffix) suppresses
+# upstream release announcements and upstream PATH-skew candidates; installed
+# newer fork copies still participate in PATH-skew detection.
+#
 # What this script never does: it reports, and it repairs nothing. It does not
 # install, update, uninstall, reorder PATH, or touch any version manager's
 # configuration, and it never fetches into a watched git repository. Every git
@@ -405,7 +409,7 @@ command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
   local hit out version matched announce_out status
   local resolved_path='' resolved_version='' resolved_out=''
-  local best_path='' best_version='' unreadable='' hits=''
+  local best_path='' best_version='' unreadable='' hits='' preserve_nm_fork=0
 
   # This tool's announcement source is dead if its pattern cannot be used, which
   # is reported here, for this tool alone, so the rest of the sweep still runs.
@@ -433,9 +437,17 @@ command_findings() {
       resolved_path=$hit
       resolved_version=$version
       resolved_out=$out
+      if [ "$name" = no-mistakes ] && [[ "$out" == *-lila-* ]]; then
+        preserve_nm_fork=1
+        announce=
+      fi
     fi
     if [ -z "$version" ]; then
       [ -n "$unreadable" ] || unreadable=$hit
+      continue
+    fi
+    # A higher upstream version does not supersede this fork's feature contract.
+    if [ "$preserve_nm_fork" -eq 1 ] && [[ "$out" != *-lila-* ]]; then
       continue
     fi
     if [ -z "$best_version" ] || version_newer "$version" "$best_version"; then

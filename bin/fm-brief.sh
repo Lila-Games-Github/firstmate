@@ -8,7 +8,7 @@
 # report, decision, or PR the ask refers to, without added speaker labels or
 # direct address) and `{FIRSTMATE_SPEC}`
 # under `## Firstmate spec` (build instructions, which are never the captain's
-# intent). bin/fm-dod-lib.sh owns the no-mistakes `--intent` contract those
+# intent). bin/fm-dod-lib.sh owns the no-mistakes intent and target contracts those
 # subsections feed; bin/fm-spawn.sh refuses leftover placeholders and a
 # `## Captain's intent` line opening with a Captain label or address. Secondmate
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
@@ -145,6 +145,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
 
@@ -668,7 +670,12 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+# Ordinary briefs may precede metadata creation; spawn's overlay supplies the
+# final recorded target even for a custom/older brief (bin/fm-dod-lib.sh).
+if [ "$LANE" -eq 0 ] && [ "$MODE" = no-mistakes ]; then
+  LANDING_BRANCH=$(fm_meta_get "$STATE/$ID.meta" landing_branch)
+fi
+DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH") || exit 1
 
 # bin/fm-dod-lib.sh owns the delivery contract and names the repository default
 # branch as the local-only landing target. This fork lands local-only work on the
@@ -694,11 +701,8 @@ if [ "$LANE" -eq 1 ]; then
   # A lane workspace owns its branch, so every `fm/<id>` instruction is
   # superseded. A PR-shipping lane must also target the landing branch, because a
   # PR opened without it goes to the repository default branch this lane must not
-  # touch. no-mistakes is the one mode whose PR base this brief cannot state: a
-  # direct-PR lane sets it with `gh-axi --base`, but `no-mistakes axi run` takes
-  # no base flag and exposes no way to read its configured target before a run, so
-  # the brief says plainly who chooses that base instead of promising a check it
-  # cannot make. The publication precondition at Setup step 1b protects this lane.
+  # touch. The shared DOD target contract handles no-mistakes; the publication
+  # precondition at Setup step 1b protects both PR-producing modes.
   case "$MODE" in
     direct-PR)
       RULE1="1. Never push to the default branch (push only $LANE_BRANCH_DESC; never create or switch branches). Never merge a PR."
@@ -720,7 +724,7 @@ If that landing branch has advanced, rebase onto it so the eventual merge stays 
       ;;
     *)
       RULE1="1. Never push to the default branch. Never merge a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches."
-      LANE_DOD_OVERRIDE="That PR's base is whatever no-mistakes is configured to target; \`no-mistakes axi run\` takes no base flag, so this brief can neither set nor read it."
+      LANE_DOD_OVERRIDE="Follow the current no-mistakes target contract above (owner: bin/fm-dod-lib.sh)."
       ;;
   esac
   DOD="$DOD

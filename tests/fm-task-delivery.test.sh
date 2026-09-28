@@ -880,6 +880,108 @@ EOF
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
 
+# The promoted worker's base step is part of the generated ship-instructions
+# prompt; running the git commands it hands the worker in a scout worktree that
+# sits on main proves which base the promoted fm/<id> branch actually starts from.
+test_promotion_base_follows_landing_branch() {
+  local root home origin proj id target wt step cmds cmd main_only lila_tip
+  root="$TMP_ROOT/promotion-base"
+  home="$root/home" origin="$root/origin" proj="$root/proj"
+  mkdir -p "$home/state" "$origin"
+  git -C "$origin" init -q -b main || fail "could not initialize origin fixture"
+  git -C "$origin" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init || fail "origin init commit"
+  git -C "$origin" branch proto/lila || fail "could not create landing branch"
+  git -C "$origin" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m main-only || fail "main-only commit"
+  main_only=$(git -C "$origin" rev-parse main)
+  git -C "$origin" checkout -q proto/lila || fail "checkout landing"
+  git -C "$origin" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m lila-only || fail "lila-only commit"
+  lila_tip=$(git -C "$origin" rev-parse proto/lila)
+  git -C "$origin" checkout -q main
+  git clone -q "$origin" "$proj" || fail "could not clone project fixture"
+  for target in proto/lila ''; do
+    id="promotion-base-${target:+landing}"
+    id=${id%-}
+    printf 'window=fm-%s\nworktree=/tmp/wt\nproject=%s\nharness=claude\nkind=scout\n' "$id" "$proj" > "$home/state/$id.meta"
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null || fail "scout scaffold failed"
+    fill_brief_subsections "$home/data/$id/brief.md" "Integrate branch routing." "Preserve routing."
+    FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off ${target:+--landing-branch "$target"} >/dev/null 2>&1 \
+      || fail "promotion failed for '$target'"
+    wt="$root/wt-$id"
+    git clone -q "$origin" "$wt" || fail "could not clone scout worktree"
+    step=$(grep '^3\. ' "$home/data/$id/ship-instructions.md")
+    # shellcheck disable=SC2016  # literal backticks delimit the generated git commands
+    cmds=$(printf '%s\n' "$step" | grep -o '`git [^`]*`' | tr -d '`')
+    if [ -n "$target" ]; then
+      case "$step" in *"recorded landing branch \`$target\`"*) ;; *) fail "landing promotion base step does not name $target: $step" ;; esac
+      printf '%s\n' "$cmds" | sed -n 2p | grep -q 'origin/proto/lila$' || fail "landing base step lacks an origin checkout: $cmds"
+      cmds=$(printf '%s\n' "$cmds" | sed -n 1,2p)
+    else
+      case "$step" in *"default-branch base"*) ;; *) fail "default promotion base step changed: $step" ;; esac
+      printf '%s\n' "$cmds" | grep -q 'origin/' && fail "default promotion base step fetches a landing branch: $cmds"
+    fi
+    while IFS= read -r cmd; do
+      [ -n "$cmd" ] || continue
+      (cd "$wt" && eval "$cmd") >/dev/null 2>&1 || fail "base step command failed: $cmd"
+    done <<EOF
+$cmds
+EOF
+    [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD)" = "fm/$id" ] || fail "base step did not create fm/$id"
+    if [ -n "$target" ]; then
+      [ "$(git -C "$wt" rev-parse HEAD)" = "$lila_tip" ] || fail "promoted branch did not start at the landing tip"
+      git -C "$wt" merge-base --is-ancestor "$main_only" HEAD && fail "promoted branch carries default-branch-only commits"
+    else
+      [ "$(git -C "$wt" rev-parse HEAD)" = "$main_only" ] || fail "default promotion did not start from the default branch"
+    fi
+  done
+  pass "promotion bases the promoted branch on the recorded landing branch, else the default branch"
+}
+
+test_promotion_target_contract() {
+  local home proj id target out
+  home="$TMP_ROOT/promotion-target/home"
+  proj="$TMP_ROOT/promotion-target/proj"
+  mkdir -p "$home/state" "$proj"
+  git -C "$proj" init -q -b main || fail "could not initialize project fixture"
+  git -C "$proj" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init \
+    || fail "could not commit project fixture"
+  git -C "$proj" branch proto/lila || fail "could not create landing branch fixture"
+  scout_meta() {  # <id>
+    printf 'window=fm-%s\nworktree=/tmp/wt\nproject=%s\nharness=claude\nkind=scout\n' "$1" "$proj" \
+      > "$home/state/$1.meta"
+    FM_HOME="$home" "$BRIEF" "$1" fixture-project --scout >/dev/null || fail "scout scaffold failed"
+    fill_brief_subsections "$home/data/$1/brief.md" "Integrate branch routing." "Preserve routing."
+  }
+  for target in proto/lila ''; do
+    id="promotion-target-${target:+explicit}"
+    scout_meta "$id"
+    out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off ${target:+--landing-branch "$target"} 2>&1) \
+      || fail "promotion failed: $out"
+    if [ -n "$target" ]; then
+      [ "$(FM_HOME="$home" "$ROOT/bin/fm-landing-branch.sh" "$id")" = "$target" ] \
+        || fail "promotion did not record landing_branch"
+      assert_grep 'no-mistakes axi run --target-branch proto/lila' "$home/data/$id/ship-instructions.md" "promotion lost target"
+      assert_grep 'no-mistakes axi run --target-branch proto/lila' "$home/data/$id/brief.md" "durable promotion lost target"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-landing-branch.sh" "$id" >/dev/null && fail "default promotion recorded a landing branch"
+      assert_no_grep '--target-branch' "$home/data/$id/ship-instructions.md" "default promotion acquired target"
+    fi
+    grep -qx 'kind=ship' "$home/state/$id.meta" || fail "promotion did not flip kind"
+  done
+  for target in no-such-branch 'bad..name'; do
+    id=promotion-target-refused
+    scout_meta "$id"
+    if out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off --landing-branch "$target" 2>&1); then
+      fail "promotion accepted landing branch '$target'"
+    fi
+    grep -qx 'kind=scout' "$home/state/$id.meta" || fail "refused promotion changed the meta"
+    [ ! -e "$home/data/$id/ship-instructions.md" ] || fail "refused promotion wrote ship instructions"
+    rm -rf "$home/data/$id"
+  done
+  pass "promotion records and delivers an explicit no-mistakes landing target"
+}
+
+test_promotion_target_contract
+test_promotion_base_follows_landing_branch
 test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract

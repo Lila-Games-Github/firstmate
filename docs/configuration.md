@@ -17,7 +17,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
-That header includes the optional `landing_branch=` field, which `bin/fm-landing-branch.sh` records or corrects on an existing task, `bin/fm-merge-local.sh` consumes as the local merge target, and `bin/fm-teardown.sh` consumes for its landed-work test.
+That header includes the optional `landing_branch=` field, which `bin/fm-landing-branch.sh` records or corrects on an existing task, `bin/fm-promote.sh --landing-branch` records on a promoted scout, `bin/fm-dod-lib.sh` hands to no-mistakes as the run's target branch, `bin/fm-merge-local.sh` consumes as the local merge target, and `bin/fm-teardown.sh` consumes for its landed-work test.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
@@ -611,7 +611,7 @@ No adapter writes an advisory to a task's status file, because a `note:` line th
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer, compatible gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
+The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer built from the Lila target-branch fork (its `axi run` must support `--target-branch`), compatible gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
@@ -690,6 +690,7 @@ This section is the single owner of the canonical schema.
 Each entry needs a `name` and at least one of `command` or `git`; an entry may carry both.
 A `command` entry gives the `PATH` comparison above, and adding `announce_pattern` also reports the tool's own update announcement, which is how a tool that already reports its own updates is read rather than reimplemented.
 A tool does not always announce a new release on the command that prints its version: `no-mistakes --version` prints only the version, while its other commands carry the announcement.
+A resolved no-mistakes Lila fork build (a `-lila-` version) is never reported as superseded by an upstream release or a newer upstream copy on `PATH`; `bin/fm-tool-update-check.sh` owns that rule.
 `announce_args` names the command to search for the announcement in that case, and it is asked only of the copy `PATH` resolves; without it the version probe's own output is searched.
 An `announce_pattern` that is not a usable extended regular expression stops `arm`, and during a sweep it is reported as that one tool's own check failure so one broken pattern never stops the other watched tools from being checked.
 A `git` entry reports how many commits the local clone is behind its remote branch, and stays silent when the clone is current or ahead.

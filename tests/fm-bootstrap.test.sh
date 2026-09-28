@@ -82,6 +82,12 @@ if [ "${1:-}" = --version ]; then
   printf '%s\n' "${FM_FAKE_NO_MISTAKES_VERSION:-no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z}"
   exit 0
 fi
+if [ "${1:-}" = axi ] && [ "${2:-}" = run ] && [ "${3:-}" = --help ]; then
+  [ "${NO_MISTAKES_NO_UPDATE_CHECK:-}" = 1 ] || exit 1
+  [ "${FM_FAKE_NM_TARGET_SUPPORT:-1}" != 0 ] || exit 0
+  printf '%s\n' 'Usage: no-mistakes axi run --target-branch <branch>'
+  exit "${FM_FAKE_NM_HELP_STATUS:-0}"
+fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
@@ -605,7 +611,7 @@ ROWS
 
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh)'
+  missing='MISSING_MANUAL: no-mistakes (instructions: https://github.com/Lila-Games-Github/no-mistakes)'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -907,6 +913,30 @@ test_herdr_install_requires_manual_action() {
   [ "$out" = "error: herdr requires manual installation (instructions: https://herdr.dev)" ] \
     || fail "install herdr should return actionable manual-install guidance, got: $out"
   pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
+}
+
+test_no_mistakes_install_requires_manual_fork_build() {
+  local case_dir fakebin out status
+  case_dir="$TMP_ROOT/no-mistakes-install"
+  fakebin="$case_dir/bin"
+  mkdir -p "$fakebin"
+  for tool in brew npm curl go; do
+    cat > "$fakebin/$tool" <<SH
+#!/bin/sh
+printf '%s\n' "$tool \$*" >> "$case_dir/calls.log"
+exit 0
+SH
+    chmod +x "$fakebin/$tool"
+  done
+  : > "$case_dir/calls.log"
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" install no-mistakes 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "install no-mistakes should refuse instead of evaluating an install hint"
+  [ "$out" = "error: no-mistakes requires manual installation (instructions: https://github.com/Lila-Games-Github/no-mistakes)" ] \
+    || fail "install no-mistakes should return fork manual-install guidance, got: $out"
+  assert_not_contains "$out" 'command not found' "install no-mistakes must not evaluate prose"
+  [ ! -s "$case_dir/calls.log" ] || fail "install no-mistakes ran installers: $(cat "$case_dir/calls.log")"
+  pass "bootstrap: no-mistakes install refuses and points at the Lila fork"
 }
 
 test_cmux_bundled_cli_satisfies_dependency() {
@@ -1534,10 +1564,38 @@ ROWS
 
 test_bootstrap_reporting
 test_recorded_slot_that_reads_free_is_reported
+test_no_mistakes_target_readiness() {
+  local home fakebin out support status
+  home="$TMP_ROOT/nm-target-readiness/home"
+  mkdir -p "$home/config"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$TMP_ROOT/nm-target-readiness")
+  for support in 0 1; do
+    for status in 0 1; do
+      out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+        FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=off FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+        FM_FAKE_NO_MISTAKES_VERSION='no-mistakes version v1.58.1-lila-target-branch-c02ebab' \
+        FM_FAKE_NM_TARGET_SUPPORT="$support" FM_FAKE_NM_HELP_STATUS="$status" "$ROOT/bin/fm-bootstrap.sh")
+      if [ "$support:$status" = 1:0 ]; then
+        [ -z "$out" ] || fail "target-aware fork should be ready: $out"
+      else
+        [ "$out" = 'MISSING_MANUAL: no-mistakes (instructions: https://github.com/Lila-Games-Github/no-mistakes)' ] \
+          || fail "unsupported or failed help probe was accepted: $out"
+        assert_contains "$out" 'Lila-Games-Github/no-mistakes' "missing diagnostic must preserve fork"
+        assert_not_contains "$out" 'kunchenguid/no-mistakes' "bootstrap must not suggest upstream install"
+      fi
+    done
+  done
+  pass "bootstrap requires a successful target-branch capability probe"
+}
+
+
 test_recorded_slot_is_identified_through_a_path_alias
 test_recorded_slot_with_foreign_lease_is_reported
 test_secondmate_home_with_foreign_lease_is_reported
 test_slot_drift_survives_a_grep_without_bre_alternation
+
+test_no_mistakes_target_readiness
 test_no_mistakes_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
@@ -1548,6 +1606,7 @@ test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
+test_no_mistakes_install_requires_manual_fork_build
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
