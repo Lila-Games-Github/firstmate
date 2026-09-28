@@ -2944,8 +2944,8 @@ ORPHAN_DESCENDANT=$(cat "$TMP_ROOT/orphan-dead.descendant")
 # process tree before anything is asserted about reaping it. Linux subreapers
 # may adopt it instead of PID 1, so check ancestry rather than one parent PID.
 listener_is_reparented() {  # <listener-pid> <launching-shell-pid>
-  local pid=$1 owner=$2 parent hop
-  for hop in $(seq 1 64); do
+  local pid=$1 owner=$2 parent _hop
+  for _hop in $(seq 1 64); do
     [ "$pid" != "$owner" ] || return 1
     [ "$pid" != 1 ] || return 0
     parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
