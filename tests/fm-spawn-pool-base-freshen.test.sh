@@ -362,6 +362,38 @@ test_local_and_origin_landing_tips_select_descendant() {
   done
 }
 
+test_pr_modes_base_ahead_landing_on_origin_tip_and_warn() {
+  local mode rec id out status remote_tip local_tip n
+  for mode in no-mistakes direct-PR; do
+    id="pool-landing-ahead-$mode"
+    rec=$(make_case "landing-ahead-$mode" "$id")
+    read_case_record "$rec"
+    remote_tip=$(add_landing_branch "$CASE_DIR" "$DEFAULT_BRANCH")
+    git -C "$PROJECT_DIR" checkout --quiet -b "$LANDING" "$remote_tip"
+    for n in 1 2; do
+      printf 'unpushed local landing %s\n' "$n" > "$PROJECT_DIR/local-landing-$n.txt"
+      git -C "$PROJECT_DIR" add "local-landing-$n.txt"
+      git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+        commit -qm "local-landing-$n"
+    done
+    local_tip=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$LANDING")
+
+    out=$(run_spawn "$id" --mode "$mode" --yolo off --landing-branch "$LANDING")
+    status=$?
+    expect_code 0 "$status" "$mode spawn with an ahead local landing branch should launch"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$remote_tip" ] \
+      || fail "$mode spawn did not base on the origin landing tip $remote_tip"
+    [ ! -e "$POOL_DIR/local-landing-1.txt" ] || fail "$mode spawn carried unpushed local landings into the base"
+    [ "$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$LANDING")" = "$local_tip" ] \
+      || fail "$mode spawn moved the local landing branch"
+    assert_contains "$out" 'warning:' "$mode spawn did not warn about unpushed local commits: $out"
+    assert_contains "$out" '2 commit(s) ahead' "$mode warning did not count the unpushed local commits: $out"
+    assert_contains "$out" "$local_tip" "$mode warning did not name the local landing commit: $out"
+    assert_contains "$out" "$remote_tip" "$mode warning did not name the origin landing commit: $out"
+    pass "$mode bases an ahead local landing branch on the origin tip and warns with the unpushed count"
+  done
+}
+
 test_landing_ancestry_errors_refuse_without_reset() {
   local direction rec id remote_tip local_tip from to real_git before out status
   for direction in forward reverse; do
@@ -1064,6 +1096,7 @@ test_unreachable_origin_refuses_stale_pool_base
 test_landing_branch_bases_task_on_landing_tip
 test_local_only_landing_branch_bases_task_on_local_tip
 test_local_and_origin_landing_tips_select_descendant
+test_pr_modes_base_ahead_landing_on_origin_tip_and_warn
 test_landing_ancestry_errors_refuse_without_reset
 test_unresolvable_landing_branch_refuses_before_touching_worktree
 test_landing_base_mismatch_refuses_naming_both_commits

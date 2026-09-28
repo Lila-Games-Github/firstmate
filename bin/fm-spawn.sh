@@ -35,9 +35,11 @@
 #   The same field selects the task's BASE: a fresh ship spawn refreshes its
 #   clean pooled worktree by fetching +refs/heads/<branch>:refs/remotes/origin/<branch>
 #   and comparing that fetched commit with local refs/heads/<branch>, if present.
-#   Equal tips or a local tip behind origin select the fetched tip; a local tip
-#   ahead of origin selects that local descendant, preserving unpushed local
-#   landings. Diverged tips or an unreadable ancestry comparison refuse before
+#   Equal tips or a local tip behind origin select the fetched tip. A local tip
+#   ahead of origin selects that local descendant only for mode=local-only,
+#   preserving unpushed local landings; no-mistakes and direct-PR keep the
+#   fetched tip and warn with the count of unpushed local commits left out, so
+#   the worker's PR against origin never carries them. Diverged tips or an unreadable ancestry comparison refuse before
 #   reset, naming both commits. The clean pool is hard-reset to the selected
 #   commit, with HEAD equality and ancestry asserted before launch; a mismatch
 #   refuses naming both commits. Without the flag the refresh resolves and fetches
@@ -2980,7 +2982,7 @@ spawn_worktree_has_origin_config() { # <worktree>
 freshen_spawn_worktree_base() { # <worktree>
   # The header's landing-branch contract owns descendant selection; all bases
   # share the same clean check, reset to a captured commit, and HEAD assertion.
-  local worktree=$1 base target expected actual status probe local_ref local_tip ancestry
+  local worktree=$1 base target expected actual status probe local_ref local_tip ancestry unpushed
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -3057,9 +3059,12 @@ freshen_spawn_worktree_base() { # <worktree>
       if [ "$ancestry" -eq 1 ]; then
         ancestry=0
         git -C "$worktree" merge-base --is-ancestor "$expected" "$local_tip" || ancestry=$?
-        if [ "$ancestry" -eq 0 ]; then
+        if [ "$ancestry" -eq 0 ] && [ "$MODE" = local-only ]; then
           target=$local_ref
           expected=$local_tip
+        elif [ "$ancestry" -eq 0 ]; then
+          unpushed=$(git -C "$worktree" rev-list --count "$expected..$local_tip") || unpushed=unknown
+          echo "warning: local landing branch '$local_ref' ($local_tip) is $unpushed commit(s) ahead of '$target' ($expected); mode=$MODE bases pooled worktree '$worktree' on '$target' and leaves those unpushed local commits out" >&2
         elif [ "$ancestry" -eq 1 ]; then
           echo "error: landing branch '$base' has diverged: '$local_ref' ($local_tip) and '$target' ($expected); refusing to reset pooled worktree '$worktree' or launch" >&2
           return 1
