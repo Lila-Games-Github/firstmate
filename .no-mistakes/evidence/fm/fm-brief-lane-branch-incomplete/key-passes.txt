@@ -1,0 +1,23 @@
+ok - fm-spawn: a rigor downgrade against the registered posture is announced, never blocked
+ok - fm-brief.sh: the explicit ship mode wins over the registered posture
+ok - fm-brief.sh: a lane brief runs the base check and acts on its exit code
+ok - fm-brief.sh: a lane brief declares its delivery contract prominently and keeps one authority
+ok - fm-brief.sh: a lane brief without a branch name stays coherent
+ok - fm-brief.sh: non-lane ship briefs keep the crewmate convention and no lane vocabulary
+ok - fm-lane-base-check: addon injection is tracked churn, with untracked files protected
+ok - fm-lane-base-check: neighbouring addon directories are not Playbot churn
+ok - fm-lane-base-check: non-git block names the workspace remedy
+ok - fm-lane-base-check.sh: allowlisted churn is named for disclosure, staged included
+ok - fm-lane-base-check.sh: an untracked allowlisted path blocks, a tracked one is churn
+ok - fm-lane-base-check.sh: a pruned upstream names its own cause and prescribes a working remedy
+ok - fm-lane-base-check.sh: churn classification is exactly the allowlist its owner publishes
+ok - fm-playbot-lanes: dispatch sends linked model profiles and reports Playbot's read-back values
+ok - fm-playbot-lanes: a failed post-creation read-back keeps the chat and names the send_message recovery
+ok - fm-playbot-lanes: dispatch settles a created workspace whose roots are registered late and reports the wait
+ok - fm-playbot-lanes: a created workspace whose roots are already registered is dispatched with no wait and an unchanged result
+ok - fm-playbot-lanes: tracked addon tree and project settings churn are allowed
+ok - fm-playbot-lanes: addon source injection and tracked deletions are churn
+ok - fm-playbot-lanes: neighbouring addons directories are blocking tracked work, not churn
+ok - fm-playbot-lanes: retirement rejects unregistered clones from another repository
+ok - fm-playbot-lanes: gitignored build output and the native addon tree are discardable while other ignored paths block
+ok - fm-playbot-lanes: local landing rejects a registered clone that is not its own worktree top level

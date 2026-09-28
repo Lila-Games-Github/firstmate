@@ -1,0 +1,27 @@
+=== 1. fm-brief --lane --lane-branch (reported frogpile-ui-dock case) ===
+fm-brief exit=0
+$ grep -c fm/frogpile-ui-dock brief.md
+0
+$ grep -n "Execution contract\|frogpile-bottom-dock-prefabs" brief.md
+2:Execution contract: workspace=lane
+53:      Run `git branch --show-current` and verify it is your workspace branch `frogpile-bottom-dock-prefabs`.
+66:1. Never push to the default branch. Never merge a PR. Work only on your workspace branch `frogpile-bottom-dock-prefabs`; never create or switch branches.
+162:This task runs in a Playbot lane workspace: your branch already exists and is your workspace branch `frogpile-bottom-dock-prefabs`, so every delivery instruction above applies to that branch and t
+
+=== 2. lane base check after Playbot rewrites the whole addons/playbot tree ===
+$ git status --short
+ D prototype-game/addons/playbot/playbot_common.gd.uid
+ D prototype-game/addons/playbot/playbot_embedded_size_scope.gd
+ M prototype-game/addons/playbot/plugin.gd
+ D prototype-game/addons/playbot/plugin.gd.uid
+$ fm-lane-base-check.sh landing/frog-pile
+reset-required: refs/heads/landing/frog-pile
+churn-paths: prototype-game/addons/playbot/playbot_common.gd.uid prototype-game/addons/playbot/playbot_embedded_size_scope.gd prototype-game/addons/playbot/plugin.gd prototype-game/addons/playbot/plugin.gd.uid
+exit=10
+
+=== 3. neighbouring tree addons/playbot_extra is NOT churn ===
+$ fm-lane-base-check.sh landing/frog-pile
+blocked: lane workspace is behind landing branch landing/frog-pile but carries uncommitted changes outside the Playbot churn allowlist: prototype-game/addons/playbot_extra/x.gd; save a patch of tracked changes with git diff HEAD --binary outside this workspace and copy untracked files outside it, then restore only the saved tracked paths from HEAD in both index and worktree and move the copied untracked files aside before rerunning the check (do not commit these changes on the stale base; reapply the saved work after the base is current)
+exit=20
+$ tail -1 prototype-game/addons/playbot_extra/x.gd
+real work

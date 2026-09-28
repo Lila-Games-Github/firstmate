@@ -1,0 +1,26 @@
+ok - fm-lane-base-check: addon injection is tracked churn, with untracked files protected
+ok - fm-lane-base-check: neighbouring addon directories are not Playbot churn
+ok - fm-lane-base-check: non-git block names the workspace remedy
+ok - fm-lane-base-check.sh: usage errors are refused and --help documents the verdicts
+ok - fm-lane-base-check.sh: an equal or ahead-only workspace proceeds untouched
+ok - fm-lane-base-check.sh: a behind clean workspace requires a reset and names the ref
+ok - fm-lane-base-check.sh: allowlisted churn is named for disclosure, staged included
+ok - fm-lane-base-check.sh: modifications outside the allowlist block the reset
+ok - fm-lane-base-check.sh: allowlist membership is a literal path, not a pattern
+ok - fm-lane-base-check.sh: an untracked allowlisted path blocks, a tracked one is churn
+ok - fm-lane-base-check.sh: the block names the true reason for each path
+ok - fm-lane-base-check.sh: the untracked gate does not depend on ambient git config
+ok - fm-lane-base-check.sh: a full run leaves both git dirs byte-identical
+ok - fm-lane-base-check.sh: a rename record does not misalign the status field
+ok - fm-lane-base-check.sh: a diverged workspace and an absent landing branch block
+ok - fm-lane-base-check.sh: a publishing lane blocks only on an unpublished local landing branch
+ok - fm-lane-base-check.sh: a diverged landing branch is told to reconcile, not to push
+ok - fm-lane-base-check.sh: an unresolvable or ambiguous remote tip blocks only a publishing lane
+ok - fm-lane-base-check.sh: a repository with no remote is distinguished from one whose remote carries no ref
+ok - fm-lane-base-check.sh: an upstream naming a local branch is not evidence of publication
+ok - fm-lane-base-check.sh: an upstream for a different branch is not the published tip
+ok - fm-lane-base-check.sh: an upstream naming the landing ref resolves an ambiguous name
+ok - fm-lane-base-check.sh: a pruned upstream names its own cause and prescribes a working remedy
+ok - fm-lane-base-check.sh: an unreadable working tree blocks instead of authorizing a reset
+ok - fm-lane-base-check.sh: churn classification is exactly the allowlist its owner publishes
+ok - fm-lane-base-check.sh: an unreadable allowlist owner fails safe and names its cause
