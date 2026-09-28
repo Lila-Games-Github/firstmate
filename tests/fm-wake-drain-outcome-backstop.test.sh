@@ -78,6 +78,30 @@ test_newer_task_outcome_and_routine_latest_events_stay_silent() {
   pass "a newer task-matching branch outcome suppresses the backstop and routine latest events stay silent"
 }
 
+test_device_bearing_outcome_index_still_suppresses_the_backstop() {
+  local dir state out old index version seq endpoint ident
+  dir=$(make_case device-bearing-index)
+  state="$dir/state"
+  out="$dir/drain.out"
+  old=$(( $(date +%s) - 20 ))
+
+  printf 'done: delivered before the identity format changed\n' > "$state/legacy.status"
+  set_mtime "$old" "$state/legacy.status"
+  append_outcome "$state" legacy 'legacy completion reached main'
+  index="$state/.legacy.branch-outcome-index"
+  IFS=$(printf '\t') read -r version seq endpoint ident < "$index" \
+    || fail "branch outcome did not write a task index"
+  case "$ident" in strong:*) ;; *) fail "task index lacks a strong identity: $ident" ;; esac
+  printf '%s\t%s\t%s\tstrong:60:%s\n' "$version" "$seq" "$endpoint" "${ident#strong:}" > "$index"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "main drain failed for a device-bearing outcome index"
+  if grep -F 'STATUS OUTCOME BACKSTOP (' "$out" >/dev/null; then
+    fail "a device-bearing outcome index re-presented a handled event: $(cat "$out")"
+  fi
+  pass "an outcome index persisted with a device-bearing identity still suppresses its handled event"
+}
+
 test_older_or_other_task_outcome_cannot_hide_a_new_captain_event() {
   local dir state out body future
   dir=$(make_case stale-outcomes)
@@ -507,6 +531,7 @@ test_backstop_output_is_bounded() {
 
 test_uncovered_keyless_captain_events_surface_on_the_next_main_drain
 test_newer_task_outcome_and_routine_latest_events_stay_silent
+test_device_bearing_outcome_index_still_suppresses_the_backstop
 test_older_or_other_task_outcome_cannot_hide_a_new_captain_event
 test_branch_annotation_cannot_consume_the_main_resurfacing_backstop
 test_same_second_outcome_uses_status_causal_position
