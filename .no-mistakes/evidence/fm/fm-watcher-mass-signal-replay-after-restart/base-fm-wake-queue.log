@@ -1,0 +1,2 @@
+_: line 14: fm_wake_status_adopt_legacy: command not found
+not ok - legacy adoption guard failed (rc=127)

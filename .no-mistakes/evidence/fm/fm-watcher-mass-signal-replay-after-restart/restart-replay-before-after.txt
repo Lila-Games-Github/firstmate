@@ -1,0 +1,26 @@
+# Fail-before / pass-after for the watcher restart replay regressions
+
+== base c637ee8 ==
+not ok - a device-bearing outcome index re-presented a handled event: STATUS OUTCOME BACKSTOP (newest captain-facing task event has no covering branch outcome):
+not ok - legacy restart replayed 54 historical status files
+not ok - legacy adoption guard failed (rc=127)
+
+== intermediate 7482e38 (pre st_dev fix) ==
+ok - legacy identity baselines adopt idempotently while replacement and unknown states remain wake-worthy
+ok - legacy adoption commits only the saved endpoint and retains a concurrent status append
+not ok - device-renumbered baseline handling failed (rc=10)
+ok - 54 legacy logs re-baseline silently across restarts and a downtime append wakes alone
+ok - first upgraded cycle wakes only the log with a real pending downtime append
+not ok - device renumber replayed 54 historical status files
+
+== target 9dcb624 ==
+ok - 54 legacy logs re-baseline silently across restarts and a downtime append wakes alone
+ok - first upgraded cycle wakes only the log with a real pending downtime append
+ok - 54 device-renumbered v2 baselines re-baseline silently and a downtime append wakes alone
+ok - an outcome index persisted with a device-bearing identity still suppresses its handled event
+ok - a missing outcome index self-heals on the first drain and suppresses its handled status
+ok - a genuine outcome-store fault fails closed without Pi-specific restart advice
+ok - legacy identity baselines adopt idempotently while replacement and unknown states remain wake-worthy
+ok - legacy adoption commits only the saved endpoint and retains a concurrent status append
+ok - a device-renumbered v2 baseline adopts silently while a replaced file still wakes
+ok - wake drain: generation-less legacy wakes are adopted and acknowledged

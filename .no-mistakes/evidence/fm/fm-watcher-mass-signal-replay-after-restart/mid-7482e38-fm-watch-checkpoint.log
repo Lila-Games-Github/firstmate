@@ -1,0 +1,8 @@
+ok - quiet checkpoint exits 124 with a clean checkpoint line and no live lock
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 3656488.1790580134.xoX9QR
+ok - checkpoint passes through a real watcher wake and leaves the queue for drain
+ok - checkpoint preserves watcher environment for registered custom checks
+ok - checkpoint rejects an existing watcher singleton as unowned
+ok - 54 legacy logs re-baseline silently across restarts and a downtime append wakes alone
+ok - first upgraded cycle wakes only the log with a real pending downtime append
+not ok - device renumber replayed 54 historical status files

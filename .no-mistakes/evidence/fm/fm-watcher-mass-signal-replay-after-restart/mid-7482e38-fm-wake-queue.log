@@ -1,0 +1,3 @@
+ok - legacy identity baselines adopt idempotently while replacement and unknown states remain wake-worthy
+ok - legacy adoption commits only the saved endpoint and retains a concurrent status append
+not ok - device-renumbered baseline handling failed (rc=10)
