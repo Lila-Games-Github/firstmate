@@ -156,9 +156,51 @@ test_upgrade_with_pending_downtime_write() {
   pass "first upgraded cycle wakes only the log with a real pending downtime append"
 }
 
+# A v2 marker whose identity still carries a device number, as written before
+# identities dropped it; 424242 stands in for a device renumbered at reboot.
+seed_device_bearing_baseline() {
+  FM_STATE_OVERRIDE="$1/state" bash -c '
+    set -eu
+    . "$1"
+    _fm_wake_require_classify
+    file=$2
+    ident=$(_fm_open_decisions_file_ident "$file")
+    size=$(_fm_status_file_size "$file")
+    case "$ident" in
+      strong:*) old="strong:424242:${ident#strong:}" ;;
+      *) old="weak:424242:${ident#weak:}" ;;
+    esac
+    printf "v2\t%s\t%s@%s" "$(status_observed_signature "$file" "$size" "$old")" "$size" "$old" \
+      > "$(fm_wake_signal_seen_path "${file%/*}" "$file")"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$2"
+}
+
+test_restart_after_device_renumber_is_quiet() {
+  local home i status
+  home=$(make_case device-renumber-restart)
+  mkdir -p "$home/data" "$home/config"
+  for ((i=1; i<=54; i++)); do
+    printf 'done: historical task %s\n' "$i" > "$home/state/old-$i.status"
+    seed_device_bearing_baseline "$home" "$home/state/old-$i.status"
+  done
+  status=0
+  run_baseline_checkpoint "$home" 30 || status=$?
+  if [ "$status" -ne 124 ]; then
+    fail "device renumber replayed $(awk -F '\t' '$3 == "signal" { keys[$4]=1 } END { for (k in keys) n++; print n+0 }' "$home/state/.wake-queue") historical status files"
+  fi
+  [ ! -s "$home/state/.wake-queue" ] || fail "historical signals were queued after a device renumber"
+  printf 'blocked: new line written with watcher down\n' >> "$home/state/old-9.status"
+  run_baseline_checkpoint "$home" 30 || fail "post-renumber downtime write was lost"
+  [ "$(awk -F '\t' '$3 == "signal" { keys[$4]=1 } END { for (k in keys) n++; print n+0 }' "$home/state/.wake-queue")" = 1 ] \
+    || fail "a downtime append replayed unchanged sibling logs after a device renumber"
+  assert_contains "$(cat "$home/out.txt")" 'old-9.status' "downtime file was not surfaced"
+  pass "54 device-renumbered v2 baselines re-baseline silently and a downtime append wakes alone"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
 test_restart_after_legacy_baseline_update_is_quiet
 test_upgrade_with_pending_downtime_write
+test_restart_after_device_renumber_is_quiet

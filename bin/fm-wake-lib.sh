@@ -2291,23 +2291,26 @@ fm_wake_status_seen_commit() {  # <state> <status-file> <captured-end> <captured
 
 # Adopt an unchanged legacy signal baseline, never the file's startup contents.
 # Older watchers wrote size:mtime; the intermediate presentation format wrote
-# size@identity. Only a readable regular file still matching that saved state
-# may be adopted. Missing, malformed, changed, or unreadable baselines remain
-# unannounced, preserving status appends made while the watcher was down.
+# size@identity; v2 markers written before identities dropped the device number
+# carry a device-bearing identity. Only a readable regular file still matching
+# that saved state, apart from its device number, may be adopted. Missing,
+# malformed, changed, or unreadable baselines remain unannounced, preserving
+# status appends made while the watcher was down.
 # Commit the matched size, not a fresh size read at write time: an append racing
 # adoption must stay beyond the classified endpoint and wake the next scan.
 # Returns 0 only after successful adoption; otherwise leave normal scanning in
 # charge. This mutating helper belongs to the watcher's singleton-owned scan,
 # not the read-only fm_wake_signal_seen_current predicate.
 fm_wake_status_adopt_legacy() {  # <state> <status-file> <captured-signature>
-  local state=$1 file=$2 captured=$3 marker raw size ident legacy_sig
+  local state=$1 file=$2 captured=$3 marker raw size ident legacy_sig legacy_ident
   case "$file" in *.status) ;; *) return 1 ;; esac
   [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ] || return 1
   marker=$(fm_wake_signal_seen_path "$state" "$file")
   [ -f "$marker" ] && [ -r "$marker" ] && [ ! -L "$marker" ] || return 1
   raw=$(cat "$marker" 2>/dev/null) || return 1
   case "$raw" in
-    v2$'\t'r1:*|v2$'\t'unverifiable$'\t'*) return 1 ;;
+    v2$'\t'unverifiable$'\t'*) return 1 ;;
+    v2$'\t'r1:*) ;; # Only a device-bearing identity is adopted below.
     *@*) ;; # A legacy presentation marker carries a classified identity.
     [0-9]*:[0-9]*) ;;
     *) return 1 ;;
@@ -2325,8 +2328,18 @@ fm_wake_status_adopt_legacy() {  # <state> <status-file> <captured-signature>
   else
     status_presentation_marker_parse "$raw" || return 1
     size=$(_fm_status_file_size "$file") || return 1
-    [ "$STATUS_PRESENTATION_REPORTED" = "${size}@${ident}" ] || return 1
-    [ "$STATUS_PRESENTATION_CLASSIFIED" = "$STATUS_PRESENTATION_REPORTED" ] || return 1
+    size=${size//[[:space:]]/}
+    [ "${STATUS_PRESENTATION_CLASSIFIED%%@*}" = "$size" ] || return 1
+    legacy_ident=${STATUS_PRESENTATION_CLASSIFIED#*@}
+    _fm_status_ident_matches "$legacy_ident" "$ident" || return 1
+    case "$raw" in
+      v2$'\t'*)
+        [ "$legacy_ident" != "$ident" ] || return 1
+        [ "$STATUS_PRESENTATION_REPORTED" = \
+          "$(status_observed_signature "$file" "$size" "$legacy_ident")" ] || return 1
+        ;;
+      *) [ "$STATUS_PRESENTATION_REPORTED" = "$STATUS_PRESENTATION_CLASSIFIED" ] || return 1 ;;
+    esac
   fi
   [ "$(status_observed_signature "$file")" = "$captured" ] || return 1
   [ "$(cat "$marker" 2>/dev/null)" = "$raw" ] || return 1

@@ -1729,6 +1729,64 @@ SH
   pass "legacy adoption commits only the saved endpoint and retains a concurrent status append"
 }
 
+test_device_renumbered_v2_baseline_adoption() {
+  local dir state rc
+  dir=$(make_case device-renumbered-baseline)
+  state="$dir/state"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    set -eu
+    . "$1"
+    _fm_wake_require_classify
+    state=$2
+    file="$state/task.status"
+    # A v2 marker persisted with a device-bearing identity, whose device number
+    # has since changed (btrfs assigns an anonymous st_dev at mount time).
+    seed_device_marker() {
+      local ident size old
+      ident=$(_fm_open_decisions_file_ident "$file")
+      size=$(_fm_status_file_size "$file")
+      case "$ident" in
+        strong:*) old="strong:424242:${ident#strong:}" ;;
+        weak:*) old="weak:424242:${ident#weak:}" ;;
+      esac
+      printf "v2\t%s\t%s@%s" "$(status_observed_signature "$file" "$size" "$old")" "$size" "$old" > "$marker"
+    }
+    printf "done: already announced\nneeds-decision [key=old]: resolved long ago\n" > "$file"
+    marker=$(fm_wake_signal_seen_path "$state" "$file")
+    size=$(_fm_status_file_size "$file")
+    seed_device_marker
+    [ "$(fm_wake_signal_seen_size "$state" "$file")" = "$size" ] || exit 10
+    sig=$(fm_wake_signal_sig "$file")
+    fm_wake_status_adopt_legacy "$state" "$file" "$sig" || exit 11
+    fm_wake_signal_seen_current "$state" "$file" || exit 12
+    [ "$(fm_wake_signal_seen_size "$state" "$file")" = "$size" ] || exit 13
+    ! fm_wake_status_adopt_legacy "$state" "$file" "$sig" || exit 14
+    # A replaced file keeps its size and bytes but not its inode or birth time.
+    seed_device_marker
+    seeded=$(cat "$marker")
+    cp "$file" "$file.new"
+    mv "$file.new" "$file"
+    sig=$(fm_wake_signal_sig "$file")
+    ! fm_wake_status_adopt_legacy "$state" "$file" "$sig" || exit 15
+    ! fm_wake_signal_seen_current "$state" "$file" || exit 16
+    [ "$(fm_wake_signal_seen_size "$state" "$file")" = 0 ] || exit 17
+    [ "$(cat "$marker")" = "$seeded" ] || exit 18
+    # A device-bearing marker for an appended file is not adopted, but its
+    # classified position survives so only the new line is classified.
+    seed_device_marker
+    printf "blocked: appended after the baseline\n" >> "$file"
+    sig=$(fm_wake_signal_sig "$file")
+    ! fm_wake_status_adopt_legacy "$state" "$file" "$sig" || exit 19
+    ! fm_wake_signal_seen_current "$state" "$file" || exit 20
+    offset=$(fm_wake_signal_seen_size "$state" "$file")
+    record=$(status_span_first_actionable_record "$file" "$offset") || exit 21
+    case "$record" in *"blocked: appended after the baseline"*) ;; *) exit 22 ;; esac
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "device-renumbered baseline handling failed (rc=$rc)"
+  pass "a device-renumbered v2 baseline adopts silently while a replaced file still wakes"
+}
+
 # A trap that fires inside a lock's critical section abandons the holding
 # frame, and the exit path then re-acquires the same lock (a TERM inside a
 # recovery-marker section is the reproduced case: the watcher's reap wedged
@@ -2121,6 +2179,7 @@ test_historical_annotation_skips_announced_status() {
 
 test_legacy_signal_baseline_adoption_guards
 test_legacy_adoption_preserves_racing_append
+test_device_renumbered_v2_baseline_adoption
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_lock_owner_preparation_failure_is_bounded
 test_subshell_lock_ownership_without_bashpid
