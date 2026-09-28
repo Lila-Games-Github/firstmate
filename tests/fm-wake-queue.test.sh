@@ -1628,6 +1628,107 @@ test_self_announced_append_guards() {
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
 
+test_legacy_signal_baseline_adoption_guards() {
+  local dir state rc
+  dir=$(make_case legacy-baseline-guards)
+  state="$dir/state"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    set -eu
+    . "$1"
+    state=$2
+    file="$state/task.status"
+    printf "done: already announced\n" > "$file"
+    fm_wake_status_mark_current "$state" "$file"
+    marker=$(fm_wake_signal_seen_path "$state" "$file")
+    status_presentation_marker_parse "$(cat "$marker")"
+    legacy=$STATUS_PRESENTATION_CLASSIFIED
+    # The intermediate size@identity baseline must also upgrade silently.
+    printf "%s" "$legacy" > "$marker"
+    sig=$(fm_wake_signal_sig "$file")
+    fm_wake_status_adopt_legacy "$state" "$file" "$sig"
+    fm_wake_signal_seen_current "$state" "$file"
+    [ "$(fm_wake_signal_seen_size "$state" "$file")" = "${legacy%%@*}" ]
+    # Re-running adoption on a modern marker is a no-op.
+    modern=$(cat "$marker")
+    ! fm_wake_status_adopt_legacy "$state" "$file" "$sig"
+    [ "$(cat "$marker")" = "$modern" ]
+    # A same-sized replacement has a different identity and must wake.
+    printf "%s" "$legacy" > "$marker"
+    cp "$file" "$file.new"
+    mv "$file.new" "$file"
+    sig=$(fm_wake_signal_sig "$file")
+    ! fm_wake_status_adopt_legacy "$state" "$file" "$sig"
+    ! fm_wake_signal_seen_current "$state" "$file"
+    [ "$(cat "$marker")" = "$legacy" ]
+    # Missing, malformed and future versions never authorize silent adoption.
+    for bad in missing garbage "v999\told"; do
+      rm -f "$marker"
+      [ "$bad" = missing ] || printf "%s" "$bad" > "$marker"
+      ! fm_wake_status_adopt_legacy "$state" "$file" "$sig"
+      ! fm_wake_signal_seen_current "$state" "$file"
+    done
+    # Matching size:mtime cannot authorize adopting a symlink status path.
+    if [ "$_FM_UNAME" = Darwin ]; then
+      legacy=$(/usr/bin/stat -f "%z:%Fm" "$file")
+    else
+      legacy=$(stat -c "%s:%Y" "$file")
+    fi
+    mv "$file" "$state/real.status"
+    ln -s "$state/real.status" "$file"
+    printf "%s" "$legacy" > "$marker"
+    sig=$(fm_wake_signal_sig "$file")
+    ! fm_wake_status_adopt_legacy "$state" "$file" "$sig"
+    [ "$(cat "$marker")" = "$legacy" ]
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "legacy adoption guard failed (rc=$rc)"
+  pass "legacy identity baselines adopt idempotently while replacement and unknown states remain wake-worthy"
+}
+
+test_legacy_adoption_preserves_racing_append() {
+  local dir state rc
+  dir=$(make_case legacy-baseline-race)
+  state="$dir/state"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    set -eu
+    . "$1"
+    state=$2
+    file="$state/task.status"
+    printf "done: historical\n" > "$file"
+    fm_wake_status_mark_current "$state" "$file"
+    marker=$(fm_wake_signal_seen_path "$state" "$file")
+    status_presentation_marker_parse "$(cat "$marker")"
+    legacy=$STATUS_PRESENTATION_CLASSIFIED
+    printf "%s" "$legacy" > "$marker"
+    sig=$(fm_wake_signal_sig "$file")
+    printf "%s" "${legacy#*@}" > "$state/identity"
+    cat > "$state/identity-reader" <<'"'"'SH'"'"'
+#!/usr/bin/env bash
+count=$(cat "$FM_RACE_STATE/count" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf "%s" "$count" > "$FM_RACE_STATE/count"
+if [ "$count" -eq 3 ]; then
+  printf "blocked: racing append\n" >> "$1"
+fi
+cat "$FM_RACE_STATE/identity"
+SH
+    chmod +x "$state/identity-reader"
+    export FM_RACE_STATE="$state" FM_STATUS_IDENTITY_READER="$state/identity-reader"
+    fm_wake_status_adopt_legacy "$state" "$file" "$sig"
+    [ "$(cat "$state/count")" = 3 ]
+    grep -F "blocked: racing append" "$file" >/dev/null
+    ! fm_wake_signal_seen_current "$state" "$file"
+    offset=$(fm_wake_signal_seen_size "$state" "$file")
+    [ "$offset" = "${legacy%%@*}" ]
+    record=$(status_span_first_actionable_record "$file" "$offset")
+    case "$record" in *"blocked: racing append"*) ;; *) exit 10 ;; esac
+    case "$record" in *"done: historical"*) exit 11 ;; esac
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" || rc=$?
+  [ "$rc" -eq 0 ] || fail "legacy adoption swallowed a racing append (rc=$rc)"
+  pass "legacy adoption commits only the saved endpoint and retains a concurrent status append"
+}
+
 # A trap that fires inside a lock's critical section abandons the holding
 # frame, and the exit path then re-acquires the same lock (a TERM inside a
 # recovery-marker section is the reproduced case: the watcher's reap wedged
@@ -2018,6 +2119,8 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+test_legacy_signal_baseline_adoption_guards
+test_legacy_adoption_preserves_racing_append
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_lock_owner_preparation_failure_is_bounded
 test_subshell_lock_ownership_without_bashpid
