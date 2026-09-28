@@ -52,6 +52,8 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Ship briefs carry `Execution contract: workspace=lane|crewmate`; fm-spawn
+# refuses lane briefs, and Playbot dispatch refuses marked crewmate briefs.
 # --lane writes the same ship contract for a Playbot lane. A lane brief is designed
 # to need ZERO dispatch-time overrides: a caller hands it over with nothing but
 # "read the brief at <path> and follow it exactly" plus a one-line task summary, so
@@ -767,8 +769,11 @@ $LANE_CONTRACT_RULE
 EOF
 fi
 
+WORKSPACE_KIND=crewmate
+[ "$LANE" -eq 0 ] || WORKSPACE_KIND=lane
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
+Execution contract: workspace=$WORKSPACE_KIND
 
 $TASK_SECTION
 

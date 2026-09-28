@@ -1056,6 +1056,7 @@ test_lane_mode_drops_the_crewmate_branch_convention() {
     # The safety contract a lane shares with every other ship brief must survive.
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$mode lane brief lost its machine-readable delivery contract line"
+    grep -qx "Execution contract: workspace=lane" "$brief" || fail "lane marker is absent"
     assert_grep "**Verify isolation before anything else.**" "$brief" \
       "$mode lane brief lost the worktree-isolation assertion"
     assert_grep "{TASK}" "$brief" "$mode lane brief lost the {TASK} placeholder"
@@ -1191,6 +1192,7 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
     --lane-branch task/lane-named-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
     || fail "lane brief with an explicit branch should scaffold"
   brief="$home/data/lane-named/brief.md"
+  assert_no_grep "fm/lane-named" "$brief" "named lane brief retains an fm/ branch"
   assert_grep "verify it is your workspace branch \`task/lane-named-2026-09-04\`" "$brief" \
     "named lane brief does not state the branch in its setup step"
   assert_grep "Work only on your workspace branch \`task/lane-named-2026-09-04\`; never create or switch branches." "$brief" \
@@ -1223,6 +1225,8 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
   assert_grep 'target_branch' "$brief" "lane must verify the run target"
   assert_grep 'forge PR base' "$brief" "lane must verify the published PR base"
   assert_no_grep 'this brief can neither set nor read it' "$brief" "stale target guidance survived"
+  assert_no_grep "fm/lane-named-pr" "$home/data/lane-named-pr/brief.md" "direct-PR retained fm/ branch"
+  assert_no_grep "fm/lane-named-nm" "$brief" "no-mistakes retained fm/ branch"
   pass "fm-brief.sh: an explicit lane branch is stated in every branch instruction"
 }
 

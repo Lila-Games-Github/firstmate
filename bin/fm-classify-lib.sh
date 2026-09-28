@@ -818,7 +818,10 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # discarded and rebuilt from byte 0 under the new reading.
 FM_OPEN_DECISIONS_FOLD_VERSION=8
 
-# Portable device:inode identity for the rotation/recreation check below.
+# Portable inode identity for the rotation/recreation check below. The device
+# number is deliberately excluded: some filesystems (btrfs subvolumes, for
+# example) assign an anonymous st_dev at mount time, so it can change across a
+# reboot while the file itself is unchanged.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   local f=$1 epoch birth ident
   if [ -n "${FM_STATUS_IDENTITY_READER:-}" ]; then
@@ -826,16 +829,33 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
     return
   fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
+    ident=$(LC_ALL=C /usr/bin/stat -f '%i' "$f" 2>/dev/null) || return 1
     epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
     if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
   else
-    ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
+    ident=$(LC_ALL=C stat -c '%i' "$f" 2>/dev/null) || return 1
     epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
     if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
   fi
   case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
   if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
+}
+
+# 0 when a persisted identity names the same file as <current>. Identities
+# persisted before the device number was dropped read strong:<dev>:<ino>:<birth>
+# or weak:<dev>:<ino>; they still match when inode and birth time agree, so a
+# device renumbering or the format change itself does not look like a new file.
+_fm_status_ident_matches() {  # <persisted-identity> <current-identity>
+  local stored=$1 current=$2
+  [ -n "$stored" ] && [ -n "$current" ] || return 1
+  [ "$stored" = "$current" ] && return 0
+  if [[ "$stored" =~ ^strong:[0-9]+:([0-9]+:.+)$ ]]; then
+    [ "strong:${BASH_REMATCH[1]}" = "$current" ]
+  elif [[ "$stored" =~ ^weak:[0-9]+:([0-9]+)$ ]]; then
+    [ "weak:${BASH_REMATCH[1]}" = "$current" ]
+  else
+    return 1
+  fi
 }
 
 _fm_status_file_size() {  # <status-file>
@@ -958,7 +978,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     size=$actual_size
   fi
 
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || ! _fm_status_ident_matches "$ident" "$cur_ident" || [ "$offset" -gt "$actual_size" ]; then
     offset=0
     open=''
     trusted_open=''
@@ -1154,7 +1174,7 @@ EOF
   size=$(_fm_status_file_size "$f") || return 1
   size=${size//[[:space:]]/}
   case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
-  if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
+  if ! _fm_status_ident_matches "$ident" "$cur_ident" || [ "$offset" -gt "$size" ]; then offset=0; fi
   printf '%s' "$offset"
 }
 
@@ -1178,7 +1198,7 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
       size=$(_fm_status_file_size "$f") || return 1
       size=${size//[[:space:]]/}
       case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$ident" = "$current" ] || { printf '0'; return 0; }
+      _fm_status_ident_matches "$ident" "$current" || { printf '0'; return 0; }
       backstop=${row_backstop:-0}
       [ "$backstop" -le "$size" ] || backstop=0
       printf '%s' "$backstop"
@@ -1299,7 +1319,7 @@ status_presentation_marker_offset() {
   [ "$classified" != - ] || { printf '0'; return 0; }
   offset=${classified%%@*}; ident=${classified#*@}
   current=$(_fm_open_decisions_file_ident "$2") || { printf '0'; return 0; }
-  [ "$ident" = "$current" ] || { printf '0'; return 0; }
+  _fm_status_ident_matches "$ident" "$current" || { printf '0'; return 0; }
   printf '%s' "$offset"
 }
 
@@ -1554,7 +1574,7 @@ status_open_decisions_cursor_offset() {  # <status-file>
   size=$(_fm_status_file_size "$f") || return 1
   size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || ! _fm_status_ident_matches "$ident" "$cur_ident" || [ "$offset" -gt "$size" ]; then
     offset=0
     open=''
   fi

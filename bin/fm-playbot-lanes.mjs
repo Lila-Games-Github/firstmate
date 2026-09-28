@@ -84,21 +84,18 @@ const DEFAULT_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS = 5_000;
 const MAX_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS = 300_000;
 const WORKSPACE_ROOTS_SETTLE_POLL_INTERVAL_MS = 150;
 
-// This exact list is the one allowance shared by retirement inventory and
-// retirement itself. Playbot's Godot editor integration rewrites these eight
-// tracked paths across unrelated worktrees. No directory prefix, extension,
-// basename, or untracked file is inferred to be churn.
+// Single owner of tracked Playbot churn, shared with the lane base check.
+// A trailing slash is a literal repository-relative directory prefix; other
+// entries are exact paths. These rules never classify untracked files as churn.
 const PLAYBOT_TRACKED_CHURN_PATHS = Object.freeze([
-  "prototype-game/addons/playbot/playbot_common.gd.uid",
-  "prototype-game/addons/playbot/playbot_export_plugin.gd",
-  "prototype-game/addons/playbot/playbot_export_plugin.gd.uid",
-  "prototype-game/addons/playbot/playbot_log_capture.gd.source",
-  "prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid",
-  "prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid",
-  "prototype-game/addons/playbot/plugin.gd.uid",
+  "prototype-game/addons/playbot/",
   "prototype-game/project.godot",
 ]);
-const PLAYBOT_TRACKED_CHURN_SET = new Set(PLAYBOT_TRACKED_CHURN_PATHS);
+function isTrackedPlaybotChurn(file) {
+  return PLAYBOT_TRACKED_CHURN_PATHS.some((entry) => entry.endsWith("/")
+    ? file.startsWith(entry)
+    : file === entry);
+}
 
 // Gitignored build output that Godot, Python, and task tooling regenerate on
 // demand, plus the host-specific native addon tree Playbot injects into every
@@ -1001,8 +998,8 @@ function shallowGitStatus(root) {
   const trackedPaths = [...tracked].sort();
   return {
     trackedPaths,
-    allowedTrackedChurnPaths: trackedPaths.filter((file) => PLAYBOT_TRACKED_CHURN_SET.has(file)),
-    blockingTrackedPaths: trackedPaths.filter((file) => !PLAYBOT_TRACKED_CHURN_SET.has(file)),
+    allowedTrackedChurnPaths: trackedPaths.filter((file) => isTrackedPlaybotChurn(file)),
+    blockingTrackedPaths: trackedPaths.filter((file) => !isTrackedPlaybotChurn(file)),
     untrackedPaths: [...untracked].sort(),
     ignoredPaths: [...ignored].sort(),
   };
@@ -1396,8 +1393,8 @@ function workspaceGitStatus(root, prefix = "", visited = new Set()) {
   const trackedPaths = [...tracked].sort();
   return {
     trackedPaths,
-    allowedTrackedChurnPaths: trackedPaths.filter((file) => PLAYBOT_TRACKED_CHURN_SET.has(file)),
-    blockingTrackedPaths: trackedPaths.filter((file) => !PLAYBOT_TRACKED_CHURN_SET.has(file)),
+    allowedTrackedChurnPaths: trackedPaths.filter((file) => isTrackedPlaybotChurn(file)),
+    blockingTrackedPaths: trackedPaths.filter((file) => !isTrackedPlaybotChurn(file)),
     untrackedPaths: [...untracked].sort(),
     ignoredPaths: [...ignored].sort(),
     indexFlags: indexFlags.sort((left, right) => left.path.localeCompare(right.path)),
@@ -2241,7 +2238,7 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
   if (result.tracked.blockingPaths.length > 0) {
     result.blockers.push({
       code: "tracked-modifications",
-      message: `${result.tracked.blockingPaths.length} tracked path(s) fall outside Playbot's exact churn allowlist`,
+      message: `${result.tracked.blockingPaths.length} tracked path(s) fall outside Playbot's tracked churn allowlist`,
       paths: result.tracked.blockingPaths,
     });
   }
@@ -5742,7 +5739,7 @@ function toolDefinitions() {
     },
     {
       name: "dispatch",
-      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile dispatch refuses before sending, naming the created chat so it can be archived or sent deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
+      description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. Dispatch returns workspace.roots with branch names read back from Playbot registration, so callers can regenerate a named lane brief when newWorkspace.branch was ignored. Marked ordinary crewmate briefs are refused before creation or send; unmarked custom/legacy messages remain supported. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile dispatch refuses before sending, naming the created chat so it can be archived or sent deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
       inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
     },
     {
@@ -5863,6 +5860,13 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   if (name === "dispatch") {
+    // Match the scaffold's fixed execution contract before creating or sending.
+    // Unmarked legacy/custom task messages retain their existing behavior.
+    const workspaceContracts = [...String(args.message ?? "").matchAll(/^Execution contract: workspace=(.*)$/gm)]
+      .map((match) => match[1].trim());
+    if (workspaceContracts.some((kind) => kind !== "lane")) {
+      throw new Error("workspace mismatch: Playbot dispatch requires a lane brief; re-scaffold with --lane instead of sending an ordinary crewmate brief");
+    }
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
     if (!wantsNewWorkspace && args.landingBranch !== undefined) {
       throw new Error("dispatch landingBranch is only valid together with newWorkspace; an existing workspace's freshness is read with get_workspace_freshness or get_thread_status");
@@ -5900,6 +5904,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     if (worker && workerProfile) {
       throw new Error("dispatch model and reasoningEffort only apply when creating a worker chat; the resolved existing chat was left unchanged");
     }
+    const createdChat = !worker;
     if (!worker) {
       const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, workerProfile });
       worker = resolveThread(project.id, created.workspaceId, created.id);
@@ -5926,6 +5931,23 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       freshness = settled.freshness;
       workspaceSettle = settled.settle ? createdWorkspaceSettleReport(settled.settle) : null;
     }
+    // Re-read Playbot's registered roots after creation/settling. Playbot can
+    // ignore newWorkspace.branch, so the request is never branch evidence.
+    let workspace = null;
+    const warnings = [];
+    try {
+      workspace = resolveWorkspace(resolveProject(project.id), worker.workspace_id);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const stop = reason.endsWith(".") ? "" : ".";
+      if (createdChat && wantsNewWorkspace) {
+        throw new Error(`Workspace ${worker.workspace_id} and chat ${worker.thread_id} were created, but dispatch stopped before sending because their registered branch could not be read back: ${reason}${stop} Both still exist: once workspace ${worker.workspace_id} reads back, deliver this task with send_message against chat ${worker.thread_id} rather than dispatching again.`);
+      }
+      if (createdChat) {
+        throw new Error(`Chat ${worker.thread_id} was created in workspace ${worker.workspace_id}, but dispatch stopped before sending because the workspace's registered branch could not be read back: ${reason}${stop} The chat still exists: once workspace ${worker.workspace_id} reads back, deliver this task with send_message against chat ${worker.thread_id} rather than dispatching again.`);
+      }
+      warnings.push(`Workspace ${worker.workspace_id} could not be read back (${reason}), so workspace is null and no branch was observed; read it with get_workspace_freshness before relying on a branch name.`);
+    }
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
@@ -5934,6 +5956,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         return {
           lane,
           ...sent,
+          workspace,
           ...(freshness ? { freshness } : {}),
           ...(workspaceSettle ? { workspaceSettle } : {}),
           supervision: {
@@ -5941,6 +5964,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
             laneId: lane.id,
             note: "This caller is a Playbot chat, so the worker's completed turns wake it through the registered lane and no watcher poll was armed.",
           },
+          ...(warnings.length ? { warnings } : {}),
         };
       }
       const acceptedBaseline = supervisionAcceptance?.acceptanceMs === null
@@ -5953,8 +5977,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         baseline: acceptedBaseline ?? { ...armingBaseline, acceptanceMs: null },
         delivery: acceptedBaseline ? sent.delivery : null,
       });
-      const result = { lane: null, ...sent, ...(freshness ? { freshness } : {}), ...(workspaceSettle ? { workspaceSettle } : {}), supervision };
-      if (!supervision.armed) result.warnings = [supervisionArmWarning(supervision)];
+      const result = { lane: null, ...sent, workspace, ...(freshness ? { freshness } : {}), ...(workspaceSettle ? { workspaceSettle } : {}), supervision };
+      if (!supervision.armed) warnings.push(supervisionArmWarning(supervision));
+      if (warnings.length) result.warnings = warnings;
       return result;
     } catch (error) {
       // Only a send that never reached Playbot may tear the lane down. When the

@@ -144,6 +144,7 @@ test_measured_lanes_keep_their_existing_bounds() {
   done <<'CAPS'
 tests-portable-parallel-1 10
 tests-portable-parallel-2 10
+tests-portable-parallel-3 10
 tests-portable-serial 30
 tests-herdr 75
 macos-stock-bash 10
@@ -155,6 +156,15 @@ test_ci_matrices_match_executable_partitions() {
   ruby -ryaml -ropen3 - "$CI_WORKFLOW" "$ROOT" <<'RUBY' || fail "CI partition contract"
 jobs = YAML.load_file(ARGV[0]).fetch("jobs")
 root = ARGV[1]
+parallel_lanes, status = Open3.capture2(File.join(root, "bin/fm-test-run.sh"), "--list-lanes")
+raise "cannot list runner lanes" unless status.success?
+parallel = parallel_lanes.lines.map(&:strip).select { |l| l.start_with?("portable-parallel-") }
+actual_parallel = jobs.keys.grep(/\Atests-portable-parallel-/).map { |key| key.delete_prefix("tests-") }
+raise "CI jobs and parallel runner lanes disagree" unless actual_parallel.sort == parallel.sort
+aggregate = jobs.fetch("tests-timing-aggregate").fetch("needs")
+parallel.each do |lane|
+  raise "aggregate omits #{lane}" unless aggregate.include?("tests-#{lane}")
+end
 serial = jobs.fetch("tests-portable-serial").fetch("strategy")
 raise "serial failures must not cancel other shards" unless serial.fetch("fail-fast") == false
 matrix = serial.fetch("matrix")

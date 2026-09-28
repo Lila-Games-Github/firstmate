@@ -1576,9 +1576,11 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # -nt comparison.
 # Status signatures include observable file and readability state, while turn-end
 # markers retain their size-and-mtime signature.
-# Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
-# The caller records reported state only after surfacing or intentional absorption,
-# and commits a status classification position only after a successful span read.
+# Unchanged legacy markers are adopted through fm-wake-lib.sh's migration
+# helper when signature comparison fails, so a code update cannot replay history.
+# Prints one "<seen-file>\t<sig>\t<file>" line per changed file.
+# Outside legacy adoption, the caller records reported state only after surfacing
+# or intentional absorption, and commits classification only after a span read.
 scan_signals() {
   local f sig sf
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
@@ -1589,7 +1591,10 @@ scan_signals() {
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
     case "$f" in
-      *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
+      *.status)
+        fm_wake_signal_seen_current "$STATE" "$f" && continue
+        fm_wake_status_adopt_legacy "$STATE" "$f" "$sig" && continue
+        ;;
       *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
     esac
     printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
