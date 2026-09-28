@@ -1,0 +1,19 @@
+ok - fm-playbot-lanes: public retirement discards import/export output and exact injected files while unrelated ignored/addon files block
+ok - fm-playbot-lanes: retirement distinguishes an armed check from orphaned cleanup
+ok - fm-playbot-lanes: inventory is non-destructive and reports Local, thread, root, and Git refusals with evidence
+ok - fm-playbot-lanes: retirement inventory reports a malformed remote Git timeout as configuration, not landing evidence
+ok - fm-playbot-lanes: untracked inventory bypasses Git cache shortcuts
+ok - fm-playbot-lanes: retirement rejects unregistered clones from another repository
+ok - fm-playbot-lanes: gitignored build output and the native addon tree are discardable while other ignored paths block
+ok - fm-playbot-lanes: an explicitly authorized ignored path is discarded with its exact path in the audit
+ok - fm-playbot-lanes: exact or byte-identified injected addon files are discardable and other untracked files block
+ok - fm-playbot-lanes: an authorized discard retires one workspace and audits the authorization and exact paths
+ok - fm-playbot-lanes: orphaned roots are classified apart from unreadable Git with an inventory
+ok - fm-playbot-lanes: large orphan evidence is bounded, complete, and checked before deletion
+ok - fm-playbot-lanes: complete inventories are verified before reuse, pruned when superseded, and kept while audited
+ok - fm-playbot-lanes: concurrent listings cannot leave a receipt naming a pruned inventory
+ok - fm-playbot-lanes: orphan retirement refuses unauthorized files, branch collisions, and paths outside Playbot storage
+ok - fm-playbot-lanes: orphaned roots retire as registration cleanup and remove only inventoried directories
+ok - fm-playbot-lanes: local landing rejects a registered clone that is not its own worktree top level
+ok - fm-playbot-lanes: local landing accepts a subdirectory root but rejects another repository or worktree
+ok - fm-playbot-lanes: a local-only registry posture accepts the main clone's local landing branch as landing evidence

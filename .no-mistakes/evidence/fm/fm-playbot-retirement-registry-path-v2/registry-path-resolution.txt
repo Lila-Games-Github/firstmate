@@ -1,0 +1,12 @@
+$ cat data/projects.md
+- prototype-game [local-only] - nested Godot project at /var/home/sanchith/LILA/ProjectWhite (added 2026-09-28)
+- flatproj [local-only] - legacy entry (added 2026-09-28)
+$ fm-project-mode.sh --path prototype-game
+/var/home/sanchith/LILA/ProjectWhite
+exit=0
+$ fm-project-mode.sh --path flatproj
+$FM_HOME/projects/flatproj
+exit=0
+$ fm-project-mode.sh --path absent
+error: registered clone path for absent is missing or ambiguous in $FM_HOME/data/projects.md
+exit=1
