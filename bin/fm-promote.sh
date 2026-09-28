@@ -7,7 +7,7 @@
 # data/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
 # that delivers it to the current worker. Those instructions carry the
 # scratch-state inventory, the clean
-# default-branch base, the fm/<task-id> branch, and - rendered from
+# base (the recorded landing branch when set, else the default branch), the fm/<task-id> branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
@@ -210,11 +210,19 @@ PROMOTION_ASK_USER_BLOCK=
 if [ "$MODE" = no-mistakes ]; then
   PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
 fi
+PROMOTION_BASE_STEP="3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`."
+if [ -n "$LANDING_BRANCH" ]; then
+  printf -v LANDING_Q '%q' "$LANDING_BRANCH"
+  printf -v LANDING_REFSPEC_Q '%q' "+refs/heads/$LANDING_BRANCH:refs/remotes/origin/$LANDING_BRANCH"
+  printf -v LANDING_ORIGIN_Q '%q' "origin/$LANDING_BRANCH"
+  PROMOTION_BASE_STEP="3. Return to a clean base on this task's recorded landing branch \`$LANDING_BRANCH\`, not the default branch, resolved the way a ship spawn resolves its base: run \`git fetch origin $LANDING_REFSPEC_Q\` and, when origin has that branch, create your branch from its fetched tip with \`git checkout -b fm/$ID $LANDING_ORIGIN_Q\`; only when origin has no such branch, use the local branch instead with \`git checkout -b fm/$ID $LANDING_Q\`. Never fall back to the default branch.
+   Keep \`fm/$ID\` a clean fast-forward onto that landing branch: if it advances, rebase onto it, so the PR aimed at it carries only this task's commits."
+fi
 IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`fm/$ID\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
-3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
+$PROMOTION_BASE_STEP
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
