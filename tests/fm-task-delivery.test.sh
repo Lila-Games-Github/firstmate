@@ -881,24 +881,47 @@ EOF
 }
 
 test_promotion_target_contract() {
-  local home id target out
+  local home proj id target out
   home="$TMP_ROOT/promotion-target/home"
-  mkdir -p "$home/state"
+  proj="$TMP_ROOT/promotion-target/proj"
+  mkdir -p "$home/state" "$proj"
+  git -C "$proj" init -q -b main || fail "could not initialize project fixture"
+  git -C "$proj" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m init \
+    || fail "could not commit project fixture"
+  git -C "$proj" branch proto/lila || fail "could not create landing branch fixture"
+  scout_meta() {  # <id>
+    printf 'window=fm-%s\nworktree=/tmp/wt\nproject=%s\nharness=claude\nkind=scout\n' "$1" "$proj" \
+      > "$home/state/$1.meta"
+    FM_HOME="$home" "$BRIEF" "$1" fixture-project --scout >/dev/null || fail "scout scaffold failed"
+    fill_brief_subsections "$home/data/$1/brief.md" "Integrate branch routing." "Preserve routing."
+  }
   for target in proto/lila ''; do
     id="promotion-target-${target:+explicit}"
-    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
-    [ -z "$target" ] || printf 'landing_branch=%s\n' "$target" >> "$home/state/$id.meta"
-    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null || fail "scout scaffold failed"
-    fill_brief_subsections "$home/data/$id/brief.md" "Integrate branch routing." "Preserve routing."
-    out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) || fail "promotion failed: $out"
+    scout_meta "$id"
+    out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off ${target:+--landing-branch "$target"} 2>&1) \
+      || fail "promotion failed: $out"
     if [ -n "$target" ]; then
+      [ "$(FM_HOME="$home" "$ROOT/bin/fm-landing-branch.sh" "$id")" = "$target" ] \
+        || fail "promotion did not record landing_branch"
       assert_grep 'no-mistakes axi run --target-branch proto/lila' "$home/data/$id/ship-instructions.md" "promotion lost target"
       assert_grep 'no-mistakes axi run --target-branch proto/lila' "$home/data/$id/brief.md" "durable promotion lost target"
     else
+      FM_HOME="$home" "$ROOT/bin/fm-landing-branch.sh" "$id" >/dev/null && fail "default promotion recorded a landing branch"
       assert_no_grep '--target-branch' "$home/data/$id/ship-instructions.md" "default promotion acquired target"
     fi
+    grep -qx 'kind=ship' "$home/state/$id.meta" || fail "promotion did not flip kind"
   done
-  pass "promotion preserves the recorded no-mistakes target"
+  for target in no-such-branch 'bad..name'; do
+    id=promotion-target-refused
+    scout_meta "$id"
+    if out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off --landing-branch "$target" 2>&1); then
+      fail "promotion accepted landing branch '$target'"
+    fi
+    grep -qx 'kind=scout' "$home/state/$id.meta" || fail "refused promotion changed the meta"
+    [ ! -e "$home/data/$id/ship-instructions.md" ] || fail "refused promotion wrote ship instructions"
+    rm -rf "$home/data/$id"
+  done
+  pass "promotion records and delivers an explicit no-mistakes landing target"
 }
 
 test_promotion_target_contract

@@ -2735,9 +2735,7 @@ if [ "$KIND" = ship ]; then
   # A recorded landing branch must already exist in the project clone (as a
   # local branch or an origin remote-tracking branch), so the landed-work test
   # it arms in fm-teardown.sh can never point at a ref that does not resolve.
-  if [ "$LANDING_SET" -eq 1 ] \
-    && ! git -C "$PROJ_ABS" rev-parse --quiet --verify "refs/heads/$LANDING_BRANCH^{commit}" >/dev/null 2>&1 \
-    && ! git -C "$PROJ_ABS" rev-parse --quiet --verify "refs/remotes/origin/$LANDING_BRANCH^{commit}" >/dev/null 2>&1; then
+  if [ "$LANDING_SET" -eq 1 ] && ! fm_landing_branch_check "$PROJ_ABS" "$LANDING_BRANCH"; then
     echo "error: --landing-branch '$LANDING_BRANCH' does not resolve in $PROJ_ABS as a local branch or an origin remote-tracking branch" >&2
     exit 1
   fi

@@ -346,6 +346,20 @@ fm_meta_get() {  # <meta-file> <key>
   printf '%s' "$value"
 }
 
+# fm_landing_branch_check: the single validation owner for a task's
+# landing_branch= value (contract: bin/fm-spawn.sh's header). Returns 0 when
+# <branch> passes git check-ref-format and resolves in <project-dir> as a local
+# branch or an origin remote-tracking branch, 1 when the name is invalid, and 2
+# when it does not resolve. Callers print their own error.
+fm_landing_branch_check() {  # <project-dir> <branch>
+  local proj=$1 branch=$2
+  [ -n "$branch" ] || return 1
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || return 1
+  git -C "$proj" rev-parse --quiet --verify "refs/heads/$branch^{commit}" >/dev/null 2>&1 \
+    || git -C "$proj" rev-parse --quiet --verify "refs/remotes/origin/$branch^{commit}" >/dev/null 2>&1 \
+    || return 2
+}
+
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
 # `tmux` when the field is absent - the P1 compatibility contract.
 fm_backend_of_meta() {  # <meta-file>

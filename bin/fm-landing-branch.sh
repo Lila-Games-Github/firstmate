@@ -87,8 +87,7 @@ if [ -z "$PROJ" ] || [ ! -d "$PROJ" ]; then
   echo "error: task $ID records no usable project clone to validate the branch against" >&2
   exit 1
 fi
-if ! git -C "$PROJ" rev-parse --quiet --verify "refs/heads/$BRANCH^{commit}" >/dev/null 2>&1 \
-  && ! git -C "$PROJ" rev-parse --quiet --verify "refs/remotes/origin/$BRANCH^{commit}" >/dev/null 2>&1; then
+if ! fm_landing_branch_check "$PROJ" "$BRANCH"; then
   echo "error: '$BRANCH' does not resolve in $PROJ as a local branch or an origin remote-tracking branch" >&2
   exit 1
 fi

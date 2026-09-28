@@ -24,7 +24,12 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# A scout spawn cannot record landing_branch=, so the optional --landing-branch
+# records it here, validated by fm_landing_branch_check (bin/fm-backend.sh), the
+# same owner fm-spawn.sh uses, against the meta's recorded project clone. The
+# promoted contract and every later relaunch then carry that landing target;
+# without the flag the task keeps default-branch behavior.
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +61,8 @@ MODE=
 YOLO=
 MODE_SET=0
 YOLO_SET=0
+LANDING_BRANCH=
+LANDING_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -66,6 +73,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      landing-branch) LANDING_BRANCH=$a; LANDING_SET=1 ;;
     esac
     want_value=
     continue
@@ -75,11 +83,13 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --landing-branch) want_value=landing-branch ;;
+    --landing-branch=*) LANDING_BRANCH=${a#--landing-branch=}; LANDING_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>]" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
@@ -99,6 +109,10 @@ case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
 esac
+[ "$LANDING_SET" -eq 0 ] || [ -n "$LANDING_BRANCH" ] || {
+  echo "error: --landing-branch requires a non-empty value" >&2
+  exit 1
+}
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
@@ -145,6 +159,22 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+if [ "$LANDING_SET" -eq 1 ]; then
+  PROJ=$(fm_meta_get "$META" project)
+  if [ -z "$PROJ" ] || [ ! -d "$PROJ" ]; then
+    echo "error: task $ID records no usable project clone to validate --landing-branch against" >&2
+    exit 1
+  fi
+  LANDING_STATUS=0
+  fm_landing_branch_check "$PROJ" "$LANDING_BRANCH" || LANDING_STATUS=$?
+  case "$LANDING_STATUS" in
+    0) ;;
+    1) echo "error: --landing-branch '$LANDING_BRANCH' is not a valid git branch name" >&2; exit 1 ;;
+    *) echo "error: --landing-branch '$LANDING_BRANCH' does not resolve in $PROJ as a local branch or an origin remote-tracking branch" >&2; exit 1 ;;
+  esac
+else
+  LANDING_BRANCH=$(fm_meta_get "$META" landing_branch)
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -229,7 +259,7 @@ EOF
     promote_local_only_landing "$(fm_dod_block "$MODE" "$ID")"
     printf '\n'
   else
-    fm_dod_block "$MODE" "$ID" "$(fm_meta_get "$META" landing_branch)"
+    fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH"
   fi
 }
 mkdir -p "$DATA/$ID"
@@ -283,11 +313,12 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^landing_branch=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  [ -z "$LANDING_BRANCH" ] || echo "landing_branch=$LANDING_BRANCH"
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
@@ -303,7 +334,7 @@ META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 INSTRUCTIONS_Q=$(printf '%q' "$INSTRUCTIONS")
-echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
+echo "promoted $ID to ship mode=$MODE yolo=$YOLO${LANDING_BRANCH:+ landing_branch=$LANDING_BRANCH} (teardown protection restored)"
 echo "wrote ship instructions for mode=$MODE: $INSTRUCTIONS"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID \"\$(cat $INSTRUCTIONS_Q)\""
 
