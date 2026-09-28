@@ -44,6 +44,7 @@
 # Brief, launch (including relaunch), and promotion callers supply the recorded
 # landing_branch, or the lane's explicit landing branch. The launch overlay
 # supersedes old/custom brief guidance and precedes the authorized intent body.
+# Only the command is shell-quoted; prose and equality checks use the raw name.
 fm_nm_target_block() {
   local branch=${1:-} target_arg
   [ -n "$branch" ] || return 0
@@ -56,11 +57,11 @@ fm_nm_target_block() {
 
 # Current no-mistakes target contract
 This section supersedes earlier brief guidance about the no-mistakes target.
-The recorded landing branch is \`$target_arg\`.
+The recorded landing branch is \`$branch\`.
 When starting validation, run \`no-mistakes axi run --target-branch $target_arg\` with the authorized intent supplied separately through \`--intent\`.
 The target is a separate flag; never put it inside \`--intent\`.
 Reattach an existing run using its immutable target rather than starting a replacement run with a default target.
-Before reporting a PR, verify the run's \`target_branch\` through \`no-mistakes axi status\` and the forge PR base both equal \`$target_arg\`.
+Before reporting a PR, verify the run's \`target_branch\` through \`no-mistakes axi status\` and the forge PR base both equal \`$branch\`.
 Use \`gh-axi\` with an explicit repository scope to read the forge PR base (\`base.ref\`); never infer it from the head branch or the PR title.
 If either target differs or cannot be verified, stop and report \`blocked: no-mistakes target verification failed\` with the evidence; do not report that PR as ready.
 EOF

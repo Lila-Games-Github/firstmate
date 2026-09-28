@@ -909,6 +909,7 @@ test_promotion_base_follows_landing_branch() {
     wt="$root/wt-$id"
     git clone -q "$origin" "$wt" || fail "could not clone scout worktree"
     step=$(grep '^3\. ' "$home/data/$id/ship-instructions.md")
+    # shellcheck disable=SC2016  # literal backticks delimit the generated git commands
     cmds=$(printf '%s\n' "$step" | grep -o '`git [^`]*`' | tr -d '`')
     if [ -n "$target" ]; then
       case "$step" in *"recorded landing branch \`$target\`"*) ;; *) fail "landing promotion base step does not name $target: $step" ;; esac

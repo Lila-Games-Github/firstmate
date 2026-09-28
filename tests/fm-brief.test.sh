@@ -1402,7 +1402,23 @@ test_recorded_no_mistakes_target() {
   pass "ordinary no-mistakes briefs carry only recorded targets"
 }
 
+test_no_mistakes_target_metacharacter_branch() {
+  local home brief
+  home="$TMP_ROOT/nm-target-metachar"
+  mkdir -p "$home/state"
+  printf 'landing_branch=feat/a&b\n' > "$home/state/meta.meta"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" meta fixture-project --mode no-mistakes >/dev/null \
+    || fail "metacharacter-branch brief should scaffold"
+  brief="$home/data/meta/brief.md"
+  assert_grep 'no-mistakes axi run --target-branch feat/a\&b' "$brief" "target command must shell-quote the branch"
+  assert_grep "The recorded landing branch is \`feat/a&b\`." "$brief" "prose must name the raw branch"
+  assert_grep "forge PR base both equal \`feat/a&b\`." "$brief" "equality check must use the raw branch"
+  assert_no_grep "equal \`feat/a\\&b\`" "$brief" "equality check used the shell-quoted branch"
+  pass "no-mistakes target contract quotes only the command for metacharacter branches"
+}
+
 test_recorded_no_mistakes_target
+test_no_mistakes_target_metacharacter_branch
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
