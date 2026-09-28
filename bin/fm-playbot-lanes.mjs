@@ -100,13 +100,37 @@ const PLAYBOT_TRACKED_CHURN_PATHS = Object.freeze([
 ]);
 const PLAYBOT_TRACKED_CHURN_SET = new Set(PLAYBOT_TRACKED_CHURN_PATHS);
 
-// All Git-ignored output is disposable during retirement. Non-ignored
-// untracked files still block, except the exact addon tree Playbot injects.
-// Tracked modifications continue to use the exact tracked-churn allowlist.
-// Orphans lack Git ignore evidence and always need an inventory and explicit
-// discard authorization when any file remains, including apparent caches.
+// Git-ignored build output that Godot, Python, and task tooling regenerate on
+// demand, plus the host-specific native addon tree Playbot injects into every
+// workspace, is disposable during retirement. A path qualifies only when Git
+// itself reports it ignored and one of its exact path segments names a cache
+// directory, or it lies under Playbot's native addon tree; every other ignored
+// path blocks. Elsewhere in Playbot's addon directory, an untracked or ignored
+// file is disposable only at an exact known injected path or when it is
+// byte-identical to the main clone's copy. Tracked modifications continue to
+// use the exact tracked-churn allowlist. Orphans lack Git ignore evidence and
+// always need an inventory and explicit discard authorization when any file
+// remains, including apparent caches.
 const DISCARDABLE_IGNORED_CACHE_SEGMENTS = new Set([".godot", "__pycache__", ".task_tmp"]);
 const PLAYBOT_ADDON_PREFIX = "prototype-game/addons/playbot/";
+const PLAYBOT_NATIVE_ADDON_PREFIX = "prototype-game/addons/playbot/native/";
+const PLAYBOT_INJECTED_ADDON_PATHS = Object.freeze([
+  "prototype-game/addons/playbot/playbot_common.gd",
+  "prototype-game/addons/playbot/playbot_common.gd.uid",
+  "prototype-game/addons/playbot/playbot_export_plugin.gd",
+  "prototype-game/addons/playbot/playbot_export_plugin.gd.uid",
+  "prototype-game/addons/playbot/playbot_log_capture.gd",
+  "prototype-game/addons/playbot/playbot_log_capture.gd.source",
+  "prototype-game/addons/playbot/playbot_log_capture.gd.uid",
+  "prototype-game/addons/playbot/playbot_runtime_bridge.gd",
+  "prototype-game/addons/playbot/playbot_runtime_bridge.gd.uid",
+  "prototype-game/addons/playbot/playbot_runtime_debugger.gd",
+  "prototype-game/addons/playbot/playbot_runtime_debugger.gd.uid",
+  "prototype-game/addons/playbot/plugin.cfg",
+  "prototype-game/addons/playbot/plugin.gd",
+  "prototype-game/addons/playbot/plugin.gd.uid",
+]);
+const PLAYBOT_INJECTED_ADDON_SET = new Set(PLAYBOT_INJECTED_ADDON_PATHS);
 
 // The blocker codes an explicit, recorded captain authorization may discard for
 // one confirmed workspace. Every other blocker - active or uncertain chats, the
@@ -1828,7 +1852,7 @@ function playbotAddonPath(file) {
 }
 
 function discardableIgnoredKind(file) {
-  if (playbotAddonPath(file)) return "playbot-addon";
+  if (String(file).startsWith(PLAYBOT_NATIVE_ADDON_PREFIX)) return "playbot-native-addon";
   return String(file).split("/").some((segment) => DISCARDABLE_IGNORED_CACHE_SEGMENTS.has(segment)) ? "build-cache" : null;
 }
 
@@ -1848,8 +1872,7 @@ function fileSha256(file) {
 
 // Playbot injects the same addon files into every workspace of a project,
 // including the configured main clone, so a workspace copy that is byte-identical
-// to the main clone's copy is proven to be Playbot's own injection. The identity
-// is evidence only: the injected tree is disposable either way.
+// to the main clone's copy is proven to be Playbot's own injection.
 function nativeAddonIdentity(worktreePath, mainCloneTop, file) {
   if (file.endsWith("/")) return "directory-entry";
   if (!mainCloneTop) return "main-clone-unavailable";
@@ -1866,14 +1889,41 @@ function nativeAddonIdentity(worktreePath, mainCloneTop, file) {
   }
 }
 
+function injectedAddonEntry(worktreePath, mainCloneTop, file) {
+  if (!playbotAddonPath(file)) return null;
+  const identity = nativeAddonIdentity(worktreePath, mainCloneTop, file);
+  return PLAYBOT_INJECTED_ADDON_SET.has(file) || identity === "matches-main-clone"
+    ? { path: file, kind: "playbot-addon", identity }
+    : null;
+}
+
+function classifyUntrackedPaths(worktreePath, mainCloneTop, untrackedPaths) {
+  const discardable = [];
+  const blocking = [];
+  for (const file of untrackedPaths) {
+    const injected = injectedAddonEntry(worktreePath, mainCloneTop, file);
+    if (injected) discardable.push(injected);
+    else blocking.push(file);
+  }
+  return { discardable, blocking };
+}
+
 function classifyIgnoredPaths(worktreePath, mainCloneTop, ignoredPaths) {
   const discardable = [];
   const blocking = [];
   for (const file of ignoredPaths) {
-    const kind = discardableIgnoredKind(file) ?? "git-ignored";
-    discardable.push(kind === "playbot-addon"
-      ? { path: file, kind, identity: nativeAddonIdentity(worktreePath, mainCloneTop, file) }
-      : { path: file, kind });
+    const kind = discardableIgnoredKind(file);
+    if (kind === "playbot-native-addon") {
+      discardable.push({ path: file, kind, identity: nativeAddonIdentity(worktreePath, mainCloneTop, file) });
+      continue;
+    }
+    if (kind) {
+      discardable.push({ path: file, kind });
+      continue;
+    }
+    const injected = injectedAddonEntry(worktreePath, mainCloneTop, file);
+    if (injected) discardable.push(injected);
+    else blocking.push(file);
   }
   return { discardable, blocking };
 }
@@ -2311,10 +2361,9 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
     } catch {
       mainCloneTop = null;
     }
-    result.blockingUntrackedPaths = status.untrackedPaths.filter((file) => !playbotAddonPath(file));
-    result.discardableUntrackedPaths = status.untrackedPaths.filter(playbotAddonPath).map((file) => ({
-      path: file, kind: "playbot-addon", identity: nativeAddonIdentity(rootPath, mainCloneTop, file),
-    }));
+    const untracked = classifyUntrackedPaths(rootPath, mainCloneTop, status.untrackedPaths);
+    result.blockingUntrackedPaths = untracked.blocking;
+    result.discardableUntrackedPaths = untracked.discardable;
     const ignored = classifyIgnoredPaths(rootPath, mainCloneTop, status.ignoredPaths);
     result.discardableIgnoredPaths = ignored.discardable;
     result.blockingIgnoredPaths = ignored.blocking;
@@ -2386,14 +2435,14 @@ function inspectWorkspaceRoot(project, workspaceRoot, landingBranch, readFreshne
   if (result.blockingUntrackedPaths.length > 0) {
     result.blockers.push({
       code: "untracked-files",
-      message: `${result.blockingUntrackedPaths.length} untracked path(s) outside Playbot's injected addon tree would be deleted`,
+      message: `${result.blockingUntrackedPaths.length} untracked path(s) outside Playbot's exact or byte-identified injected addon files would be deleted`,
       paths: result.blockingUntrackedPaths,
     });
   }
   if (result.blockingIgnoredPaths.length > 0) {
     result.blockers.push({
       code: "ignored-files",
-      message: `${result.blockingIgnoredPaths.length} ignored path(s) outside regenerable build output and Playbot's native addon tree would be deleted`,
+      message: `${result.blockingIgnoredPaths.length} ignored path(s) outside regenerable build output, Playbot's native addon tree, and its exact or byte-identified injected addon files would be deleted`,
       paths: result.blockingIgnoredPaths,
     });
   }
@@ -5949,8 +5998,8 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       landingBranch,
       landingEvidence: { kind: landingOptions.localLanding ? "local-branch" : "remote", registry: landingOptions.registry },
       trackedChurnAllowlist: PLAYBOT_TRACKED_CHURN_PATHS,
-      untrackedBoundary: "Non-ignored untracked files outside prototype-game/addons/playbot/ block retirement; injected addon files are reported as discardable.",
-      ignoredBoundary: "All Git-ignored paths are reported as discardable output and never block retirement; their complete private path inventory, SHA-256, counts, and bounded samples remain evidence.",
+      untrackedBoundary: "Non-ignored untracked files block retirement unless they sit at an exact known Playbot-injected path under prototype-game/addons/playbot/ or are byte-identical to the main clone's copy there; those are reported as discardable.",
+      ignoredBoundary: "Ignored build output under .godot, __pycache__, or .task_tmp, Playbot's prototype-game/addons/playbot/native/ tree, and exact or byte-identified injected addon files are discardable; every other ignored path blocks unless an explicit ignored-files authorization covers it.",
       discardableCodes: DISCARDABLE_LOCAL_CHANGE_CODES,
       workspaces,
     };
