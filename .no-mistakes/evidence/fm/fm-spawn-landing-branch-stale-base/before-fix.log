@@ -1,0 +1,16 @@
+ok - a remote-seeded secondmate home allocates and launches from its Treehouse pool
+ok - a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort
+ok - linked spawning home: primary preserves the primary before any refresh
+ok - linked spawning home: primary-alias preserves the primary before any refresh
+ok - linked spawning home: spawning preserves the primary before any refresh
+ok - linked spawning home: scout preserves the primary before any refresh
+ok - a stale pooled worktree refreshes to current origin/main before a crew branch is created
+ok - a stale pooled worktree resolves and refreshes a non-main default branch
+ok - direct-PR ships and scouts both refresh stale pooled worktrees before launch
+ok - a dirty pooled worktree is refused without discarding its local work
+ok - an unresolved remote default branch refuses the pooled worktree
+ok - an unreachable origin refuses a potentially stale pooled worktree
+ok - a ship spawn with --landing-branch starts from the landing tip while the default path is unchanged
+ok - a landing branch missing from origin bases the spawn on the project clone's local branch tip
+ok - behind local and origin landing tips select the descendant or refuse divergence
+not ok - behind-shadow spawn did not select descendant landing tip dc0b81dc7d523b8b63b6c7a73379844bc2a219ab
