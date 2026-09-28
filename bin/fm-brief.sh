@@ -628,6 +628,7 @@ if [ "$LANE" -eq 1 ]; then
   # landing branch carrying commits the remote tip lacks. local-only publishes
   # nothing and makes no remote comparison.
   LANE_BASE_CHECK=$(shell_quote "$FM_ROOT/bin/fm-lane-base-check.sh")" $LANDING_BRANCH"
+  LANE_ADDON_GUARD="node --no-warnings $(shell_quote "$FM_ROOT/bin/fm-playbot-lanes.mjs") addon-guard"
   case "$MODE" in
     local-only) ;;
     *) LANE_BASE_CHECK="$LANE_BASE_CHECK --publishes" ;;
@@ -644,7 +645,7 @@ if [ "$LANE" -eq 1 ]; then
    b. **Base.** Playbot creates a lane workspace from the REMOTE tip of the landing branch, so a landing that has not been pushed yet leaves your workspace behind and you would build on stale code. One command decides whether your base is safe to start from; act on its EXIT CODE, never on your own reading of the repository.
       Run \`$LANE_BASE_CHECK\` from the top of your workspace. It writes nothing - no reset, no fetch, no ref update - it only reports.
       - exit 0 (\`current: ...\`): your base is safe; proceed.
-      - exit 10: it printed \`reset-required: <ref>\` and \`churn-paths: <paths>\`. When \`churn-paths\` names any path, DISCLOSE BEFORE YOU RESET: run \`git diff HEAD -- <exactly those paths>\` and leave its complete output in your log, untruncated and unsummarized - \`prototype-game/project.godot\` may be among them, and it is a hand-editable settings file rather than a generated one, so it can carry real human edits - then append \`working: discarding Playbot churn before base reset: {those paths}\` to the status file. With paths named and that diff uncaptured or that line unappended, do not reset. Then run \`git reset --hard <the ref it printed>\` and proceed. When \`churn-paths\` is empty there is nothing to disclose: reset to that ref and proceed.
+      - exit 10: it printed \`reset-required: <ref>\` and \`churn-paths: <paths>\`. When \`churn-paths\` names any path, DISCLOSE BEFORE YOU RESET: run \`git diff HEAD -- <exactly those paths>\` and leave its complete output in your log, untruncated and unsummarized - \`prototype-game/project.godot\` may be among them, and it is a hand-editable settings file rather than a generated one, so it can carry real human edits - then append \`working: preserving injected addon before guarded base reset: {those paths}\` to the status file. With paths named and that diff uncaptured or that line unappended, do not reset. Then run \`$LANE_ADDON_GUARD reset <the ref it printed>\` and proceed only on success. When \`churn-paths\` is empty there is nothing to disclose, but the same guarded reset remains mandatory. If the guard refuses, append its exact evidence as a blocker and stop.
       - exit 20: it printed one \`blocked: ...\` line naming the evidence. STOP - append that exact line to the status file and stop.
       - any other exit code is itself a blocker: append \`blocked: lane base check failed: {its output}\` to the status file and stop.
 EOF
@@ -733,6 +734,8 @@ If that landing branch has advanced, rebase onto it so the eventual merge stays 
 
 ## Lane overrides
 This task runs in a Playbot lane workspace: your branch already exists and is $LANE_BRANCH_DESC, so every delivery instruction above applies to that branch and to no other.
+For engine readiness and bounded engine-call handling, follow \`docs/playbot-lanes.md\`'s Engine readiness contract in the Firstmate code root.
+Use its Addon preservation contract before any reset, stash, engine validation, or product commit; never use a raw reset or stash that bypasses that guard.
 $LANE_DOD_OVERRIDE"
 elif [ "$MODE" = local-only ]; then
   RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."

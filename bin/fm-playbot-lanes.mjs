@@ -6,7 +6,7 @@
 // caller without one is an external terminal that dispatches without a lane
 // and supervises by polling.
 //
-// This executable has nine entry points:
+// This executable has ten entry points:
 //   serve             Run the stdio MCP server.
 //   call              Invoke one MCP tool from a terminal and print the same
 //                     result object the stdio transport returns.
@@ -21,6 +21,8 @@
 //                     Print the tracked-churn allowlist this file owns, one
 //                     path per line, so other tools read it here instead of
 //                     keeping a copy. Starts no server and touches no state.
+//   addon-guard       Preserve injected addons around a local reset/stash, or
+//                     verify complete bytes and product-commit exclusion.
 //
 // The server talks to Playbot through its local Electron DevTools socket and
 // invokes Playbot's own IPC handlers: threads:launch for chat and workspace
@@ -40,6 +42,11 @@
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
 // directly.
+// get_engine_readiness uses app:metadata and the verified 0.117.0
+// engine:listWorkspaceProjects reader to inspect existing sessions without
+// activation. Dispatch requires confirmed engine readiness unless its caller
+// explicitly declares file-only work with engineDependent=false.
+// bin/fm-playbot-engine-readiness.mjs owns packaged-bundle discovery mechanics.
 //
 // The question-card and pending-queue tools use four more of Playbot's own
 // channels - app:metadata, threads:getSnapshot, threads:respondToUserInput, and
@@ -64,9 +71,11 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
+import { engineBundle, engineReadinessReport } from "./fm-playbot-engine-readiness.mjs";
+import { guardAddon } from "./fm-playbot-addon-guard.mjs";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.8.0";
+const SERVER_VERSION = "0.9.0";
 const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
@@ -3375,20 +3384,30 @@ class CdpClient {
     };
   }
 
-  async send(method, params = {}) {
+  async send(method, params = {}, timeoutMs = 0) {
     const id = ++this.nextId;
     const result = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
     this.socket.send(JSON.stringify({ id, method, params }));
-    return result;
+    if (!timeoutMs) return result;
+    let timer;
+    try {
+      return await Promise.race([
+        result,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Playbot ${method} read timed out`)), timeoutMs); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      this.pending.delete(id);
+    }
   }
 
-  async evaluate(expression) {
+  async evaluate(expression, timeoutMs = 0) {
     const response = await this.send("Runtime.evaluate", {
       expression,
       returnByValue: true,
       awaitPromise: true,
       userGesture: false,
-    });
+    }, timeoutMs);
     if (response.error) throw new Error(response.error.message || "CDP evaluation failed");
     if (response.result?.exceptionDetails) {
       throw new Error(response.result.exceptionDetails.exception?.description || response.result.exceptionDetails.text || "Playbot IPC evaluation failed");
@@ -3401,7 +3420,7 @@ class CdpClient {
   }
 }
 
-async function connectCdp(url) {
+async function connectCdp(url, readTimeoutMs = 0) {
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Timed out connecting to Playbot DevTools")), 2_500);
@@ -3415,20 +3434,20 @@ async function connectCdp(url) {
     };
   });
   const client = new CdpClient(socket);
-  await client.send("Runtime.enable");
+  try { await client.send("Runtime.enable", {}, readTimeoutMs); } catch (error) { client.close(); throw error; }
   return client;
 }
 
-async function withPlaybotPage(callback) {
+async function withPlaybotPage(callback, readTimeoutMs = 0) {
   const portFile = path.join(desktopDir(), "DevToolsActivePort");
   if (!fs.existsSync(portFile)) throw new Error(`Playbot DevTools port not found: ${portFile}`);
   const port = fs.readFileSync(portFile, "utf8").split(/\r?\n/, 1)[0].trim();
   const response = await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(2_500) });
   const targets = (await response.json()).filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
   for (const target of targets) {
-    const client = await connectCdp(target.webSocketDebuggerUrl);
+    const client = await connectCdp(target.webSocketDebuggerUrl, readTimeoutMs);
     try {
-      const usable = await client.evaluate("Boolean(window.electronAPI && typeof window.electronAPI.invoke === 'function')");
+      const usable = await client.evaluate("Boolean(window.electronAPI && typeof window.electronAPI.invoke === 'function')", readTimeoutMs);
       if (usable) return await callback(client);
     } finally {
       client.close();
@@ -3439,6 +3458,60 @@ async function withPlaybotPage(callback) {
 
 async function playbotInvoke(channel, payload) {
   return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`));
+}
+
+// These 0.117.0 readers enumerate detected projects and peek existing sessions;
+// they do not activate a project, resume a chat, or start an engine instance.
+// Unknown versions fail closed before using an unverified engine IPC contract.
+async function engineReadInvoke(channel, payload) {
+  return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`, 2_500), 2_500);
+}
+
+async function engineReadiness(project, workspace) {
+  const app = { version: null, verifiedVersions: "0.117.0" };
+  const errors = [];
+  try {
+    const metadata = await engineReadInvoke("app:metadata", undefined);
+    if (typeof metadata?.version === "string") app.version = metadata.version.trim();
+  } catch (error) { errors.push({ source: "app:metadata", message: error.message }); }
+  const bundle = engineBundle(app.version);
+  const detected = [];
+  if (app.version !== "0.117.0") errors.push({ source: "engine:listWorkspaceProjects", message: `Engine snapshot IPC is unverified for Playbot ${app.version ?? "unconfirmed"}; no engine read was attempted.` });
+  else {
+    if (!workspace.roots.length || workspace.roots.length !== project.roots.length) errors.push({ source: "workspace-roots", message: "Workspace root coverage is incomplete." });
+    const seenRoots = new Set();
+    for (const root of workspace.roots) {
+      if (!project.roots.some((candidate) => candidate.id === root.projectRootId) || seenRoots.has(root.projectRootId)) {
+        errors.push({ source: "workspace-roots", message: "Workspace root identity is unknown or duplicated." });
+        continue;
+      }
+      seenRoots.add(root.projectRootId);
+      try {
+        const projects = await engineReadInvoke("engine:listWorkspaceProjects", { workspacePath: root.path });
+        if (!Array.isArray(projects) || projects.some((item) => !item || typeof item.engineKind !== "string" || typeof item.projectPath !== "string" || !path.isAbsolute(item.projectPath))) throw new Error("Engine discovery returned an unreadable project list");
+        for (const item of projects.filter((item) => item.engineKind === "godot")) {
+          const relative = path.relative(canonicalPath(root.path), canonicalPath(item.projectPath));
+          if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Detected engine project lies outside its workspace root");
+          if (!detected.some((candidate) => candidate.projectPath === item.projectPath)) detected.push(item);
+        }
+      } catch (error) { errors.push({ source: root.path, message: error.message }); }
+    }
+  }
+  return engineReadinessReport(app, bundle, workspace, detected, errors);
+}
+
+function engineDependentRequest(args) {
+  if (args.engineDependent !== undefined && typeof args.engineDependent !== "boolean") throw new Error("engineDependent must be a boolean; false explicitly declares file-only work");
+  return args.engineDependent !== false;
+}
+
+async function requireEngineReadiness(project, workspace, createdWorker = null) {
+  const report = await engineReadiness(project, workspace);
+  if (!report.ready || report.verdict !== "ready") {
+    const created = createdWorker ? ` Chat ${createdWorker.thread_id} remains in workspace ${workspace.id}; inspect this pair before retrying so no second pair is created.` : "";
+    throw new Error(`Engine readiness ${report.verdict} in workspace ${workspace.id}; dispatch stopped before sending.${created} Use get_engine_readiness for the evidence, or route engine validation to an ordinary worker. ${JSON.stringify(report)}`);
+  }
+  return report;
 }
 
 function createThreadId() {
@@ -4465,7 +4538,11 @@ function supervisionSelfScript() {
 }
 
 function serverBuildIdentity() {
-  return `sha256:${crypto.createHash("sha256").update(fs.readFileSync(supervisionSelfScript())).digest("hex")}`;
+  return `sha256:${crypto.createHash("sha256")
+    .update(fs.readFileSync(supervisionSelfScript()))
+    .update(fs.readFileSync(new URL("./fm-playbot-engine-readiness.mjs", import.meta.url)))
+    .update(fs.readFileSync(new URL("./fm-playbot-addon-guard.mjs", import.meta.url)))
+    .digest("hex")}`;
 }
 
 function supervisionStateDir() {
@@ -5589,6 +5666,12 @@ function toolDefinitions() {
   });
   return [
     {
+      name: "get_engine_readiness",
+      description: "Read-only Godot readiness for one exact workspace: app/bundled/workspace addon versions and complete byte comparison, stored/canonical project identity, existing session startup/admission evidence, and selected executable when an existing launch log proves it. Starts no engine session or chat; unknown evidence is unconfirmed.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Exact workspace id, path, or name") }, ["project", "workspace"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
       name: "list_projects",
       description: "List every Playbot project and workspace globally, including stable ids and root paths. Does not resume chats.",
       inputSchema: object(),
@@ -5740,7 +5823,7 @@ function toolDefinitions() {
     {
       name: "dispatch",
       description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. Dispatch returns workspace.roots with branch names read back from Playbot registration, so callers can regenerate a named lane brief when newWorkspace.branch was ignored. Marked ordinary crewmate briefs are refused before creation or send; unmarked custom/legacy messages remain supported. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile dispatch refuses before sending, naming the created chat so it can be archived or sent deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
+      inputSchema: object({ engineDependent: boolean("Require confirmed Godot engine readiness before sending; defaults true, false explicitly declares file-only work", true), project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -5818,6 +5901,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   const project = resolveProject(args.project, projects);
+  if (name === "get_engine_readiness") {
+    return engineReadiness(project, resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace)));
+  }
   if (name === "get_workspace_freshness") {
     const landingBranch = explicitLandingBranch(name, args.landingBranch);
     const workspace = resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace));
@@ -5860,6 +5946,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   if (name === "dispatch") {
+    const engineDependent = engineDependentRequest(args);
     // Match the scaffold's fixed execution contract before creating or sending.
     // Unmarked legacy/custom task messages retain their existing behavior.
     const workspaceContracts = [...String(args.message ?? "").matchAll(/^Execution contract: workspace=(.*)$/gm)]
@@ -5888,6 +5975,11 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const requestedTaskId = typeof args.taskId === "string" ? args.taskId : null;
     if (requestedTaskId !== null && !supervisionTaskIdValid(requestedTaskId)) {
       throw new Error(`taskId '${requestedTaskId}' cannot key a watcher poll; use a firstmate task id of up to 64 characters from A-Z, a-z, 0-9, dot, dash, and underscore, not starting with a dot`);
+    }
+    // Inspect the destination before resolving a title or creating a chat.
+    if (engineDependent && !wantsNewWorkspace) {
+      const existing = args.thread ? resolveThreadInProject(project, args.workspace, args.thread) : null;
+      await requireEngineReadiness(project, resolveWorkspace(project, existing?.workspace_id ?? args.workspace));
     }
     let worker = null;
     const workerProfile = requestedWorkerProfile(args.model, args.reasoningEffort);
@@ -5948,6 +6040,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       }
       warnings.push(`Workspace ${worker.workspace_id} could not be read back (${reason}), so workspace is null and no branch was observed; read it with get_workspace_freshness before relying on a branch name.`);
     }
+    const engineReport = engineDependent
+      ? await requireEngineReadiness(resolveProject(project.id), resolveWorkspace(resolveProject(project.id), worker.workspace_id), createdChat ? worker : null)
+      : null;
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     try {
@@ -5957,6 +6052,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
           lane,
           ...sent,
           workspace,
+          ...(engineReport ? { engineReadiness: engineReport } : {}),
           ...(freshness ? { freshness } : {}),
           ...(workspaceSettle ? { workspaceSettle } : {}),
           supervision: {
@@ -5977,7 +6073,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         baseline: acceptedBaseline ?? { ...armingBaseline, acceptanceMs: null },
         delivery: acceptedBaseline ? sent.delivery : null,
       });
-      const result = { lane: null, ...sent, workspace, ...(freshness ? { freshness } : {}), ...(workspaceSettle ? { workspaceSettle } : {}), supervision };
+      const result = { lane: null, ...sent, workspace, ...(engineReport ? { engineReadiness: engineReport } : {}), ...(freshness ? { freshness } : {}), ...(workspaceSettle ? { workspaceSettle } : {}), supervision };
       if (!supervision.armed) warnings.push(supervisionArmWarning(supervision));
       if (warnings.length) result.warnings = warnings;
       return result;
@@ -6247,6 +6343,7 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs serve",
     "  fm-playbot-lanes.mjs setup|doctor|install",
     "  fm-playbot-lanes.mjs tracked-churn-allowlist",
+    "  fm-playbot-lanes.mjs addon-guard verify|check-index|reset <ref>|stash [--all|--include-untracked] [--message text]",
     "",
     `MCP tools: ${toolDefinitions().map((tool) => tool.name).join(", ")}`,
   ].join("\n");
@@ -6271,7 +6368,7 @@ async function callFromCli(argv) {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     throw new Error("arguments-json must decode to a JSON object");
   }
-  ensurePrivateDirs();
+  if (name !== "get_engine_readiness") ensurePrivateDirs();
   console.log(JSON.stringify(mcpResult(await handleTool(name, args, "external-terminal")), null, 2));
 }
 
@@ -6391,6 +6488,21 @@ async function main() {
   }
   if (command === "doctor") return console.log(JSON.stringify(await doctor(), null, 2));
   if (command === "tracked-churn-allowlist") return console.log(PLAYBOT_TRACKED_CHURN_PATHS.join("\n"));
+  if (command === "addon-guard") {
+    const root = canonicalPath(git(process.cwd(), ["rev-parse", "--show-toplevel"]).trim());
+    const matches = topology().flatMap((project) => project.workspaces
+      .filter((workspace) => workspace.archiveState === "active" && workspace.roots.some((entry) => {
+        const relative = path.relative(root, canonicalPath(entry.path));
+        return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+      })).map((workspace) => ({ project, workspace })));
+    if (matches.length !== 1) throw new Error("addon-guard requires one exact registered Playbot workspace in the current Git worktree");
+    const { project, workspace } = matches[0];
+    const verify = () => engineReadiness(project, workspace);
+    const report = await verify();
+    const result = await guardAddon({ root, report, operation: process.argv[3], args: process.argv.slice(4), git, indexFlags: gitIndexFlags(root), operations: gitOperationState(root), verify });
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
   if (command === "supervision-poll") return await supervisionPoll(process.argv.slice(3));
   if (command === "hook-pretool") {
     try {
