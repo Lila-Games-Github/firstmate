@@ -75,11 +75,12 @@
 #          never a report that work was lost.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
-#          no-mistakes is also MISSING when its installed version is older than
+#          no-mistakes is also MISSING_MANUAL when its installed version is older than
 #          1.46.0 (structured pipeline attestation floor; see CONTRIBUTING.md)
 #          or `axi run --help` cannot prove --target-branch support.
-#          Missing/incompatible builds must be installed from the Lila target-branch
-#          fork, never replaced by the upstream installer. The help probe disables
+#          Missing/incompatible builds report MISSING_MANUAL with the Lila
+#          target-branch fork, never an upstream installer, and `install
+#          no-mistakes` refuses instead of installing anything. The help probe disables
 #          the binary's background update check to keep local detection local.
 #          The AXI-family floor policy is owned beside GH_AXI_MIN and
 #          LAVISH_AXI_MIN below; the per-tool owners point there. An installed
@@ -908,7 +909,6 @@ install_cmd() {
     tmux|node|git|gh|curl|jq|orca|zellij) echo "brew install $1  # or the platform's package manager" ;;
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
-    no-mistakes) echo "build and install the target-branch fork from https://github.com/Lila-Games-Github/no-mistakes; preserve the fork build" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi|quota-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
@@ -919,6 +919,7 @@ manual_install_url() {
   case "$1" in
     herdr) echo "https://herdr.dev" ;;
     cursor-agent) echo "https://cursor.com/cli" ;;
+    no-mistakes) echo "https://github.com/Lila-Games-Github/no-mistakes" ;;
     *) return 1 ;;
   esac
 }
@@ -1516,7 +1517,7 @@ detect_local_tools() {
   fi
   if command -v no-mistakes >/dev/null 2>&1 \
     && { ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN" || ! no_mistakes_supports_target_branch; }; then
-    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
+    missing_tool_diagnostic no-mistakes
   fi
   if command -v gh-axi >/dev/null 2>&1 && ! tool_version_at_least gh-axi "$GH_AXI_MIN"; then
     echo "MISSING: gh-axi (install: $(install_cmd gh-axi))"

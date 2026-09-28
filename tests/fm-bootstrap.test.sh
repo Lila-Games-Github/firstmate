@@ -611,7 +611,7 @@ ROWS
 
 test_no_mistakes_min_version() {
   local label version mode case_dir fakebin out missing n
-  missing='MISSING: no-mistakes (install: build and install the target-branch fork from https://github.com/Lila-Games-Github/no-mistakes; preserve the fork build)'
+  missing='MISSING_MANUAL: no-mistakes (instructions: https://github.com/Lila-Games-Github/no-mistakes)'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -913,6 +913,30 @@ test_herdr_install_requires_manual_action() {
   [ "$out" = "error: herdr requires manual installation (instructions: https://herdr.dev)" ] \
     || fail "install herdr should return actionable manual-install guidance, got: $out"
   pass "bootstrap: Herdr manual-install guidance is never executed as a shell command"
+}
+
+test_no_mistakes_install_requires_manual_fork_build() {
+  local case_dir fakebin out status
+  case_dir="$TMP_ROOT/no-mistakes-install"
+  fakebin="$case_dir/bin"
+  mkdir -p "$fakebin"
+  for tool in brew npm curl go; do
+    cat > "$fakebin/$tool" <<SH
+#!/bin/sh
+printf '%s\n' "$tool \$*" >> "$case_dir/calls.log"
+exit 0
+SH
+    chmod +x "$fakebin/$tool"
+  done
+  : > "$case_dir/calls.log"
+  out=$(PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-bootstrap.sh" install no-mistakes 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "install no-mistakes should refuse instead of evaluating an install hint"
+  [ "$out" = "error: no-mistakes requires manual installation (instructions: https://github.com/Lila-Games-Github/no-mistakes)" ] \
+    || fail "install no-mistakes should return fork manual-install guidance, got: $out"
+  assert_not_contains "$out" 'command not found' "install no-mistakes must not evaluate prose"
+  [ ! -s "$case_dir/calls.log" ] || fail "install no-mistakes ran installers: $(cat "$case_dir/calls.log")"
+  pass "bootstrap: no-mistakes install refuses and points at the Lila fork"
 }
 
 test_cmux_bundled_cli_satisfies_dependency() {
@@ -1555,7 +1579,8 @@ test_no_mistakes_target_readiness() {
       if [ "$support:$status" = 1:0 ]; then
         [ -z "$out" ] || fail "target-aware fork should be ready: $out"
       else
-        assert_contains "$out" 'MISSING: no-mistakes' "unsupported or failed help probe was accepted"
+        [ "$out" = 'MISSING_MANUAL: no-mistakes (instructions: https://github.com/Lila-Games-Github/no-mistakes)' ] \
+          || fail "unsupported or failed help probe was accepted: $out"
         assert_contains "$out" 'Lila-Games-Github/no-mistakes' "missing diagnostic must preserve fork"
         assert_not_contains "$out" 'kunchenguid/no-mistakes' "bootstrap must not suggest upstream install"
       fi
@@ -1581,6 +1606,7 @@ test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux
 test_session_provider_backends_gate_own_cli_not_tmux
 test_herdr_install_requires_manual_action
+test_no_mistakes_install_requires_manual_fork_build
 test_cmux_bundled_cli_satisfies_dependency
 test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
