@@ -11,7 +11,7 @@
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
-# escalation rule and --yes ban. The instructions also carry `# Task` with
+# escalation rule, --yes ban, and recorded landing target. The instructions also carry `# Task` with
 # `## Captain's intent` preserved from the scout brief and promotion's ship-time
 # instructions under `## Firstmate spec`; the scout-time spec remains context but
 # is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
@@ -35,6 +35,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -227,7 +229,7 @@ EOF
     promote_local_only_landing "$(fm_dod_block "$MODE" "$ID")"
     printf '\n'
   else
-    fm_dod_block "$MODE" "$ID"
+    fm_dod_block "$MODE" "$ID" "$(fm_meta_get "$META" landing_branch)"
   fi
 }
 mkdir -p "$DATA/$ID"

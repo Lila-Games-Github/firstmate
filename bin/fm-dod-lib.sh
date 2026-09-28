@@ -5,7 +5,7 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [landing-branch] prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
@@ -38,6 +38,33 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+
+# fm_nm_target_block <landing-branch> owns the no-mistakes target handoff.
+# An empty branch emits nothing, preserving the pipeline's default behavior.
+# Brief, launch (including relaunch), and promotion callers supply the recorded
+# landing_branch, or the lane's explicit landing branch. The launch overlay
+# supersedes old/custom brief guidance and precedes the authorized intent body.
+fm_nm_target_block() {
+  local branch=${1:-} target_arg
+  [ -n "$branch" ] || return 0
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || {
+    echo "error: no-mistakes landing branch is not a valid branch name: $branch" >&2
+    return 1
+  }
+  printf -v target_arg '%q' "$branch"
+  cat <<EOF
+
+# Current no-mistakes target contract
+This section supersedes earlier brief guidance about the no-mistakes target.
+The recorded landing branch is \`$target_arg\`.
+When starting validation, run \`no-mistakes axi run --target-branch $target_arg\` with the authorized intent supplied separately through \`--intent\`.
+The target is a separate flag; never put it inside \`--intent\`.
+Reattach an existing run using its immutable target rather than starting a replacement run with a default target.
+Before reporting a PR, verify the run's \`target_branch\` through \`no-mistakes axi status\` and the forge PR base both equal \`$target_arg\`.
+Use \`gh-axi\` with an explicit repository scope to read the forge PR base (\`base.ref\`); never infer it from the head branch or the PR title.
+If either target differs or cannot be verified, stop and report \`blocked: no-mistakes target verification failed\` with the evidence; do not report that PR as ready.
+EOF
+}
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -232,8 +259,8 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+fm_dod_block() {  # <mode> <task-id> [landing-branch]
+  local mode=$1 id=$2 landing_branch=${3:-}
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -291,6 +318,7 @@ Two firstmate-specific rules layer on top of that guidance:
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
+      fm_nm_target_block "$landing_branch" || return 1
       ;;
     *)
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2

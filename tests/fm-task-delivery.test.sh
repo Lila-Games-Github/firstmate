@@ -880,6 +880,28 @@ EOF
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
 }
 
+test_promotion_target_contract() {
+  local home id target out
+  home="$TMP_ROOT/promotion-target/home"
+  mkdir -p "$home/state"
+  for target in proto/lila ''; do
+    id="promotion-target-${target:+explicit}"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+    [ -z "$target" ] || printf 'landing_branch=%s\n' "$target" >> "$home/state/$id.meta"
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null || fail "scout scaffold failed"
+    fill_brief_subsections "$home/data/$id/brief.md" "Integrate branch routing." "Preserve routing."
+    out=$(FM_HOME="$home" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) || fail "promotion failed: $out"
+    if [ -n "$target" ]; then
+      assert_grep 'no-mistakes axi run --target-branch proto/lila' "$home/data/$id/ship-instructions.md" "promotion lost target"
+      assert_grep 'no-mistakes axi run --target-branch proto/lila' "$home/data/$id/brief.md" "durable promotion lost target"
+    else
+      assert_no_grep '--target-branch' "$home/data/$id/ship-instructions.md" "default promotion acquired target"
+    fi
+  done
+  pass "promotion preserves the recorded no-mistakes target"
+}
+
+test_promotion_target_contract
 test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
 test_ship_spawn_requires_a_valid_delivery_contract

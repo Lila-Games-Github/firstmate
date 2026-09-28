@@ -1449,6 +1449,34 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+test_launch_target_overlay() {
+  local rec id out target
+  for target in proto/lila ''; do
+    id="target-overlay-${target:+explicit}"
+    rec=$(make_spawn_case "$id" codex "$id")
+    read_case_record "$rec"
+    printf '\n# Old target guidance\nThe pipeline cannot set a target branch.\n' >> "$HOME_DIR/data/$id/brief.md"
+    if [ -n "$target" ]; then
+      git -C "$PROJ_DIR" branch "$target" HEAD || fail "could not create landing branch"
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" codex --landing-branch "$target") || fail "target overlay launch failed: $out"
+    else
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" codex) || fail "default overlay launch failed: $out"
+    fi
+    if [ -n "$target" ]; then
+      assert_grep 'no-mistakes axi run --target-branch proto/lila' "$HOME_DIR/data/$id/launch-brief.md" "custom brief lost launch target"
+      assert_grep 'supersedes' "$HOME_DIR/data/$id/launch-brief.md" "overlay must override old target guidance"
+      assert_grep 'forge PR base' "$HOME_DIR/data/$id/launch-brief.md" "overlay lost forge verification"
+      assert_grep 'target_branch' "$HOME_DIR/data/$id/launch-brief.md" "overlay lost run verification"
+      sed -n '/^## Captain intent authorized for --intent$/,$p' "$HOME_DIR/data/$id/launch-brief.md" > "$CASE_DIR/intent"
+      assert_no_grep '--target-branch' "$CASE_DIR/intent" "target instructions leaked into authorized intent"
+    else
+      assert_no_grep '--target-branch' "$HOME_DIR/data/$id/launch-brief.md" "default launch acquired a target"
+    fi
+  done
+  pass "launch overlay supplies recorded no-mistakes targets to custom briefs"
+}
+
+test_launch_target_overlay
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers

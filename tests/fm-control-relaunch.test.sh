@@ -460,6 +460,8 @@ test_relaunch_reuses_recorded_landing_branch_without_rebasing() {
   assert_grep 'uncommitted lane work' "$dir/wt/wip.txt" "a relaunch must keep uncommitted work in the worktree"
   [ "$(meta_field "$dir" rl41 worktree)" = "$dir/wt" ] \
     || fail "the worktree must be reused, not reallocated"
+  assert_grep 'no-mistakes axi run --target-branch proto/lane' "$dir/home/data/rl41/launch-brief.md" \
+    "relaunch lost the recorded pipeline target"
   pass "fm-control relaunch: the recorded landing branch is reused as the task's base axis without re-basing the worktree"
 }
 

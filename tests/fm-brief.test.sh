@@ -1184,7 +1184,7 @@ test_lane_brief_declares_its_delivery_contract_prominently() {
 # An explicit workspace branch must be stated in all four places that used to name
 # fm/<task-id>: the setup step, rule 1, the definition of done, and the ready line.
 test_lane_branch_name_is_stated_in_every_branch_instruction() {
-  local home brief demand
+  local home brief
   home="$TMP_ROOT/lane-named-home"
   mkdir -p "$home/data"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named some-proj --mode local-only --lane \
@@ -1214,24 +1214,15 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
     "$home/data/lane-named-pr/brief.md" \
     "direct-PR lane brief does not name the landing branch as the PR base"
 
-  # A no-mistakes lane cannot establish OR read that base - `no-mistakes axi run`
-  # has no base flag and no-mistakes exposes no way to read its configured target -
-  # so its definition of done states the fact and asks nothing of the worker. Every
-  # verification variant was unsatisfiable in some placement, so none may return:
-  # an instruction the worker cannot perform reads as a guarantee.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" lane-named-nm some-proj --mode no-mistakes --lane \
     --lane-branch task/lane-named-nm-2026-09-04 --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
     || fail "no-mistakes lane brief should scaffold"
   brief="$home/data/lane-named-nm/brief.md"
-  assert_grep "base is whatever no-mistakes is configured to target" "$brief" \
-    "no-mistakes lane brief does not state who chooses its PR base"
-  assert_grep "this brief can neither set nor read it" "$brief" \
-    "no-mistakes lane brief does not admit it cannot set or read that base"
-  for demand in "confirm its configured target" "confirm the base" "gh-axi api" \
-    "blocked: no-mistakes opened" "blocked: no-mistakes targets" "--jq .base.ref"; do
-    assert_no_grep "$demand" "$brief" \
-      "no-mistakes lane brief still asks the worker to verify its PR base ('$demand')"
-  done
+  assert_grep 'no-mistakes axi run --target-branch proto/godot/frog-pile' "$brief" \
+    "no-mistakes lane must pass its landing branch as a flag"
+  assert_grep 'target_branch' "$brief" "lane must verify the run target"
+  assert_grep 'forge PR base' "$brief" "lane must verify the published PR base"
+  assert_no_grep 'this brief can neither set nor read it' "$brief" "stale target guidance survived"
   pass "fm-brief.sh: an explicit lane branch is stated in every branch instruction"
 }
 
@@ -1392,6 +1383,26 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+test_recorded_no_mistakes_target() {
+  local home id brief
+  home="$TMP_ROOT/recorded-nm-target"
+  mkdir -p "$home/state"
+  for id in target default; do
+    [ "$id" != target ] || printf 'landing_branch=proto/lila\n' > "$home/state/$id.meta"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" fixture-project --mode no-mistakes >/dev/null \
+      || fail "ordinary $id brief should scaffold"
+    brief="$home/data/$id/brief.md"
+    if [ "$id" = target ]; then
+      assert_grep 'no-mistakes axi run --target-branch proto/lila' "$brief" "ordinary brief lost recorded target"
+      assert_grep 'separate flag' "$brief" "target must stay outside intent"
+    else
+      assert_no_grep '--target-branch' "$brief" "unrecorded target changed default behavior"
+    fi
+  done
+  pass "ordinary no-mistakes briefs carry only recorded targets"
+}
+
+test_recorded_no_mistakes_target
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution

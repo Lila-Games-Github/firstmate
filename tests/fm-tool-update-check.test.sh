@@ -1005,6 +1005,33 @@ test_armed_check_wakes_the_watcher_with_the_skew_report() {
   pass "the armed check reaches the watcher as an ordinary check wake"
 }
 
+test_fork_build_ignores_upstream_updates() {
+  local home dir report
+  home=$(make_home fork-update)
+  dir="$TMP_ROOT/fork-update/bin"
+  mkdir -p "$dir"
+  cat > "$dir/no-mistakes-fixture" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'no-mistakes version v1.58.1-lila-target-branch-c02ebab\n'
+else
+  printf 'A new version of no-mistakes is available: v1.58.1-lila-target-branch-c02ebab -> v1.79.0\n' >&2
+fi
+SH
+  chmod +x "$dir/no-mistakes-fixture"
+  make_copy "$TMP_ROOT/fork-update/upstream" no-mistakes-fixture 'no-mistakes version v1.79.0'
+  write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
+  run_check "$home" "$dir:$TMP_ROOT/fork-update/upstream:$PATH" "$home/out"
+  report=$(cat "$home/out")
+  [ -z "$report" ] || fail "upstream release must not supersede fork: $report"
+  make_copy "$TMP_ROOT/fork-update/new-fork" no-mistakes-fixture 'no-mistakes version v1.59.0-lila-target-branch-next'
+  run_check "$home" "$dir:$TMP_ROOT/fork-update/new-fork:$PATH" "$home/out"
+  report=$(cat "$home/out")
+  assert_contains "$report" 'no-mistakes update not in effect' "newer installed fork skew must still be visible"
+  pass "fork update checks preserve fork while retaining fork PATH-skew detection"
+}
+
+test_fork_build_ignores_upstream_updates
 test_path_skew_is_reported_from_every_copy
 test_newest_copy_first_on_path_is_silent
 test_identical_versions_are_silent
