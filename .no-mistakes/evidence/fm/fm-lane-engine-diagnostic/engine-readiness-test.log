@@ -1,0 +1,6 @@
+verified engine readiness fixture verdicts and dispatch refuses unconfirmed readiness
+ok - fm-playbot-engine-readiness: fixture verdicts and dispatch execute through public tools
+
+real	0m7.440s
+user	0m3.537s
+sys	0m1.688s

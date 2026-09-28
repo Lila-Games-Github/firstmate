@@ -1,0 +1,303 @@
+
+===== 1. healthy: addon matches bundle, session connected =====
+$ fm-playbot-lanes.mjs call get_engine_readiness {"project":"p","workspace":"ws"}
+{
+ "verdict": "ready",
+ "app": {
+  "version": "0.117.0",
+  "verifiedVersions": "0.117.0"
+ },
+ "bundle": {
+  "resources": "<fixture>/resources",
+  "appVersion": "0.117.0",
+  "path": "<fixture>/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+  "version": "0.7.20",
+  "confirmed": true
+ },
+ "projects": [
+  {
+   "storedPath": "<fixture>/game",
+   "canonicalPath": "<fixture>/game",
+   "normalizedProjectPath": null,
+   "engineKind": "godot",
+   "addon": {
+    "path": "<fixture>/game/addons/playbot",
+    "version": "0.7.20",
+    "byteIdentical": true,
+    "missingFiles": [],
+    "differingFiles": [],
+    "unreadableFiles": []
+   },
+   "selectedExecutable": {
+    "path": "<fixture>/godot",
+    "canonicalPath": "<fixture>/godot",
+    "source": "existing-headless-launch-log",
+    "kind": "native-binary"
+   },
+   "session": {
+    "id": "session",
+    "type": "headless",
+    "status": "idle-edit",
+    "lifecycleStatus": "connected",
+    "pluginStatus": "up_to_date",
+    "pluginVersion": "0.7.20",
+    "startupActivity": null,
+    "statusMessage": null,
+    "failure": null
+   },
+   "verdict": "ready",
+   "reasons": []
+  }
+ ]
+}
+
+===== 2. addon drift (repo 0.7.14 vs bundle 0.7.20) =====
+$ fm-playbot-lanes.mjs call get_engine_readiness {"project":"p","workspace":"ws"}
+{
+ "verdict": "addon-drift",
+ "app": {
+  "version": "0.117.0",
+  "verifiedVersions": "0.117.0"
+ },
+ "bundle": {
+  "resources": "<fixture>/resources",
+  "appVersion": "0.117.0",
+  "path": "<fixture>/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+  "version": "0.7.20",
+  "confirmed": true
+ },
+ "projects": [
+  {
+   "storedPath": "<fixture>/game",
+   "canonicalPath": "<fixture>/game",
+   "normalizedProjectPath": null,
+   "engineKind": "godot",
+   "addon": {
+    "path": "<fixture>/game/addons/playbot",
+    "version": "0.7.14",
+    "byteIdentical": false,
+    "missingFiles": [],
+    "differingFiles": [
+     "plugin.cfg"
+    ],
+    "unreadableFiles": []
+   },
+   "selectedExecutable": {
+    "path": "<fixture>/godot",
+    "canonicalPath": "<fixture>/godot",
+    "source": "existing-headless-launch-log",
+    "kind": "native-binary"
+   },
+   "session": {
+    "id": "session",
+    "type": "headless",
+    "status": "idle-edit",
+    "lifecycleStatus": "connected",
+    "pluginStatus": "up_to_date",
+    "pluginVersion": "0.7.20",
+    "startupActivity": null,
+    "statusMessage": null,
+    "failure": null
+   },
+   "verdict": "addon-drift",
+   "reasons": [
+    {
+     "verdict": "addon-drift",
+     "code": "addon-drift",
+     "message": "Workspace addon differs from the app bundle."
+    }
+   ]
+  }
+ ]
+}
+
+===== 3. missing addon file =====
+$ fm-playbot-lanes.mjs call get_engine_readiness {"project":"p","workspace":"ws"}
+{
+ "verdict": "missing-addon-files",
+ "app": {
+  "version": "0.117.0",
+  "verifiedVersions": "0.117.0"
+ },
+ "bundle": {
+  "resources": "<fixture>/resources",
+  "appVersion": "0.117.0",
+  "path": "<fixture>/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+  "version": "0.7.20",
+  "confirmed": true
+ },
+ "projects": [
+  {
+   "storedPath": "<fixture>/game",
+   "canonicalPath": "<fixture>/game",
+   "normalizedProjectPath": null,
+   "engineKind": "godot",
+   "addon": {
+    "path": "<fixture>/game/addons/playbot",
+    "version": "0.7.20",
+    "byteIdentical": false,
+    "missingFiles": [
+     "plugin.gd"
+    ],
+    "differingFiles": [],
+    "unreadableFiles": []
+   },
+   "selectedExecutable": {
+    "path": "<fixture>/godot",
+    "canonicalPath": "<fixture>/godot",
+    "source": "existing-headless-launch-log",
+    "kind": "native-binary"
+   },
+   "session": {
+    "id": "session",
+    "type": "headless",
+    "status": "idle-edit",
+    "lifecycleStatus": "connected",
+    "pluginStatus": "up_to_date",
+    "pluginVersion": "0.7.20",
+    "startupActivity": null,
+    "statusMessage": null,
+    "failure": null
+   },
+   "verdict": "missing-addon-files",
+   "reasons": [
+    {
+     "verdict": "missing-addon-files",
+     "code": "missing-addon-files",
+     "message": "Required bundled addon files are missing."
+    }
+   ]
+  }
+ ]
+}
+
+===== 4. startup still pending =====
+$ fm-playbot-lanes.mjs call get_engine_readiness {"project":"p","workspace":"ws"}
+{
+ "verdict": "startup-pending",
+ "app": {
+  "version": "0.117.0",
+  "verifiedVersions": "0.117.0"
+ },
+ "bundle": {
+  "resources": "<fixture>/resources",
+  "appVersion": "0.117.0",
+  "path": "<fixture>/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+  "version": "0.7.20",
+  "confirmed": true
+ },
+ "projects": [
+  {
+   "storedPath": "<fixture>/game",
+   "canonicalPath": "<fixture>/game",
+   "normalizedProjectPath": null,
+   "engineKind": "godot",
+   "addon": {
+    "path": "<fixture>/game/addons/playbot",
+    "version": "0.7.20",
+    "byteIdentical": true,
+    "missingFiles": [],
+    "differingFiles": [],
+    "unreadableFiles": []
+   },
+   "selectedExecutable": {
+    "path": "<fixture>/godot",
+    "canonicalPath": "<fixture>/godot",
+    "source": "existing-headless-launch-log",
+    "kind": "native-binary"
+   },
+   "session": {
+    "id": "session",
+    "type": "headless",
+    "status": "offline",
+    "lifecycleStatus": "starting",
+    "pluginStatus": "up_to_date",
+    "pluginVersion": "0.7.20",
+    "startupActivity": null,
+    "statusMessage": null,
+    "failure": null
+   },
+   "verdict": "startup-pending",
+   "reasons": [
+    {
+     "verdict": "startup-pending",
+     "code": "startup-pending",
+     "message": "Existing headless engine startup is still pending."
+    },
+    {
+     "verdict": "unconfirmed",
+     "code": "session-unconfirmed",
+     "message": "A connected session with the bundled loaded addon is not confirmed."
+    }
+   ]
+  }
+ ]
+}
+
+===== 5. Flatpak shim selected (identity admission risk) =====
+$ fm-playbot-lanes.mjs call get_engine_readiness {"project":"p","workspace":"ws"}
+{
+ "verdict": "identity-admission-risk",
+ "app": {
+  "version": "0.117.0",
+  "verifiedVersions": "0.117.0"
+ },
+ "bundle": {
+  "resources": "<fixture>/resources",
+  "appVersion": "0.117.0",
+  "path": "<fixture>/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+  "version": "0.7.20",
+  "confirmed": true
+ },
+ "projects": [
+  {
+   "storedPath": "<fixture>/game",
+   "canonicalPath": "<fixture>/game",
+   "normalizedProjectPath": null,
+   "engineKind": "godot",
+   "addon": {
+    "path": "<fixture>/game/addons/playbot",
+    "version": "0.7.20",
+    "byteIdentical": true,
+    "missingFiles": [],
+    "differingFiles": [],
+    "unreadableFiles": []
+   },
+   "selectedExecutable": {
+    "path": "<fixture>/godot",
+    "canonicalPath": "<fixture>/godot",
+    "source": "existing-headless-launch-log",
+    "kind": "namespace-launcher"
+   },
+   "session": {
+    "id": "session",
+    "type": "headless",
+    "status": "idle-edit",
+    "lifecycleStatus": "connected",
+    "pluginStatus": "up_to_date",
+    "pluginVersion": "0.7.20",
+    "startupActivity": null,
+    "statusMessage": null,
+    "failure": null
+   },
+   "verdict": "identity-admission-risk",
+   "reasons": [
+    {
+     "verdict": "identity-admission-risk",
+     "code": "namespace-launcher",
+     "message": "The observed launcher uses a process namespace; Playbot's host process-number admission can reject it."
+    }
+   ]
+  }
+ ]
+}
+
+===== 6. engine-dependent dispatch refused on unconfirmed readiness =====
+$ fm-playbot-lanes.mjs call dispatch {"project":"p","workspace":"ws","thread":"chat","message":"Run engine tests"}
+Engine readiness identity-admission-risk in workspace ws; dispatch stopped before sending. Use get_engine_readiness for the evidence, or route engine validation to an ordinary worker. {"app":{"version":"0.117.0","verifiedVersions":"0.117.0"},"bundle":{"resources":"<fixture>/resources","appVersion":"0.117.0","path":"<fixture>/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot","version":"0.7.20","confirmed":true},"workspaceId":"ws","observedAt":"2026-09-28T08:30:21.967Z","verdict":"identity-admission-risk","ready":false,"projects":[{"storedPath":"<fixture>/game","canonicalPath":"<fixture>/game","normalizedProjectPath":null,"engineKind":"godot","addon":{"path":"<fixture>/game/addons/playbot","version":"0.7.20","byteIdentical":true,"missingFiles":[],"differingFiles":[],"unreadableFiles":[]},"selectedExecutable":{"path":"<fixture>/godot","canonicalPath":"<fixture>/godot","source":"existing-headless-launch-log","kind":"namespace-launcher"},"session":{"id":"session","type":"headless","status":"idle-edit","lifecycleStatus":"connected","pluginStatus":"up_to_date","pluginVersion":"0.7.20","startupActivity":null,"statusMessage":null,"failure":null},"verdict":"identity-admission-risk","reasons":[{"verdict":"identity-admission-risk","code":"namespace-launcher","message":"The observed launcher uses a process namespace; Playbot's host process-number admission can reject it."}]}],"reasons":[{"verdict":"identity-admission-risk","code":"namespace-launcher","message":"The observed launcher uses a process namespace; Playbot's host process-number admission can reject it."}],"errors":[]}
+exit=1
+IPC channels invoked: app:metadata, engine:listWorkspaceProjects  (no threads:send)
+
+===== 7. engine-dependent newWorkspace dispatch refused before creation =====
+Engine-dependent dispatch cannot target newWorkspace: a workspace created here has no connected engine session, so readiness could never be confirmed before sending. Nothing was created; dispatch file-only work with engineDependent=false, or target an existing workspace whose get_engine_readiness verdict is ready.
+exit=1; IPC calls made: 0
