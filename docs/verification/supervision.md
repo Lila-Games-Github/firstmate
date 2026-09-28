@@ -549,7 +549,7 @@ Observed output:
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
 ## Playbot lanes
 
-On 2026-09-28, Linux with Node v26.7.0 passed all 204 checks in the lane suite, including terminal dispatch from a brief and backlog item without preexisting task metadata.
+On 2026-09-28, Linux with Node v26.7.0 passed all 208 checks in the lane suite at `0050fbec197b49f4119bc184b38944cf91898f85`, including terminal dispatch from a brief and backlog item without preexisting task metadata.
 The refresh command is:
 
 ```sh
@@ -564,10 +564,17 @@ ok - fm-playbot-lanes: brief/backlog terminal dispatch creates a supervised task
 ok - fm-playbot-lanes: lane state and teardown share the dispatched identity and preserve Playbot work
 ok - fm-playbot-lanes: lane dispatch and teardown preserve manual backlog ownership
 ok - fm-playbot-lanes: lane teardown locks its idle read through retirement against redispatch
+ok - fm-playbot-lanes: an archived worker chat retires a landed lane record
+ok - fm-playbot-lanes: a deleted worker chat retires a landed lane record
+ok - fm-playbot-lanes: an active worker chat still blocks forced lane teardown
+ok - fm-playbot-lanes: --force never bypasses the landed check for an absent worker chat
+FM_TEST_END 2026-09-28T09:55:52Z tests/fm-playbot-lanes.test.sh exit=0 duration_ms=434364 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=434435
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=434364 failed=0
 ```
 
 These checks use stubbed Playbot endpoints and scratch Firstmate homes, not a live dispatch.
-They verify private lane metadata, poll arming, same-worker redispatch, persisted worker-state reads, refusal to retire active or unlanded work, and local record cleanup that preserves the workspace, chat, and brief.
+They verify private lane metadata, poll arming, same-worker redispatch, persisted worker-state reads, refusal to retire active or unlanded work (even under `--force`), retirement of a landed record whose worker chat is archived or deleted, and local record cleanup that preserves the workspace, chat, and brief.
 They also verify that unconfirmed delivery defeats an earlier completion declaration and that manual backlog ownership survives dispatch and cleanup.
 An engine-dependent new-workspace refusal leaves the lane metadata absent and its backlog item queued, without contacting Playbot.
 The concurrency check pauses teardown after its successful idle read, redispatches through the public MCP interface, and verifies that teardown cannot consume a newly armed poll using that earlier reading.
