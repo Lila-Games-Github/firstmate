@@ -1,0 +1,25 @@
+### recorded landing proto/lila
+# Current no-mistakes target contract
+This section supersedes earlier brief guidance about the no-mistakes target.
+The recorded landing branch is `proto/lila`.
+When starting validation, run `no-mistakes axi run --target-branch proto/lila` with the authorized intent supplied separately through `--intent`.
+The target is a separate flag; never put it inside `--intent`.
+Reattach an existing run using its immutable target rather than starting a replacement run with a default target.
+Before reporting a PR, verify the run's `target_branch` through `no-mistakes axi status` and the forge PR base both equal `proto/lila`.
+Use `gh-axi` with an explicit repository scope to read the forge PR base (`base.ref`); never infer it from the head branch or the PR title.
+If either target differs or cannot be verified, stop and report `blocked: no-mistakes target verification failed` with the evidence; do not report that PR as ready.
+
+### metacharacter branch feat/a&b
+# Current no-mistakes target contract
+This section supersedes earlier brief guidance about the no-mistakes target.
+The recorded landing branch is `feat/a&b`.
+When starting validation, run `no-mistakes axi run --target-branch feat/a\&b` with the authorized intent supplied separately through `--intent`.
+The target is a separate flag; never put it inside `--intent`.
+Reattach an existing run using its immutable target rather than starting a replacement run with a default target.
+Before reporting a PR, verify the run's `target_branch` through `no-mistakes axi status` and the forge PR base both equal `feat/a&b`.
+Use `gh-axi` with an explicit repository scope to read the forge PR base (`base.ref`); never infer it from the head branch or the PR title.
+If either target differs or cannot be verified, stop and report `blocked: no-mistakes target verification failed` with the evidence; do not report that PR as ready.
+
+### no landing_branch recorded
+0
+(no --target-branch in default brief)

@@ -1,0 +1,10 @@
+$ bin/fm-bootstrap.sh install no-mistakes
+error: no-mistakes requires manual installation (instructions: https://github.com/Lila-Games-Github/no-mistakes)
+exit=1
+
+$ no-mistakes --version   # host install
+no-mistakes version v1.58.1-lila-target-branch-c02ebab (c02ebab) 2026-09-28T03:53:01Z
+
+$ NO_MISTAKES_NO_UPDATE_CHECK=1 no-mistakes axi run --help | grep target-branch   # the readiness probe
+--target-branch optionally selects the upstream integration branch used for
+      --target-branch string   upstream integration branch to compare against, rebase onto, and use as the base for a new PR
