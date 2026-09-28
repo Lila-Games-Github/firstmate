@@ -7833,22 +7833,19 @@ rm -f "$FIXTURE_ROOT/send-drop-key" "$FIXTURE_ROOT/snapshot-envelope" "$FIXTURE_
 pass "fm-playbot-lanes: captured Playbot 0.117.0 envelope supports card, queue, recall, answer, send, and dispatch while missing fields fail closed"
 
 # ---------------------------------------------------------------------------
-# Engine dispatch checks the actual new workspace after root settling and
-# refuses before send even though Playbot already created the empty chat.
+# Engine dispatch into a new workspace is refused before Playbot creates any
+# workspace or chat, since a fresh workspace cannot have a connected session.
 printf '0.117.0' > "$FIXTURE_ROOT/app-version"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-engine-unconfirmed\"},\"landingBranch\":\"main\",\"title\":\"Engine readiness refusal\",\"message\":\"Validate Godot\"}}}")
-OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "new-workspace dispatch sent engine work before confirmed readiness"
-const fs = require('node:fs');
+OUT="$out" node --no-warnings <<'NODE' || fail "new-workspace engine dispatch was not refused before creation: $out"
 const value = JSON.parse(process.env.OUT);
-const calls = fs.readFileSync(process.env.CALLS,'utf8').trim().split('\n').map(JSON.parse);
-if (!value.error || !/Engine readiness unconfirmed/.test(value.error.message)) process.exit(1);
-if (!calls.some(c => c.channel === 'threads:launch') || calls.some(c => c.channel === 'threads:send')) process.exit(1);
-if (!/workspace ws-/.test(value.error.message)) process.exit(1);
+if (!value.error || !/cannot target newWorkspace/.test(value.error.message)) process.exit(1);
 NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "new-workspace engine dispatch contacted Playbot before refusing"
 printf '0.95.0' > "$FIXTURE_ROOT/app-version"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
-pass "fm-playbot-lanes: new-workspace engine dispatch refuses unconfirmed readiness before sending"
+pass "fm-playbot-lanes: new-workspace engine dispatch refuses before creating anything"
 
 # The shared node resolver must name what it rejected.
 #

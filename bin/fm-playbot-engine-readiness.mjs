@@ -192,3 +192,7 @@ export function engineReadinessReport(app, bundle, workspace, projects, errors) 
   if (reports.length === 0 || errors.length) reasons.push({ verdict: "unconfirmed", code: "discovery-unconfirmed", message: "Complete Godot project discovery is not confirmed." });
   return { app, bundle, workspaceId: workspace.id, observedAt: new Date().toISOString(), verdict: verdict(reasons), ready: reasons.length === 0, projects: reports, reasons, errors };
 }
+
+export function addonPreservationReport(app, bundle, projectPaths, errors) {
+  return { app, bundle, projects: projectPaths.map((projectPath) => ({ projectPath, addon: inspectAddon(projectPath, bundle) })), errors };
+}

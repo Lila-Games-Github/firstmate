@@ -1,7 +1,10 @@
 // Local workspace mutation owner for fm-playbot-lanes.mjs addon-guard.
-// A complete, app-bundle-identical addon is required before reset or stash.
+// Every Git-visible Godot project with an addons/playbot tree must hold a
+// complete, app-bundle-identical addon before reset or stash; a worktree with
+// no addon tree preserves nothing and keeps every other check.
 // reset accepts one ref, refuses backward/divergent history and any tracked or
-// untracked product changes outside the preserved trees. It makes a private
+// untracked product changes outside the preserved trees except the caller's
+// listed tracked Playbot churn, whose diff it prints before reverting. It makes a private
 // temporary backup first, restores tracked/untracked/ignored files after Git,
 // and retains the backup on any failure. stash accepts only --all/-a,
 // --include-untracked/-u, and --message/-m; exact addon pathspec exclusions keep
@@ -28,7 +31,8 @@ function files(directory, relative = "") {
 }
 
 function verifiedAddons(root, report) {
-  if (!report.bundle.confirmed || report.errors.length || !report.projects.length) throw new Error("Addon bundle/project identity is unconfirmed; run get_engine_readiness before preservation.");
+  if (!report.projects.length) return [];
+  if (!report.bundle?.confirmed || report.errors.length) throw new Error(`Addon bundle identity is unconfirmed; start Playbot so its app bundle can be read before preservation. ${JSON.stringify({ bundle: report.bundle, errors: report.errors })}`);
   return report.projects.map((project) => {
     if (fs.lstatSync(project.addon.path).isSymbolicLink()) throw new Error("Addon preservation refuses a symlinked addon directory.");
     const directory = fs.realpathSync.native(project.addon.path);
@@ -62,7 +66,7 @@ function restoreFile(directory, file, boundary) {
   fs.chmodSync(destination, file.mode);
 }
 
-export async function guardAddon({ root, report, operation, args, git, indexFlags, operations, verify }) {
+export async function guardAddon({ root, report, operation, args, git, indexFlags, operations, trackedChurn, verify }) {
   const addons = verifiedAddons(root, report);
   const owned = (file) => addons.some((addon) => file.startsWith(`${addon.relative}/`));
   if (operation === "verify" || operation === "check-index") {
@@ -74,7 +78,7 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
     return { operation, verified: true, addons: addons.map((addon) => addon.relative) };
   }
   if (!["reset", "stash"].includes(operation)) throw new Error("addon-guard expects verify, check-index, reset <ref>, or stash [--all|--include-untracked] [--message text]");
-  let command;
+  let command, churn = [];
   if (operation === "reset") {
     if (args.length !== 1 || !args[0] || args[0].startsWith("-")) throw new Error("addon-guard reset requires exactly one target ref");
     const target = git(root, ["rev-parse", "--verify", `${args[0]}^{commit}`]).trim();
@@ -83,7 +87,8 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
     if (indexFlags.length) throw new Error("Reset refuses assume-unchanged or skip-worktree index flags.");
     const changed = git(root, ["diff", "HEAD", "--name-only", "-z", "--"]).split("\0").filter(Boolean);
     const untracked = git(root, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
-    const outside = [...changed, ...untracked].filter((file) => !owned(file));
+    churn = changed.filter((file) => !owned(file) && trackedChurn(file));
+    const outside = [...changed.filter((file) => !churn.includes(file)), ...untracked].filter((file) => !owned(file));
     const targetPaths = git(root, ["ls-tree", "-r", "--name-only", "-z", target]).split("\0").filter(Boolean);
     const ignored = git(root, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
     outside.push(...ignored.filter((file) => !owned(file) && targetPaths.some((targetPath) => file === targetPath || file.startsWith(`${targetPath}/`) || targetPath.startsWith(`${file}/`))));
@@ -103,6 +108,7 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
   for (const addon of snapshots) for (const file of addon.files) restoreFile(path.join(backup, String(addon.index)), file, backup);
   fs.writeFileSync(path.join(backup, "manifest.json"), JSON.stringify({ root, operation, addons: snapshots.map(({ directory, index, files: inventory }) => ({ directory, index, files: inventory.map(({ name, mode }) => ({ name, mode })) })) }, null, 2));
   process.stderr.write(`Addon preservation backup: ${backup}\n`);
+  if (churn.length) process.stderr.write(`Reverting listed Playbot tracked churn: ${churn.join(", ")}\n${git(root, ["diff", "HEAD", "--", ...churn.map((file) => `:(literal)${file}`)])}\n`);
   try {
     verifiedAddons(root, await verify());
     for (const addon of snapshots) for (const file of addon.files) {
@@ -121,6 +127,6 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
     verifiedAddons(root, await verify());
     if (commandError) throw commandError;
     fs.rmSync(backup, { recursive: true });
-    return { operation, preserved: true, verified: true, addons: addons.map((addon) => addon.relative) };
+    return { operation, preserved: true, verified: true, addons: addons.map((addon) => addon.relative), ...(operation === "reset" ? { revertedChurn: churn } : {}) };
   } catch (error) { throw new Error(`${error.message}; complete addon backup retained at ${backup}`); }
 }

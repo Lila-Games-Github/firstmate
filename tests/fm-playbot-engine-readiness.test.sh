@@ -184,63 +184,91 @@ assert.equal(call('get_engine_readiness').verdict,'unconfirmed');
 assert(!fs.readFileSync(path.join(root,'calls'),'utf8').includes('engine:listWorkspaceProjects'));
 // Reset/stash preservation exercises real Git, tracked helpers, untracked
 // helpers, and ignored native files through the same lane executable.
-fs.rmSync(path.join(root,'version')); stage();
+fs.rmSync(path.join(root,'version'));
+// Engine-dependent work never creates a workspace it could not confirm.
+fs.writeFileSync(path.join(root,'calls'),'');
+const fresh=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'call','dispatch',JSON.stringify({project:'p',landingBranch:'main',newWorkspace:{branch:'fm-engine'},title:'Engine',message:'Run engine tests'})],{encoding:'utf8'});
+assert.notEqual(fresh.status,0); assert.match(fresh.stderr,/cannot target newWorkspace.*Nothing was created/);
+assert.equal(fs.readFileSync(path.join(root,'calls'),'utf8'),'');
+const proj=path.join(game,'prototype-game'); fs.mkdirSync(proj);
+fs.renameSync(path.join(game,'project.godot'),path.join(proj,'project.godot'));
+fs.renameSync(path.join(game,'addons'),path.join(proj,'addons'));
+projectPath=proj; stage();
 function git(...args) {
   const r=spawnSync('git',['-C',game,...args],{encoding:'utf8'});
   assert.equal(r.status,0,r.stderr); return r.stdout.trim();
 }
 git('init','--initial-branch=main'); git('config','user.name','Fixture'); git('config','user.email','fixture@example.invalid');
-fs.writeFileSync(path.join(game,'.gitignore'),'addons/playbot/native/\nprotected.private\n');
+fs.writeFileSync(path.join(game,'.gitignore'),'prototype-game/addons/playbot/native/\nprotected.private\n');
 fs.writeFileSync(path.join(game,'product.txt'),'old');
-fs.writeFileSync(path.join(game,'addons/playbot/plugin.cfg'),'[plugin]\nversion="0.7.14"\n');
-fs.writeFileSync(path.join(game,'addons/playbot/plugin.gd'),'old');
+fs.writeFileSync(path.join(proj,'addons/playbot/plugin.cfg'),'[plugin]\nversion="0.7.14"\n');
+fs.writeFileSync(path.join(proj,'addons/playbot/plugin.gd'),'old');
 git('add','.'); git('commit','-m','old addon and product'); const oldhead=git('rev-parse','HEAD');
 fs.writeFileSync(path.join(game,'protected.private'),'landing data'); git('add','-f','protected.private');
 fs.writeFileSync(path.join(game,'product.txt'),'new'); git('add','product.txt'); git('commit','-m','product advance'); const base=git('rev-parse','HEAD');
 git('reset','--hard',oldhead);
-fs.cpSync(bundle,path.join(game,'addons/playbot'),{recursive:true});
-fs.writeFileSync(path.join(game,'addons/playbot/untracked-helper.gd'),'injected helper');
-fs.chmodSync(path.join(game,'addons/playbot/native/library.so'),0o755);
-function guard(operation,...args) {
-  const r=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard',operation,...args],{cwd:game,encoding:'utf8',timeout:10000});
-  assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout);
+fs.cpSync(bundle,path.join(proj,'addons/playbot'),{recursive:true});
+fs.writeFileSync(path.join(proj,'addons/playbot/untracked-helper.gd'),'injected helper');
+fs.chmodSync(path.join(proj,'addons/playbot/native/library.so'),0o755);
+function guardRun(env,operation,...args) {
+  const r=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard',operation,...args],{cwd:game,encoding:'utf8',timeout:10000,env:{...process.env,...env}});
+  assert.equal(r.status,0,r.stderr); return {...JSON.parse(r.stdout),stderr:r.stderr};
 }
+const guard=(...args)=>guardRun({},...args);
 fs.writeFileSync(path.join(game,'protected.private'),'unlanded private data');
 const collision=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','reset',base],{cwd:game,encoding:'utf8'});
 assert.notEqual(collision.status,0); assert.equal(fs.readFileSync(path.join(game,'protected.private'),'utf8'),'unlanded private data');
 fs.rmSync(path.join(game,'protected.private'));
 guard('reset',base); assert.equal(git('rev-parse','HEAD'),base);
 expect('ready');
-assert.equal(fs.readFileSync(path.join(game,'addons/playbot/untracked-helper.gd'),'utf8'),'injected helper');
-assert(fs.readFileSync(path.join(game,'addons/playbot/native/library.so')).equals(Buffer.from([1,2,3])));
-assert.equal(fs.statSync(path.join(game,'addons/playbot/native/library.so')).mode&0o777,0o755);
+assert.equal(fs.readFileSync(path.join(proj,'addons/playbot/untracked-helper.gd'),'utf8'),'injected helper');
+assert(fs.readFileSync(path.join(proj,'addons/playbot/native/library.so')).equals(Buffer.from([1,2,3])));
+assert.equal(fs.statSync(path.join(proj,'addons/playbot/native/library.so')).mode&0o777,0o755);
 fs.writeFileSync(path.join(game,'product.txt'),'unstaged product work');
 guard('stash','--all'); expect('ready');
 assert.equal(fs.readFileSync(path.join(game,'product.txt'),'utf8'),'new');
-assert.equal(fs.readFileSync(path.join(game,'addons/playbot/untracked-helper.gd'),'utf8'),'injected helper');
-git('add','addons/playbot');
+assert.equal(fs.readFileSync(path.join(proj,'addons/playbot/untracked-helper.gd'),'utf8'),'injected helper');
+git('add','prototype-game/addons/playbot');
 const staged=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','check-index'],{cwd:game,encoding:'utf8'});
 assert.notEqual(staged.status,0); assert.match(staged.stderr,/staged.*addon|addon.*staged/i);
-git('reset','--','addons/playbot'); guard('check-index');
+git('reset','--','prototype-game/addons/playbot'); guard('check-index');
+// Listed tracked Playbot churn is disclosed and reverted; nothing else is.
+fs.appendFileSync(path.join(proj,'project.godot'),'playbot_setting=1\n');
+const churned=guard('reset',base);
+assert.deepEqual(churned.revertedChurn,['prototype-game/project.godot']);
+assert.match(churned.stderr,/Reverting listed Playbot tracked churn: prototype-game\/project\.godot[\s\S]*\+playbot_setting=1/);
+assert.equal(fs.readFileSync(path.join(proj,'project.godot'),'utf8'),'config_version=5\n');
+assert.equal(fs.readFileSync(path.join(proj,'addons/playbot/untracked-helper.gd'),'utf8'),'injected helper');
+fs.appendFileSync(path.join(proj,'project.godot'),'playbot_setting=1\n'); fs.writeFileSync(path.join(game,'notes.txt'),'untracked product');
+const mixed=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','reset',base],{cwd:game,encoding:'utf8'});
+assert.notEqual(mixed.status,0); assert.match(mixed.stderr,/notes\.txt/);
+assert.match(fs.readFileSync(path.join(proj,'project.godot'),'utf8'),/playbot_setting=1/);
+fs.rmSync(path.join(game,'notes.txt')); git('checkout','--','prototype-game/project.godot');
+// Bundle-verified preservation does not depend on the engine-IPC version pin.
+fs.writeFileSync(path.join(root,'version'),'0.118.0'); fs.writeFileSync(path.join(root,'resources/app/package.json'),JSON.stringify({version:'0.118.0'}));
+fs.writeFileSync(path.join(root,'calls'),'');
+assert.deepEqual(guard('verify').addons,['prototype-game/addons/playbot']);
+assert(!fs.readFileSync(path.join(root,'calls'),'utf8').includes('engine:listWorkspaceProjects'));
+fs.rmSync(path.join(root,'version')); fs.writeFileSync(path.join(root,'resources/app/package.json'),JSON.stringify({version:'0.117.0'}));
 // Outside product edits and divergent refs are never authorized as addon churn.
 fs.writeFileSync(path.join(game,'product.txt'),'must survive');
 const refusedReset=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','reset',base],{cwd:game,encoding:'utf8'});
 assert.notEqual(refusedReset.status,0); assert.equal(fs.readFileSync(path.join(game,'product.txt'),'utf8'),'must survive');
 fs.writeFileSync(path.join(game,'product.txt'),'new');
-fs.rmSync(path.join(game,'addons/playbot/plugin.gd'));
+fs.rmSync(path.join(proj,'addons/playbot/plugin.gd'));
 const incomplete=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','reset',base],{cwd:game,encoding:'utf8'});
 assert.notEqual(incomplete.status,0); assert.equal(git('rev-parse','HEAD'),base);
 // A target replacing an addon ancestor with a symlink must never redirect
 // restoration outside the worktree; its complete recovery backup remains.
-fs.copyFileSync(path.join(bundle,'plugin.gd'),path.join(game,'addons/playbot/plugin.gd'));
+fs.copyFileSync(path.join(bundle,'plugin.gd'),path.join(proj,'addons/playbot/plugin.gd'));
 const originalHead=git('rev-parse','HEAD');
 const savedAddons=path.join(root,'saved-addons'), outside=path.join(root,'outside');
 fs.mkdirSync(outside); fs.writeFileSync(path.join(outside,'sentinel'),'untouched');
-git('rm','-r','--cached','addons');
-fs.renameSync(path.join(game,'addons'),savedAddons);
-fs.symlinkSync(outside,path.join(game,'addons')); git('add','addons'); git('commit','-m','symlink ancestor target');
+git('rm','-r','--cached','prototype-game/addons');
+fs.renameSync(path.join(proj,'addons'),savedAddons);
+fs.symlinkSync(outside,path.join(proj,'addons')); git('add','prototype-game/addons'); git('commit','-m','symlink ancestor target');
 const unsafeTarget=git('rev-parse','HEAD'); git('reset','--hard',originalHead);
-fs.cpSync(savedAddons,path.join(game,'addons'),{recursive:true});
+fs.cpSync(savedAddons,path.join(proj,'addons'),{recursive:true});
 const unsafe=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','reset',unsafeTarget],{cwd:game,encoding:'utf8'});
 assert.notEqual(unsafe.status,0); assert.match(unsafe.stderr,/Unsafe addon restore directory/);
 assert.equal(fs.readFileSync(path.join(outside,'sentinel'),'utf8'),'untouched');
@@ -248,6 +276,14 @@ assert(!fs.existsSync(path.join(outside,'playbot')));
 const backup=/complete addon backup retained at ([^\n]+)/.exec(unsafe.stderr)?.[1]; assert(backup);
 assert(fs.readFileSync(path.join(backup,'0/native/library.so')).equals(Buffer.from([1,2,3])));
 fs.rmSync(backup,{recursive:true});
+// Without any addon tree the guard preserves nothing and needs no bundle.
+git('reset','--hard',originalHead); fs.rmSync(path.join(proj,'addons'),{recursive:true,force:true});
+git('rm','-r','-q','--ignore-unmatch','prototype-game/addons'); git('commit','-q','--allow-empty','-m','drop addon'); const dropped=git('rev-parse','HEAD');
+fs.writeFileSync(path.join(game,'product.txt'),'later'); git('commit','-q','-am','later product'); const later=git('rev-parse','HEAD');
+git('reset','--hard',dropped);
+const noBundle={PLAYBOT_LANES_APP_RESOURCES:path.join(root,'missing-resources')};
+assert.deepEqual(guardRun(noBundle,'verify').addons,[]);
+const bare=guardRun(noBundle,'reset',later); assert.deepEqual(bare.addons,[]); assert.equal(git('rev-parse','HEAD'),later);
 console.log('verified engine readiness fixture verdicts and dispatch refuses unconfirmed readiness');
 NODE
 pass "fm-playbot-engine-readiness: fixture verdicts and dispatch execute through public tools"

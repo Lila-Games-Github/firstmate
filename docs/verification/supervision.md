@@ -1040,4 +1040,5 @@ verified engine readiness fixture verdicts and dispatch refuses unconfirmed read
 ok - fm-playbot-engine-readiness: fixture verdicts and dispatch execute through public tools
 ```
 
-`bash tests/fm-playbot-lanes.test.sh` additionally covers new-workspace dispatch retaining its freshness guard and refusing unconfirmed readiness after creating the empty chat but before sending.
+The same fixture also proves engine-dependent `newWorkspace` dispatch is refused before any Playbot call, that the reset guard reverts only listed tracked churn after printing its diff, that an unknown app version still permits bundle-verified preservation, and that a worktree with no addon tree resets without app-bundle evidence.
+`bash tests/fm-playbot-lanes.test.sh` additionally covers file-only new-workspace dispatch retaining its freshness guard.

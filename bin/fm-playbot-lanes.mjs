@@ -45,7 +45,9 @@
 // get_engine_readiness uses app:metadata and the verified 0.117.0
 // engine:listWorkspaceProjects reader to inspect existing sessions without
 // activation. Dispatch requires confirmed engine readiness unless its caller
-// explicitly declares file-only work with engineDependent=false.
+// explicitly declares file-only work with engineDependent=false, and refuses
+// engine-dependent newWorkspace dispatch before creating anything.
+// addon-guard reads only app:metadata and the packaged bundle.
 // bin/fm-playbot-engine-readiness.mjs owns packaged-bundle discovery mechanics.
 //
 // The question-card and pending-queue tools use four more of Playbot's own
@@ -71,7 +73,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
-import { engineBundle, engineReadinessReport } from "./fm-playbot-engine-readiness.mjs";
+import { addonPreservationReport, engineBundle, engineReadinessReport } from "./fm-playbot-engine-readiness.mjs";
 import { guardAddon } from "./fm-playbot-addon-guard.mjs";
 
 const SERVER_NAME = "playbot_lanes";
@@ -3500,6 +3502,26 @@ async function engineReadiness(project, workspace) {
   return engineReadinessReport(app, bundle, workspace, detected, errors);
 }
 
+// Addon preservation needs only bundle identity and file comparison, so it
+// discovers Godot projects from Git rather than the version-pinned engine IPC.
+function playbotAddonProjects(root) {
+  const listed = git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ":(glob)**/project.godot"]).split("\0").filter(Boolean);
+  return [...new Set(listed.map((file) => path.join(root, path.dirname(file))))]
+    .filter((project) => fs.lstatSync(path.join(project, "addons/playbot"), { throwIfNoEntry: false }));
+}
+
+async function addonReadiness(root) {
+  const projectPaths = playbotAddonProjects(root);
+  const app = { version: null };
+  const errors = [];
+  if (!projectPaths.length) return addonPreservationReport(app, null, projectPaths, errors);
+  try {
+    const metadata = await engineReadInvoke("app:metadata", undefined);
+    if (typeof metadata?.version === "string") app.version = metadata.version.trim();
+  } catch (error) { errors.push({ source: "app:metadata", message: error.message }); }
+  return addonPreservationReport(app, engineBundle(app.version), projectPaths, errors);
+}
+
 function engineDependentRequest(args) {
   if (args.engineDependent !== undefined && typeof args.engineDependent !== "boolean") throw new Error("engineDependent must be a boolean; false explicitly declares file-only work");
   return args.engineDependent !== false;
@@ -5959,6 +5981,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       throw new Error("dispatch landingBranch is only valid together with newWorkspace; an existing workspace's freshness is read with get_workspace_freshness or get_thread_status");
     }
     const landingBranch = wantsNewWorkspace ? explicitLandingBranch(name, args.landingBranch) : null;
+    if (engineDependent && wantsNewWorkspace) {
+      throw new Error("Engine-dependent dispatch cannot target newWorkspace: a workspace created here has no connected engine session, so readiness could never be confirmed before sending. Nothing was created; dispatch file-only work with engineDependent=false, or target an existing workspace whose get_engine_readiness verdict is ready.");
+    }
     // Resolved here rather than at the read, so a malformed settle budget is a
     // configuration error before anything is created instead of a refusal that
     // has already left a workspace and chat behind.
@@ -6494,12 +6519,11 @@ async function main() {
       .filter((workspace) => workspace.archiveState === "active" && workspace.roots.some((entry) => {
         const relative = path.relative(root, canonicalPath(entry.path));
         return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-      })).map((workspace) => ({ project, workspace })));
+      })));
     if (matches.length !== 1) throw new Error("addon-guard requires one exact registered Playbot workspace in the current Git worktree");
-    const { project, workspace } = matches[0];
-    const verify = () => engineReadiness(project, workspace);
+    const verify = () => addonReadiness(root);
     const report = await verify();
-    const result = await guardAddon({ root, report, operation: process.argv[3], args: process.argv.slice(4), git, indexFlags: gitIndexFlags(root), operations: gitOperationState(root), verify });
+    const result = await guardAddon({ root, report, operation: process.argv[3], args: process.argv.slice(4), git, indexFlags: gitIndexFlags(root), operations: gitOperationState(root), trackedChurn: isTrackedPlaybotChurn, verify });
     console.log(JSON.stringify(result, null, 2));
     return;
   }

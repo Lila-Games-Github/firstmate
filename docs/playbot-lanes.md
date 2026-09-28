@@ -174,7 +174,8 @@ Readiness requires an existing routed connected session reporting the current lo
 
 `dispatch` requires confirmed readiness by default and re-reads the destination immediately before sending.
 Set `engineDependent: false` only for work whose completion needs no engine execution, capture, or validation; omission and `true` both enforce the guard, and non-booleans are rejected.
-Existing workspaces are checked before chat creation; new workspaces retain the root-settle/freshness guard and are checked after creation but before sending, so a readiness refusal can leave an empty workspace and chat whose ids the diagnostic names.
+Existing workspaces are checked before chat creation and re-read before sending.
+Engine-dependent `newWorkspace` dispatch is refused before anything is created, because a freshly created workspace has no connected engine session; file-only `newWorkspace` dispatch retains the root-settle/freshness guard.
 Do not bypass a readiness refusal through `send_message`; use that tool for engine work only after a fresh readiness verdict is confirmed.
 Choose `newWorkspace` for isolation, and verify capability separately: it provides no shell-permission or engine-policy workaround.
 When readiness fails or remains unconfirmed, dispatch engine-dependent validation to an ordinary worker whose instructions permit the project's pinned native validation route, recording the exact commit and workspace validated and the engine assertions still unverified.
@@ -189,10 +190,12 @@ Avoid repeated engine calls while readiness is already known to fail, and keep b
 ### Addon preservation
 
 Lane workers run `node --no-warnings <Firstmate-code-root>/bin/fm-playbot-lanes.mjs addon-guard reset <ref>` for a base-check-authorized reset and `addon-guard stash` for stashing, rather than raw Git reset/stash commands.
-The command binds the current Git worktree to one registered Playbot workspace and requires a complete addon matching the observed app bundle before mutation.
+The command binds the current Git worktree to one registered Playbot workspace, discovers every Git-visible Godot project with an `addons/playbot` tree, and requires each such addon to be complete and match the observed app bundle before mutation.
+It reads only `app:metadata` and the packaged bundle, so it does not depend on the version-pinned engine snapshot IPC; a worktree with no addon tree preserves nothing and still applies every other check.
 Reset preserves every tracked, untracked, and ignored addon file, including native files, restores their exact bytes and modes after Git, and verifies them against a fresh app-bundle read.
 Stash excludes the exact addon trees from its pathspec and verifies their bytes afterward; it does not stash the injected helpers.
-The reset guard additionally refuses backward/divergent history, hidden index flags, and product changes outside the addon trees, even when the base checker classifies project settings as tracked churn.
+The reset guard additionally refuses backward/divergent history, hidden index flags, untracked product files, and tracked product changes outside the addon trees.
+The only tracked changes it reverts outside those trees are paths on the tracked-churn allowlist (such as `prototype-game/project.godot`), whose diff it prints before resetting; the lane brief requires disclosing that diff first.
 An incomplete or stale addon requires a supported Playbot update before either operation; the guard does not silently install files from a different app version.
 Its header and CLI help own supported flags and backup mechanics; any failed operation names the retained complete backup for recovery.
 This preservation is independent of the retirement churn allowlist and grants no permission to discard addon or product edits.
