@@ -1782,12 +1782,12 @@ function settleRecord(attempts, reads, startedAt, timeoutMs, outcome) {
   return { reads, waitedMs: Date.now() - startedAt, timeoutMs, outcome };
 }
 
-// Freshness for a workspace THIS call just created. Every verdict returned here
-// comes from a real topology read; the loop decides only whether to read again,
-// never what the answer is. Nothing but the not-yet-registered coverage shape is
-// retried, and the caller-supplied-workspace paths never come through here at
-// all, so an existing workspace is never waited on.
-async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, timeoutMs) {
+// Shared bounded re-read for a workspace THIS call just created. Every verdict
+// returned here comes from a real topology read; the loop decides only whether
+// to read again, never what the answer is. Nothing but the not-yet-registered
+// coverage shape is retried, and the caller-supplied-workspace paths never come
+// through here at all, so an existing workspace is never waited on.
+async function createdWorkspaceRootsRead(projectId, workspaceId, timeoutMs) {
   const startedAt = Date.now();
   let attempts = 0;
   let reads = 0;
@@ -1803,7 +1803,9 @@ async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, 
       coverage = workspaceRootCoverage(project, workspace);
     } catch (error) {
       return {
-        ok: false,
+        project: null,
+        workspace: null,
+        coverage: null,
         error: error instanceof Error ? error.message : String(error),
         settle: settleRecord(attempts, reads, startedAt, timeoutMs, "unreadable"),
       };
@@ -1814,12 +1816,40 @@ async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, 
       await settlePause(WORKSPACE_ROOTS_SETTLE_POLL_INTERVAL_MS);
       continue;
     }
-    const settle = settleRecord(attempts, reads, startedAt, timeoutMs, unregistered ? "unregistered" : "registered");
-    try {
-      return { ok: true, freshness: workspaceFreshness(project, workspace, landingBranch), settle };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error), settle };
-    }
+    return {
+      project,
+      workspace,
+      coverage,
+      error: null,
+      settle: settleRecord(attempts, reads, startedAt, timeoutMs, unregistered ? "unregistered" : "registered"),
+    };
+  }
+}
+
+// Freshness for a workspace THIS call just created, built on the shared settle
+// read above.
+async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, timeoutMs) {
+  const read = await createdWorkspaceRootsRead(projectId, workspaceId, timeoutMs);
+  if (read.error) return { ok: false, error: read.error, settle: read.settle };
+  try {
+    return { ok: true, freshness: workspaceFreshness(read.project, read.workspace, landingBranch), settle: read.settle };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error), settle: read.settle };
+  }
+}
+
+// Playbot's new mode/from launch schema is documented only as the quick
+// strategy's single-root provisioning, so a workspace it creates for a
+// multi-root project is confirmed to cover every project root exactly once
+// rather than trusted on name alone - independent of Playbot version, and not
+// gated to the 0.117.0-specific engine-readiness check.
+async function verifyCreatedWorkspaceRootCoverage(projectId, workspaceId, timeoutMs) {
+  const read = await createdWorkspaceRootsRead(projectId, workspaceId, timeoutMs);
+  if (read.error) {
+    throw new Error(`Workspace ${workspaceId} was created, but its project root coverage could not be confirmed: ${read.error}`);
+  }
+  if (!read.coverage.complete) {
+    throw new Error(`Workspace ${workspaceId} was created, but its project root coverage is incomplete: ${read.coverage.message}`);
   }
 }
 
@@ -3934,10 +3964,15 @@ function readBackWorkspace(project, workspaceId) {
 }
 
 async function createWorkspace(project, options = {}) {
+  // Resolved before anything is created, so a malformed settle budget is a
+  // configuration error up front instead of a refusal that has already left a
+  // workspace behind.
+  const settleTimeoutMs = workspaceRootsSettleTimeoutMs();
   if (await chatCreationApi() === "openThread") {
     const created = await playbotInvoke("workspace:create", workspaceCreatePayload(project.id, options));
     const workspaceId = created?.id;
     if (!workspaceId) throw new Error("Playbot did not return the created workspace id");
+    await verifyCreatedWorkspaceRootCoverage(project.id, workspaceId, settleTimeoutMs);
     return readBackWorkspace(project, workspaceId);
   }
   const launch = await playbotInvoke("threads:launch", {
@@ -3953,6 +3988,7 @@ async function createWorkspace(project, options = {}) {
   } catch (error) {
     throw new Error(`Workspace ${workspaceId} was created, but archiving its setup chat ${placeholderThreadId} failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  await verifyCreatedWorkspaceRootCoverage(project.id, workspaceId, settleTimeoutMs);
   return readBackWorkspace(project, workspaceId);
 }
 

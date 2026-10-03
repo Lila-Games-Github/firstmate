@@ -1430,6 +1430,11 @@ const deferredWriteFailureFile = path.join(process.env.FIXTURE_ROOT, 'deferred-w
 const workspaceDeleteFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-fail-after');
 const workspaceDeleteRootRowFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-root-row-fail-after');
 const workspaceDeleteSucceedsWithoutRemovalFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-succeeds-without-removal');
+// Simulates a Playbot launch schema that only ever provisions one project
+// root regardless of how many the project has, the way the documented quick
+// strategy's single-root provisioning would if a caller mistook it for the
+// project strategy's every-root coverage.
+const createWorkspaceSingleRootFile = path.join(process.env.FIXTURE_ROOT, 'create-workspace-single-root');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
@@ -1556,10 +1561,11 @@ function createWorkspaceRows(db, spec) {
   const now = new Date().toISOString();
   db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .run(id, spec.projectId, spec.name ?? null, 'worktree', 0, 'active', now, now);
-  const roots = db.prepare(`
+  const allRoots = db.prepare(`
     SELECT pr.id AS root_id, r.path AS repo_path FROM project_roots pr
     JOIN repositories r ON r.id = pr.repository_id WHERE pr.project_id = ?
   `).all(spec.projectId);
+  const roots = readFileOr(createWorkspaceSingleRootFile, '') ? allRoots.slice(0, 1) : allRoots;
   const rows = [];
   for (const root of roots) {
     const worktreePath = path.join(root.repo_path, '.worktrees', branch);
@@ -8692,6 +8698,56 @@ const result = JSON.parse(process.env.OUT).result?.structuredContent;
 if (result?.workspace?.roots?.[0]?.branch !== 'fm-mode-dispatch' || !result.thread?.id) process.exit(1);
 NODE
 pass "fm-playbot-lanes: current mode schema works for create_chat and dispatch newWorkspace"
+
+# Playbot's documented project strategy gives every project root a worktree;
+# the mode/from launch schema carries no strategy or root-count marker at all,
+# so a workspace it creates for a multi-root project is confirmed to cover
+# every project root exactly once rather than trusted on name alone - and a
+# schema that silently provisioned only one root is refused by the created
+# workspace's own id instead of being handed back as if it were complete.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)')
+  .run('root-mode-multi-two', 'project-worker', 'repo-partial-two', 1);
+db.close();
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"baseBranch\":\"main\",\"branch\":\"fm-mode-multi\"}}}")
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "mode-schema create_workspace did not cover every root of a multi-root project"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const workspace = JSON.parse(process.env.OUT).result?.structuredContent?.workspace;
+if (!workspace) process.exit(1);
+const rootIds = workspace.roots.map((root) => root.projectRootId).sort();
+if (JSON.stringify(rootIds) !== JSON.stringify(['root-mode-multi-two', 'root-worker'])) process.exit(1);
+if (!workspace.roots.every((root) => root.branch === 'fm-mode-multi')) process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const count = db.prepare('SELECT COUNT(*) AS n FROM workspace_roots WHERE workspace_id = ?').get(workspace.id).n;
+db.close();
+if (count !== 2) process.exit(1);
+NODE
+pass "fm-playbot-lanes: mode-schema create_workspace covers every root of a multi-root project"
+
+printf 'true\n' > "$FIXTURE_ROOT/create-workspace-single-root"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=900 rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"baseBranch\":\"main\",\"branch\":\"fm-mode-partial\"}}}")
+rm -f "$FIXTURE_ROOT/create-workspace-single-root"
+OUT="$out" node --no-warnings <<'NODE' || fail "mode-schema create_workspace did not refuse a workspace that silently dropped a project root"
+const value = JSON.parse(process.env.OUT);
+const message = value.error?.message ?? '';
+if (!/^Workspace (\S+) was created, but its project root coverage is incomplete: workspace \1 root coverage mismatch: missing project root id\(s\): (root-worker|root-mode-multi-two)\.?$/.test(message)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: mode-schema create_workspace refuses a workspace that silently dropped a project root"
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('DELETE FROM project_roots WHERE id = ?').run('root-mode-multi-two');
+db.close();
+NODE
 
 printf 'unknown\n' > "$FIXTURE_ROOT/ipc-mode"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
