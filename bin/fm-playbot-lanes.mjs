@@ -29,7 +29,8 @@
 //
 // The server talks to Playbot through its local Electron DevTools socket and
 // invokes Playbot's own IPC handlers: threads:launch for chat and workspace
-// creation on Playbot 0.94.0 and newer, including optional catalog-validated
+// creation on Playbot 0.94.0 and newer, including both known workspace launch
+// schemas and optional catalog-validated
 // linked planning and execution model profiles, with a detected fallback to
 // the pre-0.94 threads:openThread and workspace:create channels, plus the
 // unchanged threads:send and threads:archiveThread channels, whose send response
@@ -1781,12 +1782,12 @@ function settleRecord(attempts, reads, startedAt, timeoutMs, outcome) {
   return { reads, waitedMs: Date.now() - startedAt, timeoutMs, outcome };
 }
 
-// Freshness for a workspace THIS call just created. Every verdict returned here
-// comes from a real topology read; the loop decides only whether to read again,
-// never what the answer is. Nothing but the not-yet-registered coverage shape is
-// retried, and the caller-supplied-workspace paths never come through here at
-// all, so an existing workspace is never waited on.
-async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, timeoutMs) {
+// Shared bounded re-read for a workspace THIS call just created. Every verdict
+// returned here comes from a real topology read; the loop decides only whether
+// to read again, never what the answer is. Nothing but the not-yet-registered
+// coverage shape is retried, and the caller-supplied-workspace paths never come
+// through here at all, so an existing workspace is never waited on.
+async function createdWorkspaceRootsRead(projectId, workspaceId, timeoutMs) {
   const startedAt = Date.now();
   let attempts = 0;
   let reads = 0;
@@ -1802,7 +1803,9 @@ async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, 
       coverage = workspaceRootCoverage(project, workspace);
     } catch (error) {
       return {
-        ok: false,
+        project: null,
+        workspace: null,
+        coverage: null,
         error: error instanceof Error ? error.message : String(error),
         settle: settleRecord(attempts, reads, startedAt, timeoutMs, "unreadable"),
       };
@@ -1813,12 +1816,43 @@ async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, 
       await settlePause(WORKSPACE_ROOTS_SETTLE_POLL_INTERVAL_MS);
       continue;
     }
-    const settle = settleRecord(attempts, reads, startedAt, timeoutMs, unregistered ? "unregistered" : "registered");
-    try {
-      return { ok: true, freshness: workspaceFreshness(project, workspace, landingBranch), settle };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error), settle };
-    }
+    return {
+      project,
+      workspace,
+      coverage,
+      error: null,
+      settle: settleRecord(attempts, reads, startedAt, timeoutMs, unregistered ? "unregistered" : "registered"),
+    };
+  }
+}
+
+// Freshness for a workspace THIS call just created, built on the shared settle
+// read above.
+async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, timeoutMs) {
+  const read = await createdWorkspaceRootsRead(projectId, workspaceId, timeoutMs);
+  if (read.error) return { ok: false, error: read.error, settle: read.settle };
+  try {
+    return { ok: true, freshness: workspaceFreshness(read.project, read.workspace, landingBranch), settle: read.settle };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error), settle: read.settle };
+  }
+}
+
+// Playbot's new mode/from launch schema is documented only as the quick
+// strategy's single-root provisioning, so a workspace it creates for a
+// multi-root project is confirmed to cover every project root exactly once
+// rather than trusted on name alone - independent of Playbot version, and not
+// gated to the 0.117.0-specific engine-readiness check.
+async function verifyCreatedWorkspaceRootCoverage(projectId, workspaceId, timeoutMs, { threadId } = {}) {
+  const read = await createdWorkspaceRootsRead(projectId, workspaceId, timeoutMs);
+  const createdDescription = threadId
+    ? `Workspace ${workspaceId} and chat ${threadId} were created`
+    : `Workspace ${workspaceId} was created`;
+  if (read.error) {
+    throw new Error(`${createdDescription}, but its project root coverage could not be confirmed: ${read.error}`);
+  }
+  if (!read.coverage.complete) {
+    throw new Error(`${createdDescription}, but its project root coverage is incomplete: ${read.coverage.message}`);
   }
 }
 
@@ -3820,15 +3854,13 @@ function createThreadId() {
   return `chat-lane-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
 }
 
-// Playbot 0.94.0 removed threads:openThread and workspace:create and folded
-// both into threads:launch. The probe payload below is rejected by every
-// known Playbot schema before any handler code can run, so classifying the
-// rejection detects which API this Playbot exposes without side effects:
-// a missing-handler rejection means the pre-0.94 channels, any other
-// rejection means threads:launch, and an accepted probe is an explicit
-// error rather than a guess.
-const CHAT_API_PROBE = { destination: { kind: "fm-capability-probe" } };
+// This incomplete new-workspace launch is rejected by both known launch
+// schemas before a handler can create anything. Its validation error names
+// either the old required strategy or the newer required mode. A missing
+// handler identifies the pre-0.94 channels; every unknown response refuses.
+const CHAT_API_PROBE = { destination: { kind: "new-workspace", workspace: {} } };
 let detectedChatApi = null;
+let detectedWorkspaceLaunchSchema = null;
 
 async function chatCreationApi() {
   if (detectedChatApi) return detectedChatApi;
@@ -3838,7 +3870,29 @@ async function chatCreationApi() {
   if (!outcome || outcome.accepted !== false) {
     throw new Error("Playbot accepted the threads:launch capability probe; refusing to guess the chat-creation API");
   }
-  detectedChatApi = /No handler registered/i.test(outcome.message ?? "") ? "openThread" : "launch";
+  const message = outcome.message ?? "";
+  let issues = null;
+  try {
+    issues = JSON.parse(message.slice(message.indexOf("[")));
+  } catch {
+    // Older Playbot builds may format validation errors as plain text.
+  }
+  const workspaceIssue = (field) => Array.isArray(issues) && issues.some((issue) =>
+    JSON.stringify(issue?.path) === JSON.stringify(["destination", "workspace", field]));
+  const modeIssue = Array.isArray(issues) && issues.some((issue) =>
+    JSON.stringify(issue?.path) === JSON.stringify(["destination", "workspace", "mode"])
+    && JSON.stringify(issue?.values) === JSON.stringify(["open", "from", "copy"]));
+  if (/No handler registered/i.test(message)) {
+    detectedChatApi = "openThread";
+  } else if (modeIssue || (/\bmode\b/i.test(message) && /open.*from.*copy/i.test(message) && !workspaceIssue("strategy"))) {
+    detectedChatApi = "launch";
+    detectedWorkspaceLaunchSchema = "mode";
+  } else if ((workspaceIssue("strategy") || /\bstrategy\b/i.test(message)) && /\bproject\b/i.test(message) && !workspaceIssue("mode")) {
+    detectedChatApi = "launch";
+    detectedWorkspaceLaunchSchema = "strategy";
+  } else {
+    throw new Error(`Playbot rejected the threads:launch capability probe with an unknown workspace schema; refusing to guess: ${message}`);
+  }
   return detectedChatApi;
 }
 
@@ -3849,6 +3903,21 @@ function workspaceCreatePayload(projectId, { name, baseBranch, branch } = {}) {
   if (trimmed(branch)) payload.branch = trimmed(branch);
   if (trimmed(baseBranch)) payload.baseBranch = trimmed(baseBranch);
   return payload;
+}
+
+function workspaceLaunchPayload(projectId, options = {}) {
+  if (detectedWorkspaceLaunchSchema === "strategy") return workspaceCreatePayload(projectId, options);
+  if (detectedWorkspaceLaunchSchema !== "mode") throw new Error("Playbot workspace launch schema is unknown; refusing to guess");
+  const trimmed = (value) => String(value ?? "").trim();
+  if (trimmed(options.name)) {
+    throw new Error("This Playbot threads:launch schema cannot carry a workspace name; omit name and use Playbot's generated name");
+  }
+  return {
+    projectId,
+    mode: "from",
+    ...(trimmed(options.baseBranch) ? { baseRef: trimmed(options.baseBranch) } : {}),
+    ...(trimmed(options.branch) ? { branch: trimmed(options.branch) } : {}),
+  };
 }
 
 function requestedWorkerProfile(model, reasoningEffort) {
@@ -3897,15 +3966,23 @@ function readBackWorkspace(project, workspaceId) {
   return fresh;
 }
 
-async function createWorkspace(project, options = {}) {
+// verifyRootCoverage is false only when a caller (dispatch) immediately
+// performs its own, richer post-creation settle-and-refuse check; every other
+// caller needs this function to be the one place that confirms coverage.
+async function createWorkspace(project, options = {}, verifyRootCoverage = true) {
+  // Resolved before anything is created, so a malformed settle budget is a
+  // configuration error up front instead of a refusal that has already left a
+  // workspace behind.
+  const settleTimeoutMs = verifyRootCoverage ? workspaceRootsSettleTimeoutMs() : null;
   if (await chatCreationApi() === "openThread") {
     const created = await playbotInvoke("workspace:create", workspaceCreatePayload(project.id, options));
     const workspaceId = created?.id;
     if (!workspaceId) throw new Error("Playbot did not return the created workspace id");
+    if (verifyRootCoverage) await verifyCreatedWorkspaceRootCoverage(project.id, workspaceId, settleTimeoutMs);
     return readBackWorkspace(project, workspaceId);
   }
   const launch = await playbotInvoke("threads:launch", {
-    destination: { kind: "new-workspace", workspace: workspaceCreatePayload(project.id, options) },
+    destination: { kind: "new-workspace", workspace: workspaceLaunchPayload(project.id, options) },
     thread: { title: "Firstmate workspace setup", approvalMode: "default", planMode: false },
     activate: false,
   });
@@ -3917,6 +3994,7 @@ async function createWorkspace(project, options = {}) {
   } catch (error) {
     throw new Error(`Workspace ${workspaceId} was created, but archiving its setup chat ${placeholderThreadId} failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  if (verifyRootCoverage) await verifyCreatedWorkspaceRootCoverage(project.id, workspaceId, settleTimeoutMs);
   return readBackWorkspace(project, workspaceId);
 }
 
@@ -3932,15 +4010,23 @@ function assertNewWorkspaceRequest(name, args) {
   return true;
 }
 
-async function createChat({ project, workspace, newWorkspace, title, approvalMode = "full-access", planMode = false, model, reasoningEffort, workerProfile = requestedWorkerProfile(model, reasoningEffort) }) {
+// verifyNewWorkspaceCoverage is false only when a caller (dispatch) immediately
+// performs its own, richer post-creation settle-and-refuse check on the
+// workspace this call creates; every other caller needs this function to be
+// the one place that confirms coverage.
+async function createChat({ project, workspace, newWorkspace, title, approvalMode = "full-access", planMode = false, model, reasoningEffort, workerProfile = requestedWorkerProfile(model, reasoningEffort), verifyNewWorkspaceCoverage = true }) {
   const projects = topology();
   const targetProject = resolveProject(project, projects);
   const cleanTitle = String(title ?? "").trim();
   if (!cleanTitle) throw new Error("title must not be blank; Playbot requires a non-empty chat title");
   if (await chatCreationApi() === "launch") {
+    // Resolved before anything is created, so a malformed settle budget is a
+    // configuration error up front instead of a refusal that has already left
+    // a workspace and chat behind.
+    const settleTimeoutMs = newWorkspace === undefined || !verifyNewWorkspaceCoverage ? null : workspaceRootsSettleTimeoutMs();
     const destination = newWorkspace === undefined
       ? { kind: "existing-workspace", workspaceId: resolveWorkspace(targetProject, workspace).id }
-      : { kind: "new-workspace", workspace: workspaceCreatePayload(targetProject.id, newWorkspace) };
+      : { kind: "new-workspace", workspace: workspaceLaunchPayload(targetProject.id, newWorkspace) };
     const launch = await playbotInvoke("threads:launch", {
       destination,
       thread: { title: cleanTitle, approvalMode, planMode: Boolean(planMode), ...(workerProfile ?? {}) },
@@ -3949,6 +4035,9 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
     const threadId = launch?.thread?.id;
     const workspaceId = launch?.workspace?.id ?? destination.workspaceId;
     if (!threadId || !workspaceId) throw new Error("Playbot did not return the launched chat and workspace ids");
+    if (newWorkspace !== undefined && verifyNewWorkspaceCoverage) {
+      await verifyCreatedWorkspaceRootCoverage(targetProject.id, workspaceId, settleTimeoutMs, { threadId });
+    }
     const created = publicThread(resolveThread(targetProject.id, workspaceId, threadId));
     if (workerProfile && (created.model !== workerProfile.executionModel || created.reasoningEffort !== workerProfile.executionReasoningLevel)) {
       const where = newWorkspace === undefined ? `Chat ${created.id} was created in workspace ${created.workspaceId}` : `Workspace ${created.workspaceId} and chat ${created.id} were created`;
@@ -3961,7 +4050,7 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
   }
   const targetWorkspace = newWorkspace === undefined
     ? resolveWorkspace(targetProject, workspace)
-    : await createWorkspace(targetProject, newWorkspace);
+    : await createWorkspace(targetProject, newWorkspace, verifyNewWorkspaceCoverage);
   const threadId = createThreadId();
   await playbotInvoke("threads:openThread", {
     id: threadId,
@@ -6138,7 +6227,7 @@ function toolDefinitions() {
   const boolean = (description, defaultValue) => ({ type: "boolean", description, default: defaultValue });
   const newWorkspace = () => ({
     ...object({
-      name: string("Optional workspace name; Playbot shows a generated name when omitted"),
+      name: string("Optional workspace name on older Playbot schemas; current mode/from launches cannot carry a name and refuse this option"),
       baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"),
       branch: string("Optional name for the new working branch; generated when omitted"),
     }),
@@ -6172,7 +6261,7 @@ function toolDefinitions() {
     {
       name: "create_workspace",
       description: "Create a new Playbot workspace in one project through Playbot's own IPC, optionally from a chosen base branch. On Playbot 0.94.0 and newer this launches and immediately archives one setup chat, because workspace creation is folded into chat launch, and does not change the selected workspace; on 0.93.x Playbot marks the workspace selected within its project.",
-      inputSchema: object({ project: string("Project id, root path, or unique project name"), name: string("Optional workspace name; Playbot shows a generated name when omitted"), baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"), branch: string("Optional name for the new working branch; generated when omitted") }, ["project"]),
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), name: string("Optional workspace name on older Playbot schemas; current mode/from launches cannot carry a name and refuse this option"), baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"), branch: string("Optional name for the new working branch; generated when omitted") }, ["project"]),
     },
     {
       name: "get_workspace_freshness",
@@ -6486,7 +6575,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const laneCapture = laneIdentityHome ? preflightTerminalLaneIdentity(requestedTaskId, worker) : null;
     const createdChat = !worker;
     if (!worker) {
-      const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, workerProfile });
+      const created = await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title || "Firstmate task", approvalMode: args.approvalMode || "full-access", planMode: args.planMode, workerProfile, verifyNewWorkspaceCoverage: !wantsNewWorkspace });
       worker = resolveThread(project.id, created.workspaceId, created.id);
     }
     let freshness = null;

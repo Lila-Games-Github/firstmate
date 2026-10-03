@@ -1363,7 +1363,8 @@ pass "fm-playbot-lanes: workspace root branches are visible in the global topolo
 # emulates workspace and thread creation against the fixture database.
 # The fixture serves the Playbot 0.94.0 surface (threads:launch) by default and
 # the pre-0.94 surface (workspace:create plus threads:openThread) when the
-# ipc-mode file contains "legacy", so both adapter paths are enforced.
+# ipc-mode file contains "legacy", and the mode/from launch surface when it
+# contains "mode".
 cat > "$FIXTURE_ROOT/fake-cdp.mjs" <<'NODE'
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -1429,6 +1430,11 @@ const deferredWriteFailureFile = path.join(process.env.FIXTURE_ROOT, 'deferred-w
 const workspaceDeleteFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-fail-after');
 const workspaceDeleteRootRowFailAfterFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-root-row-fail-after');
 const workspaceDeleteSucceedsWithoutRemovalFile = path.join(process.env.FIXTURE_ROOT, 'workspace-delete-succeeds-without-removal');
+// Simulates a Playbot launch schema that only ever provisions one project
+// root regardless of how many the project has, the way the documented quick
+// strategy's single-root provisioning would if a caller mistook it for the
+// project strategy's every-root coverage.
+const createWorkspaceSingleRootFile = path.join(process.env.FIXTURE_ROOT, 'create-workspace-single-root');
 let createCounter = 0;
 let threadCounter = 0;
 let sendCounter = 0;
@@ -1542,7 +1548,11 @@ function scheduleDeferredWrite(mutate, delayMs, attemptsLeft = 20) {
 }
 
 function createWorkspaceRows(db, spec) {
-  if (spec.strategy !== 'project') throw new Error('fixture implements only the project strategy');
+  const mode = currentMode();
+  if (mode === 'mode') {
+    if (Object.keys(spec).some((key) => !['projectId', 'mode', 'baseRef', 'branch'].includes(key))) throw new Error('new workspace payload has unrecognized keys');
+    if (spec.mode !== 'from') throw new Error('new workspace payload requires mode from');
+  } else if (spec.strategy !== 'project') throw new Error('fixture implements only the project strategy');
   const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(spec.projectId);
   if (!project) throw new Error(`Unknown project: ${spec.projectId}`);
   createCounter += 1;
@@ -1551,10 +1561,11 @@ function createWorkspaceRows(db, spec) {
   const now = new Date().toISOString();
   db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
     .run(id, spec.projectId, spec.name ?? null, 'worktree', 0, 'active', now, now);
-  const roots = db.prepare(`
+  const allRoots = db.prepare(`
     SELECT pr.id AS root_id, r.path AS repo_path FROM project_roots pr
     JOIN repositories r ON r.id = pr.repository_id WHERE pr.project_id = ?
   `).all(spec.projectId);
+  const roots = readFileOr(createWorkspaceSingleRootFile, '') ? allRoots.slice(0, 1) : allRoots;
   const rows = [];
   for (const root of roots) {
     const worktreePath = path.join(root.repo_path, '.worktrees', branch);
@@ -1704,9 +1715,14 @@ async function electronInvoke(channel, payload) {
       }];
     }
     if (channel === 'threads:launch') {
-      if (mode !== 'modern') throw new Error("No handler registered for 'threads:launch'");
-      if (readFileOr(probeAcceptedFile, '') && (payload.destination ?? {}).kind === 'fm-capability-probe') {
-        return { thread: { id: 'thread-probe-accepted' } };
+      if (mode !== 'modern' && mode !== 'mode' && mode !== 'unknown') throw new Error("No handler registered for 'threads:launch'");
+      if (payload.destination?.kind === 'new-workspace' && Object.keys(payload.destination.workspace ?? {}).length === 0) {
+        if (readFileOr(probeAcceptedFile, '')) return { thread: { id: 'thread-probe-accepted' } };
+        if (mode === 'mode') throw new Error(JSON.stringify([
+          { code: 'invalid_value', values: ['open', 'from', 'copy'], path: ['destination', 'workspace', 'mode'], message: 'Invalid option: expected one of "open"|"from"|"copy"' },
+        ]));
+        if (mode === 'modern') throw new Error('destination.workspace.strategy Invalid option: expected project');
+        throw new Error('unexpected workspace validation shape');
       }
       return launchThread(db, payload);
     }
@@ -2025,7 +2041,7 @@ OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || 
 const fs = require('node:fs');
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch,threads:archiveThread') process.exit(1);
-if (calls[0].payload.destination.kind !== 'fm-capability-probe') process.exit(1);
+if (calls[0].payload.destination.kind !== 'new-workspace' || Object.keys(calls[0].payload.destination.workspace).length !== 0) process.exit(1);
 const payload = calls[1].payload;
 if (payload.activate !== false || payload.destination.kind !== 'new-workspace') process.exit(1);
 const spec = payload.destination.workspace;
@@ -8634,6 +8650,145 @@ NODE
 printf '0.95.0' > "$FIXTURE_ROOT/app-version"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 pass "fm-playbot-lanes: new-workspace engine dispatch refuses before creating anything"
+
+# Playbot's current launch schema requires mode from and baseRef, and has no
+# workspace name field. Probe it before a write, preserve the selected branches,
+# and refuse a name rather than silently dropping the caller's request.
+printf 'mode\n' > "$FIXTURE_ROOT/ipc-mode"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"baseBranch\":\"main\",\"branch\":\"fm-mode-workspace\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "mode-schema create_workspace did not launch and read back the requested branch"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch,threads:archiveThread') process.exit(1);
+const spec = calls[1].payload.destination.workspace;
+if (JSON.stringify(spec) !== JSON.stringify({ projectId: 'project-worker', mode: 'from', baseRef: 'main', branch: 'fm-mode-workspace' })) process.exit(1);
+const workspace = JSON.parse(process.env.OUT).result?.structuredContent?.workspace;
+if (workspace?.roots?.[0]?.branch !== 'fm-mode-workspace') process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"name\":\"unrepresentable\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "mode-schema launch silently discarded a requested workspace name"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.length !== 1 || calls[0].channel !== 'threads:launch') process.exit(1);
+if (!JSON.parse(process.env.OUT).error?.message.includes('cannot carry a workspace name')) process.exit(1);
+NODE
+pass "fm-playbot-lanes: current workspace mode schema preserves base and branch and refuses unsupported names"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"main\",\"branch\":\"fm-mode-chat\"},\"title\":\"Mode chat\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "mode-schema create_chat did not use the new workspace payload"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch') process.exit(1);
+if (JSON.stringify(calls[1].payload.destination.workspace) !== JSON.stringify({ projectId: 'project-worker', mode: 'from', baseRef: 'main', branch: 'fm-mode-chat' })) process.exit(1);
+const thread = JSON.parse(process.env.OUT).result?.structuredContent?.thread;
+if (!thread?.workspaceId || thread.title !== 'Mode chat') process.exit(1);
+NODE
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"main\",\"branch\":\"fm-mode-dispatch\"},\"title\":\"Mode task\",\"message\":\"Do mode task\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "mode-schema dispatch did not create, read back, and send"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.map(call => call.channel).join(',') !== 'threads:launch,threads:launch,threads:send') process.exit(1);
+if (JSON.stringify(calls[1].payload.destination.workspace) !== JSON.stringify({ projectId: 'project-worker', mode: 'from', baseRef: 'main', branch: 'fm-mode-dispatch' })) process.exit(1);
+const result = JSON.parse(process.env.OUT).result?.structuredContent;
+if (result?.workspace?.roots?.[0]?.branch !== 'fm-mode-dispatch' || !result.thread?.id) process.exit(1);
+NODE
+pass "fm-playbot-lanes: current mode schema works for create_chat and dispatch newWorkspace"
+
+# Playbot's documented project strategy gives every project root a worktree;
+# the mode/from launch schema carries no strategy or root-count marker at all,
+# so a workspace it creates for a multi-root project is confirmed to cover
+# every project root exactly once rather than trusted on name alone - and a
+# schema that silently provisioned only one root is refused by the created
+# workspace's own id instead of being handed back as if it were complete.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)')
+  .run('root-mode-multi-two', 'project-worker', 'repo-partial-two', 1);
+db.close();
+NODE
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"baseBranch\":\"main\",\"branch\":\"fm-mode-multi\"}}}")
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "mode-schema create_workspace did not cover every root of a multi-root project"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const workspace = JSON.parse(process.env.OUT).result?.structuredContent?.workspace;
+if (!workspace) process.exit(1);
+const rootIds = workspace.roots.map((root) => root.projectRootId).sort();
+if (JSON.stringify(rootIds) !== JSON.stringify(['root-mode-multi-two', 'root-worker'])) process.exit(1);
+if (!workspace.roots.every((root) => root.branch === 'fm-mode-multi')) process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const count = db.prepare('SELECT COUNT(*) AS n FROM workspace_roots WHERE workspace_id = ?').get(workspace.id).n;
+db.close();
+if (count !== 2) process.exit(1);
+NODE
+pass "fm-playbot-lanes: mode-schema create_workspace covers every root of a multi-root project"
+
+printf 'true\n' > "$FIXTURE_ROOT/create-workspace-single-root"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=900 rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json,\"baseBranch\":\"main\",\"branch\":\"fm-mode-partial\"}}}")
+rm -f "$FIXTURE_ROOT/create-workspace-single-root"
+OUT="$out" node --no-warnings <<'NODE' || fail "mode-schema create_workspace did not refuse a workspace that silently dropped a project root"
+const value = JSON.parse(process.env.OUT);
+const message = value.error?.message ?? '';
+if (!/^Workspace (\S+) was created, but its project root coverage is incomplete: workspace \1 root coverage mismatch: missing project root id\(s\): (root-worker|root-mode-multi-two)\.?$/.test(message)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: mode-schema create_workspace refuses a workspace that silently dropped a project root"
+
+# create_chat's own 'launch' branch builds a new workspace directly, without
+# going through createWorkspace() at all, so it needs this same confirmation
+# at its own call site rather than inheriting create_workspace's.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"main\",\"branch\":\"fm-mode-chat-multi\"},\"title\":\"Mode chat multi\"}}}")
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "mode-schema create_chat did not cover every root of a multi-root project"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const thread = JSON.parse(process.env.OUT).result?.structuredContent?.thread;
+if (!thread?.workspaceId) process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const rows = db.prepare('SELECT project_root_id FROM workspace_roots WHERE workspace_id = ?').all(thread.workspaceId);
+db.close();
+const ids = rows.map((row) => row.project_root_id).sort();
+if (JSON.stringify(ids) !== JSON.stringify(['root-mode-multi-two', 'root-worker'])) process.exit(1);
+NODE
+pass "fm-playbot-lanes: mode-schema create_chat covers every root of a multi-root project"
+
+printf 'true\n' > "$FIXTURE_ROOT/create-workspace-single-root"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=900 rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"main\",\"branch\":\"fm-mode-chat-partial\"},\"title\":\"Mode chat partial\"}}}")
+rm -f "$FIXTURE_ROOT/create-workspace-single-root"
+OUT="$out" node --no-warnings <<'NODE' || fail "mode-schema create_chat did not refuse a workspace that silently dropped a project root"
+const value = JSON.parse(process.env.OUT);
+const message = value.error?.message ?? '';
+if (!/^Workspace (\S+) and chat (\S+) were created, but its project root coverage is incomplete: workspace \1 root coverage mismatch: missing project root id\(s\): (root-worker|root-mode-multi-two)\.?$/.test(message)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: mode-schema create_chat refuses a workspace that silently dropped a project root"
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare('DELETE FROM project_roots WHERE id = ?').run('root-mode-multi-two');
+db.close();
+NODE
+
+printf 'unknown\n' > "$FIXTURE_ROOT/ipc-mode"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_workspace\",\"arguments\":{\"project\":$worker_json}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "unknown workspace schema did not refuse before creation"
+const fs = require('node:fs');
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+if (calls.length !== 1 || calls[0].channel !== 'threads:launch') process.exit(1);
+if (!JSON.parse(process.env.OUT).error?.message.includes('unknown workspace schema; refusing to guess')) process.exit(1);
+NODE
+printf 'modern\n' > "$FIXTURE_ROOT/ipc-mode"
+pass "fm-playbot-lanes: unknown workspace launch schemas refuse without creating anything"
 
 # The shared node resolver must name what it rejected.
 #

@@ -66,6 +66,9 @@ When present, the workspace and the chat are created together in one launch on 0
 `newWorkspace` is mutually exclusive with `workspace`, and `dispatch` additionally rejects combining it with `thread`, because a just-created workspace has no existing chats.
 When `newWorkspace` is absent, existing workspace selection behavior is unchanged.
 
+`create_workspace`, and `create_chat`'s own `newWorkspace` launch, each confirm every project root is covered exactly once before returning, the same incomplete-root-coverage shape `dispatch` already re-reads under Lane lifecycle below.
+Incomplete coverage refuses by name, naming the created workspace and, when `create_chat` created one, the created chat, rather than returning a workspace that silently covers fewer project roots than it has.
+
 ### Worker model profiles
 
 `create_chat` and `dispatch` accept optional `model` and `reasoningEffort` fields when they create a chat.

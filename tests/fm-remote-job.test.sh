@@ -453,7 +453,11 @@ wait "$OTHER_PID" 2>/dev/null || true
 OTHER_PID=
 pass "stale ownership is reclaimed without signaling a reused pid"
 
-FM_REMOTE_JOB_TIMEOUT=1
+# 1s (~2s window with the worker's +1 grace) was too tight on a loaded CI
+# runner for the deadline-polling loop to observe and signal in time
+# (portable serial shard 7); 3s matches the window used elsewhere in this
+# file for the same kill-while-running assertion.
+FM_REMOTE_JOB_TIMEOUT=3
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
