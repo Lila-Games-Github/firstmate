@@ -8741,6 +8741,35 @@ if (!/^Workspace (\S+) was created, but its project root coverage is incomplete:
 NODE
 pass "fm-playbot-lanes: mode-schema create_workspace refuses a workspace that silently dropped a project root"
 
+# create_chat's own 'launch' branch builds a new workspace directly, without
+# going through createWorkspace() at all, so it needs this same confirmation
+# at its own call site rather than inheriting create_workspace's.
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"main\",\"branch\":\"fm-mode-chat-multi\"},\"title\":\"Mode chat multi\"}}}")
+OUT="$out" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "mode-schema create_chat did not cover every root of a multi-root project"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const thread = JSON.parse(process.env.OUT).result?.structuredContent?.thread;
+if (!thread?.workspaceId) process.exit(1);
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const rows = db.prepare('SELECT project_root_id FROM workspace_roots WHERE workspace_id = ?').all(thread.workspaceId);
+db.close();
+const ids = rows.map((row) => row.project_root_id).sort();
+if (JSON.stringify(ids) !== JSON.stringify(['root-mode-multi-two', 'root-worker'])) process.exit(1);
+NODE
+pass "fm-playbot-lanes: mode-schema create_chat covers every root of a multi-root project"
+
+printf 'true\n' > "$FIXTURE_ROOT/create-workspace-single-root"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS=900 rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"create_chat\",\"arguments\":{\"project\":$worker_json,\"newWorkspace\":{\"baseBranch\":\"main\",\"branch\":\"fm-mode-chat-partial\"},\"title\":\"Mode chat partial\"}}}")
+rm -f "$FIXTURE_ROOT/create-workspace-single-root"
+OUT="$out" node --no-warnings <<'NODE' || fail "mode-schema create_chat did not refuse a workspace that silently dropped a project root"
+const value = JSON.parse(process.env.OUT);
+const message = value.error?.message ?? '';
+if (!/^Workspace (\S+) and chat (\S+) were created, but its project root coverage is incomplete: workspace \1 root coverage mismatch: missing project root id\(s\): (root-worker|root-mode-multi-two)\.?$/.test(message)) process.exit(1);
+NODE
+pass "fm-playbot-lanes: mode-schema create_chat refuses a workspace that silently dropped a project root"
+
 FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
