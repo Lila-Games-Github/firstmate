@@ -1,0 +1,533 @@
+
+=== 1. Baseline: Playbot 0.117.0, native Godot addon byte-identical ===
+{
+  "app": {
+    "version": "0.117.0",
+    "verifiedVersions": "0.117.0 and 0.124.0"
+  },
+  "bundle": {
+    "resources": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources",
+    "appVersion": "0.117.0",
+    "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+    "version": "0.7.20",
+    "confirmed": true
+  },
+  "workspaceId": "ws",
+  "observedAt": "2026-10-05T11:31:37.280Z",
+  "verdict": "ready",
+  "ready": true,
+  "projects": [
+    {
+      "storedPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "normalizedProjectPath": null,
+      "engineKind": "godot",
+      "addon": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/game/addons/playbot",
+        "version": "0.7.20",
+        "byteIdentical": true,
+        "missingFiles": [],
+        "differingFiles": [],
+        "unreadableFiles": []
+      },
+      "selectedExecutable": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+        "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+        "source": "existing-headless-launch-log",
+        "kind": "native-binary"
+      },
+      "session": {
+        "id": "session",
+        "type": "headless",
+        "status": "idle-edit",
+        "lifecycleStatus": "connected",
+        "pluginStatus": "up_to_date",
+        "pluginVersion": "0.7.20",
+        "startupActivity": null,
+        "statusMessage": null,
+        "failure": null
+      },
+      "verdict": "ready",
+      "reasons": []
+    }
+  ],
+  "reasons": [],
+  "errors": []
+}
+
+=== 2. get_worktree_root before canonicalization (home-dir symlink alias, e.g. /home vs /var/home) ===
+{
+  "before": {
+    "defaultPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/worktree-alias",
+    "configuredPath": null,
+    "effectivePath": "/tmp/manual-engine-readiness-transcript.qPrjkp/worktree-alias",
+    "usesDefault": true
+  }
+}
+
+=== 3. canonicalize_worktree_root: future workspaces will be created under the canonical spelling ===
+{
+  "before": {
+    "defaultPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/worktree-alias",
+    "configuredPath": null,
+    "effectivePath": "/tmp/manual-engine-readiness-transcript.qPrjkp/worktree-alias",
+    "usesDefault": true
+  },
+  "after": {
+    "defaultPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/worktree-alias",
+    "configuredPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/worktrees",
+    "effectivePath": "/tmp/manual-engine-readiness-transcript.qPrjkp/worktrees",
+    "usesDefault": false
+  },
+  "changed": true
+}
+
+=== 4. Upgrading observed Playbot to 0.124.0 (previously unverified/unconfirmed) still reads ready ===
+{
+  "app": {
+    "version": "0.124.0",
+    "verifiedVersions": "0.117.0 and 0.124.0"
+  },
+  "bundle": {
+    "resources": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources",
+    "appVersion": "0.124.0",
+    "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+    "version": "0.7.20",
+    "confirmed": true
+  },
+  "workspaceId": "ws",
+  "observedAt": "2026-10-05T11:31:37.610Z",
+  "verdict": "ready",
+  "ready": true,
+  "projects": [
+    {
+      "storedPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "normalizedProjectPath": null,
+      "engineKind": "godot",
+      "addon": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/game/addons/playbot",
+        "version": "0.7.20",
+        "byteIdentical": true,
+        "missingFiles": [],
+        "differingFiles": [],
+        "unreadableFiles": []
+      },
+      "selectedExecutable": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+        "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+        "source": "existing-headless-launch-log",
+        "kind": "native-binary"
+      },
+      "session": {
+        "id": "session",
+        "type": "headless",
+        "status": "idle-edit",
+        "lifecycleStatus": "connected",
+        "pluginStatus": "up_to_date",
+        "pluginVersion": "0.7.20",
+        "startupActivity": null,
+        "statusMessage": null,
+        "failure": null
+      },
+      "verdict": "ready",
+      "reasons": []
+    }
+  ],
+  "reasons": [],
+  "errors": []
+}
+
+=== 5. Workspace addon missing its native file (matches the reported "addon must match bundle exactly" failure) ===
+{
+  "app": {
+    "version": "0.124.0",
+    "verifiedVersions": "0.117.0 and 0.124.0"
+  },
+  "bundle": {
+    "resources": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources",
+    "appVersion": "0.124.0",
+    "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+    "version": "0.7.20",
+    "confirmed": true
+  },
+  "workspaceId": "ws",
+  "observedAt": "2026-10-05T11:31:37.730Z",
+  "verdict": "missing-addon-files",
+  "ready": false,
+  "projects": [
+    {
+      "storedPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "normalizedProjectPath": null,
+      "engineKind": "godot",
+      "addon": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/game/addons/playbot",
+        "version": "0.7.20",
+        "byteIdentical": false,
+        "missingFiles": [
+          "native/library.so"
+        ],
+        "differingFiles": [],
+        "unreadableFiles": []
+      },
+      "selectedExecutable": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+        "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+        "source": "existing-headless-launch-log",
+        "kind": "native-binary"
+      },
+      "session": {
+        "id": "session",
+        "type": "headless",
+        "status": "idle-edit",
+        "lifecycleStatus": "connected",
+        "pluginStatus": "up_to_date",
+        "pluginVersion": "0.7.20",
+        "startupActivity": null,
+        "statusMessage": null,
+        "failure": null
+      },
+      "verdict": "missing-addon-files",
+      "reasons": [
+        {
+          "verdict": "missing-addon-files",
+          "code": "missing-addon-files",
+          "message": "Required bundled addon files are missing."
+        }
+      ]
+    }
+  ],
+  "reasons": [
+    {
+      "verdict": "missing-addon-files",
+      "code": "missing-addon-files",
+      "message": "Required bundled addon files are missing."
+    }
+  ],
+  "errors": []
+}
+
+=== 6. prepare_engine_workspace installs the missing bundled native file and re-verifies byte identity ===
+{
+  "before": {
+    "app": {
+      "version": "0.124.0",
+      "verifiedVersions": "0.117.0 and 0.124.0"
+    },
+    "bundle": {
+      "resources": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources",
+      "appVersion": "0.124.0",
+      "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+      "version": "0.7.20",
+      "confirmed": true
+    },
+    "workspaceId": "ws",
+    "observedAt": "2026-10-05T11:31:37.847Z",
+    "verdict": "missing-addon-files",
+    "ready": false,
+    "projects": [
+      {
+        "storedPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+        "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+        "normalizedProjectPath": null,
+        "engineKind": "godot",
+        "addon": {
+          "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/game/addons/playbot",
+          "version": "0.7.20",
+          "byteIdentical": false,
+          "missingFiles": [
+            "native/library.so"
+          ],
+          "differingFiles": [],
+          "unreadableFiles": []
+        },
+        "selectedExecutable": {
+          "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+          "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+          "source": "existing-headless-launch-log",
+          "kind": "native-binary"
+        },
+        "session": {
+          "id": "session",
+          "type": "headless",
+          "status": "idle-edit",
+          "lifecycleStatus": "connected",
+          "pluginStatus": "up_to_date",
+          "pluginVersion": "0.7.20",
+          "startupActivity": null,
+          "statusMessage": null,
+          "failure": null
+        },
+        "verdict": "missing-addon-files",
+        "reasons": [
+          {
+            "verdict": "missing-addon-files",
+            "code": "missing-addon-files",
+            "message": "Required bundled addon files are missing."
+          }
+        ]
+      }
+    ],
+    "reasons": [
+      {
+        "verdict": "missing-addon-files",
+        "code": "missing-addon-files",
+        "message": "Required bundled addon files are missing."
+      }
+    ],
+    "errors": []
+  },
+  "installed": {
+    "success": true
+  },
+  "after": {
+    "app": {
+      "version": "0.124.0",
+      "verifiedVersions": "0.117.0 and 0.124.0"
+    },
+    "bundle": {
+      "resources": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources",
+      "appVersion": "0.124.0",
+      "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+      "version": "0.7.20",
+      "confirmed": true
+    },
+    "workspaceId": "ws",
+    "observedAt": "2026-10-05T11:31:37.869Z",
+    "verdict": "ready",
+    "ready": true,
+    "projects": [
+      {
+        "storedPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+        "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+        "normalizedProjectPath": null,
+        "engineKind": "godot",
+        "addon": {
+          "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/game/addons/playbot",
+          "version": "0.7.20",
+          "byteIdentical": true,
+          "missingFiles": [],
+          "differingFiles": [],
+          "unreadableFiles": []
+        },
+        "selectedExecutable": {
+          "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+          "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+          "source": "existing-headless-launch-log",
+          "kind": "native-binary"
+        },
+        "session": {
+          "id": "session",
+          "type": "headless",
+          "status": "idle-edit",
+          "lifecycleStatus": "connected",
+          "pluginStatus": "up_to_date",
+          "pluginVersion": "0.7.20",
+          "startupActivity": null,
+          "statusMessage": null,
+          "failure": null
+        },
+        "verdict": "ready",
+        "reasons": []
+      }
+    ],
+    "reasons": [],
+    "errors": []
+  },
+  "changed": true
+}
+
+=== 7. A project whose stored path is itself a symlink alias is now explicitly flagged (not silently "ready") ===
+{
+  "app": {
+    "version": "0.117.0",
+    "verifiedVersions": "0.117.0 and 0.124.0"
+  },
+  "bundle": {
+    "resources": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources",
+    "appVersion": "0.117.0",
+    "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+    "version": "0.7.20",
+    "confirmed": true
+  },
+  "workspaceId": "ws",
+  "observedAt": "2026-10-05T11:31:37.974Z",
+  "verdict": "identity-admission-risk",
+  "ready": false,
+  "projects": [
+    {
+      "storedPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/alias",
+      "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "normalizedProjectPath": null,
+      "engineKind": "godot",
+      "addon": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/alias/addons/playbot",
+        "version": "0.7.20",
+        "byteIdentical": true,
+        "missingFiles": [],
+        "differingFiles": [],
+        "unreadableFiles": []
+      },
+      "selectedExecutable": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+        "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot",
+        "source": "existing-headless-launch-log",
+        "kind": "native-binary"
+      },
+      "session": {
+        "id": "session",
+        "type": "headless",
+        "status": "idle-edit",
+        "lifecycleStatus": "connected",
+        "pluginStatus": "up_to_date",
+        "pluginVersion": "0.7.20",
+        "startupActivity": null,
+        "statusMessage": null,
+        "failure": null
+      },
+      "verdict": "identity-admission-risk",
+      "reasons": [
+        {
+          "verdict": "identity-admission-risk",
+          "code": "project-path-alias",
+          "message": "Stored and canonical project paths differ; Playbot can bind a different engine identity."
+        }
+      ]
+    }
+  ],
+  "reasons": [
+    {
+      "verdict": "identity-admission-risk",
+      "code": "project-path-alias",
+      "message": "Stored and canonical project paths differ; Playbot can bind a different engine identity."
+    }
+  ],
+  "errors": []
+}
+
+=== 8. Launch log expired (empty), but a live --headless process bound to this exact project is confirmed via /proc ===
+{
+  "app": {
+    "version": "0.117.0",
+    "verifiedVersions": "0.117.0 and 0.124.0"
+  },
+  "bundle": {
+    "resources": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources",
+    "appVersion": "0.117.0",
+    "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+    "version": "0.7.20",
+    "confirmed": true
+  },
+  "workspaceId": "ws",
+  "observedAt": "2026-10-05T11:31:38.091Z",
+  "verdict": "ready",
+  "ready": true,
+  "projects": [
+    {
+      "storedPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "normalizedProjectPath": null,
+      "engineKind": "godot",
+      "addon": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/game/addons/playbot",
+        "version": "0.7.20",
+        "byteIdentical": true,
+        "missingFiles": [],
+        "differingFiles": [],
+        "unreadableFiles": []
+      },
+      "selectedExecutable": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot-fixture",
+        "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/godot-fixture",
+        "source": "live-headless-process",
+        "kind": "native-binary"
+      },
+      "session": {
+        "id": "session",
+        "type": "headless",
+        "status": "idle-edit",
+        "lifecycleStatus": "connected",
+        "pluginStatus": "up_to_date",
+        "pluginVersion": "0.7.20",
+        "startupActivity": null,
+        "statusMessage": null,
+        "failure": null
+      },
+      "verdict": "ready",
+      "reasons": []
+    }
+  ],
+  "reasons": [],
+  "errors": []
+}
+
+=== 9. A PID that is not actually running this project as headless Godot is correctly NOT confirmed ===
+{
+  "app": {
+    "version": "0.117.0",
+    "verifiedVersions": "0.117.0 and 0.124.0"
+  },
+  "bundle": {
+    "resources": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources",
+    "appVersion": "0.117.0",
+    "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot",
+    "version": "0.7.20",
+    "confirmed": true
+  },
+  "workspaceId": "ws",
+  "observedAt": "2026-10-05T11:31:38.216Z",
+  "verdict": "unconfirmed",
+  "ready": false,
+  "projects": [
+    {
+      "storedPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "canonicalPath": "/tmp/manual-engine-readiness-transcript.qPrjkp/game",
+      "normalizedProjectPath": null,
+      "engineKind": "godot",
+      "addon": {
+        "path": "/tmp/manual-engine-readiness-transcript.qPrjkp/game/addons/playbot",
+        "version": "0.7.20",
+        "byteIdentical": true,
+        "missingFiles": [],
+        "differingFiles": [],
+        "unreadableFiles": []
+      },
+      "selectedExecutable": {
+        "path": null,
+        "canonicalPath": null,
+        "source": null,
+        "kind": "unconfirmed"
+      },
+      "session": {
+        "id": "session",
+        "type": "headless",
+        "status": "idle-edit",
+        "lifecycleStatus": "connected",
+        "pluginStatus": "up_to_date",
+        "pluginVersion": "0.7.20",
+        "startupActivity": null,
+        "statusMessage": null,
+        "failure": null
+      },
+      "verdict": "unconfirmed",
+      "reasons": [
+        {
+          "verdict": "unconfirmed",
+          "code": "executable-unconfirmed",
+          "message": "The selected executable and its launcher identity cannot be confirmed without starting a process."
+        }
+      ]
+    }
+  ],
+  "reasons": [
+    {
+      "verdict": "unconfirmed",
+      "code": "executable-unconfirmed",
+      "message": "The selected executable and its launcher identity cannot be confirmed without starting a process."
+    }
+  ],
+  "errors": []
+}
+
+All manual verification steps completed successfully.
