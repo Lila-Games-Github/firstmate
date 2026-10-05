@@ -2446,7 +2446,7 @@ if (!value) process.exit(1);
 if (!value.freshness?.current || value.freshness.roots[0].commitsBehind !== 0) process.exit(1);
 const settle = value.workspaceSettle;
 if (!settle || settle.reads < 2 || settle.outcome !== 'registered') process.exit(1);
-if (!(settle.waitedMs > 0) || settle.timeoutMs !== 5000) process.exit(1);
+if (!(settle.waitedMs > 0) || settle.timeoutMs !== 30000) process.exit(1);
 if (!settle.note.includes('re-read')) process.exit(1);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 const sent = calls.filter(call => call.channel === 'threads:send');

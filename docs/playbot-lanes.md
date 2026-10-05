@@ -110,7 +110,7 @@ The parked-chat detection remains a persisted, non-resuming read, while freshnes
 
 Registered clone paths are resolved by [`fm-project-mode.sh --path`](../bin/fm-project-mode.sh), whose header owns external-path and legacy registry syntax.
 
-`list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
+`list_retirable_workspaces` inspects active workspaces in one exact project against a required `landingBranch`, every active workspace by default or one exact workspace when an optional `workspace` selector narrows it.
 It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
 An optional `registryProject` names the project in the controller home's firstmate registry, resolved through `bin/fm-project-mode.sh`; only a registered `local-only` posture whose main clone is itself a Git worktree top level that some selected Playbot root resolves to, including a root in a subdirectory of that clone, makes that clone's local `refs/heads/<landingBranch>` the landing evidence instead, because such a project lands without pushing and its remote branch lags.
 The result's `landingEvidence` and each root's `landing.evidence` say which evidence was used, and an explicit `refs/remotes/<remote>/<branch>` name always selects remote evidence.
