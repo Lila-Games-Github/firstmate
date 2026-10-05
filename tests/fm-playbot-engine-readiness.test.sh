@@ -74,7 +74,22 @@ server.on('upgrade',(req,socket) => {
         const value = message.method==='Runtime.evaluate' ? await vm.runInNewContext(message.params.expression,{window:{electronAPI:{invoke: async(channel,payload)=>{
           fs.appendFileSync(path.join(root,'calls'),JSON.stringify({channel,payload})+'\n');
           if(channel==='app:metadata')return {version:fs.existsSync(path.join(root,'version'))?fs.readFileSync(path.join(root,'version'),'utf8'):'0.117.0'};
+          if(channel==='worktreeSettings:getRoot') {
+            const defaultPath=path.join(root,'worktree-alias');
+            const configuredPath=fs.existsSync(path.join(root,'worktree-root'))?fs.readFileSync(path.join(root,'worktree-root'),'utf8'):null;
+            return {defaultPath,configuredPath,effectivePath:configuredPath??defaultPath,usesDefault:configuredPath===null};
+          }
+          if(channel==='worktreeSettings:setRoot') {
+            fs.writeFileSync(path.join(root,'worktree-root'),payload.path);
+            return {defaultPath:path.join(root,'worktree-alias'),configuredPath:payload.path,effectivePath:payload.path,usesDefault:false};
+          }
           if(channel==='threads:send')return {pendingMessages:[],outboundMessages:[]};
+          if(channel==='engine:activateProject')return;
+          if(channel==='engine:installPlugin') {
+            const bundle=path.join(root,'resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot');
+            fs.cpSync(bundle,path.join(payload.workspacePath,'addons/playbot'),{recursive:true});
+            return {success:true};
+          }
           if(channel==='engine:listWorkspaceProjects') {
             if(fs.existsSync(path.join(root,'hang-engine-read'))) return new Promise(()=>{});
             const projects=JSON.parse(fs.readFileSync(path.join(root,'engine.json'),'utf8'));
@@ -109,7 +124,7 @@ for _ in $(seq 1 50); do
 done
 SCRIPT="$SCRIPT" node --no-warnings <<'NODE' || fail "engine diagnostic, dispatch, or addon preservation fixture failed"
 const fs=require('node:fs'), path=require('node:path'), assert=require('node:assert/strict');
-const {spawnSync}=require('node:child_process');
+const {spawn,spawnSync}=require('node:child_process');
 const root=process.env.FIXTURE_ROOT, game=path.join(root,'game'), bundle=path.join(root,'resources/app.asar.unpacked/electron/backend/godot-plugin/addons/playbot');
 let instance={id:'session',type:'headless',status:'idle-edit',lifecycleStatus:'connected',pluginStatus:'up_to_date',pluginVersion:'0.7.20',processLogs:[`[Headless] Godot path: ${root}/godot`],processErrors:[]};
 let snapshot={instances:[instance],routedInstanceId:'session',preferredInstanceType:'headless',connectionBlocked:false};
@@ -127,9 +142,23 @@ function expect(verdict,code) {
   return d;
 }
 let d=expect('ready'); assert.equal(d.projects[0].addon.byteIdentical,true);
+assert(!fs.existsSync(process.env.PLAYBOT_LANES_STATE_DIR),'read-only CLI created lane state');
+fs.mkdirSync(path.join(root,'worktrees')); fs.symlinkSync(path.join(root,'worktrees'),path.join(root,'worktree-alias'));
+const worktreeRoot=call('get_worktree_root'); assert.equal(worktreeRoot.before.usesDefault,true);
+assert(!fs.existsSync(process.env.PLAYBOT_LANES_STATE_DIR),'read-only root inspection created lane state');
+const canonicalized=call('canonicalize_worktree_root',{confirm:true});
+assert.equal(canonicalized.before.effectivePath,path.join(root,'worktree-alias'));
+assert.equal(canonicalized.after.effectivePath,path.join(root,'worktrees'));
+assert.equal(call('canonicalize_worktree_root',{confirm:true}).changed,false);
+fs.writeFileSync(path.join(root,'version'),'0.124.0'); fs.writeFileSync(path.join(root,'resources/app/package.json'),JSON.stringify({version:'0.124.0'}));
+stage(); assert.equal(call('get_engine_readiness').verdict,'ready');
+fs.rmSync(path.join(game,'addons/playbot/native/library.so'));
+const prepared=call('prepare_engine_workspace',{confirm:true});
+assert.equal(prepared.changed,true); assert.equal(prepared.after.projects[0].addon.byteIdentical,true);
+assert.equal(call('prepare_engine_workspace',{confirm:true}).changed,false);
+fs.rmSync(path.join(root,'version')); fs.writeFileSync(path.join(root,'resources/app/package.json'),JSON.stringify({version:'0.117.0'}));
 fs.writeFileSync(path.join(game,'addons/playbot/extra.gd'),'extra'); expect('ready');
 assert.equal(d.projects[0].selectedExecutable.path,path.join(root,'godot'));
-assert(!fs.existsSync(process.env.PLAYBOT_LANES_STATE_DIR),'read-only CLI created lane state');
 fs.writeFileSync(path.join(game,'addons/playbot/plugin.cfg'),'[plugin]\nversion="0.7.14"\n');
 expect('addon-drift','addon-drift');
 fs.copyFileSync(path.join(bundle,'plugin.cfg'),path.join(game,'addons/playbot/plugin.cfg'));
@@ -156,6 +185,24 @@ for(const extra of [{},{engineDependent:true},{engineDependent:'false'}]) {
 }
 snapshot.instances=[instance,instance]; snapshot.routedInstanceId='session'; expect('unconfirmed','session-unconfirmed');
 snapshot.instances=[instance]; instance.processLogs=[]; expect('unconfirmed','executable-unconfirmed');
+if(process.platform==='linux') {
+  const executable=path.join(root,'godot-fixture');
+  fs.copyFileSync(process.execPath,executable);
+  const child=spawn(executable,['-e','setTimeout(()=>{},30000)','--','--headless','--path',game],{stdio:'ignore'});
+  try {
+    let started=false;
+    for(let attempt=0;attempt<100;attempt++) {
+      try {started=fs.readFileSync(`/proc/${child.pid}/cmdline`,'utf8').includes('--headless');} catch {}
+      if(started)break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+    }
+    assert(started,'native fixture did not start');
+    instance.pid=child.pid;
+    const observed=expect('ready');
+    assert.equal(observed.projects[0].selectedExecutable.source,'live-headless-process');
+    instance.pid=process.pid; expect('unconfirmed','executable-unconfirmed');
+  } finally { child.kill(); delete instance.pid; }
+}
 instance.processLogs=[`[Headless] Godot path: ${root}/godot`];
 instance.pluginVersion='0.7.14'; expect('addon-drift','loaded-addon-drift'); instance.pluginVersion='0.7.20';
 instance.failure={code:'capture-failed',message:'Capture failed'}; expect('engine-failure','engine-failure'); delete instance.failure;
