@@ -108,18 +108,35 @@ function inspectAddon(projectPath, bundle) {
   return result;
 }
 
-function inspectExecutable(instance) {
+function liveHeadlessExecutable(instance, projectPath) {
+  if (process.platform !== "linux" || !Number.isSafeInteger(instance?.pid) || instance.pid <= 0) return null;
+  try {
+    const executable = fs.readlinkSync(`/proc/${instance.pid}/exe`);
+    if (!/^godot(?:[-_.]|$)/i.test(path.basename(executable))) return null;
+    const args = fs.readFileSync(`/proc/${instance.pid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
+    if (!args.includes("--headless")) return null;
+    const pathIndex = args.indexOf("--path");
+    const launchedPath = pathIndex >= 0 ? args[pathIndex + 1] : args.find((arg) => arg.startsWith("--path="))?.slice(7);
+    if (!launchedPath || fs.realpathSync.native(launchedPath) !== fs.realpathSync.native(projectPath)) return null;
+    return executable;
+  } catch { return null; }
+}
+
+function inspectExecutable(instance, projectPath) {
   const result = { path: null, canonicalPath: null, source: null, kind: "unconfirmed" };
   // A configured editor or PATH candidate is not a selection: Playbot checks
-  // executable version compatibility before choosing it. Only its actual launch
-  // log proves what this existing headless session selected; never run --version.
-  if (instance?.type !== "headless" || !Array.isArray(instance.processLogs)) return result;
-  const paths = instance.processLogs.filter((line) => typeof line === "string" && line.startsWith("[Headless] Godot path: "))
+  // executable version compatibility before choosing it. Use the existing
+  // headless launch log or a live process bound to this exact project; never
+  // run --version. The bounded launch log may be gone after a long import.
+  if (instance?.type !== "headless") return result;
+  const paths = (Array.isArray(instance.processLogs) ? instance.processLogs : [])
+    .filter((line) => typeof line === "string" && line.startsWith("[Headless] Godot path: "))
     .map((line) => line.slice("[Headless] Godot path: ".length));
-  const selected = paths.at(-1);
+  const observedProcess = liveHeadlessExecutable(instance, projectPath);
+  const selected = observedProcess ?? paths.at(-1);
   if (!selected || !path.isAbsolute(selected)) return result;
   result.path = selected;
-  result.source = "existing-headless-launch-log";
+  result.source = observedProcess ? "live-headless-process" : "existing-headless-launch-log";
   try {
     result.canonicalPath = fs.realpathSync.native(selected);
     if (!fs.statSync(selected).isFile()) throw new Error("selected executable is not a regular file");
@@ -173,7 +190,7 @@ export function inspectEngineProject(project, bundle) {
     }
     if (!["idle-edit", "idle-play", "busy"].includes(instance.status) || instance.type !== "headless" || instance.lifecycleStatus !== "connected" || snapshot.preferredInstanceType !== "headless" || instance.pluginStatus !== "up_to_date" || instance.pluginVersion !== bundle.version) add("unconfirmed", "session-unconfirmed", "A connected session with the bundled loaded addon is not confirmed.");
   }
-  const selectedExecutable = inspectExecutable(instance);
+  const selectedExecutable = inspectExecutable(instance, storedPath);
   if (selectedExecutable.kind === "namespace-launcher") add("identity-admission-risk", "namespace-launcher", "The observed launcher uses a process namespace; Playbot's host process-number admission can reject it.");
   else if (selectedExecutable.kind !== "native-binary") add("unconfirmed", "executable-unconfirmed", "The selected executable and its launcher identity cannot be confirmed without starting a process.");
   const session = instance ? {

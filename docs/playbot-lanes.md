@@ -110,7 +110,7 @@ The parked-chat detection remains a persisted, non-resuming read, while freshnes
 
 Registered clone paths are resolved by [`fm-project-mode.sh --path`](../bin/fm-project-mode.sh), whose header owns external-path and legacy registry syntax.
 
-`list_retirable_workspaces` inspects every active workspace in one exact project against a required `landingBranch`.
+`list_retirable_workspaces` inspects active workspaces in one exact project against a required `landingBranch`, every active workspace by default or one exact workspace when an optional `workspace` selector narrows it.
 It resolves that caller-named branch to current remote evidence rather than reading or guessing a repository default; a configured upstream can identify the remote but never replace the caller's branch name.
 An optional `registryProject` names the project in the controller home's firstmate registry, resolved through `bin/fm-project-mode.sh`; only a registered `local-only` posture whose main clone is itself a Git worktree top level that some selected Playbot root resolves to, including a root in a subdirectory of that clone, makes that clone's local `refs/heads/<landingBranch>` the landing evidence instead, because such a project lands without pushing and its remote branch lags.
 The result's `landingEvidence` and each root's `landing.evidence` say which evidence was used, and an explicit `refs/remotes/<remote>/<branch>` name always selects remote evidence.
@@ -147,6 +147,7 @@ Playbot's injected `prototype-game/addons/playbot/` tree, including tracked modi
 Path matching preserves Git pathname identity, so a literal backslash in a POSIX filename cannot alias a slash in an allowlisted path.
 
 `retire_workspace` accepts only one exact active workspace id returned by inspection, the same explicit `landingBranch` and `registryProject`, and `confirm: true`.
+`list_retirable_workspaces` accepts an optional exact `workspace` selector to keep a one-workspace safety inspection bounded in projects with many active workspaces.
 There is no bulk destructive form.
 An optional `discardLocalChanges` object records a captain's explicit authorization for that one workspace: `authorization` holds the captain's words, `allow` names the discardable blocker codes `tracked-modifications`, `untracked-files`, `ignored-files`, `orphaned-files`, `unlanded-commits`, or `prune-would-drop-unlanded-head`, and `commits` must list every exact commit id those blockers would drop, including other registrations' commits a prune would drop, exactly when either code is allowed.
 Any blocker it does not name, an unlanded commit it does not name, or a named commit that is not currently unlanded refuses with the uncovered blockers, and active or uncertain chats, the Local workspace, live task records, and unreadable evidence are never discardable.
@@ -179,7 +180,7 @@ With `newWorkspace`, it requires an explicit `landingBranch`, creates the isolat
 The landing branch and the root-settle budget are both validated before any workspace is created, and an unreadable post-creation workspace stops dispatch before the task is sent with an error naming the workspace and chat that were already created.
 Playbot can make that new workspace's row readable before it commits the workspace's root rows, so exactly one shape is re-read on a bounded schedule: incomplete root coverage of the workspace this call just created, meaning rows that have not arrived yet.
 Each attempt is a real read of current Playbot state, and the verdict is always that read's, never an assumption that enough time passed.
-The budget defaults to 5 seconds, is overridable through `PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS` as a positive integer of milliseconds up to 300000, and a malformed value is an explicit configuration error before anything is created rather than a refusal that already left a workspace behind.
+The budget defaults to 30 seconds, is overridable through `PLAYBOT_LANES_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS` as a positive integer of milliseconds up to 300000, and a malformed value is an explicit configuration error before anything is created rather than a refusal that already left a workspace behind.
 When a re-read happened, the result carries `workspaceSettle` with the milliseconds waited, the number of reads, and the budget, so the race is visible rather than inferred from silence.
 Nothing else is ever waited on: registered roots that are extra or duplicated, an unreadable root, an unresolvable landing branch, and every other blocker refuse on the first read exactly as they always have, and a caller-supplied existing workspace is never re-read because its state is not this call's to wait on.
 Once a re-read has happened, any refusal that follows it - the budget spent with the rows still missing, or a later read that could not be resolved at all - names both created ids, says how long it waited, and states the recovery: the workspace and chat both still exist, so once that workspace reads fresh the task is delivered with `send_message` against that chat rather than by dispatching again.
@@ -266,11 +267,18 @@ An `unknown` verdict is classified by the chat-creation API this Playbot exposes
 ### Engine readiness
 
 Before engine-dependent dispatch, `get_engine_readiness` reads one exact project's workspace without activating a project, resuming a chat, or starting an engine session.
-It reports app and bundled addon versions, Playbot's detected Godot projects, workspace addon versions and every required file's byte identity against that bundle (including native files), stored and canonical project paths, and the executable selected by an existing headless session when its launch log is readable.
+It reports app and bundled addon versions, Playbot's detected Godot projects, workspace addon versions and every required file's byte identity against that bundle (including native files), stored and canonical project paths, and the executable selected by an existing headless session.
+On Linux, a connected headless session can confirm its selected native binary from Playbot's reported PID when the bounded launch log has expired; the live process must be named Godot, have `--headless`, and have a `--path` resolving to that exact project.
 `PLAYBOT_LANES_APP_RESOURCES` can identify the packaged app's resources directory when running-process discovery is unavailable; the script header owns its discovery and version-binding mechanics.
 An editor preference or PATH candidate is insufficient selection evidence because Playbot checks executable compatibility before choosing it.
 Unreadable evidence remains `unconfirmed`; the tool never runs the candidate executable to fill that gap.
-The engine snapshot reader is verified for Playbot 0.117.0; other app versions return `unconfirmed` without calling unverified engine IPC.
+The engine snapshot reader is verified for Playbot 0.117.0 and 0.124.0; other app versions return `unconfirmed` without calling unverified engine IPC.
+For Playbot 0.124.0 on a symlinked home, use `get_worktree_root` to inspect the effective storage path and `canonicalize_worktree_root` to select its canonical spelling through Playbot's own settings IPC before creating a workspace.
+That setting changes the path Playbot records for future workspaces, while existing workspaces retain their recorded paths.
+After creating a Godot workspace, `prepare_engine_workspace` uses Playbot's engine IPC to install missing bundled native addon files in that exact idle workspace and verifies complete byte identity before engine validation.
+The tool refuses a stored project path alias and addon drift beyond missing native files.
+Playbot 0.124.0's system instruction prohibits an agent from running Godot through its shell even in a `full-access` chat; a direct `!` shell command sent by the user/controller runs through Playbot's `thread/shellCommand` route and can run the project's native automation.
+The agent can use `execute_engine_code` for engine state; a GDScript runner must return its result because `print()` alone leaves the tool's returned text empty.
 The diagnostic distinguishes `addon-drift`, `missing-addon-files`, `startup-pending`, `identity-admission-risk`, an observed `identity-admission-rejected`, generic `engine-failure`, and `unconfirmed`, retaining all reasons when several apply.
 A Flatpak or other observed namespace launcher and differing stored/canonical paths are admission risks, while `connectionBlocked` alone does not prove a PID rejection.
 Readiness requires an existing routed connected session reporting the current loaded addon, complete matching disk bytes, and a readable native launch executable with no reported failure or identity risk.

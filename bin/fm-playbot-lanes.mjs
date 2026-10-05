@@ -46,7 +46,7 @@
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
 // directly.
-// get_engine_readiness uses app:metadata and the verified 0.117.0
+// get_engine_readiness uses app:metadata and the verified 0.117.0/0.124.0
 // engine:listWorkspaceProjects reader to inspect existing sessions without
 // activation. Dispatch requires confirmed engine readiness unless its caller
 // explicitly declares file-only work with engineDependent=false, and refuses
@@ -95,7 +95,7 @@ const MAX_REMOTE_GIT_TIMEOUT_MS = 300_000;
 // rows land within a moment of creation, and a caller that is holding a real
 // dispatch open must not be made to wait on a workspace whose registration is
 // genuinely wrong rather than merely late.
-const DEFAULT_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS = 5_000;
+const DEFAULT_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS = 30_000;
 const MAX_WORKSPACE_ROOTS_SETTLE_TIMEOUT_MS = 300_000;
 const WORKSPACE_ROOTS_SETTLE_POLL_INTERVAL_MS = 150;
 
@@ -1842,7 +1842,7 @@ async function createdWorkspaceFreshness(projectId, workspaceId, landingBranch, 
 // strategy's single-root provisioning, so a workspace it creates for a
 // multi-root project is confirmed to cover every project root exactly once
 // rather than trusted on name alone - independent of Playbot version, and not
-// gated to the 0.117.0-specific engine-readiness check.
+// gated to the verified engine-readiness check.
 async function verifyCreatedWorkspaceRootCoverage(projectId, workspaceId, timeoutMs, { threadId } = {}) {
   const read = await createdWorkspaceRootsRead(projectId, workspaceId, timeoutMs);
   const createdDescription = threadId
@@ -3776,7 +3776,7 @@ async function playbotInvoke(channel, payload) {
   return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`));
 }
 
-// These 0.117.0 readers enumerate detected projects and peek existing sessions;
+// These 0.117.0/0.124.0 readers enumerate detected projects and peek existing sessions;
 // they do not activate a project, resume a chat, or start an engine instance.
 // Unknown versions fail closed before using an unverified engine IPC contract.
 async function engineReadInvoke(channel, payload) {
@@ -3784,7 +3784,7 @@ async function engineReadInvoke(channel, payload) {
 }
 
 async function engineReadiness(project, workspace) {
-  const app = { version: null, verifiedVersions: "0.117.0" };
+  const app = { version: null, verifiedVersions: "0.117.0 and 0.124.0" };
   const errors = [];
   try {
     const metadata = await engineReadInvoke("app:metadata", undefined);
@@ -3792,7 +3792,7 @@ async function engineReadiness(project, workspace) {
   } catch (error) { errors.push({ source: "app:metadata", message: error.message }); }
   const bundle = engineBundle(app.version);
   const detected = [];
-  if (app.version !== "0.117.0") errors.push({ source: "engine:listWorkspaceProjects", message: `Engine snapshot IPC is unverified for Playbot ${app.version ?? "unconfirmed"}; no engine read was attempted.` });
+  if (!["0.117.0", "0.124.0"].includes(app.version)) errors.push({ source: "engine:listWorkspaceProjects", message: `Engine snapshot IPC is unverified for Playbot ${app.version ?? "unconfirmed"}; no engine read was attempted.` });
   else {
     if (!workspace.roots.length || workspace.roots.length !== project.roots.length) errors.push({ source: "workspace-roots", message: "Workspace root coverage is incomplete." });
     const seenRoots = new Set();
@@ -6264,6 +6264,22 @@ function toolDefinitions() {
       inputSchema: object({ project: string("Project id, root path, or unique project name"), name: string("Optional workspace name on older Playbot schemas; current mode/from launches cannot carry a name and refuse this option"), baseBranch: string("Optional branch the workspace worktrees are taken from; each root's default target branch when omitted"), branch: string("Optional name for the new working branch; generated when omitted") }, ["project"]),
     },
     {
+      name: "get_worktree_root",
+      description: "Read Playbot's effective worktree storage directory through its own settings IPC without changing it.",
+      inputSchema: object({}),
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: "canonicalize_worktree_root",
+      description: "Set Playbot's worktree storage directory to the canonical spelling of its current effective directory through Playbot settings IPC. The directory must already exist; this changes no worktree contents and returns the before and after settings.",
+      inputSchema: object({ confirm: { type: "boolean", const: true } }, ["confirm"]),
+    },
+    {
+      name: "prepare_engine_workspace",
+      description: "Install Playbot's missing bundled Godot addon files in one exact idle workspace through Playbot's engine IPC, then verify complete byte identity. Refuses an aliased project path, addon version drift, or other differing files.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Exact workspace id, path, or name"), confirm: { type: "boolean", const: true } }, ["project", "workspace", "confirm"]),
+    },
+    {
       name: "get_workspace_freshness",
       description: "Read one workspace's exact Git heads against a caller-named landing branch using current remote evidence. Reports ahead and behind counts, whether each head is a clean fast-forward of the landing tip, and every unlanded commit subject. Missing or unreadable worktrees, repositories, or branches fail closed.",
       inputSchema: object({
@@ -6275,9 +6291,10 @@ function toolDefinitions() {
     },
     {
       name: "list_retirable_workspaces",
-      description: "Inspect every active workspace in one exact project against a caller-named landing branch using current remote branch evidence (or the main clone's local branch for a local-only registry project), unarchived thread states, live firstmate task records, commits and subjects ahead, bounded tracked, untracked, and ignored path samples with complete private SHA-256 inventory evidence, and orphaned roots whose Git metadata is gone. Local workspaces and any workspace with uncertain evidence are reported blocked, with which blockers an explicit discard authorization could clear.",
+      description: "Inspect active workspaces in one exact project, optionally narrowed to one exact workspace, against a caller-named landing branch using current remote branch evidence (or the main clone's local branch for a local-only registry project), unarchived thread states, live firstmate task records, commits and subjects ahead, bounded tracked, untracked, and ignored path samples with complete private SHA-256 inventory evidence, and orphaned roots whose Git metadata is gone. Local workspaces and any workspace with uncertain evidence are reported blocked, with which blockers an explicit discard authorization could clear.",
       inputSchema: object({
         project: string("Project id, root path, or unique project name"),
+        workspace: string("Optional exact active workspace id, path, or unique name to inspect"),
         landingBranch: string("Explicit branch these workspaces must already be landed on; use refs/remotes/<remote>/<branch> to name a remote branch unambiguously"),
         registryProject: string("Optional exact firstmate registry project name; when its registered posture is local-only, the main clone's local landing branch is the landing evidence"),
       }, ["project", "landingBranch"]),
@@ -6423,6 +6440,18 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   const caller = callerMode === "external-terminal" ? null : controllerForTool(name);
   const projects = topology();
   if (name === "list_projects") return { projects };
+  if (name === "get_worktree_root" || name === "canonicalize_worktree_root") {
+    const before = await playbotInvoke("worktreeSettings:getRoot", undefined);
+    if (!before || typeof before.effectivePath !== "string" || !path.isAbsolute(before.effectivePath)) throw new Error("Playbot returned an unreadable worktree root setting");
+    if (name === "get_worktree_root") return { before };
+    if (args.confirm !== true) throw new Error("canonicalize_worktree_root requires confirm=true");
+    const canonical = fs.realpathSync.native(before.effectivePath);
+    if (!fs.statSync(canonical).isDirectory()) throw new Error("Playbot's effective worktree root is not a directory");
+    if (canonical === before.effectivePath) return { before, after: before, changed: false };
+    const after = await playbotInvoke("worktreeSettings:setRoot", { path: canonical });
+    if (after?.effectivePath !== canonical) throw new Error(`Playbot did not read back canonical worktree root ${canonical}`);
+    return { before, after, changed: true };
+  }
   if (name === "list_lanes") return { lanes: loadRoutes().filter((route) => !args.activeOnly || route.active) };
   if (name === "close_lane") {
     const file = routePath(args.laneId);
@@ -6473,6 +6502,22 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   if (name === "get_engine_readiness") {
     return engineReadiness(project, resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace)));
   }
+  if (name === "prepare_engine_workspace") {
+    if (args.confirm !== true) throw new Error("prepare_engine_workspace requires confirm=true");
+    const workspace = resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace));
+    if (threadsForProject(project.id, workspace.id).some((row) => row.agent_status !== "ready" || queuedMessageCount(row.pending_queue_json) !== 0)) throw new Error("Cannot prepare the addon while a chat in this workspace is active or queued");
+    const before = await engineReadiness(project, workspace);
+    if (before.app.version !== "0.124.0" || !before.bundle.confirmed || before.errors.length || before.projects.length !== 1) throw new Error("Playbot 0.124.0, one detected Godot project, and a confirmed bundled addon are required");
+    const detected = before.projects[0];
+    if (detected.engineKind !== "godot" || detected.storedPath !== detected.canonicalPath) throw new Error("The detected Godot project must have one canonical stored path");
+    if (detected.addon.byteIdentical === true) return { before, after: before, changed: false };
+    if (detected.addon.version !== before.bundle.version || detected.addon.differingFiles.length || detected.addon.unreadableFiles.length || detected.addon.missingFiles.some((file) => !file.startsWith("native/"))) throw new Error("Addon drift is not limited to missing bundled native files; inspect it before installation");
+    await playbotInvoke("engine:activateProject", { workspaceId: workspace.id, projectPath: detected.storedPath, warm: false });
+    const installed = await playbotInvoke("engine:installPlugin", { workspacePath: detected.storedPath });
+    const after = await engineReadiness(resolveProject(project.id), resolveWorkspace(resolveProject(project.id), workspace.id));
+    if (installed?.success !== true || after.errors.length || after.projects.length !== 1 || after.projects[0].addon.byteIdentical !== true) throw new Error("Playbot did not install and verify the complete bundled addon");
+    return { before, installed, after, changed: true };
+  }
   if (name === "get_workspace_freshness") {
     const landingBranch = explicitLandingBranch(name, args.landingBranch);
     const workspace = resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace));
@@ -6481,8 +6526,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   if (name === "list_retirable_workspaces") {
     const landingBranch = explicitLandingBranch(name, args.landingBranch);
     const landingOptions = registryLandingOptions(project, args.registryProject);
+    const selectedWorkspace = args.workspace === undefined ? null : resolveWorkspace(project, args.workspace);
     const workspaces = project.workspaces
-      .filter((workspace) => workspace.archiveState === "active")
+      .filter((workspace) => workspace.archiveState === "active" && (!selectedWorkspace || workspace.id === selectedWorkspace.id))
       .map((workspace) => publicRetirementEvidence(workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions)));
     pruneRetirementPathInventories();
     return {
@@ -6961,7 +7007,7 @@ async function callFromCli(argv) {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     throw new Error("arguments-json must decode to a JSON object");
   }
-  if (name !== "get_engine_readiness") ensurePrivateDirs();
+  if (!["get_engine_readiness", "get_worktree_root"].includes(name)) ensurePrivateDirs();
   console.log(JSON.stringify(mcpResult(await handleTool(name, args, "external-terminal")), null, 2));
 }
 

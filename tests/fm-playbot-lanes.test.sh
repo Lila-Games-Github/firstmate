@@ -1336,7 +1336,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup did not fail closed 
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== false || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== false || value.checks.controllerPresent !== true) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 22) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 25) process.exit(1);
 NODE
 threads_after=$(FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -1710,7 +1710,7 @@ async function electronInvoke(channel, payload) {
         name: 'playbot_lanes',
         enabled: true,
         error: null,
-        toolCount: 22,
+        toolCount: 25,
         env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.9.0') },
       }];
     }
@@ -1987,7 +1987,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup accepted a stale loa
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.toolCount !== 22) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.toolCount !== 25) process.exit(1);
 if (value.checks.configuredSchemaVersion !== '0.9.0') process.exit(1);
 if (value.checks.schemaVersion !== '0.9.0' || value.checks.expectedSchemaVersion !== '0.9.0') process.exit(1);
 if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
@@ -1996,7 +1996,7 @@ setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" 
 OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup reloaded an MCP whose build identity was already current"
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== false) process.exit(1);
-if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 22) process.exit(1);
+if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 25) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project"
 
@@ -2446,7 +2446,7 @@ if (!value) process.exit(1);
 if (!value.freshness?.current || value.freshness.roots[0].commitsBehind !== 0) process.exit(1);
 const settle = value.workspaceSettle;
 if (!settle || settle.reads < 2 || settle.outcome !== 'registered') process.exit(1);
-if (!(settle.waitedMs > 0) || settle.timeoutMs !== 5000) process.exit(1);
+if (!(settle.waitedMs > 0) || settle.timeoutMs !== 30000) process.exit(1);
 if (!settle.note.includes('re-read')) process.exit(1);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 const sent = calls.filter(call => call.channel === 'threads:send');
@@ -6006,7 +6006,7 @@ retirement_call() {
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace retirement tools were not exposed with one-at-a-time schemas"
 const tools = JSON.parse(process.env.OUT).result.tools;
-if (tools.length !== 22) process.exit(1);
+if (tools.length !== 25) process.exit(1);
 const freshness = tools.find(tool => tool.name === 'get_workspace_freshness');
 const list = tools.find(tool => tool.name === 'list_retirable_workspaces');
 const retire = tools.find(tool => tool.name === 'retire_workspace');
@@ -6073,6 +6073,13 @@ if (!freshness.current || freshness.roots[0].commitsAhead !== 0 || freshness.roo
 if (JSON.stringify(freshness.roots[0]) !== JSON.stringify(byId['ws-worker-alt'].roots[0].freshness)) process.exit(1);
 NODE
 pass "fm-playbot-lanes: inventory is non-destructive and reports Local, thread, root, and Git refusals with evidence"
+
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_retirable_workspaces\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker-alt\",\"landingBranch\":\"main\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "exact-workspace retirement inspection included other workspaces"
+const value = JSON.parse(process.env.OUT).result.structuredContent;
+if (value.workspaces.length !== 1 || value.workspaces[0].workspace.id !== 'ws-worker-alt') process.exit(1);
+NODE
+pass "fm-playbot-lanes: retirement inspection can narrow to one exact workspace"
 
 retirement_list branch-that-does-not-exist > "$retirement_inventory"
 OUT_FILE="$retirement_inventory" node --no-warnings <<'NODE' || fail "an unresolvable landing branch was not reported as a blocker"
