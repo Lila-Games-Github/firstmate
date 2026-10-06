@@ -18,8 +18,8 @@
 # different words for the same negative - a rejected acceptance whose task was
 # then discarded agrees. A consultation still waiting for its ground truth is
 # counted under `unlabelled` rather than folded into either class. Object
-# verdicts (open-question and wiki-audit batches) compare matching keys. Spend includes every
-# network attempt. Estimated tokens
+# verdicts (open-question and wiki-audit batches) compare matching keys. Spend
+# includes every network attempt. Estimated tokens
 # avoided includes available, confidence-qualified consultations in both shadow
 # and active modes; a batched per-key consultation contributes the share of its
 # estimate whose own answers qualified, so nine confident answers out of ten
