@@ -46,6 +46,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RULES_FILE="$SCRIPT_DIR/jev-questions/wiki-audit.json"
+RULES_LABEL="bin/jev-questions/wiki-audit.json (built-in)"
 LABEL=
 # The client adds the pinned model to the request it sends; keep room for that
 # and for any re-encoding difference between this build and that one.
@@ -60,7 +61,7 @@ usage() { sed -n '4p' "$0" | sed 's/^# //' >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --rules) [ "$#" -ge 2 ] || usage; RULES_FILE=$2; shift 2 ;;
+    --rules) [ "$#" -ge 2 ] || usage; RULES_FILE=$2; RULES_LABEL=$2; shift 2 ;;
     --label) [ "$#" -ge 2 ] || usage; LABEL=$2; shift 2 ;;
     -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; break ;;
@@ -327,7 +328,7 @@ if ! cp -- "$RECORDS" "$VERDICTS.tmp.$$" || ! mv -f "$VERDICTS.tmp.$$" "$VERDICT
   exit 0
 fi
 
-if ! jq -s -r --arg label "${LABEL:-$WIKI_DIR}" --arg mode "$MODE" --arg rules_file "$RULES_FILE" \
+if ! jq -s -r --arg label "${LABEL:-$WIKI_DIR}" --arg mode "$MODE" --arg rules_file "$RULES_LABEL" \
   --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --slurpfile rules_data "$RULES_FILE" '
   . as $pages | ($rules_data[0].rules) as $rules | ($rules | keys) as $keys |
   def conf: if . == null then "n/a" else (. * 100 | round / 100 | tostring) end;
