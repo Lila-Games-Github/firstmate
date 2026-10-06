@@ -1,0 +1,54 @@
+=== 1. Running fm-jev-wiki-audit.sh WITHOUT --rules (no built-in rule set ships anymore) ===
+$ ./bin/fm-jev-wiki-audit.sh /tmp/wiki-audit-demo/wiki /tmp/wiki-audit-demo/out
+wiki-audit: --rules <file> is required; firstmate ships no rule set
+exit code: 2
+
+=== 2. Running WITH --rules <project-owned-rules-file> --exclude archive/ (end-to-end against a fixture Jev service) ===
+$ FM_HOME=... ./bin/fm-jev-wiki-audit.sh --rules rules.json --exclude archive/ wiki/ out/
+wiki-audit: 2 pages, 0 flagged, 0 not judged confidently; /tmp/wiki-audit-demo/out/jev-report.md
+exit code: 0
+
+--- Requests actually sent to the Jev service (pages under the excluded archive/ directory must be absent) ---
+design/two.md
+one.md
+
+--- Generated out/jev-report.md ---
+# Jev wiki rule audit
+
+- Wiki: /tmp/wiki-audit-demo/wiki
+- Generated: 2026-10-06T07:32:32Z in shadow mode with confidence floor 0.8
+- Rule file: /tmp/wiki-audit-demo/rules.json (2 rules)
+- Pages: 2, of which 0 needed more than one chunk
+- Consultations: 2 answered of 2
+- Spend on answered consultations: US$0.000010 for 231 input tokens
+
+Each rule asks whether the page violates it; yes is a flag. A flag is listed only when its confidence met the floor. Nothing in the wiki was changed.
+
+## Per-rule counts
+
+| Rule | Pages flagged | Flagged below the floor | Not judged confidently | Source |
+| --- | --- | --- | --- | --- |
+| `hedge` | 0 | 0 | 0 |  |
+| `history` | 0 | 0 | 0 | fixture style guide |
+
+## Per-page flags
+
+| Page | Rules flagged (confidence) | Chunks |
+| --- | --- | --- |
+| design/two.md | none | 1 |
+| one.md | none | 1 |
+
+## Pages Jev could not judge confidently
+
+None.
+
+## Chunked pages
+
+None.
+
+## Spend
+
+- Answered consultations: 2, US$0.000010, 231 input tokens
+- Unanswered consultations: 0
+- Pages split again after a rejected request: 0; spend on answered chunks of a discarded attempt is included above
+- Every attempt, including failed ones, is also in the Jev ledger; `bin/fm-jev-report.sh` reads it.
