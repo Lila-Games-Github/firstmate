@@ -18,8 +18,8 @@
 # different words for the same negative - a rejected acceptance whose task was
 # then discarded agrees. A consultation still waiting for its ground truth is
 # counted under `unlabelled` rather than folded into either class. Object
-# verdicts (open-question batches) compare matching keys. Spend includes every
-# network attempt. Estimated tokens
+# verdicts (open-question and wiki-audit batches) compare matching keys. Spend
+# includes every network attempt. Estimated tokens
 # avoided includes available, confidence-qualified consultations in both shadow
 # and active modes; a batched per-key consultation contributes the share of its
 # estimate whose own answers qualified, so nine confident answers out of ten
@@ -73,7 +73,7 @@ fi
 
 MODES=
 KEY_STATE=absent
-for use in accept-check triage commit-lint open-questions; do
+for use in accept-check triage commit-lint open-questions wiki-audit; do
   STATUS=$("$SCRIPT_DIR/fm-jev.sh" status "$use" 2>/dev/null) || STATUS=
   IFS=$'\t' read -r USE_MODE USE_REASON USE_KEY _ <<<"$STATUS"
   [ "${USE_KEY:-absent}" != present ] || KEY_STATE=present
@@ -105,6 +105,7 @@ METRICS=$(jq -n -r '
     if $use == "accept-check" then "accepted"
     elif $use == "triage" then "actionable"
     elif $use == "commit-lint" then "flagged"
+    elif $use == "wiki-audit" then "yes"
     else "settled" end;
   # A Jev verdict and a ground-truth label do not share one vocabulary: an
   # acceptance row is answered "accepted" or "rejected" and labelled "accepted"
@@ -157,7 +158,7 @@ METRICS=$(jq -n -r '
         | .active += (if $row.mode == "active" then 1 else 0 end))
     end)
   | . as $by_use
-  | (["accept-check","triage","commit-lint","open-questions"]
+  | (["accept-check","triage","commit-lint","open-questions","wiki-audit"]
      | map(. as $u | ($by_use[$u] // blank) + {use:$u})) as $rows
   | ($rows | reduce .[] as $r (blank + {use:"overall"};
       .consultations += $r.consultations | .labelled += $r.labelled
@@ -231,6 +232,7 @@ MISMATCHES=$(jq -r '
     if $use == "accept-check" then "accepted"
     elif $use == "triage" then "actionable"
     elif $use == "commit-lint" then "flagged"
+    elif $use == "wiki-audit" then "yes"
     else "settled" end;
   . as $row |
   select(.available and .jev_verdict != null and .eventual_outcome != null) |

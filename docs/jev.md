@@ -1,6 +1,6 @@
 # Jev decision observers
 
-Firstmate can ask TypeSafe AI's Jev model for bounded typed decisions at four existing workflow boundaries.
+Firstmate can ask TypeSafe AI's Jev model for bounded typed decisions at four existing workflow boundaries and in one explicitly run documentation audit.
 Every use is active by default, and the established deterministic or human path remains the fallback.
 Jev cannot produce free text, prove correctness, recover missing product intent, or replace lifecycle and merge authority.
 
@@ -16,6 +16,7 @@ A home that already has it therefore turns all four observers active on its next
 | Supervision triage | Each presented status line, wake row, or captured Lavish review element, truncated to 1500 characters per item. |
 | Commit lint | Each branch-only commit's subject, body, and diff, or its `git show --stat` plus leading hunks when the diff exceeds the per-call budget. |
 | Open questions | Each question line and the text of every page those lines reference, each page once per request rather than once per question, shortened when it exceeds the per-call budget. |
+| Wiki audit | Only when run by name: each page's path, opening lines, heading outline, and full text, one page per request, or one section-sized chunk per request when the page exceeds the per-call budget. |
 
 Shadow and `off` remain the manual opt-outs; neither is selected for you.
 Create the gitignored `config/jev.json` described in [configuration.md](configuration.md#jev-decision-observers-configjevjson) to change budgets or select another mode per use.
@@ -24,7 +25,7 @@ Active mode uses a confidence-qualified answer only for the adapter effects list
 Active triage still presents every input; its classification is evidence and never a suppression rule because a mistaken routine verdict must not silently lose a wake.
 
 Set `kill_switch` to `true`, set an individual use to `off`, or remove `TYPESAFE_API_KEY` to return affected paths to their behavior without Jev.
-The adapters you run by name - `bin/fm-jev-accept-check.sh`, `bin/fm-jev-commit-lint.sh`, and `bin/fm-jev-open-questions.sh` - then print one `<use>: off (<reason>)` line on stderr and exit zero, naming the absent key, the off mode, the kill switch, or the unreadable configuration.
+The adapters you run by name - `bin/fm-jev-accept-check.sh`, `bin/fm-jev-commit-lint.sh`, `bin/fm-jev-open-questions.sh`, and `bin/fm-jev-wiki-audit.sh` - then print one `<use>: off (<reason>)` line on stderr and exit zero, naming the absent key, the off mode, the kill switch, or the unreadable configuration.
 The triage hooks inside `bin/fm-wake-drain.sh` and `bin/fm-procevent-lavish.sh read` stay silent, because they run on the presentation path where a per-drain diagnostic would be noise.
 `bin/fm-jev-report.sh` opens with the effective mode of each use and whether a key is present.
 A malformed config, missing key, exhausted cap, timeout, HTTP error, or malformed response also falls back without blocking the caller.
@@ -39,9 +40,11 @@ The system never changes a use's configured mode or disables Jev because of a di
 | Supervision triage | `bin/fm-wake-drain.sh` and `bin/fm-procevent-lavish.sh read` | Records routine or actionable for each admitted item and ruling, question, or instruction for captured review answers, batching the admitted items from one drain or one read into at most one request. | Marks each confidence-qualified classification in the batch as the Jev decision for that item in the ledger, while presentation remains unchanged so no input can be silently lost. |
 | Commit lint | `bin/fm-jev-commit-lint.sh <worktree>` | Reviews each branch commit in its own request for message and diff agreement, persistence changes, weakened tests, debug output, and credentials, and writes `data/<id>/commit-lint.json`. | Also records an `advisory` string in that same file, but never blocks or authorizes landing. |
 | Open questions | `bin/fm-jev-open-questions.sh <questions-file> <pages-dir>` | Writes `<stem>-jev-review.md` with still open, settled, or cannot tell against each question's named page, carrying each referenced page once as shared context; a question Jev did not answer is listed as unclassified with the reason rather than given a classification. | Writes the same proposal and never edits the question register or referenced pages. |
+| Wiki audit | `bin/fm-jev-wiki-audit.sh --rules <file> [--exclude <dir>]... [--label <text>] <wiki-dir> <output-dir>` | Asks one yes/no Choice per rule key - does this page violate the rule - for every Markdown page outside the excluded directories, and writes `jev-verdicts.jsonl` (raw per-page, per-chunk, per-rule choices and confidences) and `jev-report.md` (flags per page, counts per rule, pages not judged confidently, chunked pages, spend) into the output directory. | Writes the same files and never edits a wiki page. |
 
 Each adapter builds its requests from material that code has already narrowed.
 The question wording is reviewable under `bin/jev-questions/`.
+The wiki audit is the exception: firstmate ships no rule set for it, so the audited project keeps its rules file beside its own documentation and passes it with `--rules`, and the adapter header owns that file's format, chunking, and the per-page merge rules.
 No adapter writes a task's status file: a `note:` line there is a status event that would supersede a worker's terminal `done:` line and change how supervision classifies an idle, finished pane, so every advisory lives in the use's own evidence file and in the report instead.
 Triage admits at most 50 items per drain or Lavish read, with a lower limit when the configured request budget requires it.
 While triage is enabled, the drain remembers answered presentation items in `state/.jev-triage-seen`, regardless of confidence, and avoids reconsulting unchanged content while it remains presented.
@@ -78,11 +81,13 @@ A teardown that refuses records nothing, so the row keeps waiting for a real lab
 Every recorded label names the teardown path that observed it in `label_source`, and the report shows it beside each disagreement.
 `accepted` is the positive class and `discarded` is a negative one, so a Jev rejection of work that was then discarded counts as agreement rather than as a false negative, and an acceptance of discarded work is the false positive it is.
 Consultations with no label yet are counted in the report's `unlabelled` column instead of being folded into either class.
+A wiki-audit row's baseline is `no` for every rule, because nothing else checks a page against the rules, so every flag Jev raises is listed under `disagreements:`.
+A later human or model classification of a page is recorded with `bin/fm-jev.sh finalize --use wiki-audit --subject <page path> --decision-json '{"<rule>":"yes",...}' --label-source <classifier>`, and `outcome-mismatches:` then names each rule where Jev and that classification differ; a chunked page's rows carry `#chunk-<i>-of-<n>` subjects and are labelled per chunk.
 A criterion whose own text had to be shortened to fit the per-call budget is recorded `met: null` with `truncated: true` and its `judged_characters`, listed under `unjudged_criteria`, and left out of `unmet_criteria` and the advisory, which instead names how many criteria went unjudged: an answer about a stub is not an answer about the criterion the brief states.
 When every question a verdict names was answered from a stub the consultation is not scored at all: the row records `questions-truncated` with no verdict, the caller keeps its baseline, `acceptance.json` carries `verdict: "unjudged"`, and the report leaves the row out of agreement, the error columns and the avoided-token credit.
 A shortened request is only ever credited the tokens it actually carried, never the estimate of the material the adapter gathered.
 Every available consultation whose material was shortened is listed under `advisories:` in `bin/fm-jev-report.sh` with `truncated=true`, in shadow mode as well as active and whether or not it flagged anything.
-For unshortened requests, the report uses adapter estimates: acceptance and triage divide their material bytes by four, while commit lint and open-question review divide their serialized material character counts by four.
+For unshortened requests, the report uses adapter estimates: acceptance and triage divide their material bytes by four, commit lint and open-question review divide their serialized material character counts by four, and the wiki audit divides each chunk's page-text bytes by four.
 These are approximate savings estimates and can differ for non-ASCII material; the client enforces request budgets using UTF-8 bytes, including request overhead.
 A batched consultation is credited the share of its estimate whose own items cleared the floor, because each item of a batch is judged on the confidence Jev returned for that item rather than on the batch minimum.
 For shadow rows the value is only a counterfactual estimate of what active mode could avoid.
@@ -92,7 +97,7 @@ Compare both agreement and error direction before promoting a use because a low 
 ## Revert
 
 The fastest global rollback is `"kill_switch": true` in `config/jev.json`.
-Removing the key from both the environment and `.env` disables the four observers; an environment-provided key takes precedence over `.env`.
+Removing the key from both the environment and `.env` disables the four observers and the wiki audit; an environment-provided key takes precedence over `.env`.
 To keep the key for typed dispatch while disabling only these observers, set every use in `config/jev.json` to `off`.
 No ledger archive under `state/jev-ledger/` needs deleting either; rotation only moves evidence, it never discards it.
 Removing `config/jev.json` restores the built-in active configuration, so it is not a rollback.

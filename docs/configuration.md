@@ -525,7 +525,7 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 ## Jev decision observers (config/jev.json)
 
-`config/jev.json` controls four optional TypeSafe AI Jev observers without changing typed dispatch resolution.
+`config/jev.json` controls four optional TypeSafe AI Jev observers and the explicitly run wiki audit without changing typed dispatch resolution.
 The file is local and gitignored, is not inherited by secondmate homes, and is absent by default.
 An absent file uses the active built-in configuration shown below.
 An unreadable, symlinked, or malformed file makes every observer unavailable and preserves the existing path without a network call.
@@ -540,24 +540,27 @@ The complete version 1 schema is:
   "kill_switch": false,
   "per_call_token_cap": 32000,
   "daily": {
-    "call_cap": 100,
-    "spend_usd_cap": 0.05
+    "call_cap": 250,
+    "spend_usd_cap": 0.15
   },
   "uses": {
     "accept-check": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
     "triage": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
     "commit-lint": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
-    "open-questions": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}}
+    "open-questions": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
+    "wiki-audit": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 150, "spend_usd_cap": 0.1}}
   }
 }
 ```
 
-`version` must be `1`, `kill_switch` must be Boolean, and `uses` must contain exactly the four named objects.
+`version` must be `1`, `kill_switch` must be Boolean, and `uses` must contain the four observer objects and may also contain `wiki-audit`.
+A file that omits `wiki-audit` leaves that use off with no budget, so a home whose budgets were sized before the use existed never spends its global cap on a batch audit until the file lists it; `bin/fm-jev.sh status wiki-audit` names that reason.
+A listed `wiki-audit` without its own `daily` object receives the built-in one shown above rather than a share of the global budget.
 `per_call_token_cap` is an integer from 1 through 32000.
 `bin/fm-jev.sh request-budget <use>` reports the request size limit; the client header owns request sizing, splitting, truncation, and refusal mechanics, including triage's single-request limit.
 See [the client contract](../bin/fm-jev.sh) before building an adapter envelope, and [Jev evaluation](jev.md#evaluate-the-result) for interpreting shortened or unanswered consultations.
 `daily.call_cap` is a nonnegative integer, and `daily.spend_usd_cap` is a nonnegative US-dollar number.
-Each use may also carry its own `daily` object with the same two fields; a use that omits it receives a share of the global budget. The remainder of an uneven division is handed out one call at a time in use-name order, so the four shares always sum to `daily.call_cap` exactly and no call is lost to rounding. A global cap below four therefore leaves some uses a share of zero rather than starving all four: `bin/fm-jev.sh status <use>` reports such a use as its configured mode with the reason `no-budget`, and `bin/fm-jev-report.sh` prints it as `<use>=<mode>(no-budget)`.
+Each of the four observer uses may also carry its own `daily` object with the same two fields; one that omits it receives a share of the global budget instead - wiki-audit never draws from that shared pool, as described above. The remainder of an uneven division among the four is handed out one call at a time in use-name order, so their shares always sum to `daily.call_cap` exactly and no call is lost to rounding. A global cap below four therefore leaves some uses a share of zero rather than starving all four: `bin/fm-jev.sh status <use>` reports such a use as its configured mode with the reason `no-budget`, and `bin/fm-jev-report.sh` prints it as `<use>=<mode>(no-budget)`.
 Both budgets apply: a call needs room under the global cap and under its own use's cap.
 The built-in per-use shares prevent triage from spending another use's allocation; explicit overrides whose sum exceeds the global cap can exhaust that cap before another use runs.
 Every ledger row names the `use` that consumed the budget.

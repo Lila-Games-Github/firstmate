@@ -2,17 +2,22 @@
 # fm-jev.sh - bounded TypeSafe AI Jev client and outcome-ledger owner.
 #
 # Usage:
-#   fm-jev.sh mode <accept-check|triage|commit-lint|open-questions>
-#   fm-jev.sh status <accept-check|triage|commit-lint|open-questions>
-#   fm-jev.sh request-budget <accept-check|triage|commit-lint|open-questions>
-#   fm-jev.sh consult <accept-check|triage|commit-lint|open-questions> < envelope.json
+#   fm-jev.sh mode <use>
+#   fm-jev.sh status <use>
+#   fm-jev.sh request-budget <use>
+#   fm-jev.sh consult <use> < envelope.json
 #   fm-jev.sh finalize --use <use> --subject <subject> --decision-json <json> \
 #     --label-source <path>
 #   fm-jev.sh validate-ledger [ledger.jsonl]
 #
+# A <use> is accept-check, triage, commit-lint, open-questions, or wiki-audit.
+#
 # `mode` prints the effective mode only: off, shadow, or active. The built-in
 # configuration defaults every use to active; config/jev.json can select shadow
-# or off per use or engage the global kill switch.
+# or off per use or engage the global kill switch. wiki-audit is the one use a
+# config/jev.json may omit: a home that wrote its own budgets before the use
+# existed leaves it off until that file lists it, so a batch audit can never
+# spend a shared global cap the operator sized for the other four.
 #
 # `status` prints one tab-separated line - effective mode, machine reason,
 # `present` or `absent` for the key, and a human explanation - so an explicitly
@@ -122,8 +127,13 @@ PRICE_PER_MILLION=0.042
 BYTES_PER_TOKEN=4
 HTTP_TIMEOUT=5
 LOCK_TIMEOUT=5
-KNOWN_USES='["accept-check","triage","commit-lint","open-questions"]'
-DEFAULT_CONFIG_JSON='{"version":1,"kill_switch":false,"per_call_token_cap":32000,"daily":{"call_cap":100,"spend_usd_cap":0.05},"uses":{"accept-check":{"mode":"active","confidence_floor":0.8,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"triage":{"mode":"active","confidence_floor":0.65,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"commit-lint":{"mode":"active","confidence_floor":0.8,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"open-questions":{"mode":"active","confidence_floor":0.65,"daily":{"call_cap":25,"spend_usd_cap":0.0125}}}}'
+KNOWN_USES='["accept-check","triage","commit-lint","open-questions","wiki-audit"]'
+# The uses a config/jev.json must list, and the ones a use without its own
+# daily block shares the global budget with. wiki-audit always carries its own.
+SHARED_USES='["accept-check","triage","commit-lint","open-questions"]'
+UNLISTED_USE_JSON='{"mode":"off","confidence_floor":1,"daily":{"call_cap":0,"spend_usd_cap":0}}'
+USE_LISTED=true
+DEFAULT_CONFIG_JSON='{"version":1,"kill_switch":false,"per_call_token_cap":32000,"daily":{"call_cap":250,"spend_usd_cap":0.15},"uses":{"accept-check":{"mode":"active","confidence_floor":0.8,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"triage":{"mode":"active","confidence_floor":0.65,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"commit-lint":{"mode":"active","confidence_floor":0.8,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"open-questions":{"mode":"active","confidence_floor":0.65,"daily":{"call_cap":25,"spend_usd_cap":0.0125}},"wiki-audit":{"mode":"active","confidence_floor":0.8,"daily":{"call_cap":150,"spend_usd_cap":0.1}}}}'
 
 CONFIG_STATUS=absent
 CONFIG_REASON=config-absent
@@ -160,7 +170,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 use_valid() {
-  case "$1" in accept-check|triage|commit-lint|open-questions) return 0 ;; esac
+  case "$1" in accept-check|triage|commit-lint|open-questions|wiki-audit) return 0 ;; esac
   return 1
 }
 
@@ -207,7 +217,7 @@ load_config() {
     CONFIG_REASON=config-unreadable
     return 0
   }
-  err=$(jq -r --argjson known "$KNOWN_USES" '
+  err=$(jq -r --argjson known "$KNOWN_USES" --argjson shared "$SHARED_USES" '
     def integer: . as $value | type == "number" and floor == $value;
     if type != "object" then "top-level value must be an object"
     elif .version != 1 then "version must be 1"
@@ -217,7 +227,7 @@ load_config() {
     elif (.daily.call_cap | integer | not) or .daily.call_cap < 0 then "daily.call_cap must be a nonnegative integer"
     elif (.daily.spend_usd_cap | type) != "number" or .daily.spend_usd_cap < 0 then "daily.spend_usd_cap must be a nonnegative number"
     elif (.uses | type) != "object" then "uses must be an object"
-    elif ((.uses | keys | sort) != ($known | sort)) then "uses must contain exactly accept-check, triage, commit-lint, and open-questions"
+    elif ((.uses | keys) - $known | length) > 0 or (($shared - (.uses | keys)) | length) > 0 then "uses must contain accept-check, triage, commit-lint, and open-questions, and may also contain wiki-audit"
     elif any(.uses[]; type != "object") then "each use must be an object"
     elif any(.uses[]; . as $use | ($use.mode | type) != "string" or (["off","shadow","active"] | index($use.mode) | not)) then "each use mode must be off, shadow, or active"
     elif any(.uses[]; (.confidence_floor | type) != "number" or .confidence_floor < 0 or .confidence_floor > 1) then "each confidence_floor must be a number from 0 through 1"
@@ -239,6 +249,9 @@ load_config() {
 # budget. The remainder of an uneven division is handed out one call at a time
 # in use-name order, so the four shares always sum to the global cap exactly and
 # a small global cap is never silently rounded down to no budget at all.
+# wiki-audit never takes a share: an unlisted wiki-audit is off with no budget,
+# and a listed one without its own daily block gets the built-in default block,
+# still bounded by the global cap.
 resolve_use_config() { # <use>
   local use=$1 kill
   CONFIGURED_MODE=off
@@ -251,18 +264,33 @@ resolve_use_config() { # <use>
   USE_SPEND_CAP=0
   load_config
   [ "$CONFIG_STATUS" = ok ] || return 0
+  USE_LISTED=true
+  if ! jq -e --argjson shared "$SHARED_USES" --arg use "$use" \
+    '($shared | index($use)) != null or (.uses | has($use))' >/dev/null 2>&1 <<<"$CONFIG_JSON"; then
+    USE_LISTED=false
+  fi
+  CONFIG_JSON=$(jq -c --argjson shared "$SHARED_USES" --argjson defaults "$DEFAULT_CONFIG_JSON" \
+    --argjson unlisted "$UNLISTED_USE_JSON" '
+    reduce (($defaults.uses | keys) - $shared)[] as $own (.;
+      if .uses | has($own) then
+        (if .uses[$own] | has("daily") then . else .uses[$own].daily = $defaults.uses[$own].daily end)
+      else .uses[$own] = $unlisted end)' <<<"$CONFIG_JSON") || {
+    CONFIG_STATUS=invalid
+    CONFIG_REASON=config-invalid
+    return 0
+  }
   kill=$(jq -r '.kill_switch' <<<"$CONFIG_JSON")
   CONFIGURED_MODE=$(jq -r --arg use "$use" '.uses[$use].mode' <<<"$CONFIG_JSON")
   CONFIDENCE_FLOOR=$(jq -r --arg use "$use" '.uses[$use].confidence_floor' <<<"$CONFIG_JSON")
   PER_CALL_TOKEN_CAP=$(jq -r '.per_call_token_cap' <<<"$CONFIG_JSON")
   DAILY_CALL_CAP=$(jq -r '.daily.call_cap' <<<"$CONFIG_JSON")
   DAILY_SPEND_CAP=$(jq -r '.daily.spend_usd_cap' <<<"$CONFIG_JSON")
-  USE_CALL_CAP=$(jq -r --argjson known "$KNOWN_USES" --arg use "$use" '
+  USE_CALL_CAP=$(jq -r --argjson known "$SHARED_USES" --arg use "$use" '
     ($known | sort) as $names | ($names | length) as $n |
     .daily.call_cap as $cap |
     .uses[$use].daily.call_cap //
       (($cap / $n | floor) + (if ($names | index($use)) < ($cap % $n) then 1 else 0 end))' <<<"$CONFIG_JSON")
-  USE_SPEND_CAP=$(jq -r --argjson known "$KNOWN_USES" --arg use "$use" \
+  USE_SPEND_CAP=$(jq -r --argjson known "$SHARED_USES" --arg use "$use" \
     '.uses[$use].daily.spend_usd_cap // (.daily.spend_usd_cap / ($known | length))' <<<"$CONFIG_JSON")
   if [ "$kill" = true ]; then
     CONFIG_REASON='kill-switch'
@@ -279,7 +307,7 @@ ledger_row_valid_filter='
   (.timestamp | type) == "string" and
   (.date | type) == "string" and
   (.consultation_id | type) == "string" and (.consultation_id | length) > 0 and
-  (.use | type) == "string" and (["accept-check","triage","commit-lint","open-questions"] | index($row.use)) != null and
+  (.use | type) == "string" and (["accept-check","triage","commit-lint","open-questions","wiki-audit"] | index($row.use)) != null and
   (.subject | type) == "string" and
   (.mode | type) == "string" and (["shadow","active"] | index($row.mode)) != null and
   (.configured_mode | type) == "string" and (["shadow","active"] | index($row.configured_mode)) != null and
@@ -652,7 +680,12 @@ cmd_status() {
     '') explanation="$use is $EFFECTIVE_MODE" ;;
     no-budget) explanation="$use is $EFFECTIVE_MODE but its share of daily.call_cap is 0, so every consultation is refused" ;;
     kill-switch) explanation="$CONFIG_FILE sets kill_switch to true" ;;
-    mode-off) explanation="$CONFIG_FILE sets $use to off" ;;
+    mode-off)
+      if [ "$USE_LISTED" = true ]; then
+        explanation="$CONFIG_FILE sets $use to off"
+      else
+        explanation="$CONFIG_FILE does not list $use, so it stays off until that file adds it"
+      fi ;;
     missing-key) explanation="TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env" ;;
     config-invalid) explanation="$CONFIG_FILE is not valid against the version 1 schema" ;;
     config-unreadable) explanation="$CONFIG_FILE is not a readable regular file" ;;

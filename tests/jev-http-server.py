@@ -2,6 +2,7 @@
 """Local-only Jev-shaped HTTP fixture used by fm-jev.test.sh."""
 
 import json
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -27,6 +28,16 @@ class Handler(BaseHTTPRequestHandler):
             log.write(json.dumps(request, separators=(",", ":")) + "\n")
 
         state_text = json.dumps(request.get("state", {}), separators=(",", ":"))
+        # A service that rejects a wiki-audit chunk longer than the marked
+        # number of characters, as the real one does for text that tokenizes
+        # denser than the client's byte estimate.
+        limit = re.search(r"FORCE_REJECT_OVER_(\d+)\.", state_text)
+        chunk = request.get("state", {}).get("chunk", {})
+        if limit and len(chunk.get("text", "")) > int(limit.group(1)):
+            self.send_response(400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         # One part of a split can fail while its siblings answer; this marker
         # lets a test put that failure on exactly one part's own state.
         if "FORCE_HTTP_500" in state_text:
@@ -58,11 +69,15 @@ class Handler(BaseHTTPRequestHandler):
                     choice = "ruling"
                 elif "settled" in options:
                     choice = "settled"
+                elif sorted(options) == ["no", "yes"]:
+                    # A wiki-audit rule: a page violates rule <key> only where
+                    # its own text carries the marker naming that key.
+                    choice = "yes" if f"FORCE_YES_{key}." in state_text else "no"
                 else:
                     choice = options[0]
                 # Per-question confidence, so one item of a batch can come back
                 # below the floor while its siblings stay confident.
-                if "FORCE_LOW_CONFIDENCE" in text:
+                if "FORCE_LOW_CONFIDENCE" in text or f"FORCE_LOW_{key}." in state_text:
                     confidence, winner = 0.4, 0.55
                 else:
                     confidence, winner = 0.9, 0.9
