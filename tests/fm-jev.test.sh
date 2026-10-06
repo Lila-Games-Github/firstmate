@@ -1449,7 +1449,7 @@ write_wiki_rules() { # <file>
 {
   "preamble": "Audit one wiki page.",
   "rules": {
-    "history": {"question": "Does the page record history?", "yes": "It does.", "no": "It does not.", "source": "schema rule 71"},
+    "history": {"question": "Does the page record history?", "yes": "It does.", "no": "It does not.", "source": "fixture style guide"},
     "hedge": {"question": "Does the page hedge?", "yes": "It does.", "no": "It does not."}
   }
 }
@@ -1474,17 +1474,22 @@ write_big_page() { # <file> [closing-text]
 }
 
 # shellcheck disable=SC2016 # Markdown backticks are literal report text.
-test_wiki_audit_parses_rules_and_skips_sources() {
+test_wiki_audit_requires_rules_and_honors_excludes() {
   local home="$TMP_ROOT/wiki-rules" before out rc=0 request
   write_wiki_config "$home" shadow 32000
   write_key "$home"
-  mkdir -p "$home/wiki/sources/images" "$home/wiki/design"
+  mkdir -p "$home/wiki/archive/old" "$home/wiki/design"
   printf '# One\n\nState.\n' > "$home/wiki/one.md"
   printf '# Two\n\nState.\n' > "$home/wiki/design/two.md"
-  printf '# Source\n\nDated record.\n' > "$home/wiki/sources/images/2026-01-01-record.md"
+  printf '# Archived\n\nDated record.\n' > "$home/wiki/archive/old/record.md"
+  before=$(request_count)
+  out=$(jev_env "$home" "$WIKI_AUDIT" "$home/wiki" "$home/out" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "an audit without a rule file did not exit 2: rc=$rc"
+  assert_contains "$out" "--rules <file> is required" "the missing rule file is not named"
+  [ "$(request_count)" -eq "$before" ] || fail "an audit without a rule file still sent a request"
+  rc=0
   printf '{"preamble":"p","rules":{"bad key":{"question":"q","yes":"y","no":"n"},"ok":{"question":"q","yes":"y"}}}\n' \
     > "$home/bad-rules.json"
-  before=$(request_count)
   out=$(jev_env "$home" "$WIKI_AUDIT" --rules "$home/bad-rules.json" "$home/wiki" "$home/out" 2>&1) || rc=$?
   [ "$rc" -eq 2 ] || fail "a malformed rule file did not exit 2: rc=$rc"
   assert_contains "$out" "bad key" "the rule-file diagnostic does not name the malformed key"
@@ -1496,22 +1501,22 @@ test_wiki_audit_parses_rules_and_skips_sources() {
   [ "$rc" -eq 2 ] && [[ "$out" == *"ok"* ]] || fail "a rule without its no answer was accepted: rc=$rc $out"
 
   write_wiki_rules "$home/rules.json"
-  out=$(jev_env "$home" "$WIKI_AUDIT" --rules "$home/rules.json" "$home/wiki" "$home/out") \
+  out=$(jev_env "$home" "$WIKI_AUDIT" --rules "$home/rules.json" --exclude archive/ "$home/wiki" "$home/out") \
     || fail "the wiki audit failed on a valid rule file"
-  [ "$(request_count)" -eq $((before + 2)) ] || fail "the wiki audit did not send exactly one request per non-source page"
+  [ "$(request_count)" -eq $((before + 2)) ] || fail "the wiki audit did not send exactly one request per included page"
   request=$(tail -1 "$REQUEST_LOG")
   jq -e '(.questions | keys) == ["hedge","history"] and
     all(.questions[]; .type == "choice" and (.criteria | keys) == ["no","yes"] and
       (.instructions | startswith("Audit one wiki page.")) and (has("source") | not)) and
     .state.page.path == "one.md" and .state.chunk == {index:1,count:1,text:"# One\n\nState.\n"}' \
     <<<"$request" >/dev/null || fail "a rule did not become one yes/no Choice over the page: $request"
-  if grep -q 'Dated record' "$REQUEST_LOG"; then fail "a page under sources/ was sent"; fi
+  if grep -q 'Dated record' "$REQUEST_LOG"; then fail "a page under an excluded directory was sent"; fi
   jq -e -s 'length == 2 and map(.page) == ["design/two.md","one.md"] and all(.[]; .status == "judged" and .flagged == [])' \
     "$home/out/jev-verdicts.jsonl" >/dev/null || fail "the verdict file does not hold one judged record per page"
-  assert_contains "$(cat "$home/out/jev-report.md")" '| `history` | 0 | 0 | 0 | schema rule 71 |' \
+  assert_contains "$(cat "$home/out/jev-report.md")" '| `history` | 0 | 0 | 0 | fixture style guide |' \
     "the report does not count each rule with its source"
   "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "a wiki-audit ledger row failed schema validation"
-  pass "Jev wiki audit: the rule file is validated, each rule is one yes/no Choice, and sources/ is skipped"
+  pass "Jev wiki audit: a rule file is required and validated, each rule is one yes/no Choice, and excluded directories are skipped"
 }
 
 test_wiki_audit_chunks_an_oversized_page_without_losing_text() {
@@ -1686,7 +1691,7 @@ test_report_names_failed_network_attempts
 test_report_lists_per_key_outcome_mismatches
 test_report_names_only_the_differing_items_of_a_batch
 test_report_derives_differing_items_for_an_old_row
-test_wiki_audit_parses_rules_and_skips_sources
+test_wiki_audit_requires_rules_and_honors_excludes
 test_wiki_audit_chunks_an_oversized_page_without_losing_text
 test_wiki_audit_merges_chunk_verdicts_per_page
 test_wiki_audit_stops_at_its_daily_cap

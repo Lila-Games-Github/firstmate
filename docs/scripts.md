@@ -118,7 +118,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-jev-triage.sh`       | Classify a bounded supervision batch without changing its presentation            |
 | `fm-jev-commit-lint.sh`  | Review task-branch commits for message agreement and declared risk signals without blocking landing |
 | `fm-jev-open-questions.sh` | Propose statuses for page-referenced open questions without editing their register  |
-| `fm-jev-wiki-audit.sh`   | Ask one yes/no rule question per wiki page, chunking oversized pages, and write per-page verdicts and a report without editing the wiki |
+| `fm-jev-wiki-audit.sh`   | Ask one yes/no question per rule from a project-supplied rules file for each wiki page, chunking oversized pages, and write per-page verdicts and a report without editing the wiki |
 | `fm-jev-report.sh`       | Summarize Jev agreement, error direction, spend, and estimated token avoidance        |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
 | `fm-wake-drain.sh`       | Present and acknowledge the current actor's claimed wake rows alongside status, outcome-backstop, decision, divergence, recovery, and supervision checks |

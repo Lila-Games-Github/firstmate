@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # fm-jev-wiki-audit.sh - audit every wiki page against a rule set, one page per consult.
 #
-# Usage: fm-jev-wiki-audit.sh [--rules <file>] [--label <text>] <wiki-dir> <output-dir>
+# Usage: fm-jev-wiki-audit.sh --rules <file> [--exclude <dir>]... [--label <text>] <wiki-dir> <output-dir>
 #
-# Every `*.md` file under <wiki-dir>, except those under its top-level
-# `sources/` directory, is one subject. Each consultation carries one page (or
-# one chunk of it) and one yes/no Choice per rule key, where yes means the page
-# violates that rule. The rule set is data: `bin/jev-questions/wiki-audit.json`
-# by default, or the file named by --rules, shaped as
+# Every `*.md` file under <wiki-dir> is one subject, except those under a
+# directory named by --exclude, given relative to <wiki-dir> and repeatable.
+# Each consultation carries one page (or one chunk of it) and one yes/no Choice
+# per rule key, where yes means the page violates that rule. Firstmate ships no
+# rule set: the audited project owns its rules beside its documentation and
+# passes them with the required --rules, as a file shaped as
 #   {"preamble": "<shared instructions>",
 #    "rules": {"<key>": {"question": "...", "yes": "...", "no": "...",
 #                        "source": "<where the rule comes from>"}}}
@@ -45,8 +46,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RULES_FILE="$SCRIPT_DIR/jev-questions/wiki-audit.json"
-RULES_LABEL="bin/jev-questions/wiki-audit.json (built-in)"
+RULES_FILE=
+EXCLUDES=()
 LABEL=
 # The client adds the pinned model to the request it sends; keep room for that
 # and for any re-encoding difference between this build and that one.
@@ -61,20 +62,28 @@ usage() { sed -n '4p' "$0" | sed 's/^# //' >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --rules) [ "$#" -ge 2 ] || usage; RULES_FILE=$2; RULES_LABEL=$2; shift 2 ;;
+    --rules) [ "$#" -ge 2 ] || usage; RULES_FILE=$2; shift 2 ;;
+    --exclude) [ "$#" -ge 2 ] || usage; EXCLUDES+=("$2"); shift 2 ;;
     --label) [ "$#" -ge 2 ] || usage; LABEL=$2; shift 2 ;;
-    -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^set -u$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     --) shift; break ;;
     -*) usage ;;
     *) break ;;
   esac
 done
 [ "$#" -eq 2 ] || usage
+[ -n "$RULES_FILE" ] || { printf 'wiki-audit: --rules <file> is required; firstmate ships no rule set\n' >&2; exit 2; }
 WIKI_DIR=$1
 OUT_DIR=$2
 command -v jq >/dev/null 2>&1 || { printf 'wiki-audit: jq is required\n' >&2; exit 2; }
 [ -d "$WIKI_DIR" ] && [ ! -L "$WIKI_DIR" ] || { printf 'wiki-audit: %s is not a directory\n' "$WIKI_DIR" >&2; exit 2; }
 WIKI_ROOT=$(cd -P "$WIKI_DIR" && pwd -P) || exit 2
+PRUNE=()
+for dir in "${EXCLUDES[@]+"${EXCLUDES[@]}"}"; do
+  case "$dir" in ''|/*|*..*) printf 'wiki-audit: --exclude %s must be a relative directory inside %s\n' "$dir" "$WIKI_DIR" >&2; exit 2 ;; esac
+  dir=${dir%/}
+  PRUNE+=(-path "$WIKI_ROOT/$dir" -prune -o)
+done
 
 # Rule parsing happens before the opt-in gate so a broken rule file is reported
 # even where Jev is off, and before anything is read from the wiki.
@@ -317,7 +326,7 @@ while IFS= read -r -d '' PAGE_FILE; do
      input_tokens:(([$chunks[].input_tokens] | add // 0) + ([$resplits[0][].discarded_input_tokens] | add // 0)),
      chunks:$chunks}
   ' "$CHUNK_RECORDS" >> "$RECORDS" || continue
-done < <(find "$WIKI_ROOT" -path "$WIKI_ROOT/sources" -prune -o -type f -name '*.md' -print0 | LC_ALL=C sort -z)
+done < <(find "$WIKI_ROOT" "${PRUNE[@]+"${PRUNE[@]}"}" -type f -name '*.md' -print0 | LC_ALL=C sort -z)
 
 [ -s "$RECORDS" ] || { printf 'wiki-audit: no pages found under %s\n' "$WIKI_DIR" >&2; exit 0; }
 
@@ -328,7 +337,7 @@ if ! cp -- "$RECORDS" "$VERDICTS.tmp.$$" || ! mv -f "$VERDICTS.tmp.$$" "$VERDICT
   exit 0
 fi
 
-if ! jq -s -r --arg label "${LABEL:-$WIKI_DIR}" --arg mode "$MODE" --arg rules_file "$RULES_LABEL" \
+if ! jq -s -r --arg label "${LABEL:-$WIKI_DIR}" --arg mode "$MODE" --arg rules_file "$RULES_FILE" \
   --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --slurpfile rules_data "$RULES_FILE" '
   . as $pages | ($rules_data[0].rules) as $rules | ($rules | keys) as $keys |
   def conf: if . == null then "n/a" else (. * 100 | round / 100 | tostring) end;
