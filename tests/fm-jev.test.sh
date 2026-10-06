@@ -1596,6 +1596,32 @@ test_wiki_audit_stops_at_its_daily_cap() {
   pass "Jev wiki audit: a spent daily cap stops the run and names the unjudged pages"
 }
 
+test_wiki_audit_resplits_a_rejected_page() {
+  local home="$TMP_ROOT/wiki-resplit" i
+  write_wiki_config "$home" shadow 1000
+  write_key "$home"
+  write_wiki_rules "$home/rules.json"
+  mkdir -p "$home/wiki"
+  {
+    printf '# Dense page FORCE_REJECT_OVER_1500.\n\n'
+    for i in $(seq 1 12); do
+      printf '## Part %s\n\nFiller text for part %s that the service will only take in smaller pieces.\n\n' "$i" "$i"
+      printf 'More filler text for part %s so that each first-pass chunk is too long.\n\n' "$i"
+    done
+  } > "$home/wiki/dense.md"
+  jev_env "$home" "$WIKI_AUDIT" --rules "$home/rules.json" "$home/wiki" "$home/out" >/dev/null \
+    || fail "the wiki audit failed on a rejected page"
+  jq -e -s '.[0] as $p | $p.status == "judged" and ($p.resplits | length) >= 1 and
+    $p.resplits[0].rejected == "http-400" and $p.chunk_count > $p.resplits[0].chunk_count and
+    all($p.chunks[]; .status == "answered" and .bytes <= 1500)' \
+    "$home/out/jev-verdicts.jsonl" >/dev/null || fail "a rejected page was not split again into accepted chunks"
+  [ "$(jq -r '.chunks | map(.first_line) | .[0]' "$home/out/jev-verdicts.jsonl")" = 1 ] \
+    || fail "the re-split page does not start at its first line"
+  assert_contains "$(cat "$home/out/jev-report.md")" "split again after the service rejected" \
+    "the report does not say the page had to be split again"
+  pass "Jev wiki audit: a chunk the service rejects re-splits the page smaller instead of losing it"
+}
+
 test_wiki_audit_is_off_until_a_custom_config_lists_it() {
   local home="$TMP_ROOT/wiki-unlisted" before status err
   write_config "$home" shadow off off off
@@ -1664,6 +1690,7 @@ test_wiki_audit_parses_rules_and_skips_sources
 test_wiki_audit_chunks_an_oversized_page_without_losing_text
 test_wiki_audit_merges_chunk_verdicts_per_page
 test_wiki_audit_stops_at_its_daily_cap
+test_wiki_audit_resplits_a_rejected_page
 test_wiki_audit_is_off_until_a_custom_config_lists_it
 
 printf 'all fm-jev tests passed\n'

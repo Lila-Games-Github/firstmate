@@ -25,7 +25,10 @@
 # in every chunk clears it, and anything else is reported as not judged
 # confidently. The chunks together always carry the whole page, so page text is
 # never truncated; the record names how many chunks a page needed and their
-# line ranges.
+# line ranges. The budget is counted in bytes, so dense text can still exceed
+# the service's own token limit: when the service rejects a chunk with HTTP 400
+# or 413, the whole page is split again at half the size, at most three times,
+# and the page record keeps each discarded attempt under `resplits`.
 #
 # Writes <output-dir>/jev-verdicts.jsonl (one raw per-page record, including
 # each chunk's per-rule choice and confidence and its consultation id) and
@@ -50,6 +53,8 @@ BUDGET_MARGIN=256
 HEAD_LINES=12
 HEAD_CHARS=1500
 OUTLINE_CHARS=4000
+MIN_ALLOWANCE=512
+MAX_RESPLITS=3
 
 usage() { sed -n '4p' "$0" | sed 's/^# //' >&2; exit 2; }
 
@@ -114,6 +119,7 @@ CHUNKS="$TMP_DIR/chunks.json"
 ENVELOPE="$TMP_DIR/envelope.json"
 RESULT="$TMP_DIR/result.json"
 CHUNK_RECORDS="$TMP_DIR/chunk-records.jsonl"
+RESPLITS="$TMP_DIR/resplits.json"
 RECORDS="$TMP_DIR/records.jsonl"
 : > "$RECORDS"
 
@@ -186,11 +192,60 @@ record_chunk_unavailable() { # <index> <reason> <chunk-json-file|->
   ' "$file" >> "$CHUNK_RECORDS"
 }
 
+# consult_chunks <allowance>: splits the current page at <allowance> bytes of
+# encoded text and consults each chunk, appending one record per chunk to
+# CHUNK_RECORDS. Sets REJECTED when the service refused a chunk as a bad or
+# oversized request, which is how a page whose text tokenizes denser than the
+# client's bytes-per-token estimate shows up.
+consult_chunks() { # <allowance>
+  local allowance=$1 index=0 subject reason
+  REJECTED=
+  COUNT=
+  if jq -Rs -c --argjson allowance "$allowance" "$CHUNK_FILTER" "$PAGE_FILE" > "$CHUNKS" 2>/dev/null; then
+    COUNT=$(jq 'length' "$CHUNKS")
+  fi
+  case "$COUNT" in ''|*[!0-9]*|0) COUNT=0; record_chunk_unavailable 1 page-unreadable -; return 0 ;; esac
+  while [ "$index" -lt "$COUNT" ]; do
+    index=$((index + 1))
+    jq -c ".[$((index - 1))]" "$CHUNKS" > "$TMP_DIR/chunk.json"
+    if [ -n "$STOP" ]; then
+      record_chunk_unavailable "$index" "$STOP" "$TMP_DIR/chunk.json"
+      continue
+    fi
+    subject=$REL
+    [ "$COUNT" -eq 1 ] || subject="$REL#chunk-$index-of-$COUNT"
+    if ! build_envelope "$REL" "$index" "$COUNT" "$TMP_DIR/chunk.json" "$subject"; then
+      record_chunk_unavailable "$index" envelope-failed "$TMP_DIR/chunk.json"
+      continue
+    fi
+    "$SCRIPT_DIR/fm-jev.sh" consult wiki-audit < "$ENVELOPE" > "$RESULT" 2>/dev/null \
+      || printf '{"status":"unavailable","reason":"client-failed"}\n' > "$RESULT"
+    if [ "$(jq -r '.status // "unavailable"' "$RESULT" 2>/dev/null)" != available ]; then
+      reason=$(jq -r '.reason // "unavailable"' "$RESULT" 2>/dev/null)
+      case "$reason" in
+        *call-cap|*spend-cap|ledger-unreadable) STOP=$reason ;;
+        http-400|http-413) REJECTED=$reason ;;
+      esac
+      record_chunk_unavailable "$index" "${reason:-unavailable}" "$TMP_DIR/chunk.json"
+      continue
+    fi
+    FLOOR=$(jq -c '.confidence_floor' "$RESULT")
+    jq -c --argjson index "$index" --slurpfile chunk "$TMP_DIR/chunk.json" '
+      {index:$index, first_line:$chunk[0].first_line, last_line:$chunk[0].last_line,
+       bytes:($chunk[0].text | utf8bytelength), status:"answered", reason:null,
+       consultation_id:.consultation_id, truncated:(.truncated // false),
+       cost_usd:(.cost_usd // 0), input_tokens:(.input_tokens // 0),
+       answers:(.answers | with_entries(.value = {choice:.value.choice, confidence:.value.confidence}))}
+    ' "$RESULT" >> "$CHUNK_RECORDS"
+  done
+}
+
 STOP=
 FLOOR=null
 while IFS= read -r -d '' PAGE_FILE; do
   REL=${PAGE_FILE#"$WIKI_ROOT"/}
   : > "$CHUNK_RECORDS"
+  printf '[]\n' > "$RESPLITS"
   jq -Rs --argjson lines "$HEAD_LINES" --argjson head_chars "$HEAD_CHARS" --argjson outline_chars "$OUTLINE_CHARS" '
     (split("\n")) as $all |
     ($all[0:$lines] | join("\n")) as $head |
@@ -208,51 +263,30 @@ while IFS= read -r -d '' PAGE_FILE; do
   fi
   case "$OVERHEAD" in ''|*[!0-9]*) OVERHEAD=$((BUDGET + 1)) ;; esac
   ALLOWANCE=$((BUDGET - OVERHEAD))
-  COUNT=1
   if [ -n "$STOP" ]; then
     record_chunk_unavailable 1 "$STOP" -
-  elif [ "$ALLOWANCE" -lt 512 ]; then
+  elif [ "$ALLOWANCE" -lt "$MIN_ALLOWANCE" ]; then
     record_chunk_unavailable 1 question-block-exceeds-budget -
   else
-    COUNT=
-    if jq -Rs -c --argjson allowance "$ALLOWANCE" "$CHUNK_FILTER" "$PAGE_FILE" > "$CHUNKS" 2>/dev/null; then
-      COUNT=$(jq 'length' "$CHUNKS")
-    fi
-    case "$COUNT" in ''|*[!0-9]*|0) COUNT=0; record_chunk_unavailable 1 page-unreadable - ;; esac
-    INDEX=0
-    while [ "$INDEX" -lt "$COUNT" ]; do
-      INDEX=$((INDEX + 1))
-      jq -c ".[$((INDEX - 1))]" "$CHUNKS" > "$TMP_DIR/chunk.json"
-      if [ -n "$STOP" ]; then
-        record_chunk_unavailable "$INDEX" "$STOP" "$TMP_DIR/chunk.json"
-        continue
-      fi
-      SUBJECT=$REL
-      [ "$COUNT" -eq 1 ] || SUBJECT="$REL#chunk-$INDEX-of-$COUNT"
-      if ! build_envelope "$REL" "$INDEX" "$COUNT" "$TMP_DIR/chunk.json" "$SUBJECT"; then
-        record_chunk_unavailable "$INDEX" envelope-failed "$TMP_DIR/chunk.json"
-        continue
-      fi
-      "$SCRIPT_DIR/fm-jev.sh" consult wiki-audit < "$ENVELOPE" > "$RESULT" 2>/dev/null \
-        || printf '{"status":"unavailable","reason":"client-failed"}\n' > "$RESULT"
-      if [ "$(jq -r '.status // "unavailable"' "$RESULT" 2>/dev/null)" != available ]; then
-        REASON=$(jq -r '.reason // "unavailable"' "$RESULT" 2>/dev/null)
-        case "$REASON" in *call-cap|*spend-cap|ledger-unreadable) STOP=$REASON ;; esac
-        record_chunk_unavailable "$INDEX" "${REASON:-unavailable}" "$TMP_DIR/chunk.json"
-        continue
-      fi
-      FLOOR=$(jq -c '.confidence_floor' "$RESULT")
-      jq -c --argjson index "$INDEX" --slurpfile chunk "$TMP_DIR/chunk.json" '
-        {index:$index, first_line:$chunk[0].first_line, last_line:$chunk[0].last_line,
-         bytes:($chunk[0].text | utf8bytelength), status:"answered", reason:null,
-         consultation_id:.consultation_id, truncated:(.truncated // false),
-         cost_usd:(.cost_usd // 0), input_tokens:(.input_tokens // 0),
-         answers:(.answers | with_entries(.value = {choice:.value.choice, confidence:.value.confidence}))}
-      ' "$RESULT" >> "$CHUNK_RECORDS"
+    # A rejected chunk re-splits the whole page at half the allowance, a bounded
+    # number of times; the discarded attempt stays in the page record and its
+    # answered chunks' spend is still counted.
+    while :; do
+      : > "$CHUNK_RECORDS"
+      consult_chunks "$ALLOWANCE"
+      [ -n "$REJECTED" ] && [ -z "$STOP" ] || break
+      [ "$(jq 'length' "$RESPLITS")" -lt "$MAX_RESPLITS" ] || break
+      [ $((ALLOWANCE / 2)) -ge "$MIN_ALLOWANCE" ] || break
+      jq -c --argjson allowance "$ALLOWANCE" --arg reason "$REJECTED" --slurpfile chunks <(jq -s . "$CHUNK_RECORDS") '
+        . + [{allowance_bytes:$allowance, chunk_count:($chunks[0] | length), rejected:$reason,
+              discarded_cost_usd:([$chunks[0][].cost_usd] | add // 0),
+              discarded_input_tokens:([$chunks[0][].input_tokens] | add // 0)}]
+      ' "$RESPLITS" > "$RESPLITS.tmp" && mv -f "$RESPLITS.tmp" "$RESPLITS"
+      ALLOWANCE=$((ALLOWANCE / 2))
     done
   fi
   jq -s -c --arg page "$REL" --argjson bytes "${PAGE_BYTES:-0}" --argjson floor "$FLOOR" \
-    --slurpfile questions "$QUESTIONS" '
+    --slurpfile questions "$QUESTIONS" --slurpfile resplits "$RESPLITS" '
     . as $chunks | ($questions[0] | keys) as $keys | ($chunks | length) as $n |
     ([$chunks[] | select(.status == "answered")] | length) as $answered |
     (reduce $keys[] as $k ({}; . + {($k):(
@@ -277,7 +311,9 @@ while IFS= read -r -d '' PAGE_FILE; do
      flagged:[$keys[] | select($rules[.].violates == true and $rules[.].confident)],
      not_confident:[$keys[] | select($rules[.].confident | not)],
      rules:$rules,
-     cost_usd:([$chunks[].cost_usd] | add // 0), input_tokens:([$chunks[].input_tokens] | add // 0),
+     resplits:$resplits[0],
+     cost_usd:(([$chunks[].cost_usd] | add // 0) + ([$resplits[0][].discarded_cost_usd] | add // 0)),
+     input_tokens:(([$chunks[].input_tokens] | add // 0) + ([$resplits[0][].discarded_input_tokens] | add // 0)),
      chunks:$chunks}
   ' "$CHUNK_RECORDS" >> "$RECORDS" || continue
 done < <(find "$WIKI_ROOT" -path "$WIKI_ROOT/sources" -prune -o -type f -name '*.md' -print0 | LC_ALL=C sort -z)
@@ -345,10 +381,14 @@ if ! jq -s -r --arg label "${LABEL:-$WIKI_DIR}" --arg mode "$MODE" --arg rules_f
   end),
   "",
   "## Chunked pages", "",
-  (if ([$pages[] | select(.chunked)] | length) == 0 then "None." else
-    ($pages[] | select(.chunked) |
+  (if ([$pages[] | select(.chunked or ((.resplits // []) | length) > 0)] | length) == 0 then "None." else
+    ($pages[] | select(.chunked or ((.resplits // []) | length) > 0) |
       "- \(.page) (\(.bytes) bytes): \(.chunk_count) chunks, lines "
-      + ([.chunks[] | "\(.first_line)-\(.last_line)"] | join(", ")))
+      + ([.chunks[] | "\(.first_line)-\(.last_line)"] | join(", "))
+      + (if ((.resplits // []) | length) > 0 then
+           "; split again after the service rejected the "
+           + ([.resplits[] | "\(.chunk_count)-chunk attempt (\(.rejected))"] | join(" and the "))
+         else "" end))
   end),
   "",
   "## Spend", "",
@@ -357,6 +397,7 @@ if ! jq -s -r --arg label "${LABEL:-$WIKI_DIR}" --arg mode "$MODE" --arg rules_f
     + (if (($all_chunks | length) - $answered) > 0 then
          " (" + ([$all_chunks[] | select(.status != "answered") | .reason] | group_by(.) | map("\(.[0]) \(length)") | join(", ")) + ")"
        else "" end),
+  "- Pages split again after a rejected request: \([$pages[] | select(((.resplits // []) | length) > 0)] | length); spend on answered chunks of a discarded attempt is included above",
   "- Every attempt, including failed ones, is also in the Jev ledger; `bin/fm-jev-report.sh` reads it."
 ' "$RECORDS" > "$REPORT.tmp.$$" 2>/dev/null || ! mv -f "$REPORT.tmp.$$" "$REPORT"; then
   rm -f "$REPORT.tmp.$$"
