@@ -525,7 +525,7 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 ## Jev decision observers (config/jev.json)
 
-`config/jev.json` controls four optional TypeSafe AI Jev observers without changing typed dispatch resolution.
+`config/jev.json` controls four optional TypeSafe AI Jev observers and the explicitly run wiki audit without changing typed dispatch resolution.
 The file is local and gitignored, is not inherited by secondmate homes, and is absent by default.
 An absent file uses the active built-in configuration shown below.
 An unreadable, symlinked, or malformed file makes every observer unavailable and preserves the existing path without a network call.
@@ -540,19 +540,22 @@ The complete version 1 schema is:
   "kill_switch": false,
   "per_call_token_cap": 32000,
   "daily": {
-    "call_cap": 100,
-    "spend_usd_cap": 0.05
+    "call_cap": 250,
+    "spend_usd_cap": 0.15
   },
   "uses": {
     "accept-check": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
     "triage": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
     "commit-lint": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
-    "open-questions": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}}
+    "open-questions": {"mode": "active", "confidence_floor": 0.65, "daily": {"call_cap": 25, "spend_usd_cap": 0.0125}},
+    "wiki-audit": {"mode": "active", "confidence_floor": 0.8, "daily": {"call_cap": 150, "spend_usd_cap": 0.1}}
   }
 }
 ```
 
-`version` must be `1`, `kill_switch` must be Boolean, and `uses` must contain exactly the four named objects.
+`version` must be `1`, `kill_switch` must be Boolean, and `uses` must contain the four observer objects and may also contain `wiki-audit`.
+A file that omits `wiki-audit` leaves that use off with no budget, so a home whose budgets were sized before the use existed never spends its global cap on a batch audit until the file lists it; `bin/fm-jev.sh status wiki-audit` names that reason.
+A listed `wiki-audit` without its own `daily` object receives the built-in one shown above rather than a share of the global budget.
 `per_call_token_cap` is an integer from 1 through 32000.
 `bin/fm-jev.sh request-budget <use>` reports the request size limit; the client header owns request sizing, splitting, truncation, and refusal mechanics, including triage's single-request limit.
 See [the client contract](../bin/fm-jev.sh) before building an adapter envelope, and [Jev evaluation](jev.md#evaluate-the-result) for interpreting shortened or unanswered consultations.

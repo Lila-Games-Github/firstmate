@@ -1,0 +1,83 @@
+{
+  "preamble": "You are auditing one page of a current-state documentation wiki against one rule. `page.path` is the page path relative to the wiki root, `page.head` is the opening lines of the page, and `page.outline` lists every heading on the page. `chunk.text` is the part of the page under review, chunk `chunk.index` of `chunk.count`. Judge the rule against `chunk.text` unless the rule names another field. Stating, quoting, or explaining a documentation rule as a rule is not itself a violation of it.",
+  "rules": {
+    "provenance_narration": {
+      "question": "Does the text narrate who asked for, approved, or authored the content, or where its authority comes from, instead of only stating the design? Examples: 'the user requested', 'this conversation is the authority', 'no separate source artifact exists', 'Product owner, <date>, re-authored', 'per the captain'.",
+      "yes": "The text narrates provenance or authority.",
+      "no": "The text states the design without provenance or authority narration.",
+      "source": "Product-owner audit feedback items 5 and 6"
+    },
+    "dated_ruling": {
+      "question": "Does the text present a dated ruling, decision, or directive as the reason for the current design, for example 'the 2026-09-10 relocation ruling' or 'a 2026-09-08 verbal ruling', where that ruling is a task instruction or a conversation rather than a preserved source artifact?",
+      "yes": "The text cites a dated ruling or decision as authority.",
+      "no": "The text cites no dated ruling or decision as authority.",
+      "source": "Documentation schema, verbal design and source-artifact boundary; product-owner audit feedback item 3"
+    },
+    "history_narration": {
+      "question": "Does the text record history instead of current state: a changelog, a decision log, superseded reasoning, wording such as 'previously', 'originally', or 'was changed to', or a narrative of how the design changed over time?",
+      "yes": "The text records history in a current-state page.",
+      "no": "The text states only the current state.",
+      "source": "Documentation schema, current-state and source rules; product-owner audit feedback items 3 and 6"
+    },
+    "supersession_narration": {
+      "question": "Does the text say that something supersedes, replaces, or was superseded by earlier material, for example 'Supersedes the single shared silhouette described above', or keep a superseded description alongside its replacement?",
+      "yes": "The text narrates supersession or keeps superseded material.",
+      "no": "The text neither narrates supersession nor keeps superseded material.",
+      "source": "Product-owner audit feedback item 6"
+    },
+    "design_and_implementation_mixed": {
+      "question": "Use `page.outline` and `chunk.text` to judge the whole page. Does this page both state product design (what the game should be, look, sound, or feel like, and its rules) and document implementation (how code, scenes, scripts, node paths, classes, file layout, or editor-exposed settings realize it)? Answer yes only when both kinds of content are substantive on the page.",
+      "yes": "The page mixes substantive design and implementation documentation.",
+      "no": "The page is design only or implementation only.",
+      "source": "Product-owner audit feedback item 7"
+    },
+    "hedging_qualifier": {
+      "question": "Does the text qualify current statements with provenance or certainty words such as 'confirmed', 'ratified', 'approved', 'agreed', 'official', or a heading such as 'Confirmed purpose', where a current page should state what is true unqualified?",
+      "yes": "The text hedges or qualifies current statements this way.",
+      "no": "The text states current facts unqualified.",
+      "source": "Product-owner audit feedback item 8"
+    },
+    "archived_evidence_outside_sources": {
+      "question": "Use `page.path`, `page.head`, and `chunk.text`. Is this page archived or preserved evidence - an inventory of crops, exports, screenshots, or transcripts, other preserved source material, or a page whose status is Archived and that makes no current-design claim - while its `page.path` is outside the `sources/` directory?",
+      "yes": "The page is archived evidence filed outside sources/.",
+      "no": "The page is not archived evidence, or it is filed under sources/.",
+      "source": "Documentation schema, current-state and source rules; product-owner audit feedback item 4"
+    },
+    "attributed_quotation": {
+      "question": "Does the text quote or attribute wording to a person or a task (the product owner, the user, the captain, a developer, a task brief) instead of stating the design directly in plain current-state prose?",
+      "yes": "The text carries attributed quotations or wording.",
+      "no": "The text states the design directly without attributed wording.",
+      "source": "Documentation schema, filing and verbal-design rules on attributed wording; product-owner audit feedback item 5"
+    },
+    "invented_source_record": {
+      "question": "Does the text treat a ruling, decision, task brief, conversation summary, or verbal decision as a source artifact, for example by citing it under 'Sources:', describing a dated record for it, or using a product-owner-rulings source category?",
+      "yes": "The text treats a ruling, brief, or conversation as a source artifact.",
+      "no": "The text cites only real preserved artifacts as sources, or cites none.",
+      "source": "Documentation schema, verbal design and source-artifact boundary"
+    },
+    "unbacked_authority_date": {
+      "question": "Use `page.head`, `page.outline`, and `chunk.text`. Does the page carry an `Authority date`, or a date in its title or section headings, without being a dated source record of a real preserved artifact such as an image, transcript, meeting note, or CSV?",
+      "yes": "The page carries a date that no preserved source artifact backs.",
+      "no": "The page carries no such date, or it is a dated record of a real artifact.",
+      "source": "Documentation schema, required page header and verbal design rules"
+    },
+    "missing_header": {
+      "question": "Use `page.head` only. Does the page lack the required header block after its title, that is a `**Status:**` line, a `**Document type:**` line, and an `**Owner:**` line?",
+      "yes": "At least one required header line is missing.",
+      "no": "All three required header lines are present.",
+      "source": "Documentation schema, required page header"
+    },
+    "delivery_report_in_wiki": {
+      "question": "Is this text, or a substantial part of it, a delivery report, task evidence, a verification or test log, or a First Mate report (what a task did, which checks ran, commits, PR notes) rather than design or reference knowledge?",
+      "yes": "The text is delivery or task evidence filed in the wiki.",
+      "no": "The text is design or reference knowledge.",
+      "source": "Documentation schema, filing and linking rules"
+    },
+    "mislabeled_source_citation": {
+      "question": "Does the text label a link to another current wiki page (not a file under `sources/`) as a source, for example a `**Sources:**` line pointing at a wiki page, or rely on a page-wide bibliography instead of citing the exact artifact below each section?",
+      "yes": "The text mislabels a wiki page as a source or cites sources page-wide.",
+      "no": "Source citations, if any, name real artifacts per section.",
+      "source": "Documentation schema, current-state and source rules on citations"
+    }
+  }
+}

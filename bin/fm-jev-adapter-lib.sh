@@ -4,8 +4,9 @@
 #
 # bin/fm-dispatch-resolve.sh names its off reason on stderr and exits zero when
 # its key is absent. This is that contract for the Jev adapters a human or a
-# workflow step runs by name: accept-check, commit-lint, and open-questions all
-# say why they are doing nothing instead of exiting silently, since an operator
+# workflow step runs by name: accept-check, commit-lint, open-questions, and
+# wiki-audit all say why they are doing nothing instead of exiting silently,
+# since an operator
 # who enabled the feature with no key otherwise gets no feedback from any
 # surface. The presentation-path triage hooks share the same gate through
 # fm_jev_observer_ready, which answers the same question without printing

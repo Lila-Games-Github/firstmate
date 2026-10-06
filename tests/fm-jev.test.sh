@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for the bounded Jev client, four adapters, and metrics report.
+# Behavior tests for the bounded Jev client, five adapters, and metrics report.
 #
 # Every enabled adapter talks only to tests/jev-http-server.py on 127.0.0.1.
 # Off, missing-key, and cap paths prove no request reaches even that local
@@ -18,6 +18,7 @@ ACCEPT="$ROOT/bin/fm-jev-accept-check.sh"
 TRIAGE="$ROOT/bin/fm-jev-triage.sh"
 COMMIT_LINT="$ROOT/bin/fm-jev-commit-lint.sh"
 OPEN_QUESTIONS="$ROOT/bin/fm-jev-open-questions.sh"
+WIKI_AUDIT="$ROOT/bin/fm-jev-wiki-audit.sh"
 REPORT="$ROOT/bin/fm-jev-report.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 LAVISH="$ROOT/bin/fm-procevent-lavish.sh"
@@ -1423,6 +1424,201 @@ test_report_fixture_and_empty_error() {
   pass "Jev report: fixture quality metrics are correct and an empty ledger fails clearly"
 }
 
+write_wiki_config() { # <home> <mode> <token-cap> [wiki-call-cap]
+  local home=$1 mode=$2 tokens=$3 calls=${4:-100}
+  mkdir -p "$home/config" "$home/state" "$home/data"
+  cat > "$home/config/jev.json" <<JSON
+{
+  "version": 1,
+  "kill_switch": false,
+  "per_call_token_cap": $tokens,
+  "daily": {"call_cap": 100, "spend_usd_cap": 1},
+  "uses": {
+    "accept-check": {"mode": "off", "confidence_floor": 0.8},
+    "triage": {"mode": "off", "confidence_floor": 0.65},
+    "commit-lint": {"mode": "off", "confidence_floor": 0.8},
+    "open-questions": {"mode": "off", "confidence_floor": 0.65},
+    "wiki-audit": {"mode": "$mode", "confidence_floor": 0.8, "daily": {"call_cap": $calls, "spend_usd_cap": 1}}
+  }
+}
+JSON
+}
+
+write_wiki_rules() { # <file>
+  cat > "$1" <<'JSON'
+{
+  "preamble": "Audit one wiki page.",
+  "rules": {
+    "history": {"question": "Does the page record history?", "yes": "It does.", "no": "It does not.", "source": "schema rule 71"},
+    "hedge": {"question": "Does the page hedge?", "yes": "It does.", "no": "It does not."}
+  }
+}
+JSON
+}
+
+# A page of twelve sections, large enough that a small per-call cap must chunk
+# it. Optional markers land in the closing section only.
+# shellcheck disable=SC2016 # Markdown backticks are literal report text.
+write_big_page() { # <file> [closing-text]
+  local i
+  {
+    printf '# Big page\n\n**Status:** Current\n\n'
+    for i in $(seq 1 12); do
+      printf '## Section %s\n\n' "$i"
+      printf 'Paragraph one of section %s carries filler text so the page grows past the cap.\n\n' "$i"
+      printf 'Paragraph two of section %s carries more filler text so the page grows past the cap.\n\n' "$i"
+      printf '```\n# not a heading inside a fence %s\n```\n\n' "$i"
+    done
+    printf '## Closing\n\n%s\n' "${2:-Nothing else.}"
+  } > "$1"
+}
+
+# shellcheck disable=SC2016 # Markdown backticks are literal report text.
+test_wiki_audit_parses_rules_and_skips_sources() {
+  local home="$TMP_ROOT/wiki-rules" before out rc=0 request
+  write_wiki_config "$home" shadow 32000
+  write_key "$home"
+  mkdir -p "$home/wiki/sources/images" "$home/wiki/design"
+  printf '# One\n\nState.\n' > "$home/wiki/one.md"
+  printf '# Two\n\nState.\n' > "$home/wiki/design/two.md"
+  printf '# Source\n\nDated record.\n' > "$home/wiki/sources/images/2026-01-01-record.md"
+  printf '{"preamble":"p","rules":{"bad key":{"question":"q","yes":"y","no":"n"},"ok":{"question":"q","yes":"y"}}}\n' \
+    > "$home/bad-rules.json"
+  before=$(request_count)
+  out=$(jev_env "$home" "$WIKI_AUDIT" --rules "$home/bad-rules.json" "$home/wiki" "$home/out" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a malformed rule file did not exit 2: rc=$rc"
+  assert_contains "$out" "bad key" "the rule-file diagnostic does not name the malformed key"
+  [ "$(request_count)" -eq "$before" ] || fail "a malformed rule file still sent a request"
+  [ ! -e "$home/out/jev-report.md" ] || fail "a malformed rule file still wrote a report"
+  printf '{"preamble":"p","rules":{"ok":{"question":"q","yes":"y"}}}\n' > "$home/bad-rules.json"
+  rc=0
+  out=$(jev_env "$home" "$WIKI_AUDIT" --rules "$home/bad-rules.json" "$home/wiki" "$home/out" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] && [[ "$out" == *"ok"* ]] || fail "a rule without its no answer was accepted: rc=$rc $out"
+
+  write_wiki_rules "$home/rules.json"
+  out=$(jev_env "$home" "$WIKI_AUDIT" --rules "$home/rules.json" "$home/wiki" "$home/out") \
+    || fail "the wiki audit failed on a valid rule file"
+  [ "$(request_count)" -eq $((before + 2)) ] || fail "the wiki audit did not send exactly one request per non-source page"
+  request=$(tail -1 "$REQUEST_LOG")
+  jq -e '(.questions | keys) == ["hedge","history"] and
+    all(.questions[]; .type == "choice" and (.criteria | keys) == ["no","yes"] and
+      (.instructions | startswith("Audit one wiki page.")) and (has("source") | not)) and
+    .state.page.path == "one.md" and .state.chunk == {index:1,count:1,text:"# One\n\nState.\n"}' \
+    <<<"$request" >/dev/null || fail "a rule did not become one yes/no Choice over the page: $request"
+  if grep -q 'Dated record' "$REQUEST_LOG"; then fail "a page under sources/ was sent"; fi
+  jq -e -s 'length == 2 and map(.page) == ["design/two.md","one.md"] and all(.[]; .status == "judged" and .flagged == [])' \
+    "$home/out/jev-verdicts.jsonl" >/dev/null || fail "the verdict file does not hold one judged record per page"
+  assert_contains "$(cat "$home/out/jev-report.md")" '| `history` | 0 | 0 | 0 | schema rule 71 |' \
+    "the report does not count each rule with its source"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "a wiki-audit ledger row failed schema validation"
+  pass "Jev wiki audit: the rule file is validated, each rule is one yes/no Choice, and sources/ is skipped"
+}
+
+test_wiki_audit_chunks_an_oversized_page_without_losing_text() {
+  local home="$TMP_ROOT/wiki-chunks" before count budget
+  write_wiki_config "$home" shadow 1000
+  write_key "$home"
+  write_wiki_rules "$home/rules.json"
+  mkdir -p "$home/wiki"
+  write_big_page "$home/wiki/big.md"
+  before=$(request_count)
+  jev_env "$home" "$WIKI_AUDIT" --rules "$home/rules.json" "$home/wiki" "$home/out" >/dev/null \
+    || fail "the wiki audit failed on an oversized page"
+  count=$(( $(request_count) - before ))
+  [ "$count" -ge 2 ] || fail "an oversized page was not chunked: $count request(s)"
+  budget=$(jev_env "$home" "$JEV" request-budget wiki-audit)
+  tail -n "$count" "$REQUEST_LOG" | jq -e -s --argjson budget "$budget" --argjson n "$count" '
+    all(.[]; (tojson | utf8bytelength) <= $budget and .state.chunk.count == $n and .state.page.path == "big.md")
+    and (map(.state.chunk.index) == [range(1; $n + 1)])' >/dev/null \
+    || fail "a chunk exceeded the per-call budget or lost its place in the page"
+  [ "$(tail -n "$count" "$REQUEST_LOG" | jq -j '.state.chunk.text')" = "$(cat "$home/wiki/big.md")" ] \
+    || fail "the chunks do not carry exactly the whole page"
+  tail -n "$count" "$REQUEST_LOG" | jq -e -s 'all(.[]; .state.chunk.text | startswith("#") and (startswith("# not") | not))' \
+    >/dev/null || fail "a chunk did not start at a section heading outside a code fence"
+  jq -e -s --argjson n "$count" 'length == 1 and .[0].chunked == true and .[0].chunk_count == $n and
+    (.[0].chunks | length) == $n and .[0].chunks[0].first_line == 1' \
+    "$home/out/jev-verdicts.jsonl" >/dev/null || fail "the verdict record does not say the page was chunked"
+  jq -e -s --argjson n "$count" 'map(.subject) == [range(1; $n + 1) | "big.md#chunk-\(.)-of-\($n)"] and
+    all(.[]; .truncated == false)' "$home/state/jev-ledger.jsonl" >/dev/null \
+    || fail "chunk consultations were not recorded as untruncated per-chunk subjects"
+  assert_contains "$(cat "$home/out/jev-report.md")" "- big.md (" "the report does not list the chunked page"
+  pass "Jev wiki audit: an oversized page is split into budget-sized chunks that carry the whole page"
+}
+
+# shellcheck disable=SC2016 # Markdown backticks are literal report text.
+test_wiki_audit_merges_chunk_verdicts_per_page() {
+  local home="$TMP_ROOT/wiki-merge" out report
+  write_wiki_config "$home" active 1000
+  write_key "$home"
+  write_wiki_rules "$home/rules.json"
+  mkdir -p "$home/wiki"
+  write_big_page "$home/wiki/big.md" 'Was changed earlier FORCE_YES_history. and FORCE_LOW_hedge. here.'
+  printf '# Small\n\nIt is FORCE_YES_hedge. confirmed.\n' > "$home/wiki/small.md"
+  out=$(jev_env "$home" "$WIKI_AUDIT" --rules "$home/rules.json" --label 'fixture wiki' "$home/wiki" "$home/out") \
+    || fail "the wiki audit failed while merging chunks"
+  assert_contains "$out" "2 pages, 2 flagged, 1 not judged confidently" "the summary line miscounted the pages"
+  jq -e -s '
+    (.[] | select(.page == "big.md")) as $big | (.[] | select(.page == "small.md")) as $small |
+    $big.chunked and $big.flagged == ["history"] and
+    $big.rules.history.chunks == [$big.chunk_count] and $big.rules.history.confident and
+    $big.rules.hedge.confident == false and $big.rules.hedge.violates == false and
+    $big.not_confident == ["hedge"] and
+    $small.flagged == ["hedge"] and $small.rules.history == {violates:false,confidence:0.9,confident:true,chunks:[]}' \
+    "$home/out/jev-verdicts.jsonl" >/dev/null || fail "chunk answers were not merged per page and rule"
+  report=$(cat "$home/out/jev-report.md")
+  assert_contains "$report" "- Wiki: fixture wiki" "the report lost its label"
+  assert_contains "$report" '| big.md | `history` 0.9 |' "the per-page table does not show the flag and confidence"
+  assert_contains "$report" '- big.md: `hedge` no 0.4' "the report does not list the unconfident rule"
+  assert_contains "$report" '| `hedge` | 1 | 0 | 1 |' "the per-rule count is wrong"
+  "$JEV" validate-ledger "$home/state/jev-ledger.jsonl" || fail "merged wiki-audit rows failed schema validation"
+  out=$(FM_HOME="$home" "$REPORT" "$home/state/jev-ledger.jsonl") || fail "the Jev report rejected wiki-audit rows"
+  assert_contains "$out" $'\nwiki-audit\t' "the Jev report has no wiki-audit row"
+  pass "Jev wiki audit: a confident yes in any chunk flags the page and a weak answer is reported as unconfident"
+}
+
+test_wiki_audit_stops_at_its_daily_cap() {
+  local home="$TMP_ROOT/wiki-cap" before
+  write_wiki_config "$home" shadow 32000 1
+  write_key "$home"
+  write_wiki_rules "$home/rules.json"
+  mkdir -p "$home/wiki"
+  printf '# A\n' > "$home/wiki/a.md"
+  printf '# B\n' > "$home/wiki/b.md"
+  printf '# C\n' > "$home/wiki/c.md"
+  before=$(request_count)
+  jev_env "$home" "$WIKI_AUDIT" --rules "$home/rules.json" "$home/wiki" "$home/out" >/dev/null \
+    || fail "the wiki audit failed at its cap"
+  [ "$(request_count)" -eq $((before + 1)) ] || fail "the wiki audit kept sending past its daily cap"
+  jq -e -s 'map(.status) == ["judged","unavailable","unavailable"] and
+    (.[1].chunks[0].reason == "use-daily-call-cap") and (.[2].chunks[0].reason == "use-daily-call-cap")' \
+    "$home/out/jev-verdicts.jsonl" >/dev/null || fail "pages after the cap were not recorded with its reason"
+  assert_contains "$(cat "$home/out/jev-report.md")" "use-daily-call-cap" "the report does not name why pages went unjudged"
+  pass "Jev wiki audit: a spent daily cap stops the run and names the unjudged pages"
+}
+
+test_wiki_audit_is_off_until_a_custom_config_lists_it() {
+  local home="$TMP_ROOT/wiki-unlisted" before status err
+  write_config "$home" shadow off off off
+  write_key "$home"
+  write_wiki_rules "$home/rules.json"
+  mkdir -p "$home/wiki"
+  printf '# A\n' > "$home/wiki/a.md"
+  status=$(jev_env "$home" "$JEV" status wiki-audit)
+  [ "$(cut -f1 <<<"$status")" = off ] && [ "$(cut -f2 <<<"$status")" = mode-off ] \
+    || fail "an unlisted wiki-audit use is not off: $status"
+  assert_contains "$status" "does not list wiki-audit" "the off reason does not say the use is unlisted"
+  status=$(jev_env "$home" "$JEV" status accept-check)
+  [ "$(cut -f2 <<<"$status")" = none ] || fail "a config without wiki-audit broke the other uses: $status"
+  before=$(request_count)
+  err=$(jev_env "$home" "$WIKI_AUDIT" --rules "$home/rules.json" "$home/wiki" "$home/out" 2>&1 >/dev/null)
+  assert_contains "$err" "wiki-audit: off" "the off wiki audit did not name its reason"
+  [ "$(request_count)" -eq "$before" ] || fail "an unlisted wiki-audit use reached HTTP"
+  [ ! -e "$home/out" ] || fail "an off wiki audit wrote output"
+  status=$(FM_HOME="$TMP_ROOT/wiki-default" "$JEV" status wiki-audit)
+  [ "$(cut -f1 <<<"$status")" = active ] || fail "the built-in configuration does not enable wiki-audit: $status"
+  pass "Jev wiki audit: active by default, but off where a custom config predates it"
+}
+
 test_accept_brief_delivery_fixtures
 test_accept_brief_structure_fixtures
 test_off_is_noop_for_every_adapter
@@ -1464,5 +1660,10 @@ test_report_names_failed_network_attempts
 test_report_lists_per_key_outcome_mismatches
 test_report_names_only_the_differing_items_of_a_batch
 test_report_derives_differing_items_for_an_old_row
+test_wiki_audit_parses_rules_and_skips_sources
+test_wiki_audit_chunks_an_oversized_page_without_losing_text
+test_wiki_audit_merges_chunk_verdicts_per_page
+test_wiki_audit_stops_at_its_daily_cap
+test_wiki_audit_is_off_until_a_custom_config_lists_it
 
 printf 'all fm-jev tests passed\n'
