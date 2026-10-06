@@ -6,12 +6,11 @@
 # its key is absent. This is that contract for the Jev adapters a human or a
 # workflow step runs by name: accept-check, commit-lint, open-questions, and
 # wiki-audit all say why they are doing nothing instead of exiting silently,
-# since an operator
-# who enabled the feature with no key otherwise gets no feedback from any
-# surface. The presentation-path triage hooks share the same gate through
-# fm_jev_observer_ready, which answers the same question without printing
-# anything, because a per-drain diagnostic on the supervision path would be
-# noise.
+# since an operator who enabled the feature with no key otherwise gets no
+# feedback from any surface. The presentation-path triage hooks share the same
+# gate through fm_jev_observer_ready, which answers the same question without
+# printing anything, because a per-drain diagnostic on the supervision path
+# would be noise.
 
 # fm_jev_adapter_ready <use>
 # 0 when <use> is configured on and a key is resolvable, leaving the effective
