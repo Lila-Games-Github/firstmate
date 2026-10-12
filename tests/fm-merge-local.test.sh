@@ -10,6 +10,7 @@
 #   (e) a task branch diverged from the resolved landing branch still refuses
 #   (f) a lane lands the branch checked out in its recorded worktree
 #   (g) a detached or unrelated lane worktree refuses without guessing fm/<id>
+#   (h) a lane task whose identity never recorded a delivery mode refuses
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -34,10 +35,10 @@ make_case() {
 }
 
 write_meta() {
-  local case_dir=$1 landing_branch=${2-}
-  fm_write_meta "$case_dir/state/task-x1.meta" \
-    "project=$case_dir/project" \
-    "mode=local-only"
+  local case_dir=$1 landing_branch=${2-} mode=${3-}
+  local fields=("project=$case_dir/project")
+  [ -z "$mode" ] || fields+=("mode=$mode")
+  fm_write_meta "$case_dir/state/task-x1.meta" "${fields[@]}"
   [ -z "$landing_branch" ] \
     || printf 'landing_branch=%s\n' "$landing_branch" >> "$case_dir/state/task-x1.meta"
 }
@@ -64,7 +65,7 @@ test_recorded_nondefault_branch_never_merges_default() {
   case_dir=$(make_case recorded-target)
   git -C "$case_dir/project" branch proto/dev main
   commit_task_change "$case_dir" proto/dev
-  write_meta "$case_dir" proto/dev
+  write_meta "$case_dir" proto/dev local-only
   git -C "$case_dir/project" switch -q proto/dev
   main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
   task_tip=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)
@@ -86,7 +87,7 @@ test_absent_landing_branch_keeps_default_behavior() {
   local case_dir task_tip
   case_dir=$(make_case default-target)
   commit_task_change "$case_dir" main
-  write_meta "$case_dir"
+  write_meta "$case_dir" "" local-only
   task_tip=$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)
 
   run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
@@ -101,7 +102,7 @@ test_unresolved_recorded_branch_refuses_without_fallback() {
   local case_dir main_before rc
   case_dir=$(make_case unresolved-target)
   commit_task_change "$case_dir" main
-  write_meta "$case_dir" proto/missing
+  write_meta "$case_dir" proto/missing local-only
   main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
 
   set +e
@@ -124,7 +125,7 @@ test_checkout_and_cleanliness_guard_resolved_target() {
   case_dir=$(make_case target-preconditions)
   git -C "$case_dir/project" branch proto/dev main
   commit_task_change "$case_dir" proto/dev
-  write_meta "$case_dir" proto/dev
+  write_meta "$case_dir" proto/dev local-only
   proto_before=$(git -C "$case_dir/project" rev-parse refs/heads/proto/dev)
 
   set +e
@@ -154,7 +155,7 @@ test_diverged_landing_branch_still_refuses() {
   case_dir=$(make_case diverged-target)
   git -C "$case_dir/project" branch proto/dev main
   commit_task_change "$case_dir" proto/dev
-  write_meta "$case_dir" proto/dev
+  write_meta "$case_dir" proto/dev local-only
   git -C "$case_dir/project" switch -q proto/dev
   git -C "$case_dir/project" commit -q --allow-empty -m 'landing branch diverges'
   proto_before=$(git -C "$case_dir/project" rev-parse refs/heads/proto/dev)
@@ -180,7 +181,7 @@ test_lane_uses_recorded_worktree_branch() {
   printf 'lane change\n' > "$case_dir/lane-wt/lane.txt"
   git -C "$case_dir/lane-wt" add lane.txt
   git -C "$case_dir/lane-wt" commit -q -m 'lane change'
-  write_meta "$case_dir"
+  write_meta "$case_dir" "" local-only
   printf 'kind=lane\nworktree=%s\n' "$case_dir/lane-wt" >> "$case_dir/state/task-x1.meta"
   lane_tip=$(git -C "$case_dir/project" rev-parse refs/heads/playbot/descriptive)
 
@@ -194,12 +195,37 @@ test_lane_uses_recorded_worktree_branch() {
   pass "lane task lands the branch checked out in its recorded worktree"
 }
 
+test_lane_without_recorded_mode_refuses() {
+  local case_dir main_before rc
+  case_dir=$(make_case lane-no-mode)
+  git -C "$case_dir/project" branch playbot/unmoded main
+  git -C "$case_dir/project" worktree add -q "$case_dir/lane-wt" playbot/unmoded
+  printf 'lane change\n' > "$case_dir/lane-wt/lane.txt"
+  git -C "$case_dir/lane-wt" add lane.txt
+  git -C "$case_dir/lane-wt" commit -q -m 'lane change'
+  write_meta "$case_dir"
+  printf 'kind=lane\nworktree=%s\n' "$case_dir/lane-wt" >> "$case_dir/state/task-x1.meta"
+  main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
+
+  set +e
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lane-no-mode: merge should refuse"
+  assert_grep 'is mode=, not local-only' "$case_dir/stderr" \
+    "lane-no-mode: refusal did not name the missing recorded mode"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$main_before" ] \
+    || fail "lane-no-mode: main changed despite refusal"
+  pass "a lane task whose identity never recorded a delivery mode refuses instead of guessing local-only"
+}
+
 test_lane_detached_worktree_refuses() {
   local case_dir main_before rc
   case_dir=$(make_case lane-detached)
   commit_task_change "$case_dir" main
   git -C "$case_dir/task-wt" switch -q --detach
-  write_meta "$case_dir"
+  write_meta "$case_dir" "" local-only
   printf 'kind=lane\nworktree=%s\n' "$case_dir/task-wt" >> "$case_dir/state/task-x1.meta"
   main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
 
@@ -222,7 +248,7 @@ test_lane_branch_missing_from_project_refuses() {
   git init -q -b other "$case_dir/unrelated"
   git -C "$case_dir/unrelated" commit -q --allow-empty -m unrelated
   git -C "$case_dir/unrelated" worktree add -q -b playbot/unrelated "$case_dir/unrelated-wt"
-  write_meta "$case_dir"
+  write_meta "$case_dir" "" local-only
   printf 'kind=lane\nworktree=%s\n' "$case_dir/unrelated-wt" >> "$case_dir/state/task-x1.meta"
   main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
 
@@ -245,6 +271,7 @@ test_unresolved_recorded_branch_refuses_without_fallback
 test_checkout_and_cleanliness_guard_resolved_target
 test_diverged_landing_branch_still_refuses
 test_lane_uses_recorded_worktree_branch
+test_lane_without_recorded_mode_refuses
 test_lane_detached_worktree_refuses
 test_lane_branch_missing_from_project_refuses
 

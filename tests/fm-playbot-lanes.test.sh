@@ -2348,6 +2348,15 @@ NODE
 [ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch created a chat before rejecting a null landingBranch without newWorkspace"
 pass "fm-playbot-lanes: dispatch rejects landingBranch without newWorkspace before any side effect"
 
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"mode\":\"local-only\",\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"x\"}}}")
+OUT="$out" node --no-warnings <<'NODE' || fail "dispatch silently ignored mode with no firstmate lane identity to arm"
+const value = JSON.parse(process.env.OUT);
+if (!value.error?.message.includes('mode is only valid when taskId arms a firstmate lane identity')) process.exit(1);
+NODE
+[ ! -e "$FIXTURE_ROOT/ipc-calls.jsonl" ] || fail "dispatch contacted Playbot before rejecting mode with no lane identity to arm"
+pass "fm-playbot-lanes: dispatch rejects mode when no firstmate lane identity is being armed"
+
 out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"dispatch\",\"arguments\":{\"engineDependent\":false,\"landingBranch\":\"main\",\"project\":$worker_json,\"workspace\":\"ws-worker\",\"newWorkspace\":{},\"title\":\"Conflict\",\"message\":\"x\"}}}")
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace plus newWorkspace was not rejected"
 const value = JSON.parse(process.env.OUT);
@@ -3911,7 +3920,7 @@ SH
 chmod 0700 "$FIXTURE_ROOT/lane-rollback-bin/tasks-axi"
 lane_rollback_ipc_before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
 out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 FM_TEST_LANE_TASKS_AXI="$(command -v tasks-axi)" \
-  PATH="$FIXTURE_ROOT/lane-rollback-bin:$PATH" home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Rollback lane task\",\"taskId\":\"fm-lane-rollback\"}")
+  PATH="$FIXTURE_ROOT/lane-rollback-bin:$PATH" home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Rollback lane task\",\"taskId\":\"fm-lane-rollback\",\"mode\":\"local-only\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "failed lane backlog transition was not reported: $out"
 if (!JSON.parse(process.env.OUT).error?.message.includes('injected lane backlog start failure')) process.exit(1);
 NODE
@@ -3922,7 +3931,7 @@ assert_absent "$FM_HOME_FIXTURE/state/fm-lane-rollback.check.sh" "failed lane ba
 tasks-axi show fm-lane-rollback --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-rollback-row.out" \
   || fail "could not read rollback lane backlog"
 assert_grep 'state: queued' "$FIXTURE_ROOT/lane-rollback-row.out" "failed lane backlog commit changed its row"
-out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Retry rollback lane task\",\"taskId\":\"fm-lane-rollback\"}")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Retry rollback lane task\",\"taskId\":\"fm-lane-rollback\",\"mode\":\"local-only\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "rollback lane retry did not arm: $out"
 if (JSON.parse(process.env.OUT).result?.structuredContent?.supervision?.armed !== true) process.exit(1);
 NODE
@@ -3970,7 +3979,7 @@ tasks-axi show fm-lane-identity --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FI
   || fail "could not read engine-refused lane backlog"
 assert_grep 'state: queued' "$FIXTURE_ROOT/lane-engine-refused.out" "engine-refused dispatch changed the lane backlog"
 pass "fm-playbot-lanes: engine refusal precedes lane creation and leaves task identity untouched"
-out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-identity\"},\"title\":\"Lane identity\",\"message\":\"Do the lane task\",\"taskId\":\"fm-lane-identity\"}")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-identity\"},\"title\":\"Lane identity\",\"message\":\"Do the lane task\",\"taskId\":\"fm-lane-identity\",\"mode\":\"no-mistakes\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "PL-021: brief/backlog dispatch without metadata failed to arm: $out"
 const value = JSON.parse(process.env.OUT).result.structuredContent;
 if (value.supervision.armed !== true) process.exit(1);
@@ -3988,6 +3997,7 @@ const meta = Object.fromEntries(fs.readFileSync(process.env.META, 'utf8').trim()
 }));
 if (meta.kind !== 'lane' || meta.playbot_thread !== process.env.THREAD || meta.playbot_workspace !== process.env.WORKSPACE) process.exit(1);
 if (meta.landing_branch !== 'main' || !meta.spawn_gen || !fs.existsSync(meta.worktree)) process.exit(1);
+if (meta.mode !== 'no-mistakes') process.exit(1);
 NODE
 mkdir -p "$FIXTURE_ROOT/lane-append-meta"
 lane_append_meta="$FIXTURE_ROOT/lane-append-meta/fm-lane-identity.meta"
@@ -4096,7 +4106,7 @@ tasks-axi add fm-lane-manual "Manual lane backlog" --kind ship --queue \
 printf 'manual\n' > "$FM_HOME_FIXTURE/config/backlog-backend"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
 printf '2099-08-25T12:00:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
-out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Manual backlog task\",\"taskId\":\"fm-lane-manual\"}")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Manual backlog task\",\"taskId\":\"fm-lane-manual\",\"mode\":\"local-only\"}")
 rm "$FIXTURE_ROOT/send-reconciles" "$FIXTURE_ROOT/send-accepted-at"
 OUT="$out" node --no-warnings <<'NODE' || fail "manual backlog posture prevented lane supervision"
 if (JSON.parse(process.env.OUT).result.structuredContent.supervision.armed !== true) process.exit(1);
@@ -4114,6 +4124,47 @@ tasks-axi show fm-lane-manual --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXT
   || fail "could not read manual lane backlog after cleanup"
 assert_grep 'state: queued' "$FIXTURE_ROOT/lane-manual.out" "lane teardown ignored the manual backlog posture"
 pass "fm-playbot-lanes: lane dispatch and teardown preserve manual backlog ownership"
+
+# A lane's recorded mode decides which landing path owns it (fm-merge-local.sh
+# only ever advances mode=local-only), so a missing or invalid mode refuses to
+# record the identity exactly like any other post-creation identity failure:
+# the workspace and chat already exist, and the caller is told how to reach
+# them again, but nothing is guessed on its behalf.
+mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-mode-missing"
+printf 'Mode-missing lane brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-mode-missing/brief.md"
+tasks-axi add fm-lane-mode-missing "Lane without a delivery mode" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage mode-missing lane backlog"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-mode-missing\"},\"title\":\"Mode missing\",\"message\":\"Do the unmoded lane task\",\"taskId\":\"fm-lane-mode-missing\"}")
+mode_recovery=$(OUT="$out" node --no-warnings <<'NODE'
+const message = JSON.parse(process.env.OUT).error?.message ?? "";
+if (!message.includes('were created') || !message.includes('could not be recorded') || !message.includes('requires an explicit mode')) process.exit(1);
+const match = message.match(/^Workspace (\S+) and chat (\S+) were created/);
+if (!match) process.exit(1);
+process.stdout.write(`${match[1]} ${match[2]}`);
+NODE
+) || fail "missing-mode dispatch did not name its created pair and cause: $out"
+read -r mode_missing_workspace mode_missing_thread <<<"$mode_recovery"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-mode-missing.meta" "a dispatch refused for its missing mode still recorded an identity"
+
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$mode_missing_workspace\",\"thread\":\"$mode_missing_thread\",\"message\":\"Do the unmoded lane task\",\"taskId\":\"fm-lane-mode-missing\",\"mode\":\"yolo\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an invalid mode was accepted instead of refused: $out"
+const message = JSON.parse(process.env.OUT).error?.message ?? "";
+if (!message.includes("mode must be one of no-mistakes, direct-PR, local-only (got 'yolo')")) process.exit(1);
+NODE
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-mode-missing.meta" "an invalid mode still recorded an identity"
+
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$mode_missing_workspace\",\"thread\":\"$mode_missing_thread\",\"message\":\"Do the unmoded lane task\",\"taskId\":\"fm-lane-mode-missing\",\"mode\":\"direct-PR\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "a valid mode on the recovery dispatch was not accepted: $out"
+if (JSON.parse(process.env.OUT).result?.structuredContent?.supervision?.armed !== true) process.exit(1);
+NODE
+META="$FM_HOME_FIXTURE/state/fm-lane-mode-missing.meta" node --no-warnings <<'NODE' || fail "the recovered dispatch did not persist the mode it was given"
+const fs = require('node:fs');
+const meta = Object.fromEntries(fs.readFileSync(process.env.META, 'utf8').trim().split('\n').map(line => {
+  const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)];
+}));
+if (meta.kind !== 'lane' || meta.mode !== 'direct-PR') process.exit(1);
+NODE
+pass "fm-playbot-lanes: dispatch refuses to record a lane identity without an explicit, valid mode and persists the one eventually given"
 
 # A worker chat the operator archived or deleted cannot block retiring a lane
 # whose workspace is verified landed, and --force never skips that check.
@@ -4182,7 +4233,7 @@ tasks-axi add "$lane_race_task" "Lane retirement publication race" --kind ship -
   --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage lane retirement race"
 printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
 printf '2099-08-25T13:00:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
-out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Lane retirement race baseline\",\"taskId\":\"$lane_race_task\"}")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Lane retirement race baseline\",\"taskId\":\"$lane_race_task\",\"mode\":\"local-only\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "could not arm the lane retirement race"
 if (JSON.parse(process.env.OUT).result.structuredContent.supervision.armed !== true) process.exit(1);
 NODE
@@ -4292,7 +4343,7 @@ NODE
 ) || fail "post-creation identity failure lost the created workspace/chat recovery: $out"
 read -r locked_workspace locked_thread <<<"$recovery"
 assert_absent "$FM_HOME_FIXTURE/state/fm-lane-locked.meta" "a refused post-creation identity was still recorded"
-out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$locked_workspace\",\"thread\":\"$locked_thread\",\"message\":\"Do the locked lane task\",\"taskId\":\"fm-lane-locked\"}")
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$locked_workspace\",\"thread\":\"$locked_thread\",\"message\":\"Do the locked lane task\",\"taskId\":\"fm-lane-locked\",\"mode\":\"local-only\"}")
 OUT="$out" node --no-warnings <<'NODE' || fail "the recovery dispatch did not arm the created worker: $out"
 if (JSON.parse(process.env.OUT).result?.structuredContent?.supervision?.armed !== true) process.exit(1);
 NODE
