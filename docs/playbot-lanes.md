@@ -208,7 +208,8 @@ If that record is missing the poll reports the observation state as unreadable a
 Firstmate's task teardown removes the poll artifacts with the matching task identity.
 
 For a terminal dispatch with an explicit `taskId`, an existing dispatchable backlog item and durable brief can supply a task that has not been spawned through a shell harness.
-When its metadata is absent, dispatch creates a private `kind=lane` identity before sending, retaining the selected workspace, thread, landing branch, and spawn incarnation under the task locks.
+When its metadata is absent, dispatch creates a private `kind=lane` identity before sending, retaining the selected workspace, thread, landing branch, spawn incarnation, and the caller's explicit `mode` under the task locks.
+Dispatch requires that explicit `mode` (`no-mistakes`, `direct-PR`, or `local-only`) whenever `taskId` arms a new lane identity and refuses instead of defaulting one, because `bin/fm-merge-local.sh` only ever lands a recorded `mode=local-only` lane; `no-mistakes` and `direct-PR` lanes ship through their own existing pipelines.
 An existing task record is preserved, and a retired, held, blocked, or otherwise unavailable work item cannot mint a replacement identity.
 Appended bookkeeping fields retain their last value, while duplicate identity fields are refused.
 Eligibility is checked before any workspace or chat is created, and the refusal names its cause (missing brief, missing backlog item, held/blocked/closed row, lock timeout, or unreadable record) without sending.

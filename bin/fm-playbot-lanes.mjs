@@ -1562,6 +1562,19 @@ function explicitLandingBranch(tool, value) {
   return landingBranch;
 }
 
+// A lane's delivery mode decides which landing path owns it: fm-merge-local.sh
+// only ever advances mode=local-only lanes, leaving no-mistakes and direct-PR
+// lanes to their existing pipelines. There is no safe default to fall back to,
+// so an absent or unrecognized mode refuses instead of guessing one.
+const LANE_DELIVERY_MODES = ["no-mistakes", "direct-PR", "local-only"];
+
+function explicitLaneMode(tool, value) {
+  const mode = typeof value === "string" ? value.trim() : "";
+  if (!mode) throw new Error(`${tool} requires an explicit mode (one of ${LANE_DELIVERY_MODES.join(", ")}) to record a firstmate lane task identity`);
+  if (!LANE_DELIVERY_MODES.includes(mode)) throw new Error(`${tool} mode must be one of ${LANE_DELIVERY_MODES.join(", ")} (got '${mode}')`);
+  return mode;
+}
+
 function parkedLandingTargets(args, projects) {
   const hasProject = args.project !== undefined;
   const hasLandingBranch = args.landingBranch !== undefined;
@@ -5386,7 +5399,7 @@ function laneMeta(file) {
     const at = line.indexOf("=");
     if (at < 1 || /[\0\r]/.test(line)) throw new Error("lane metadata is malformed or ambiguous");
     const key = line.slice(0, at);
-    const identityKey = key === "kind" || key === "spawn_gen" || key.startsWith("playbot_");
+    const identityKey = key === "kind" || key === "spawn_gen" || key === "mode" || key.startsWith("playbot_");
     if (identityKey && Object.hasOwn(meta, key)) throw new Error("lane metadata is malformed or ambiguous");
     // Existing writers append bookkeeping; match fm_meta_get's last-wins
     // semantics without allowing an identity field to change ambiguously.
@@ -5458,7 +5471,7 @@ function preflightTerminalLaneIdentity(taskId, worker) {
   return captured;
 }
 
-async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, captured) {
+async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, mode, captured) {
   const state = supervisionStateDir();
   const helper = laneIdentityHelperPath();
   if (captured !== "missing") {
@@ -5485,6 +5498,7 @@ async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, capture
       project: supervisionPath(projectRoot.path, "lane project root"),
       worktree: supervisionPath(root.path, "lane workspace root"),
       landing_branch: landingBranch ?? projectRoot.defaultBranch,
+      mode: explicitLaneMode("dispatch", mode),
     };
     if (Object.values(fields).some((value) => typeof value !== "string" || !value || /[\0\r\n]/.test(value))) {
       throw new Error("lane task identity has an empty or malformed field");
@@ -6409,7 +6423,7 @@ function toolDefinitions() {
     {
       name: "dispatch",
       description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. Dispatch returns workspace.roots with branch names read back from Playbot registration, so callers can regenerate a named lane brief when newWorkspace.branch was ignored. Marked ordinary crewmate briefs are refused before creation or send; unmarked custom/legacy messages remain supported. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile dispatch refuses before sending, naming the created chat so it can be archived or sent deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ engineDependent: boolean("Require confirmed Godot engine readiness before sending; defaults true, false explicitly declares file-only work", true), project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
+      inputSchema: object({ engineDependent: boolean("Require confirmed Godot engine readiness before sending; defaults true, false explicitly declares file-only work", true), project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), mode: { type: "string", enum: LANE_DELIVERY_MODES, description: "Delivery mode recorded on the firstmate lane task identity this taskId arms; required when taskId arms one and rejected otherwise. local-only is the only mode fm-merge-local.sh will land; no-mistakes and direct-PR lanes ship through their own existing pipelines." }, thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -6618,6 +6632,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     // An unconfigured controller still receives the established send result
     // with a loud arming warning; it is not a home that can mint task records.
     const laneIdentityHome = !caller && requestedTaskId !== null && fs.existsSync(path.join(controllerRoot(), "state"));
+    if (!laneIdentityHome && args.mode !== undefined) {
+      throw new Error("dispatch mode is only valid when taskId arms a firstmate lane identity");
+    }
     const laneCapture = laneIdentityHome ? preflightTerminalLaneIdentity(requestedTaskId, worker) : null;
     const createdChat = !worker;
     if (!worker) {
@@ -6670,7 +6687,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);
     if (laneIdentityHome) {
       try {
-        await ensureTerminalLaneIdentity(requestedTaskId, worker, landingBranch, laneCapture);
+        await ensureTerminalLaneIdentity(requestedTaskId, worker, landingBranch, args.mode, laneCapture);
       } catch (error) {
         if (!createdChat) throw error;
         const reason = supervisionErrorDetail(error);
