@@ -8,6 +8,8 @@
 #   (c) a recorded landing branch that does not resolve refuses without merging
 #   (d) the checkout must be on the resolved landing branch and clean
 #   (e) a task branch diverged from the resolved landing branch still refuses
+#   (f) a lane lands the branch checked out in its recorded worktree
+#   (g) a detached or unrelated lane worktree refuses without guessing fm/<id>
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -170,10 +172,80 @@ test_diverged_landing_branch_still_refuses() {
   pass "diverged task branch still refuses against the resolved landing target"
 }
 
+test_lane_uses_recorded_worktree_branch() {
+  local case_dir lane_tip
+  case_dir=$(make_case lane-branch)
+  git -C "$case_dir/project" branch playbot/descriptive main
+  git -C "$case_dir/project" worktree add -q "$case_dir/lane-wt" playbot/descriptive
+  printf 'lane change\n' > "$case_dir/lane-wt/lane.txt"
+  git -C "$case_dir/lane-wt" add lane.txt
+  git -C "$case_dir/lane-wt" commit -q -m 'lane change'
+  write_meta "$case_dir"
+  printf 'kind=lane\nworktree=%s\n' "$case_dir/lane-wt" >> "$case_dir/state/task-x1.meta"
+  lane_tip=$(git -C "$case_dir/project" rev-parse refs/heads/playbot/descriptive)
+
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "lane-branch: merge of worktree branch failed"
+
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$lane_tip" ] \
+    || fail "lane-branch: main did not receive the lane tip"
+  assert_grep 'merged playbot/descriptive into local main' "$case_dir/stdout" \
+    "lane-branch: success output did not name the lane branch"
+  pass "lane task lands the branch checked out in its recorded worktree"
+}
+
+test_lane_detached_worktree_refuses() {
+  local case_dir main_before rc
+  case_dir=$(make_case lane-detached)
+  commit_task_change "$case_dir" main
+  git -C "$case_dir/task-wt" switch -q --detach
+  write_meta "$case_dir"
+  printf 'kind=lane\nworktree=%s\n' "$case_dir/task-wt" >> "$case_dir/state/task-x1.meta"
+  main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
+
+  set +e
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lane-detached: merge should refuse"
+  assert_grep "lane task task-x1 worktree $case_dir/task-wt has no checked-out branch" "$case_dir/stderr" \
+    "lane-detached: refusal did not identify the task and worktree"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$main_before" ] \
+    || fail "lane-detached: main changed despite refusal"
+  pass "detached lane worktree refuses without falling back to fm/task-x1"
+}
+
+test_lane_branch_missing_from_project_refuses() {
+  local case_dir main_before rc
+  case_dir=$(make_case lane-missing-branch)
+  git init -q -b other "$case_dir/unrelated"
+  git -C "$case_dir/unrelated" commit -q --allow-empty -m unrelated
+  git -C "$case_dir/unrelated" worktree add -q -b playbot/unrelated "$case_dir/unrelated-wt"
+  write_meta "$case_dir"
+  printf 'kind=lane\nworktree=%s\n' "$case_dir/unrelated-wt" >> "$case_dir/state/task-x1.meta"
+  main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
+
+  set +e
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "lane-missing-branch: merge should refuse"
+  assert_grep "lane task task-x1 worktree $case_dir/unrelated-wt branch playbot/unrelated does not exist" "$case_dir/stderr" \
+    "lane-missing-branch: refusal did not identify the task, worktree, and branch"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$main_before" ] \
+    || fail "lane-missing-branch: main changed despite refusal"
+  pass "lane worktree branch missing from project refuses"
+}
+
 test_recorded_nondefault_branch_never_merges_default
 test_absent_landing_branch_keeps_default_behavior
 test_unresolved_recorded_branch_refuses_without_fallback
 test_checkout_and_cleanliness_guard_resolved_target
 test_diverged_landing_branch_still_refuses
+test_lane_uses_recorded_worktree_branch
+test_lane_detached_worktree_refuses
+test_lane_branch_missing_from_project_refuses
 
 printf 'all fm-merge-local tests passed\n'
