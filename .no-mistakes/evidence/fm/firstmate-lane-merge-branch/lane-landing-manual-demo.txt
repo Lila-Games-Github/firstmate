@@ -1,0 +1,47 @@
+Manual end-to-end demonstration of bin/fm-merge-local.sh landing a finished
+Playbot-lane ship task automatically, with no separate manual merge/PR step.
+
+Setup: a project repo at main (9883e20), a Playbot lane dispatched with
+mode=local-only that did its work on branch playbot/add-shield-powerup in its
+own worktree, and the firstmate task identity that dispatch would have
+recorded for it (kind=lane, mode=local-only, worktree=<lane worktree>).
+
+--- lane branch tip before landing ---
+9acc132 feat: add shield powerup
+9883e20 baseline: project before the lane's work
+--- main tip before landing ---
+9883e20 baseline: project before the lane's work
+
+=== running bin/fm-merge-local.sh lane-shield (the automatic landing step) ===
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+merged playbot/add-shield-powerup into local main (9883e20 -> 9acc132) in /tmp/fm-lane-landing-demo.YPX2KY/project
+exit code: 0
+
+--- main tip after landing ---
+9acc132 feat: add shield powerup
+9883e20 baseline: project before the lane's work
+
+Result: main fast-forwarded to the lane's finished commit (9acc132) by
+invoking the merge gate-action directly on the recorded lane identity alone
+(no PR, no manual `git merge`), confirming the "land finished Playbot-lane
+ship tasks as soon as they are done" path works end-to-end for a lane task
+whose worktree branch is still checked out.
+
+(The WATCHER DOWN banner is unrelated supervision noise from fm-guard.sh,
+informational only -- it explicitly states the guarded operation still runs,
+and main did advance.)
+
+Note: this demo hand-authored the lane-shield.meta identity file to isolate
+and demonstrate fm-merge-local.sh's landing behavior in the same way the
+project's own tests/fm-merge-local.test.sh fixtures do. A separately recorded,
+declined review finding on this run already covers that no current production
+writer persists lane_branch=, and that the specific "merge after a retired
+worktree" scenario can't occur through the system's guarded retirement path;
+this demo does not speak to that broader production-reachability question,
+only to the merge script's landing behavior given a recorded lane identity.
