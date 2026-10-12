@@ -11,6 +11,8 @@
 #   (f) a lane lands the branch checked out in its recorded worktree
 #   (g) a detached or unrelated lane worktree refuses without guessing fm/<id>
 #   (h) a lane task whose identity never recorded a delivery mode refuses
+#   (i) a recorded lane branch takes precedence over the live worktree branch
+#   (j) a recorded lane branch lands after Playbot retires the worktree
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -195,6 +197,52 @@ test_lane_uses_recorded_worktree_branch() {
   pass "lane task lands the branch checked out in its recorded worktree"
 }
 
+test_lane_prefers_recorded_branch() {
+  local case_dir recorded_tip
+  case_dir=$(make_case lane-recorded-branch)
+  git -C "$case_dir/project" branch playbot/recorded main
+  git -C "$case_dir/project" worktree add -q "$case_dir/recorded-wt" playbot/recorded
+  printf 'recorded change\n' > "$case_dir/recorded-wt/recorded.txt"
+  git -C "$case_dir/recorded-wt" add recorded.txt
+  git -C "$case_dir/recorded-wt" commit -q -m 'recorded change'
+  git -C "$case_dir/project" branch playbot/live main
+  git -C "$case_dir/project" worktree add -q "$case_dir/live-wt" playbot/live
+  write_meta "$case_dir" "" local-only
+  printf 'kind=lane\nworktree=%s\nlane_branch=playbot/recorded\n' "$case_dir/live-wt" >> "$case_dir/state/task-x1.meta"
+  recorded_tip=$(git -C "$case_dir/project" rev-parse refs/heads/playbot/recorded)
+
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "lane-recorded-branch: merge of recorded branch failed"
+
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$recorded_tip" ] \
+    || fail "lane-recorded-branch: main did not receive the recorded branch tip"
+  assert_grep 'merged playbot/recorded into local main' "$case_dir/stdout" \
+    "lane-recorded-branch: success output did not name the recorded branch"
+  pass "recorded lane branch takes precedence over the live worktree branch"
+}
+
+test_lane_recorded_branch_survives_retired_worktree() {
+  local case_dir lane_tip
+  case_dir=$(make_case lane-retired-worktree)
+  git -C "$case_dir/project" branch playbot/retired main
+  git -C "$case_dir/project" worktree add -q "$case_dir/lane-wt" playbot/retired
+  printf 'lane change\n' > "$case_dir/lane-wt/lane.txt"
+  git -C "$case_dir/lane-wt" add lane.txt
+  git -C "$case_dir/lane-wt" commit -q -m 'lane change'
+  lane_tip=$(git -C "$case_dir/project" rev-parse refs/heads/playbot/retired)
+  git -C "$case_dir/project" worktree remove "$case_dir/lane-wt"
+  [ ! -e "$case_dir/lane-wt" ] || fail "lane-retired-worktree: fixture worktree still exists"
+  write_meta "$case_dir" "" local-only
+  printf 'kind=lane\nworktree=%s\nlane_branch=playbot/retired\n' "$case_dir/lane-wt" >> "$case_dir/state/task-x1.meta"
+
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "lane-retired-worktree: merge after worktree retirement failed"
+
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$lane_tip" ] \
+    || fail "lane-retired-worktree: main did not receive the retired lane tip"
+  pass "recorded lane branch lands after the worktree is retired"
+}
+
 test_lane_without_recorded_mode_refuses() {
   local case_dir main_before rc
   case_dir=$(make_case lane-no-mode)
@@ -271,6 +319,8 @@ test_unresolved_recorded_branch_refuses_without_fallback
 test_checkout_and_cleanliness_guard_resolved_target
 test_diverged_landing_branch_still_refuses
 test_lane_uses_recorded_worktree_branch
+test_lane_prefers_recorded_branch
+test_lane_recorded_branch_survives_retired_worktree
 test_lane_without_recorded_mode_refuses
 test_lane_detached_worktree_refuses
 test_lane_branch_missing_from_project_refuses

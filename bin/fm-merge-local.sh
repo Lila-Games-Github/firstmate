@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # task's recorded landing branch, or the project's default branch when none is
-# recorded, to the crewmate's fm/<id> branch or a lane worktree's branch.
+# recorded, to the crewmate's fm/<id> branch or a lane's recorded or live branch.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -98,8 +98,13 @@ KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ "$KIND" = lane ]; then
   WORKTREE=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$WORKTREE" ] || { echo "error: lane task $ID has no worktree path in $META; refusing local merge" >&2; exit 1; }
-  BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$BRANCH" ] || { echo "error: lane task $ID worktree $WORKTREE has no checked-out branch; refusing local merge" >&2; exit 1; }
+  if grep -q '^lane_branch=' "$META"; then
+    BRANCH=$(grep '^lane_branch=' "$META" | tail -1 | cut -d= -f2-)
+    [ -n "$BRANCH" ] || { echo "error: lane task $ID worktree $WORKTREE has an empty recorded lane_branch; refusing local merge" >&2; exit 1; }
+  else
+    BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    [ -n "$BRANCH" ] || { echo "error: lane task $ID worktree $WORKTREE has no checked-out branch; refusing local merge" >&2; exit 1; }
+  fi
   git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: lane task $ID worktree $WORKTREE branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 else
   BRANCH="fm/$ID"
