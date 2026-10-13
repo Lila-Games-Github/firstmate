@@ -3792,6 +3792,7 @@ async function playbotInvoke(channel, payload) {
 // These 0.117.0/0.124.0/0.129.0 readers enumerate detected projects and peek existing sessions;
 // they do not activate a project, resume a chat, or start an engine instance.
 // Unknown versions fail closed before using an unverified engine IPC contract.
+// Playbot updated from 0.128.0 to 0.129.0 during verification, so 0.128.0 remains unverified.
 async function engineReadInvoke(channel, payload) {
   return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`, 2_500), 2_500);
 }
