@@ -273,7 +273,7 @@ On Linux, a connected headless session can confirm its selected native binary fr
 `PLAYBOT_LANES_APP_RESOURCES` can identify the packaged app's resources directory when running-process discovery is unavailable; the script header owns its discovery and version-binding mechanics.
 An editor preference or PATH candidate is insufficient selection evidence because Playbot checks executable compatibility before choosing it.
 Unreadable evidence remains `unconfirmed`; the tool never runs the candidate executable to fill that gap.
-The engine snapshot reader is verified for Playbot 0.117.0 and 0.124.0; other app versions return `unconfirmed` without calling unverified engine IPC.
+The engine snapshot reader is verified for Playbot 0.117.0, 0.124.0, and 0.129.0; other app versions return `unconfirmed` without calling unverified engine IPC.
 For Playbot 0.124.0 on a symlinked home, use `get_worktree_root` to inspect the effective storage path and `canonicalize_worktree_root` to select its canonical spelling through Playbot's own settings IPC before creating a workspace.
 That setting changes the path Playbot records for future workspaces, while existing workspaces retain their recorded paths.
 After creating a Godot workspace, `prepare_engine_workspace` uses Playbot's engine IPC to install missing bundled native addon files in that exact idle workspace and verifies complete byte identity before engine validation.
