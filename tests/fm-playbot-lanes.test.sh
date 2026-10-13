@@ -8709,6 +8709,32 @@ printf '0.95.0' > "$FIXTURE_ROOT/app-version"
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
 pass "fm-playbot-lanes: new-workspace engine dispatch refuses before creating anything"
 
+# The current verified reader reaches engine IPC; the earlier reported version
+# remains unverified because this fixture cannot establish its live contract.
+printf '0.129.0' > "$FIXTURE_ROOT/app-version"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_engine_readiness\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "0.129.0 engine readiness did not use the verified read path"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.app.version !== '0.129.0' || value.app.verifiedVersions !== '0.117.0, 0.124.0, and 0.129.0') process.exit(1);
+const channels = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(line => JSON.parse(line).channel);
+if (!channels.includes('app:metadata') || !channels.includes('engine:listWorkspaceProjects')) process.exit(1);
+NODE
+printf '0.128.0' > "$FIXTURE_ROOT/app-version"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+out=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_engine_readiness\",\"arguments\":{\"project\":$worker_json,\"workspace\":\"ws-worker\"}}}")
+OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "unverified 0.128.0 reached engine IPC"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT).result?.structuredContent;
+if (value?.app.version !== '0.128.0' || value.verdict !== 'unconfirmed') process.exit(1);
+if (!value.errors.some(error => error.source === 'engine:listWorkspaceProjects' && error.message.includes('no engine read was attempted'))) process.exit(1);
+const channels = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(line => JSON.parse(line).channel);
+if (channels.includes('engine:listWorkspaceProjects')) process.exit(1);
+NODE
+printf '0.95.0' > "$FIXTURE_ROOT/app-version"
+pass "fm-playbot-lanes: 0.129.0 uses verified engine IPC while unverified 0.128.0 fails closed"
+
 # Playbot's current launch schema requires mode from and baseRef, and has no
 # workspace name field. Probe it before a write, preserve the selected branches,
 # and refuse a name rather than silently dropping the caller's request.

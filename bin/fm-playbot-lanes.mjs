@@ -46,7 +46,7 @@
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
 // directly.
-// get_engine_readiness uses app:metadata and the verified 0.117.0/0.124.0
+// get_engine_readiness uses app:metadata and the verified 0.117.0/0.124.0/0.129.0
 // engine:listWorkspaceProjects reader to inspect existing sessions without
 // activation. Dispatch requires confirmed engine readiness unless its caller
 // explicitly declares file-only work with engineDependent=false, and refuses
@@ -3789,15 +3789,16 @@ async function playbotInvoke(channel, payload) {
   return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`));
 }
 
-// These 0.117.0/0.124.0 readers enumerate detected projects and peek existing sessions;
+// These 0.117.0/0.124.0/0.129.0 readers enumerate detected projects and peek existing sessions;
 // they do not activate a project, resume a chat, or start an engine instance.
 // Unknown versions fail closed before using an unverified engine IPC contract.
+// Playbot updated from 0.128.0 to 0.129.0 during verification, so 0.128.0 remains unverified.
 async function engineReadInvoke(channel, payload) {
   return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`, 2_500), 2_500);
 }
 
 async function engineReadiness(project, workspace) {
-  const app = { version: null, verifiedVersions: "0.117.0 and 0.124.0" };
+  const app = { version: null, verifiedVersions: "0.117.0, 0.124.0, and 0.129.0" };
   const errors = [];
   try {
     const metadata = await engineReadInvoke("app:metadata", undefined);
@@ -3805,7 +3806,7 @@ async function engineReadiness(project, workspace) {
   } catch (error) { errors.push({ source: "app:metadata", message: error.message }); }
   const bundle = engineBundle(app.version);
   const detected = [];
-  if (!["0.117.0", "0.124.0"].includes(app.version)) errors.push({ source: "engine:listWorkspaceProjects", message: `Engine snapshot IPC is unverified for Playbot ${app.version ?? "unconfirmed"}; no engine read was attempted.` });
+  if (!["0.117.0", "0.124.0", "0.129.0"].includes(app.version)) errors.push({ source: "engine:listWorkspaceProjects", message: `Engine snapshot IPC is unverified for Playbot ${app.version ?? "unconfirmed"}; no engine read was attempted.` });
   else {
     if (!workspace.roots.length || workspace.roots.length !== project.roots.length) errors.push({ source: "workspace-roots", message: "Workspace root coverage is incomplete." });
     const seenRoots = new Set();
