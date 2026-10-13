@@ -216,8 +216,9 @@ Eligibility is checked before any workspace or chat is created, and the refusal 
 If recording the identity fails after a worker was created, the error names that workspace and chat so the task is dispatched to them again instead of to a new pair.
 `bin/fm-crew-state.sh` reads that lane's persisted Playbot state; an idle chat alone does not imply that its task is complete.
 While a poll is armed, its task delivery and post-acceptance completion evidence also constrain state reads and teardown, so an earlier `done` declaration cannot retire a newly dispatched task.
-`bin/fm-teardown.sh` retires its local identity and poll only after a completed declaration and an idle, landed workspace, while preserving the Playbot workspace, chat, and durable brief.
-A worker chat that was archived or deleted in Playbot no longer blocks that retirement, but the workspace must still be verified landed; `--force` skips only the declaration check, never the landed-workspace check, and an active chat still has to be idle with an empty queue.
+`bin/fm-teardown.sh` retires its local identity and poll only after a completed declaration and a landed workspace, while preserving the Playbot workspace, chat, and durable brief.
+A worker chat that was archived or deleted in Playbot no longer blocks that retirement provided its queue still reads empty, and an active chat still has to be idle with an empty queue; `--force` skips only the declaration check, never the landed-workspace check.
+Once Playbot has archived the workspace itself, the delivery sidecar cannot confirm completion, or a root's local worktree is gone, landed-ness can no longer be read from the local workspace, so teardown instead proves it against the project's own registered clone and the task's recorded landing branch, and refuses rather than guess when that proof is unavailable.
 Dispatch and teardown follow the controller's backlog policy; manual mode leaves backlog transitions to the operator.
 A failed backlog start removes the provisional identity so retry must complete the transition before sending.
 Lane teardown delivers any parent-channel outcome before removing records and clears task runtime files through the shared teardown cleanup.
