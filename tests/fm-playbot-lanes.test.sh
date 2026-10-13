@@ -4224,6 +4224,169 @@ git -C "$lane_identity_worktree" reset --hard -q "$lane_identity_head" || fail "
 rm -f "$FM_HOME_FIXTURE/state/fm-lane-absent-unlanded.meta"
 pass "fm-playbot-lanes: --force never bypasses the landed check for an absent worker chat"
 
+# Archived Playbot workspaces and stale delivery sidecars must use the task's
+# recorded branch in the project clone. Keep both roots separate so an
+# unlanded branch cannot borrow the landed branch's proof.
+fallback_repo="$FIXTURE_ROOT/lane-fallback"
+fallback_remote="$FIXTURE_ROOT/lane-fallback-remote.git"
+mkdir -p "$fallback_repo"
+git -C "$fallback_repo" init --initial-branch=main >/dev/null || fail "could not initialize lane fallback clone"
+git -C "$fallback_repo" config user.name fixture
+git -C "$fallback_repo" config user.email fixture@example.invalid
+printf 'base\n' > "$fallback_repo/base.txt"
+git -C "$fallback_repo" add base.txt
+git -C "$fallback_repo" commit -qm 'Lane fallback base'
+git init --bare --initial-branch=main "$fallback_remote" >/dev/null
+git -C "$fallback_repo" remote add origin "$fallback_remote"
+git -C "$fallback_repo" push -u origin main >/dev/null
+fallback_landed="$FIXTURE_ROOT/lane-fallback-landed"
+fallback_unlanded="$FIXTURE_ROOT/lane-fallback-unlanded"
+fallback_partial="$FIXTURE_ROOT/lane-fallback-partial"
+git -C "$fallback_repo" worktree add -b lane-fallback-landed "$fallback_landed" main >/dev/null
+printf 'landed\n' > "$fallback_landed/change.txt"
+git -C "$fallback_landed" add change.txt
+git -C "$fallback_landed" commit -qm 'Landed lane fallback change'
+git -C "$fallback_repo" merge --ff-only lane-fallback-landed >/dev/null
+printf 'later target change\n' > "$fallback_repo/later.txt"
+git -C "$fallback_repo" add later.txt
+git -C "$fallback_repo" commit -qm 'Advance lane fallback target'
+git -C "$fallback_repo" push origin main >/dev/null
+git -C "$fallback_repo" worktree add -b lane-fallback-unlanded "$fallback_unlanded" main >/dev/null
+printf 'not landed\n' > "$fallback_unlanded/extra.txt"
+git -C "$fallback_unlanded" add extra.txt
+git -C "$fallback_unlanded" commit -qm 'Unlanded lane fallback change'
+git -C "$fallback_repo" worktree add -b lane-fallback-partial "$fallback_partial" lane-fallback-landed >/dev/null
+printf 'extra after landing\n' > "$fallback_partial/extra.txt"
+git -C "$fallback_partial" add extra.txt
+git -C "$fallback_partial" commit -qm 'Partially landed lane fallback change'
+FIXTURE_ROOT="$FIXTURE_ROOT" FALLBACK_REPO="$fallback_repo" FALLBACK_LANDED="$fallback_landed" FALLBACK_UNLANDED="$fallback_unlanded" FALLBACK_PARTIAL="$fallback_partial" node --no-warnings <<'NODE' || fail "could not stage lane fallback Playbot rows"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = '2099-08-25T12:30:00.000Z';
+db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-lane-fallback', 'lane-fallback', 'root-lane-fallback', 'active', now, now);
+db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-lane-fallback', 'lane-fallback', process.env.FALLBACK_REPO, 'main');
+db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-lane-fallback', 'project-lane-fallback', 'repo-lane-fallback', 0);
+for (const [suffix, root] of [['landed', process.env.FALLBACK_LANDED], ['unlanded', process.env.FALLBACK_UNLANDED], ['partial', process.env.FALLBACK_PARTIAL]]) {
+  const workspace = `ws-lane-fallback-${suffix}`;
+  db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(workspace, 'project-lane-fallback', suffix, 'worktree', 0, 'archived', now, now);
+  db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)').run(workspace, 'root-lane-fallback', root, `lane-fallback-${suffix}`);
+  db.prepare(`INSERT INTO workspace_threads (id, workspace_id, title, position, is_active, session_id, approval_mode,
+    plan_mode, ephemeral, draft_input, pending_queue_json, agent_status, has_unread, last_user_activity_at,
+    created_at, updated_at, archived) VALUES (?, ?, ?, 0, 0, NULL, 'default', 0, 0, '', '{"messages":[]}', 'working', 0, NULL, ?, ?, 0)`)
+    .run(`chat-lane-fallback-${suffix}`, workspace, suffix, now, now);
+}
+db.close();
+NODE
+lane_fallback_meta() {
+  local suffix=$1 target="$FM_HOME_FIXTURE/state/fm-lane-fallback-$1.meta"
+  printf 'kind=lane\nspawn_gen=fixture\nmode=no-mistakes\nplaybot_project=project-lane-fallback\nplaybot_workspace=ws-lane-fallback-%s\nplaybot_thread=chat-lane-fallback-%s\nplaybot_desktop=%s\nplaybot_harness_home=%s\nlanding_branch=main\n' \
+    "$suffix" "$suffix" "$PLAYBOT_DESKTOP_DIR" "$PLAYBOT_HARNESS_HOME" > "$target"
+  chmod 0600 "$target"
+}
+lane_fallback_meta landed
+lane_fallback_meta unlanded
+lane_fallback_meta partial
+FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-landed.meta" \
+  > "$FIXTURE_ROOT/lane-fallback-archived-landed.out" 2>&1 \
+  || fail "archived workspace blocked landed lane: $(cat "$FIXTURE_ROOT/lane-fallback-archived-landed.out")"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-unlanded.meta" \
+    > "$FIXTURE_ROOT/lane-fallback-archived-unlanded.out" 2>&1; then
+  fail "archived workspace retired unlanded lane branch"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-fallback-archived-unlanded.out" "archived unlanded refusal lost its landing evidence"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-partial.meta" \
+    > "$FIXTURE_ROOT/lane-fallback-archived-partial.out" 2>&1; then
+  fail "archived workspace retired partially landed lane branch"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-fallback-archived-partial.out" "archived partial refusal lost its landing evidence"
+pass "fm-playbot-lanes: archived workspace retires only when its branch is landed"
+
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "could not reactivate lane fallback workspace"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare("UPDATE workspaces SET archive_state = 'active' WHERE id = 'ws-lane-fallback-landed'").run();
+db.prepare("UPDATE workspace_threads SET agent_status = 'ready' WHERE id = 'chat-lane-fallback-landed'").run();
+db.close();
+NODE
+printf 'fm-playbot-lane-poll-v2\nready\n2099-08-25T12:29:00.000Z\n' > "$FM_HOME_FIXTURE/state/fm-lane-fallback-landed.lane-poll"
+FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-landed.meta" \
+  > "$FIXTURE_ROOT/lane-fallback-unconfirmed-landed.out" 2>&1 \
+  || fail "unconfirmed sidecar blocked landed lane: $(cat "$FIXTURE_ROOT/lane-fallback-unconfirmed-landed.out")"
+printf 'uncommitted\n' > "$fallback_landed/not-landed.txt"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-landed.meta" \
+    > "$FIXTURE_ROOT/lane-fallback-unconfirmed-dirty.out" 2>&1; then
+  fail "unconfirmed sidecar retired lane with uncommitted work"
+fi
+rm "$fallback_landed/not-landed.txt"
+pass "fm-playbot-lanes: unconfirmed delivery falls back to landed content but retains dirty work"
+
+# A deleted Playbot directory cannot be inspected as a live worktree. Its
+# recorded branch remains in the main clone and must still pass the same proof.
+git -C "$fallback_repo" worktree remove "$fallback_landed" >/dev/null || fail "could not remove landed fixture worktree"
+git -C "$fallback_repo" worktree remove "$fallback_unlanded" >/dev/null || fail "could not remove unlanded fixture worktree"
+git -C "$fallback_repo" worktree remove "$fallback_partial" >/dev/null || fail "could not remove partially landed fixture worktree"
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "could not archive deleted fallback workspaces"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare("UPDATE workspaces SET archive_state = 'archived' WHERE project_id = 'project-lane-fallback'").run();
+db.close();
+NODE
+FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-landed.meta" \
+  > "$FIXTURE_ROOT/lane-fallback-deleted-landed.out" 2>&1 \
+  || fail "deleted workspace blocked landed lane: $(cat "$FIXTURE_ROOT/lane-fallback-deleted-landed.out")"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-unlanded.meta" \
+    > "$FIXTURE_ROOT/lane-fallback-deleted-unlanded.out" 2>&1; then
+  fail "deleted workspace retired unlanded lane branch"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-fallback-deleted-unlanded.out" "deleted unlanded refusal lost its landing evidence"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-partial.meta" \
+    > "$FIXTURE_ROOT/lane-fallback-deleted-partial.out" 2>&1; then
+  fail "deleted workspace retired partially landed lane branch"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-fallback-deleted-partial.out" "deleted partial refusal lost its landing evidence"
+pass "fm-playbot-lanes: deleted workspace uses main-clone branch proof and still refuses unlanded content"
+
+# A stale active Playbot row does not restore a deleted directory. Without the
+# clone fallback, the orphan inspector alone has no branch HEAD to compare.
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "could not stage active rows for missing fallback roots"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare("UPDATE workspaces SET archive_state = 'active' WHERE project_id = 'project-lane-fallback'").run();
+db.prepare("UPDATE workspace_threads SET agent_status = 'ready' WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = 'project-lane-fallback')").run();
+db.close();
+NODE
+rm "$FM_HOME_FIXTURE/state/fm-lane-fallback-landed.lane-poll"
+FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-landed.meta" \
+  > "$FIXTURE_ROOT/lane-fallback-active-missing-landed.out" 2>&1 \
+  || fail "active row with deleted landed workspace refused: $(cat "$FIXTURE_ROOT/lane-fallback-active-missing-landed.out")"
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-unlanded.meta" \
+    > "$FIXTURE_ROOT/lane-fallback-active-missing-unlanded.out" 2>&1; then
+  fail "active row with deleted workspace retired unlanded lane branch"
+fi
+assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-fallback-active-missing-unlanded.out" "active missing-root refusal lost its landing evidence"
+pass "fm-playbot-lanes: an active Playbot row cannot hide a deleted, unlanded workspace"
+
+# A stale local main is contained by a newer remote main, but it is not an
+# independent branch that can identify this task's work.
+git -C "$fallback_repo" reset --hard -q 'HEAD~2' || fail "could not stage a stale local landing branch"
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "could not stage a lane rooted on its landing branch"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+db.prepare("UPDATE workspace_roots SET branch = 'main' WHERE workspace_id = 'ws-lane-fallback-unlanded'").run();
+db.close();
+NODE
+if FM_HOME="$FM_HOME_FIXTURE" node "$SCRIPT" lane-task-retirable "$FM_HOME_FIXTURE/state/fm-lane-fallback-unlanded.meta" \
+    > "$FIXTURE_ROOT/lane-fallback-same-branch.out" 2>&1; then
+  fail "a stale local landing branch stood in for independent lane work"
+fi
+assert_grep 'task-specific work cannot be proven' "$FIXTURE_ROOT/lane-fallback-same-branch.out" "same-branch fallback refusal lost its identity reason"
+pass "fm-playbot-lanes: the landing branch itself cannot prove task-specific work"
+
 # Freeze a successful idle read while another dispatch tries to arm its poll.
 # A teardown may not consume an armed=true result published after that read.
 lane_race_task=fm-lane-retire-race
