@@ -6,8 +6,10 @@
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
 # kind=lane records own only Firstmate supervision, not the Playbot endpoint or
-# worktree. Their cleanup requires an idle, landed workspace and a done status,
-# retires local task/poll records through the same locks and backlog transition,
+# worktree. Their cleanup requires an idle worker, a done status, and landed
+# content proven from the workspace or the project clone when Playbot has
+# archived its workspace or the delivery sidecar cannot confirm completion,
+# then retires local task/poll records through the same locks and backlog transition,
 # holding the check-publication lock from the idle read through record removal,
 # delivers any parent-channel outcome before removing records, clears task
 # runtime files through the shared cleanup, and preserves the Playbot chat,

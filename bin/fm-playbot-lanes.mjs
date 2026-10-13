@@ -17,7 +17,9 @@
 //                     firstmate watcher check that dispatch armed for it.
 //   lane-task-state   Read a lane metadata record's persisted worker state.
 //   lane-task-retirable  Refuse local record cleanup while its worker or queue
-//                     is active or unreadable; never changes Playbot state.
+//                     is active or unreadable; prove archived or unconfirmed
+//                     work against the project clone and landing branch.
+//                     Never changes Playbot state.
 //   setup             Install, reload, and verify the complete integration.
 //   doctor            Print bounded local integration diagnostics.
 //   tracked-churn-allowlist
@@ -5524,21 +5526,83 @@ async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, mode, c
   }, true);
 }
 
-// Reads only persisted Playbot rows. A ready chat is idle, not proof of task
-// completion; the lane's resolved status declaration supplies that distinction.
+// A retired workspace may no longer have a readable worktree. In that case
+// inspect the exact branch Playbot recorded for every project root in the main
+// clone, against the task's recorded landing branch. Use the same tree
+// containment proof as fm-teardown.sh's content_in_default: an identical tree
+// or a clean merge that adds nothing to the freshly fetched landing target.
+// This path cannot infer the former work from an absent branch.
+function laneTaskLandedFromProject(project, workspace, landingBranch, mode) {
+  const coverage = workspaceRootCoverage(project, workspace);
+  if (!coverage.complete) throw new Error("lane workspace root coverage is incomplete");
+  if (!workspace.roots.length) throw new Error("lane workspace has no recorded roots");
+  for (const root of workspace.roots) {
+    const projectRoot = project.roots.find((candidate) => candidate.id === root.projectRootId);
+    if (!projectRoot?.path || !root.branch) throw new Error("lane workspace has no project clone or recorded branch");
+    const clone = canonicalPath(projectRoot.path);
+    const branch = root.branch.replace(/^refs\/heads\//, "");
+    const target = landingBranch.replace(/^refs\/heads\//, "");
+    git(clone, ["check-ref-format", "--branch", branch]);
+    git(clone, ["check-ref-format", "--branch", target]);
+    if (branch === target) throw new Error("lane workspace uses the landing branch itself; task-specific work cannot be proven");
+    assertNoGitAncestryOverrides(clone);
+    if (String(git(clone, ["rev-parse", "--is-shallow-repository"])).trim() !== "false") {
+      throw new Error(`lane project clone is shallow: ${clone}`);
+    }
+    const revision = String(git(clone, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim();
+    const reading = inspectWorkspaceRoot(project, root, landingBranch, false);
+    const blockers = reading.blockers.filter((blocker) => blocker.code !== "ignored-files");
+    if (blockers.length) throw new Error(`lane workspace is not safely landed: ${blockers.map((blocker) => blocker.message).join("; ")}`);
+    if (reading.head && reading.head.commit !== revision) {
+      throw new Error(`lane workspace HEAD differs from its recorded branch ${branch}; preserving supervision`);
+    }
+    if (reading.orphan?.registered) {
+      const registration = gitWorktreeEntries(clone).find((entry) => entry.path === canonicalPath(root.path));
+      if (registration?.head !== revision) {
+        throw new Error(`lane missing workspace HEAD differs from its recorded branch ${branch}; preserving supervision`);
+      }
+    }
+    let targetRef;
+    if (mode === "local-only") {
+      targetRef = `refs/heads/${target}`;
+    } else {
+      // Fetch exactly the recorded target, as the ordinary teardown proof does.
+      git(clone, ["remote", "get-url", "origin"]);
+      remoteGit(clone, ["fetch", "--quiet", "origin", `+refs/heads/${target}:refs/remotes/origin/${target}`]);
+      targetRef = `refs/remotes/origin/${target}`;
+    }
+    const targetCommit = String(git(clone, ["rev-parse", "--verify", `${targetRef}^{commit}`])).trim();
+    // A branch identical to the landing tip supplies no independent evidence
+    // that an unconfirmed delivery was ever worked on.
+    if (revision === targetCommit) throw new Error("lane branch has no independently verifiable landed work; preserving supervision");
+    const targetTree = String(git(clone, ["rev-parse", "--verify", `${targetCommit}^{tree}`])).trim();
+    const revisionTree = String(git(clone, ["rev-parse", "--verify", `${revision}^{tree}`])).trim();
+    if (revisionTree === targetTree) continue;
+    let mergedTree;
+    try {
+      mergedTree = String(git(clone, ["merge-tree", "--write-tree", targetCommit, revision])).trim().split(/\r?\n/, 1)[0];
+    } catch {
+      throw new Error(`lane branch ${branch} is not safely landed in ${landingBranch}; preserving supervision`);
+    }
+    if (mergedTree !== targetTree) throw new Error(`lane branch ${branch} is not safely landed in ${landingBranch}; preserving supervision`);
+  }
+}
+
+// A ready chat is idle, not proof of task completion; the lane's resolved
+// status declaration supplies that distinction.
 function laneTaskState(file, retirable = false, state = path.dirname(file)) {
   const meta = laneMeta(file);
   if (meta.kind !== "lane" || !meta.spawn_gen || !meta.playbot_project || !meta.playbot_workspace || !meta.playbot_thread) throw new Error("lane task identity is incomplete");
   process.env.PLAYBOT_DESKTOP_DIR = supervisionPath(meta.playbot_desktop, "lane desktop directory");
   process.env.PLAYBOT_HARNESS_HOME = supervisionPath(meta.playbot_harness_home, "lane harness directory");
   const row = threadRowById(meta.playbot_thread);
-  if (row ? row.project_id !== meta.playbot_project || row.workspace_id !== meta.playbot_workspace || row.archive_state !== "active" : !retirable) {
+  if (row ? row.project_id !== meta.playbot_project || row.workspace_id !== meta.playbot_workspace || (!retirable && row.archive_state !== "active") : !retirable) {
     throw new Error("lane worker is absent or its workspace identity changed");
   }
-  const chatActive = Boolean(row);
+  const chatActive = Boolean(row && row.archive_state === "active");
   const taskId = path.basename(file, ".meta");
   if (!supervisionTaskIdValid(taskId)) throw new Error("lane metadata filename does not identify a task");
-  const messages = chatActive ? queuedMessages(row.pending_queue_json) : null;
+  const messages = row ? queuedMessages(row.pending_queue_json) : null;
   const queued = messages === null ? null : messages.length;
   let completedDelivery = true;
   if (chatActive && row.agent_status === "ready" && pathPresence(supervisionSidecarPath(state, taskId))) {
@@ -5548,13 +5612,21 @@ function laneTaskState(file, retirable = false, state = path.dirname(file)) {
   if (retirable) {
     if (chatActive) {
       if (row.agent_status !== "ready" || queued !== 0) throw new Error(`lane worker is not idle with an empty queue (status ${row.agent_status}, queued ${queued ?? "unreadable"})`);
-      if (!completedDelivery) throw new Error("lane task delivery or post-acceptance completion is still unconfirmed; preserving supervision");
+    } else if (row && queued !== 0) {
+      throw new Error(`lane archived worker queue is not empty or readable (queued ${queued ?? "unreadable"})`);
     }
     const project = resolveProject(meta.playbot_project);
-    const workspace = resolveWorkspace(project, meta.playbot_workspace);
+    const workspace = project.workspaces.find((candidate) => candidate.id === meta.playbot_workspace);
+    if (!workspace) throw new Error("lane workspace identity is absent; preserving supervision");
+    if (!workspace.roots.length) throw new Error("lane workspace has no recorded roots");
+    if (!meta.landing_branch) throw new Error("lane task has no recorded landing branch");
+    const missingRoot = workspace.roots.some((root) => !root.path || !pathPresence(canonicalPath(root.path)));
+    if (workspace.archiveState !== "active" || !completedDelivery || missingRoot) {
+      laneTaskLandedFromProject(project, workspace, meta.landing_branch, explicitLaneMode("lane-task-retirable", meta.mode));
+      return;
+    }
     const coverage = workspaceRootCoverage(project, workspace);
     if (!coverage.complete) throw new Error("lane workspace root coverage is incomplete");
-    if (!meta.landing_branch) throw new Error("lane task has no recorded landing branch");
     for (const root of workspace.roots) {
       const reading = inspectWorkspaceRoot(project, root, meta.landing_branch);
       // Ignored files are retained with the workspace; every other blocker
