@@ -1,0 +1,6 @@
+ok - dedupe interruption converges and exact retries survive canonical disposition
+ok - three-candidate dedupe cannot create a chain
+ok - exact dedupe retry remains idempotent after a refused chain
+ok - preexisting multi-hop references cannot pass an exact dedupe retry
+ok - dedupe repairs a missing backlink and refuses the chain
+# fm-learning-candidate.test.sh: all assertions passed
