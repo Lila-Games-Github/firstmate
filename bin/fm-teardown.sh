@@ -1210,7 +1210,7 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
   fi
   LANE_RETIRE_ARGS=()
   [ -z "$LANDED_VIA" ] || LANE_RETIRE_ARGS=(--landed-via "$LANDED_VIA")
-  if ! LANE_RETIRE_DETAIL=$(node "$SCRIPT_DIR/fm-playbot-lanes.mjs" lane-task-retirable "$META" "$STATE" "${LANE_RETIRE_ARGS[@]}" 2>&1); then
+  if ! LANE_RETIRE_DETAIL=$(node "$SCRIPT_DIR/fm-playbot-lanes.mjs" lane-task-retirable "$META" "$STATE" ${LANE_RETIRE_ARGS[@]+"${LANE_RETIRE_ARGS[@]}"} 2>&1); then
     echo "REFUSED: lane task $ID cannot retire its supervision: $LANE_RETIRE_DETAIL" >&2
     exit 1
   fi
