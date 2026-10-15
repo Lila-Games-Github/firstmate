@@ -98,8 +98,12 @@
 # Lifecycle states are unresolved, dismissed, documented, promoted, follow-up,
 # and duplicate. Dismissal may precede classification. Documented, promoted, and
 # follow-up dispositions require a classification and a reference. Dedupe leaves
-# the canonical candidate unresolved and marks only the duplicate. Exact retries
-# of classification, disposition, and dedupe are idempotent; conflicting retries
+# the canonical candidate unresolved and marks only the duplicate. A candidate
+# that already owns duplicates cannot become a duplicate, and a duplicate cannot
+# serve as a canonical, so every member refers directly to one canonical. Owning
+# is judged from members' duplicate dispositions, and a refusal first restores
+# any backlink an interrupted dedupe left missing. Exact retries of
+# classification, disposition, and dedupe are idempotent; conflicting retries
 # are refused.
 #
 # FM_HOME selects the private operational home. FM_STATE_OVERRIDE overrides its
@@ -1125,7 +1129,7 @@ disposition_command() {
 
 dedupe_command() {
   local duplicate=${2:-} canonical='' curator='' reason='' timestamp duplicate_json duplicate_path
-  local canonical_json canonical_path disposition updated_canonical updated_duplicate existing exact_retry=0
+  local canonical_json canonical_path disposition updated_canonical updated_duplicate existing exact_retry=0 members
   [ -n "$duplicate" ] || die "dedupe requires a duplicate candidate id"
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -1167,6 +1171,28 @@ dedupe_command() {
   canonical_path=$RECORD_PATH
   [ "$(printf '%s\n' "$canonical_json" | jq -r '.incident.origin_task')" != "$curator" ] \
     || die "curator must differ from both originating tasks"
+  if printf '%s\n' "$canonical_json" | jq -e '.lifecycle_state == "duplicate"' >/dev/null; then
+    die "canonical candidate is itself a duplicate: $canonical"
+  fi
+  members=$(records_stream | jq -r --arg id "$duplicate" \
+    'select(.disposition.outcome == "duplicate" and .disposition.reference == $id) | .id')
+  if [ -n "$members" ]; then
+    timestamp=$(now_rfc3339)
+    updated_duplicate=$(printf '%s\n' "$duplicate_json" | jq -cS --arg members "$members" \
+      --arg at "$timestamp" --arg curator "$curator" \
+      '($members | split("\n")) as $found |
+       if (($found - .duplicates) | length) > 0 then
+         .duplicates = ((.duplicates + $found) | unique) |
+         .history += [{at:$at,event:"dedupe-canonical-repair",actor:$curator,detail:"restored missing duplicate backlinks"}]
+       else . end')
+    if [ "$updated_duplicate" != "$(printf '%s\n' "$duplicate_json" | jq -cS .)" ]; then
+      replace_record "$duplicate_path" "$updated_duplicate"
+    fi
+    die "candidate already owns duplicates and cannot be deduplicated: $duplicate (members: $(printf '%s' "$members" | tr '\n' ' ' | sed 's/ $//'))"
+  fi
+  if printf '%s\n' "$duplicate_json" | jq -e '.duplicates | length > 0' >/dev/null; then
+    die "candidate already owns duplicates and cannot be deduplicated: $duplicate"
+  fi
   if [ "$exact_retry" -eq 0 ]; then
     [ "$(printf '%s\n' "$canonical_json" | jq -r '.lifecycle_state')" = unresolved ] \
       || die "canonical candidate must remain unresolved"
