@@ -555,8 +555,8 @@ jobs:
           merge_output=$(/bin/bash tests/fm-merge-local.test.sh)
           printf '%s\n' "$merge_output"
           merge_count=$(printf '%s\n' "$merge_output" | grep -c '^ok - ')
-          [ "$merge_count" -eq 11 ] || {
-            echo "::error::expected 11 local-merge bash 3.2 tests, got $merge_count"
+          [ "$merge_count" -eq 14 ] || {
+            echo "::error::expected 14 local-merge bash 3.2 tests, got $merge_count"
             exit 1
           }
 

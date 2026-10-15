@@ -14,9 +14,13 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--green-final-head] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --green-final-head marks a ship task whose definition of done requires a
+#   green full-suite receipt on its final head. The marker is consumed by
+#   fm-spawn.sh, which requires a zero-failure receipt on the selected landing
+#   base before dispatch. The marker is preserved in the worker brief.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -216,6 +220,7 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+GREEN_FINAL_HEAD=0
 LANE=0
 LANE_BRANCH=
 LANE_BRANCH_SET=0
@@ -244,6 +249,7 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --green-final-head) GREEN_FINAL_HEAD=1 ;;
     --lane) LANE=1 ;;
     --lane-branch) want_value=lane-branch ;;
     --lane-branch=*) LANE_BRANCH=${a#--lane-branch=}; LANE_BRANCH_SET=1 ;;
@@ -276,6 +282,14 @@ elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
+[ "$GREEN_FINAL_HEAD" -eq 0 ] || [ "$KIND" = ship ] || {
+  echo "error: --green-final-head applies only to ship briefs" >&2
+  exit 1
+}
+[ "$GREEN_FINAL_HEAD" -eq 0 ] || [ "$LANE" -eq 0 ] || {
+  echo "error: --green-final-head requires fm-spawn dispatch; Playbot lane intake cannot verify a base-health receipt" >&2
+  exit 1
+}
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -774,11 +788,14 @@ fi
 
 WORKSPACE_KIND=crewmate
 [ "$LANE" -eq 0 ] || WORKSPACE_KIND=lane
+HEALTH_MARKER=
+[ "$GREEN_FINAL_HEAD" -eq 0 ] || HEALTH_MARKER='Final-head health: green'
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 Execution contract: workspace=$WORKSPACE_KIND
 
 $TASK_SECTION
+$HEALTH_MARKER
 
 $LANE_CONTRACT_BLOCK
 $HERDR_SECTION

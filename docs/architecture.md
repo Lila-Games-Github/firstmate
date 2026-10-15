@@ -323,6 +323,14 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 ## Delivery modes are explicit per task
 
 `no-mistakes` tasks run the full validation pipeline, `direct-PR` tasks open PRs without that pipeline, and `local-only` tasks stay local until firstmate performs an approved fast-forward merge.
+For a local landing, `bin/fm-merge-local.sh <task-id> --receipt <file>` requires a full-suite receipt for the exact candidate commit before moving the branch.
+The project-agnostic text format is owned by the header of [`bin/fm-landing-health-lib.sh`](../bin/fm-landing-health-lib.sh): `schema=fm-full-suite.v1`, a full `sha=`, a decimal `failures=`, and one stable `failure=` identifier per failure.
+An already-red landing tip can be recorded once with `--base-receipt <file>`; later candidates may retain or fix its named failures, and any new failure refuses the landing.
+The current tip's receipt is stored in this home's `data/landing-health/` by project and branch, and a red landing opens or reuses one make-it-green backlog task for that branch.
+If the merge succeeds but recording its receipt fails, the script exits 3 with a message saying the landing succeeded, so the next landing needs `--base-receipt`.
+At intake, `bin/fm-brief.sh --green-final-head` marks a crewmate ship whose final-head definition of done requires a green full suite; `bin/fm-spawn.sh --base-health-receipt <file>` then requires a zero-failure receipt naming the exact selected landing base before that ship is dispatched.
+That brief flag refuses Playbot lane briefs because their separate dispatch path does not consume the base-health receipt.
+The receipt records the producer's suite verdict and commit identity; the project's own suite command remains the producer's responsibility.
 Each task's mode and `yolo` merge posture are firstmate's decision at intake.
 The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.

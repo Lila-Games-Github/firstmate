@@ -1550,6 +1550,10 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
+    bin/fm-landing-health-lib.sh)
+      printf '%s\n' '__script__:fm-merge-local.test.sh'
+      printf '%s\n' '__script__:fm-spawn-pool-base-freshen.test.sh'
+      ;;
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
@@ -1578,6 +1582,7 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      [ "$path" != bin/fm-spawn.sh ] || printf '%s\n' '__script__:fm-spawn-pool-base-freshen.test.sh'
       ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane

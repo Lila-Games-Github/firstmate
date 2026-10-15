@@ -73,7 +73,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
 | `fm-config-push.sh`      | Push declared inherited local material to live local or remote secondmates and send the placement-specific config reread when changed |
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture or clone path from `data/projects.md` for fleet sync, home seeding, and Playbot retirement |
-| `fm-merge-local.sh`      | Fast-forward a `local-only` task's recorded landing branch, or its project's default branch, after approval |
+| `fm-merge-local.sh`      | Fast-forward a `local-only` task's recorded landing branch, or its project's default branch, after approval and a full-suite receipt for the exact SHA |
 | `fm-pr-fork-sync-proof.sh` | Prove the narrow marker-free fork-sync PR shape from fetched Git history |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
