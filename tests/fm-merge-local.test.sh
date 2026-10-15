@@ -31,6 +31,7 @@ make_case() {
   # recorded", so a data/-less fixture home refuses the merge once
   # bin/fm-merge-local.sh carries that gate from upstream.
   mkdir -p "$case_dir/state" "$case_dir/home" "$case_dir/home/data"
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$case_dir/home/data/backlog.md"
   git init -q -b main "$case_dir/project"
   git -C "$case_dir/project" commit -q --allow-empty -m baseline
   printf '%s\n' "$case_dir"
@@ -55,11 +56,128 @@ commit_task_change() {
 }
 
 run_merge() {
-  local case_dir=$1
+  local case_dir=$1 branch sha receipt
+  branch=$(sed -n 's/^lane_branch=//p' "$case_dir/state/task-x1.meta" | tail -1)
+  if [ -z "$branch" ] && grep -q '^kind=lane$' "$case_dir/state/task-x1.meta"; then
+    branch=$(sed -n 's/^worktree=//p' "$case_dir/state/task-x1.meta" | tail -1)
+    branch=$(git -C "$branch" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  fi
+  [ -n "$branch" ] || branch=fm/task-x1
+  sha=$(git -C "$case_dir/project" rev-parse "refs/heads/$branch" 2>/dev/null || git -C "$case_dir/project" rev-parse HEAD)
+  receipt="$case_dir/receipt.txt"
+  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$sha" > "$receipt"
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="$case_dir/home" \
   FM_STATE_OVERRIDE="$case_dir/state" \
-    "$MERGE_LOCAL" task-x1
+    "$MERGE_LOCAL" task-x1 --receipt "$receipt"
+}
+
+write_receipt() { # <path> <sha> [failure...]
+  local path=$1 sha=$2 count
+  shift 2
+  count=$#
+  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=%s\n' "$sha" "$count" > "$path"
+  for failure in "$@"; do printf 'failure=%s\n' "$failure" >> "$path"; done
+}
+
+run_merge_with_receipts() { # <case-dir> <candidate> [base]
+  local case_dir=$1 candidate=$2
+  shift 2
+  if [ "$#" -gt 0 ]; then
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+      "$MERGE_LOCAL" task-x1 --receipt "$candidate" --base-receipt "$1"
+  else
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+      "$MERGE_LOCAL" task-x1 --receipt "$candidate"
+  fi
+}
+
+test_known_red_lands_and_opens_one_green_task() {
+  local case_dir base candidate base_sha task_sha task_count green_id green_state
+  case_dir=$(make_case known-red)
+  commit_task_change "$case_dir" main
+  write_meta "$case_dir" "" local-only
+  base_sha=$(git -C "$case_dir/project" rev-parse main)
+  task_sha=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  base="$case_dir/base.receipt"
+  candidate="$case_dir/candidate.receipt"
+  write_receipt "$base" "$base_sha" test.animation test.catalog
+  write_receipt "$candidate" "$task_sha" test.animation
+  run_merge_with_receipts "$case_dir" "$candidate" "$base" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "known-red merge refused: $(cat "$case_dir/stderr")"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$task_sha" ] || fail 'known-red candidate did not land'
+  assert_grep 'make-it-green task green-' "$case_dir/stdout" 'red landing did not report the repair task'
+  task_count=$(grep -c 'Make main green' "$case_dir/home/data/backlog.md")
+  [ "$task_count" -eq 1 ] || fail "expected one make-it-green task, found $task_count"
+  green_id=$(sed -n 's/.*make-it-green task \(green-[0-9a-f]*\) is open.*/\1/p' "$case_dir/stdout")
+  [ -n "$green_id" ] || fail 'red landing did not name its repair task id'
+  tasks-axi 'done' "$green_id" --file "$case_dir/home/data/backlog.md" >/dev/null \
+    || fail 'could not close the make-it-green fixture task'
+  printf 'followup\n' > "$case_dir/task-wt/followup.txt"
+  git -C "$case_dir/task-wt" add followup.txt
+  git -C "$case_dir/task-wt" commit -qm followup
+  task_sha=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  write_receipt "$candidate" "$task_sha" test.animation
+  run_merge_with_receipts "$case_dir" "$candidate" > "$case_dir/again.out" 2> "$case_dir/again.err" \
+    || fail "second known-red merge refused: $(cat "$case_dir/again.err")"
+  task_count=$(grep -c 'Make main green' "$case_dir/home/data/backlog.md")
+  [ "$task_count" -eq 1 ] || fail "second red landing duplicated the repair task ($task_count)"
+  green_state=$(tasks-axi show "$green_id" --file "$case_dir/home/data/backlog.md" | sed -n 's/^  state: *//p')
+  [ "$green_state" = queued ] || fail "second red landing left the repair task in $green_state"
+  pass 'known-red work lands and creates or reopens exactly one make-it-green task'
+}
+
+test_new_failure_refused() {
+  local case_dir base candidate base_sha task_sha rc
+  case_dir=$(make_case new-failure)
+  commit_task_change "$case_dir" main
+  write_meta "$case_dir" "" local-only
+  base_sha=$(git -C "$case_dir/project" rev-parse main)
+  task_sha=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  base="$case_dir/base.receipt"
+  candidate="$case_dir/candidate.receipt"
+  write_receipt "$base" "$base_sha" test.old
+  write_receipt "$candidate" "$task_sha" test.old test.new
+  set +e
+  run_merge_with_receipts "$case_dir" "$candidate" "$base" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" 'new failure must refuse'
+  assert_grep 'test.new' "$case_dir/stderr" 'new failure was not named'
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$base_sha" ] || fail 'new failure moved main'
+  pass 'candidate with a new failure refuses without moving the landing tip'
+}
+
+test_receipt_missing_or_wrong_sha_refused() {
+  local case_dir base_sha task_sha rc
+  case_dir=$(make_case receipt-refusal)
+  commit_task_change "$case_dir" main
+  write_meta "$case_dir" "" local-only
+  base_sha=$(git -C "$case_dir/project" rev-parse main)
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$MERGE_LOCAL" task-x1 > "$case_dir/missing.out" 2> "$case_dir/missing.err"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" 'missing receipt must refuse'
+  write_receipt "$case_dir/wrong.receipt" "$base_sha"
+  set +e
+  run_merge_with_receipts "$case_dir" "$case_dir/wrong.receipt" > "$case_dir/wrong.out" 2> "$case_dir/wrong.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" 'mismatched SHA must refuse'
+  assert_grep 'does not name exact commit' "$case_dir/wrong.err" 'wrong-SHA refusal was unclear'
+  task_sha=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  write_receipt "$case_dir/false-green.receipt" "$task_sha"
+  printf 'failure=hidden.failure\n' >> "$case_dir/false-green.receipt"
+  set +e
+  run_merge_with_receipts "$case_dir" "$case_dir/false-green.receipt" > "$case_dir/false.out" 2> "$case_dir/false.err"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" 'a zero count with a failure line must refuse'
+  assert_grep 'count does not match' "$case_dir/false.err" 'false-green receipt was not refused'
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$base_sha" ] || fail 'receipt refusal moved main'
+  pass 'missing and mismatched-SHA receipts refuse'
 }
 
 test_recorded_nondefault_branch_never_merges_default() {
@@ -324,5 +442,8 @@ test_lane_recorded_branch_survives_retired_worktree
 test_lane_without_recorded_mode_refuses
 test_lane_detached_worktree_refuses
 test_lane_branch_missing_from_project_refuses
+test_known_red_lands_and_opens_one_green_task
+test_new_failure_refused
+test_receipt_missing_or_wrong_sha_refused
 
 printf 'all fm-merge-local tests passed\n'

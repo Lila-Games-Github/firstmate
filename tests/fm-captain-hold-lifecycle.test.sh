@@ -80,6 +80,11 @@ tasks_in() {  # <home> <tasks-axi args...>
   (cd "$home" && tasks-axi "$@")
 }
 
+local_merge_receipt() { # <repo> <task-id> <receipt-path>
+  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' \
+    "$(git -C "$1" rev-parse "refs/heads/fm/$2")" > "$3"
+}
+
 run_captain() {  # <home> <command args...>
   local home=$1
   shift
@@ -2752,8 +2757,9 @@ test_retained_row_artifacts_survive_captain_answers() {
   show=$(tasks_in "$home" show "$local_id" --full) || fail "the released local merge disappeared"
   assert_not_contains "$show" "hold_kind: captain" \
     "local merge approval retained its captain hold kind"
+  local_merge_receipt "$local_repo" "$local_id" "$home/local.receipt"
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-merge-local.sh" "$local_id" --receipt "$home/local.receipt" \
     > "$home/local-merge.out" 2> "$home/local-merge.err" \
     || fail "approved local merge failed: $(cat "$home/local-merge.err")"
   run_teardown "$home" "$local_id" > "$home/local-teardown.out" \
@@ -3250,13 +3256,14 @@ test_local_merge_entrypoint_refuses_a_captain_held_task() {
   run_captain "$home" hold "$local_id" --reason "captain local merge approval pending" \
     >/dev/null || fail "could not hold the local entrypoint fixture"
   before=$(git -C "$local_repo" rev-parse main)
+  local_merge_receipt "$local_repo" "$local_id" "$home/local.receipt"
 
   # Without the entrypoint guard, this run fast-forwards main while the task
   # still carries the captain hold.
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$local_id" --receipt "$home/local.receipt" \
     > "$home/local.out" 2> "$home/local.err"
   rc=$?
   set -e
@@ -3318,13 +3325,14 @@ test_local_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() 
     "project=$repo" "harness=codex" "kind=ship" "mode=local-only" \
     "spawn_gen=fixture-$id"
   before=$(git -C "$repo" rev-parse main)
+  local_merge_receipt "$repo" "$id" "$home/local.receipt"
 
   # Unreadable authority record: refuse, and leave the default branch where it was.
   chmod 000 "$home/data/backlog.md"
   set +e
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" --receipt "$home/local.receipt" \
     > "$home/missing-local.out" 2> "$home/missing-local.err"
   rc=$?
   set -e
@@ -3339,7 +3347,7 @@ test_local_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() 
   rm "$home/data/backlog.md"
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" --receipt "$home/local.receipt" \
     > "$home/absent-local.out" 2> "$home/absent-local.err" \
     || fail "the local merge entrypoint refused a home carrying no backlog"
   after=$(git -C "$repo" rev-parse main)
@@ -3373,7 +3381,7 @@ test_merge_entrypoints_validate_identity_and_state_before_locking() {
   set +e
   fm_run_timed 2 env PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$local_state" \
-    "$ROOT/bin/fm-merge-local.sh" sample-missing-local-state \
+    "$ROOT/bin/fm-merge-local.sh" sample-missing-local-state --receipt "$home/no-receipt" \
     > "$home/missing-local-state.out" 2> "$home/missing-local-state.err"
   rc=$?
   set -e
@@ -3519,6 +3527,7 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
     "worktree=$local_old_wt" "project=$local_old_repo" "harness=codex" \
     "kind=ship" "mode=local-only" "spawn_gen=original-$local_id"
   printf 'done: local merge ready\n' > "$local_home/state/$local_id.status"
+  local_merge_receipt "$local_old_repo" "$local_id" "$local_home/reuse-local.receipt"
 
   local_teardown_ready="$local_home/reuse-teardown-ready"
   local_teardown_release="$local_home/reuse-teardown-release"
@@ -3548,7 +3557,7 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
     FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
     FM_CONFIG_OVERRIDE="$local_home/config" \
-    "$ROOT/bin/fm-merge-local.sh" "$local_id" > "$local_home/reuse-merge.out" \
+    "$ROOT/bin/fm-merge-local.sh" "$local_id" --receipt "$local_home/reuse-local.receipt" > "$local_home/reuse-merge.out" \
     2> "$local_home/reuse-merge.err" &
   local_merge_pid=$!
   if ! wait_for_test_file "$local_merge_ready" "$local_merge_pid"; then
@@ -3726,12 +3735,13 @@ exec "$FM_TEST_REAL_GIT" "$@"
 SH
   chmod +x "$local_home/fakebin/git"
   before=$(git -C "$local_repo" rev-parse main)
+  local_merge_receipt "$local_repo" "$local_id" "$local_home/race-local.receipt"
   PATH="$local_home/fakebin:$PATH" FM_TEST_REAL_GIT="$real_git" \
     FM_TEST_RACE_REPO="$local_repo" FM_TEST_RACE_READY="$local_ready" \
     FM_TEST_RACE_RELEASE="$local_release" FM_ROOT_OVERRIDE="$ROOT" \
     FM_HOME="$local_home" FM_STATE_OVERRIDE="$local_home/state" \
     FM_DATA_OVERRIDE="$local_home/data" FM_CONFIG_OVERRIDE="$local_home/config" \
-    "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    "$ROOT/bin/fm-merge-local.sh" "$local_id" --receipt "$local_home/race-local.receipt" \
     > "$local_home/race-local.out" 2> "$local_home/race-local.err" &
   local_pid=$!
   i=0

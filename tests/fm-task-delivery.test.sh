@@ -1038,6 +1038,28 @@ test_direct_pr_promotion_target_contract() {
 }
 
 test_direct_pr_promotion_target_contract
+test_green_final_head_brief_marker() {
+  local rec home proj fakebin out
+  rec=$(make_home green-final-head-marker)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  FM_HOME="$home" "$BRIEF" health-brief-x fixture-project --mode local-only --green-final-head >/dev/null \
+    || fail 'could not scaffold a green-final-head ship'
+  assert_grep 'Final-head health: green' "$home/data/health-brief-x/brief.md" \
+    'green-final-head brief did not record the dispatch marker'
+  if out=$(FM_HOME="$home" "$BRIEF" health-scout-x fixture-project --scout --green-final-head 2>&1); then
+    fail 'scout accepted ship health marker'
+  fi
+  assert_contains "$out" '--green-final-head applies only to ship briefs' 'scout health refusal was unclear'
+  if out=$(FM_HOME="$home" "$BRIEF" health-lane-x fixture-project --mode local-only --lane --landing-branch main --green-final-head 2>&1); then
+    fail 'Playbot lane accepted a marker its intake does not enforce'
+  fi
+  assert_contains "$out" 'Playbot lane intake cannot verify' 'lane health refusal was unclear'
+  pass 'green-final-head ship briefs carry the dispatch marker'
+}
+
+test_green_final_head_brief_marker
 test_promotion_target_contract
 test_promotion_base_follows_landing_branch
 test_authorized_intent_keeps_words_without_composed_address

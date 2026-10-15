@@ -1084,6 +1084,40 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+test_green_final_head_requires_current_clean_base_receipt() {
+  local rec id out status tip receipt case_name failures
+  for case_name in missing wrong-sha red green; do
+    id="pool-health-$case_name-r1"
+    rec=$(make_case "health-$case_name" "$id")
+    read_case_record "$rec"
+    printf '\nFinal-head health: green\n' >> "$HOME_DIR/data/$id/brief.md"
+    tip=$(git -C "$CASE_DIR/publisher" rev-parse HEAD)
+    receipt="$CASE_DIR/base.receipt"
+    failures=0
+    [ "$case_name" != red ] || failures=1
+    if [ "$case_name" = wrong-sha ]; then
+      printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$INITIAL_SHA" > "$receipt"
+    else
+      printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=%s\n' "$tip" "$failures" > "$receipt"
+      [ "$failures" -eq 0 ] || printf 'failure=known.baseline\n' >> "$receipt"
+    fi
+    if [ "$case_name" = missing ]; then
+      out=$(run_spawn "$id" --mode no-mistakes --yolo off 2>&1)
+    else
+      out=$(run_spawn "$id" --mode no-mistakes --yolo off --base-health-receipt "$receipt" 2>&1)
+    fi
+    status=$?
+    if [ "$case_name" = green ]; then
+      expect_code 0 "$status" "clean current base receipt should dispatch: $out"
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$tip" ] || fail 'green dispatch did not use recorded tip'
+    else
+      [ "$status" -ne 0 ] || fail "$case_name base receipt dispatched a green-final-head task"
+      [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$case_name refusal published task metadata"
+    fi
+  done
+  pass 'green final-head dispatch requires a clean receipt on the exact refreshed landing tip'
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
@@ -1111,5 +1145,6 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+test_green_final_head_requires_current_clean_base_receipt
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

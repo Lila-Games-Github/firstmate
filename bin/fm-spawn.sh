@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>] [--base-health-receipt <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -26,6 +26,12 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   A ship brief declaring `Final-head health: green` requires
+#   --base-health-receipt before fresh dispatch. The project-agnostic receipt
+#   format is owned by bin/fm-landing-health-lib.sh; its SHA must equal the
+#   resolved landing base HEAD after refresh and its failure count must be zero.
+#   The check runs before the worker receives its brief. Relaunches preserve
+#   work and do not repeat the initial dispatch check.
 #   --landing-branch <branch> records landing_branch=<branch> in the task's meta:
 #   the project branch this task's work is expected to land on when the captain's
 #   posture for the project lands work somewhere other than the default branch
@@ -583,6 +589,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 LANDING_BRANCH=
+BASE_HEALTH_RECEIPT=
 TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
@@ -591,6 +598,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 LANDING_SET=0
+BASE_HEALTH_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 POS=()
@@ -631,6 +639,10 @@ for a in "$@"; do
     landing-branch)
       LANDING_BRANCH=$a
       LANDING_SET=1
+      ;;
+    base-health-receipt)
+      BASE_HEALTH_RECEIPT=$a
+      BASE_HEALTH_SET=1
       ;;
     traceparent)
       TRACEPARENT_ARG=$a
@@ -689,6 +701,11 @@ for a in "$@"; do
     LANDING_BRANCH=${a#--landing-branch=}
     LANDING_SET=1
     ;;
+  --base-health-receipt) want_value='base-health-receipt' ;;
+  --base-health-receipt=*)
+    BASE_HEALTH_RECEIPT=${a#--base-health-receipt=}
+    BASE_HEALTH_SET=1
+    ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -727,6 +744,10 @@ done
 }
 [ "$LANDING_SET" -eq 0 ] || [ -n "$LANDING_BRANCH" ] || {
   echo "error: --landing-branch requires a non-empty value" >&2
+  exit 1
+}
+[ "$BASE_HEALTH_SET" -eq 0 ] || [ -n "$BASE_HEALTH_RECEIPT" ] || {
+  echo "error: --base-health-receipt requires a non-empty path" >&2
   exit 1
 }
 if [ "$LANDING_SET" -eq 1 ]; then
@@ -783,6 +804,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   [ "$LANDING_SET" -eq 0 ] || {
     echo "error: --relaunch preserves the task's recorded landing branch; correct it with bin/fm-landing-branch.sh instead" >&2
+    exit 1
+  }
+  [ "$BASE_HEALTH_SET" -eq 0 ] || {
+    echo "error: --relaunch preserves the task's base; --base-health-receipt applies only to fresh dispatch" >&2
     exit 1
   }
 else
@@ -2747,6 +2772,21 @@ case "$BRIEF_WORKSPACES" in
     echo "error: workspace mismatch for $ID: the brief says workspace=$BRIEF_WORKSPACES; fm-spawn launches ordinary crewmates, so re-scaffold without --lane or dispatch the lane through Playbot" >&2
     exit 1 ;;
 esac
+BASE_HEALTH_REQUIRED=0
+if [ "$KIND" = ship ] && {
+  grep -Fqx 'Final-head health: green' "$BRIEF" ||
+    grep -Eiq 'green final-head receipt|final-head receipt[^.]*green' "$BRIEF"
+}; then
+  BASE_HEALTH_REQUIRED=1
+fi
+if [ "$KIND" != ship ] && [ "$BASE_HEALTH_SET" -eq 1 ]; then
+  echo "error: --base-health-receipt applies only to fresh ship dispatch" >&2
+  exit 1
+fi
+if [ "$BASE_HEALTH_REQUIRED" -eq 1 ] && [ "$BASE_HEALTH_SET" -eq 0 ]; then
+  echo "error: $ID requires a green final-head receipt; supply --base-health-receipt for its current landing tip before dispatch" >&2
+  exit 1
+fi
 if [ "$KIND" = ship ]; then
   # A recorded landing branch must already exist in the project clone (as a
   # local branch or an origin remote-tracking branch), so the landed-work test
@@ -3929,6 +3969,20 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$BASE_HEALTH_SET" -eq 1 ]; then
+  # shellcheck source=bin/fm-landing-health-lib.sh
+  . "$SCRIPT_DIR/fm-landing-health-lib.sh"
+  BASE_SHA=$(git -C "$WT" rev-parse --verify HEAD) || exit 1
+  fm_health_receipt_read "$BASE_HEALTH_RECEIPT" "$BASE_SHA" || {
+    echo "error: dispatch base-health receipt does not match the selected landing tip $BASE_SHA" >&2
+    exit 1
+  }
+  [ "$FM_HEALTH_COUNT" -eq 0 ] || {
+    printf 'error: landing tip %s has %s baseline failure(s) in %s; make it green before dispatching %s:\n%s\n' \
+      "$BASE_SHA" "$FM_HEALTH_COUNT" "$BASE_HEALTH_RECEIPT" "$ID" "$FM_HEALTH_SET" >&2
+    exit 1
+  }
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
