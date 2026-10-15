@@ -1,0 +1,3 @@
+ok - fm-playbot-lanes: explicit commit proof retires only a lane and preserves manual backlog ownership
+ok - fm-playbot-lanes: an archived worker chat retires a landed lane record
+ok - fm-playbot-lanes: --force never bypasses the landed check for an absent worker chat
