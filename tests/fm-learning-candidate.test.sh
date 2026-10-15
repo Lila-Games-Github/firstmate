@@ -1136,6 +1136,101 @@ test_dedupe_interruption_and_terminal_retry() {
   pass "dedupe interruption converges and exact retries survive canonical disposition"
 }
 
+test_dedupe_three_candidate_chain_is_refused() {
+  local home first middle last before_first before_middle before_last rc json
+  home=$(make_home dedupe-chain)
+  first=$(capture_candidate "$home" chain-first FrogPile review-rejection "first incident")
+  middle=$(capture_candidate "$home" chain-middle FrogPile review-rejection "middle incident")
+  last=$(capture_candidate "$home" chain-last FrogPile review-rejection "last incident")
+  run_learning "$home" dedupe "$first" --into "$middle" \
+    --curator curator-chain --reason "same prevention" >/dev/null \
+    || fail "first dedupe in chain fixture failed"
+  before_first=$(run_learning "$home" get "$first")
+  before_middle=$(run_learning "$home" get "$middle")
+  before_last=$(run_learning "$home" get "$last")
+  set +e
+  run_learning "$home" dedupe "$middle" --into "$last" \
+    --curator curator-chain --reason "same prevention" \
+    >"$home/chain.out" 2>"$home/chain.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dedupe accepted a canonical that already owns a duplicate"
+  assert_grep "already owns duplicates" "$home/chain.err" \
+    "chain refusal did not explain the flat-cluster rule"
+  [ "$(run_learning "$home" get "$first")" = "$before_first" ] \
+    || fail "chain refusal changed the first candidate"
+  [ "$(run_learning "$home" get "$middle")" = "$before_middle" ] \
+    || fail "chain refusal changed the middle candidate"
+  json=$(run_learning "$home" get "$last")
+  [ "$json" = "$before_last" ] || fail "chain refusal changed the last candidate"
+  printf '%s\n' "$json" | jq -e '.lifecycle_state == "unresolved" and .duplicates == []' \
+    >/dev/null || fail "chain refusal left a backlink on the last candidate"
+  pass "three-candidate dedupe cannot create a chain"
+}
+
+test_dedupe_retry_after_chain_refusal() {
+  local home first middle last before rc
+  home=$(make_home dedupe-chain-retry)
+  first=$(capture_candidate "$home" retry-first FrogPile review-rejection "first retry incident")
+  middle=$(capture_candidate "$home" retry-middle FrogPile review-rejection "middle retry incident")
+  last=$(capture_candidate "$home" retry-last FrogPile review-rejection "last retry incident")
+  run_learning "$home" dedupe "$first" --into "$middle" \
+    --curator curator-retry --reason "same prevention" >/dev/null \
+    || fail "initial dedupe for retry fixture failed"
+  set +e
+  run_learning "$home" dedupe "$middle" --into "$last" \
+    --curator curator-retry --reason "same prevention" >/dev/null 2>"$home/retry-chain.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "retry fixture unexpectedly accepted a chain"
+  before=$(run_learning "$home" get "$middle")
+  [ "$(run_learning "$home" dedupe "$first" --into "$middle" \
+    --curator curator-retry --reason "same prevention")" = "$middle" ] \
+    || fail "exact retry after chain refusal did not return the canonical"
+  [ "$(run_learning "$home" get "$middle")" = "$before" ] \
+    || fail "exact retry after chain refusal changed the canonical"
+  pass "exact dedupe retry remains idempotent after a refused chain"
+}
+
+test_dedupe_refuses_preexisting_multi_hop_reference() {
+  local home first middle last middle_path last_path before_first before_middle before_last rc
+  home=$(make_home dedupe-multi-hop)
+  first=$(capture_candidate "$home" legacy-first FrogPile review-rejection "first legacy incident")
+  middle=$(capture_candidate "$home" legacy-middle FrogPile review-rejection "middle legacy incident")
+  last=$(capture_candidate "$home" legacy-last FrogPile review-rejection "last legacy incident")
+  run_learning "$home" dedupe "$first" --into "$middle" \
+    --curator curator-legacy --reason "same prevention" >/dev/null \
+    || fail "initial dedupe for legacy fixture failed"
+  middle_path=$(candidate_path "$home" "$middle")
+  last_path=$(candidate_path "$home" "$last")
+  jq -cS --arg last "$last" \
+    '.lifecycle_state="duplicate" | .disposition={at:"2026-08-28T12:00:00Z",curator:"curator-legacy",outcome:"duplicate",note:"same prevention",reference:$last}' \
+    "$middle_path" >"$home/legacy-middle.json"
+  mv "$home/legacy-middle.json" "$middle_path"
+  mv "$middle_path" "$(candidate_path "$home" "$middle" duplicate)"
+  jq -cS --arg middle "$middle" '.duplicates=[$middle]' "$last_path" >"$home/legacy-last.json"
+  mv "$home/legacy-last.json" "$last_path"
+  before_first=$(run_learning "$home" get "$first")
+  before_middle=$(run_learning "$home" get "$middle")
+  before_last=$(run_learning "$home" get "$last")
+  set +e
+  run_learning "$home" dedupe "$first" --into "$middle" \
+    --curator curator-legacy --reason "same prevention" \
+    >"$home/multi-hop.out" 2>"$home/multi-hop.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "exact retry accepted a multi-hop canonical reference"
+  assert_grep "canonical candidate is itself a duplicate" "$home/multi-hop.err" \
+    "multi-hop refusal did not identify the duplicate canonical"
+  [ "$(run_learning "$home" get "$first")" = "$before_first" ] \
+    || fail "multi-hop refusal changed the first candidate"
+  [ "$(run_learning "$home" get "$middle")" = "$before_middle" ] \
+    || fail "multi-hop refusal changed the middle candidate"
+  [ "$(run_learning "$home" get "$last")" = "$before_last" ] \
+    || fail "multi-hop refusal changed the last candidate"
+  pass "preexisting multi-hop references cannot pass an exact dedupe retry"
+}
+
 test_concise_outputs_strip_terminal_controls() {
   local home id project impact list summary get batch
   home=$(make_home terminal-controls)
@@ -1543,6 +1638,9 @@ test_invalid_sibling_does_not_block_valid_reresolution
 test_routes_and_no_one_off_skill_gate
 test_lifecycle_dispositions_and_deduplication
 test_dedupe_interruption_and_terminal_retry
+test_dedupe_three_candidate_chain_is_refused
+test_dedupe_retry_after_chain_refusal
+test_dedupe_refuses_preexisting_multi_hop_reference
 test_concise_outputs_strip_terminal_controls
 test_skipped_entry_paths_are_terminal_safe
 test_bounded_summary_and_batch

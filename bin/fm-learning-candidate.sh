@@ -98,7 +98,9 @@
 # Lifecycle states are unresolved, dismissed, documented, promoted, follow-up,
 # and duplicate. Dismissal may precede classification. Documented, promoted, and
 # follow-up dispositions require a classification and a reference. Dedupe leaves
-# the canonical candidate unresolved and marks only the duplicate. Exact retries
+# the canonical candidate unresolved and marks only the duplicate. A candidate
+# that already owns duplicates cannot become a duplicate, and a duplicate cannot
+# serve as a canonical, so every member refers directly to one canonical. Exact retries
 # of classification, disposition, and dedupe are idempotent; conflicting retries
 # are refused.
 #
@@ -1167,6 +1169,12 @@ dedupe_command() {
   canonical_path=$RECORD_PATH
   [ "$(printf '%s\n' "$canonical_json" | jq -r '.incident.origin_task')" != "$curator" ] \
     || die "curator must differ from both originating tasks"
+  if printf '%s\n' "$canonical_json" | jq -e '.lifecycle_state == "duplicate"' >/dev/null; then
+    die "canonical candidate is itself a duplicate: $canonical"
+  fi
+  if printf '%s\n' "$duplicate_json" | jq -e '.duplicates | length > 0' >/dev/null; then
+    die "candidate already owns duplicates and cannot be deduplicated: $duplicate"
+  fi
   if [ "$exact_retry" -eq 0 ]; then
     [ "$(printf '%s\n' "$canonical_json" | jq -r '.lifecycle_state')" = unresolved ] \
       || die "canonical candidate must remain unresolved"
