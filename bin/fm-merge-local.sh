@@ -272,8 +272,8 @@ merge_status=0
 git -C "$PROJ" merge --ff-only "$INCOMING_SHA" >/dev/null || merge_status=$?
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
 fm_health_store "$MERGE_RECEIPT_STAGE" "$DATA" "$HEALTH_KEY" || {
-  echo "error: merged $INCOMING_SHA but could not record its full-suite receipt" >&2
-  exit 1
+  echo "error: landing SUCCEEDED ($TARGET now at $INCOMING_SHA) but its full-suite receipt could not be recorded; supply --base-receipt for the next landing or re-record the receipt for this tip" >&2
+  exit 3
 }
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
