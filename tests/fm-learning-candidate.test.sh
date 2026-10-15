@@ -1231,6 +1231,40 @@ test_dedupe_refuses_preexisting_multi_hop_reference() {
   pass "preexisting multi-hop references cannot pass an exact dedupe retry"
 }
 
+test_dedupe_repairs_missing_backlink_before_refusing_chain() {
+  local home first middle last first_path before_last rc json
+  home=$(make_home dedupe-missing-backlink)
+  first=$(capture_candidate "$home" orphan-first FrogPile review-rejection "first orphan incident")
+  middle=$(capture_candidate "$home" orphan-middle FrogPile review-rejection "middle orphan incident")
+  last=$(capture_candidate "$home" orphan-last FrogPile review-rejection "last orphan incident")
+  first_path=$(candidate_path "$home" "$first")
+  jq -cS --arg middle "$middle" \
+    '.lifecycle_state="duplicate" | .disposition={at:"2026-08-28T12:00:00Z",curator:"curator-orphan",outcome:"duplicate",note:"same prevention",reference:$middle}' \
+    "$first_path" >"$home/orphan-first.json"
+  mv "$home/orphan-first.json" "$first_path"
+  mv "$first_path" "$(candidate_path "$home" "$first" duplicate)"
+  before_last=$(run_learning "$home" get "$last")
+  run_learning "$home" get "$middle" | jq -e '.duplicates == []' >/dev/null \
+    || fail "interrupted-write fixture already had a backlink"
+  set +e
+  run_learning "$home" dedupe "$middle" --into "$last" \
+    --curator curator-orphan --reason "same prevention" \
+    >"$home/orphan.out" 2>"$home/orphan.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "dedupe accepted a canonical whose duplicate backlink was never written"
+  assert_grep "already owns duplicates" "$home/orphan.err" \
+    "missing-backlink refusal did not explain the flat-cluster rule"
+  assert_grep "$first" "$home/orphan.err" "missing-backlink refusal did not name the member"
+  json=$(run_learning "$home" get "$middle")
+  printf '%s\n' "$json" | jq -e --arg first "$first" \
+    '.lifecycle_state == "unresolved" and .duplicates == [$first]' >/dev/null \
+    || fail "refused dedupe did not repair the missing canonical backlink"
+  [ "$(run_learning "$home" get "$last")" = "$before_last" ] \
+    || fail "missing-backlink refusal changed the last candidate"
+  pass "dedupe repairs a missing backlink and refuses the chain"
+}
+
 test_concise_outputs_strip_terminal_controls() {
   local home id project impact list summary get batch
   home=$(make_home terminal-controls)
@@ -1641,6 +1675,7 @@ test_dedupe_interruption_and_terminal_retry
 test_dedupe_three_candidate_chain_is_refused
 test_dedupe_retry_after_chain_refusal
 test_dedupe_refuses_preexisting_multi_hop_reference
+test_dedupe_repairs_missing_backlink_before_refusing_chain
 test_concise_outputs_strip_terminal_controls
 test_skipped_entry_paths_are_terminal_safe
 test_bounded_summary_and_batch

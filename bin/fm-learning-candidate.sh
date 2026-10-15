@@ -1127,7 +1127,7 @@ disposition_command() {
 
 dedupe_command() {
   local duplicate=${2:-} canonical='' curator='' reason='' timestamp duplicate_json duplicate_path
-  local canonical_json canonical_path disposition updated_canonical updated_duplicate existing exact_retry=0
+  local canonical_json canonical_path disposition updated_canonical updated_duplicate existing exact_retry=0 members
   [ -n "$duplicate" ] || die "dedupe requires a duplicate candidate id"
   shift 2
   while [ "$#" -gt 0 ]; do
@@ -1171,6 +1171,22 @@ dedupe_command() {
     || die "curator must differ from both originating tasks"
   if printf '%s\n' "$canonical_json" | jq -e '.lifecycle_state == "duplicate"' >/dev/null; then
     die "canonical candidate is itself a duplicate: $canonical"
+  fi
+  members=$(records_stream | jq -r --arg id "$duplicate" \
+    'select(.disposition.outcome == "duplicate" and .disposition.reference == $id) | .id')
+  if [ -n "$members" ]; then
+    timestamp=$(now_rfc3339)
+    updated_duplicate=$(printf '%s\n' "$duplicate_json" | jq -cS --arg members "$members" \
+      --arg at "$timestamp" --arg curator "$curator" \
+      '($members | split("\n")) as $found |
+       if (($found - .duplicates) | length) > 0 then
+         .duplicates = ((.duplicates + $found) | unique) |
+         .history += [{at:$at,event:"dedupe-canonical-repair",actor:$curator,detail:"restored missing duplicate backlinks"}]
+       else . end')
+    if [ "$updated_duplicate" != "$(printf '%s\n' "$duplicate_json" | jq -cS .)" ]; then
+      replace_record "$duplicate_path" "$updated_duplicate"
+    fi
+    die "candidate already owns duplicates and cannot be deduplicated: $duplicate (members: $(printf '%s' "$members" | tr '\n' ' ' | sed 's/ $//'))"
   fi
   if printf '%s\n' "$duplicate_json" | jq -e '.duplicates | length > 0' >/dev/null; then
     die "candidate already owns duplicates and cannot be deduplicated: $duplicate"
