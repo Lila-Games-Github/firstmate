@@ -100,8 +100,10 @@
 # follow-up dispositions require a classification and a reference. Dedupe leaves
 # the canonical candidate unresolved and marks only the duplicate. A candidate
 # that already owns duplicates cannot become a duplicate, and a duplicate cannot
-# serve as a canonical, so every member refers directly to one canonical. Exact retries
-# of classification, disposition, and dedupe are idempotent; conflicting retries
+# serve as a canonical, so every member refers directly to one canonical. Owning
+# is judged from members' duplicate dispositions, and a refusal first restores
+# any backlink an interrupted dedupe left missing. Exact retries of
+# classification, disposition, and dedupe are idempotent; conflicting retries
 # are refused.
 #
 # FM_HOME selects the private operational home. FM_STATE_OVERRIDE overrides its
