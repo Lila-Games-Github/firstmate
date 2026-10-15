@@ -2783,7 +2783,7 @@ if [ "$KIND" != ship ] && [ "$BASE_HEALTH_SET" -eq 1 ]; then
   echo "error: --base-health-receipt applies only to fresh ship dispatch" >&2
   exit 1
 fi
-if [ "$BASE_HEALTH_REQUIRED" -eq 1 ] && [ "$BASE_HEALTH_SET" -eq 0 ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$BASE_HEALTH_REQUIRED" -eq 1 ] && [ "$BASE_HEALTH_SET" -eq 0 ]; then
   echo "error: $ID requires a green final-head receipt; supply --base-health-receipt for its current landing tip before dispatch" >&2
   exit 1
 fi

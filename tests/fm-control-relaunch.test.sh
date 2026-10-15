@@ -1003,6 +1003,18 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+test_spawn_relaunch_skips_the_green_final_head_base_receipt() {
+  local dir out rc
+  dir=$(new_case greenrelaunch rl22)
+  add_ship_task "$dir" rl22 claude
+  printf '\nFinal-head health: green\n' >> "$dir/home/data/rl22/brief.md"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl22 --relaunch 2>&1); rc=$?
+  expect_code 0 "$rc" "a green-final-head ship task must relaunch without a fresh base-health receipt"$'\n'"$out"
+  assert_contains "$out" "spawned rl22" "the relaunch should launch the task"
+  pass "fm-spawn --relaunch: a green-final-head ship task relaunches without repeating the dispatch base-health check"
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
   for mode in no-mistakes direct-PR local-only; do
@@ -1855,6 +1867,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_skips_the_green_final_head_base_receipt
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
