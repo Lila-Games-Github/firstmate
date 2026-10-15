@@ -4067,6 +4067,7 @@ rm "$lane_identity_worktree/uncommitted-lane.txt"
 lane_identity_head=$(git -C "$lane_identity_worktree" rev-parse HEAD)
 git -C "$lane_identity_worktree" -c user.name=fixture -c user.email=fixture@example.invalid \
   commit --allow-empty -qm 'Unlanded lane fixture' || fail "could not stage unlanded lane commit"
+lane_unlanded_commit=$(git -C "$lane_identity_worktree" rev-parse HEAD)
 if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-identity > "$FIXTURE_ROOT/lane-unlanded-teardown.out" 2>&1; then
   fail "lane teardown retired an unlanded commit"
 fi
@@ -4124,6 +4125,52 @@ tasks-axi show fm-lane-manual --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXT
   || fail "could not read manual lane backlog after cleanup"
 assert_grep 'state: queued' "$FIXTURE_ROOT/lane-manual.out" "lane teardown ignored the manual backlog posture"
 pass "fm-playbot-lanes: lane dispatch and teardown preserve manual backlog ownership"
+
+mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-via"
+printf 'Lane commit proof brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-via/brief.md"
+tasks-axi add fm-lane-via "Lane landed outside Playbot" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage commit-proof lane backlog"
+printf 'yes\n' > "$FIXTURE_ROOT/send-reconciles"
+printf '2099-08-25T12:03:00.000Z\n' > "$FIXTURE_ROOT/send-accepted-at"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"workspace\":\"$lane_identity_workspace\",\"thread\":\"$lane_identity_thread\",\"message\":\"Commit-proof lane task\",\"taskId\":\"fm-lane-via\",\"mode\":\"local-only\"}")
+rm "$FIXTURE_ROOT/send-reconciles" "$FIXTURE_ROOT/send-accepted-at"
+OUT="$out" node --no-warnings <<'NODE' || fail "commit-proof lane dispatch did not arm supervision"
+if (JSON.parse(process.env.OUT).result.structuredContent.supervision.armed !== true) process.exit(1);
+NODE
+set_thread_turn "$lane_identity_thread" working 2099-08-25T12:04:00.000Z || fail "could not run the commit-proof lane"
+set_thread_turn "$lane_identity_thread" ready 2099-08-25T12:05:00.000Z || fail "could not finish the commit-proof lane"
+lane_landed_commit=$(git -C "$FIXTURE_ROOT/worker" rev-parse main)
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-via --landed-via > "$FIXTURE_ROOT/lane-via-empty.out" 2>&1; then
+  fail "lane teardown accepted --landed-via without a commit"
+fi
+assert_grep 'requires at least one commit' "$FIXTURE_ROOT/lane-via-empty.out" "missing commit refusal was unclear"
+for bad_commit in "$lane_unlanded_commit" 0000000000000000000000000000000000000000; do
+  if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-via --landed-via "$bad_commit" > "$FIXTURE_ROOT/lane-via-refused.out" 2>&1; then
+    fail "lane teardown accepted missing or unlanded commit $bad_commit"
+  fi
+  assert_grep "$bad_commit" "$FIXTURE_ROOT/lane-via-refused.out" "commit refusal did not name the failing commit"
+  [ -e "$FM_HOME_FIXTURE/state/fm-lane-via.meta" ] || fail "failed commit proof removed lane metadata"
+done
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-via --landed-via "$lane_landed_commit,$lane_unlanded_commit" > "$FIXTURE_ROOT/lane-via-partial.out" 2>&1; then
+  fail "lane teardown accepted a list with one unlanded commit"
+fi
+assert_grep "$lane_unlanded_commit" "$FIXTURE_ROOT/lane-via-partial.out" "partial proof did not name the failing commit"
+cp "$FM_HOME_FIXTURE/state/fm-lane-via.meta" "$FM_HOME_FIXTURE/state/fm-lane-not-lane.meta"
+sed -i 's/^kind=lane$/kind=ship/' "$FM_HOME_FIXTURE/state/fm-lane-not-lane.meta"
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-not-lane --landed-via "$lane_landed_commit" > "$FIXTURE_ROOT/lane-via-non-lane.out" 2>&1; then
+  fail "--landed-via accepted a non-lane task"
+fi
+assert_grep 'only to kind=lane' "$FIXTURE_ROOT/lane-via-non-lane.out" "non-lane refusal was unclear"
+[ -e "$FM_HOME_FIXTURE/state/fm-lane-not-lane.meta" ] || fail "non-lane refusal removed metadata"
+rm "$FM_HOME_FIXTURE/state/fm-lane-not-lane.meta"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-via --landed-via "$lane_landed_commit" > "$FIXTURE_ROOT/lane-via-teardown.out" 2>&1 \
+  || fail "commit-proof lane teardown failed: $(cat "$FIXTURE_ROOT/lane-via-teardown.out")"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-via.meta" "commit-proof lane teardown retained its task identity"
+assert_grep "Landed via commits: $lane_landed_commit" "$FM_HOME_FIXTURE/data/fm-lane-via/retirement.md" "lane commit proof was not audited"
+tasks-axi show fm-lane-via --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-via.out" \
+  || fail "could not read commit-proof lane backlog after cleanup"
+assert_grep 'state: queued' "$FIXTURE_ROOT/lane-via.out" "commit-proof lane teardown ignored the manual backlog posture"
+pass "fm-playbot-lanes: explicit commit proof retires only a lane and preserves manual backlog ownership"
 
 # A lane's recorded mode decides which landing path owns it (fm-merge-local.sh
 # only ever advances mode=local-only), so a missing or invalid mode refuses to

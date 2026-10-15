@@ -5590,7 +5590,37 @@ function laneTaskLandedFromProject(project, workspace, landingBranch, mode) {
 
 // A ready chat is idle, not proof of task completion; the lane's resolved
 // status declaration supplies that distinction.
-function laneTaskState(file, retirable = false, state = path.dirname(file)) {
+function laneTaskLandedVia(project, meta, namedCommits) {
+  const names = namedCommits.split(",");
+  if (!names.length || names.some((name) => !/^[0-9a-fA-F]{7,64}$/.test(name))) {
+    throw new Error("--landed-via requires one or more comma-separated commit hashes");
+  }
+  const projectRoot = project.roots.find((root) => root.path && canonicalPath(root.path) === canonicalPath(meta.project));
+  if (!projectRoot) throw new Error("lane recorded project clone is absent from its Playbot project");
+  const clone = canonicalPath(projectRoot.path);
+  const localGit = (args) => git(clone, args, { env: { ...gitEnvironment(), GIT_NO_LAZY_FETCH: "1" } });
+  const branch = meta.landing_branch.replace(/^refs\/heads\//, "");
+  localGit(["check-ref-format", "--branch", branch]);
+  assertNoGitAncestryOverrides(clone, (_, args) => localGit(args));
+  if (String(localGit(["rev-parse", "--is-shallow-repository"])).trim() !== "false") {
+    throw new Error(`lane project clone is shallow: ${clone}`);
+  }
+  const target = String(localGit(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`])).trim();
+  const commits = [];
+  for (const name of names) {
+    let commit;
+    try {
+      commit = String(localGit(["rev-parse", "--verify", `${name}^{commit}`])).trim();
+      localGit(["merge-base", "--is-ancestor", commit, target]);
+    } catch {
+      throw new Error(`landed-via commit ${name} is missing or is not an ancestor of recorded landing branch ${branch}`);
+    }
+    commits.push(commit);
+  }
+  return commits.join(",");
+}
+
+function laneTaskState(file, retirable = false, state = path.dirname(file), landedVia = null) {
   const meta = laneMeta(file);
   if (meta.kind !== "lane" || !meta.spawn_gen || !meta.playbot_project || !meta.playbot_workspace || !meta.playbot_thread) throw new Error("lane task identity is incomplete");
   process.env.PLAYBOT_DESKTOP_DIR = supervisionPath(meta.playbot_desktop, "lane desktop directory");
@@ -5620,6 +5650,10 @@ function laneTaskState(file, retirable = false, state = path.dirname(file)) {
     if (!workspace) throw new Error("lane workspace identity is absent; preserving supervision");
     if (!workspace.roots.length) throw new Error("lane workspace has no recorded roots");
     if (!meta.landing_branch) throw new Error("lane task has no recorded landing branch");
+    if (landedVia !== null) {
+      console.log(laneTaskLandedVia(project, meta, landedVia));
+      return;
+    }
     const missingRoot = workspace.roots.some((root) => !root.path || !pathPresence(canonicalPath(root.path)));
     if (workspace.archiveState !== "active" || !completedDelivery || missingRoot) {
       laneTaskLandedFromProject(project, workspace, meta.landing_branch, explicitLaneMode("lane-task-retirable", meta.mode));
@@ -7233,8 +7267,10 @@ async function main() {
   }
   if (command === "supervision-poll") return await supervisionPoll(process.argv.slice(3));
   if (command === "lane-task-state" || command === "lane-task-retirable") {
-    if (![4, 5].includes(process.argv.length)) throw new Error(`${command} requires a lane metadata path and optional state directory`);
-    return laneTaskState(process.argv[3], command === "lane-task-retirable", process.argv[4]);
+    const landedVia = process.argv[5] === "--landed-via" && command === "lane-task-retirable" && process.argv.length === 7
+      ? process.argv[6] : null;
+    if (![4, 5].includes(process.argv.length) && landedVia === null) throw new Error(`${command} requires a lane metadata path and optional state directory`);
+    return laneTaskState(process.argv[3], command === "lane-task-retirable", process.argv[4], landedVia);
   }
   if (command === "hook-pretool") {
     try {
