@@ -57,7 +57,6 @@ while [ "$#" -gt 0 ]; do
     *) echo "error: unknown local merge option $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$RECEIPT" ] || { echo "error: local merge requires --receipt for the exact branch SHA" >&2; exit 2; }
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -76,6 +75,7 @@ META="$STATE/$ID.meta"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
 
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+[ -n "$RECEIPT" ] || { echo "error: local merge requires --receipt for the exact branch SHA" >&2; exit 2; }
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
