@@ -1,0 +1,7 @@
+ok - a ship spawn refuses a worktree with no commit identity, and the clone-registration remedy clears it
+ok - the identity probe sees only what the launch environment passes through
+ok - existing inputs resolve against the recorded landing branch and a stale brief goes back for re-triage
+ok - malformed preflight markers refuse before any endpoint or worktree change
+ok - required tools are probed in the selected harness, else preserved inputs are bundled and the outcome recorded
+ok - the claude probe reads the Status line and unverified harnesses never count as callable
+# all fm-dispatch-preflight tests passed
