@@ -718,6 +718,53 @@ test_term_mid_arm_commits_failure_and_rewakes() {
   pass "auto-arm: TERM mid-arm commits a durable failure and exits 2 for rewake"
 }
 
+# Claude's tree kill and its own escalation can deliver the stop signal more
+# than once, so the failure handoff must survive repeats that land while it is
+# still committing. A handler that restored the default disposition instead of
+# ignoring repeats died on the second signal, before the durable failure record
+# and the rewake exit, which is the same unrecoverable `arming` generation the
+# single-signal test guards against. The burst is bounded and the follow-up is
+# paced for the reason tests/fm-remote-job.test.sh documents beside its own
+# repeated-signal shutdown test.
+test_term_barrage_mid_arm_still_commits_failure() {
+  local dir out hook_pid i burst status=0
+  dir=$(make_primary_dir "$TMP_ROOT/term-barrage-mid-arm")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" blocking-actionable
+  out="$dir/state/autoarm.out"
+  run_autoarm_bg "$dir" "$out"
+
+  hook_pid=
+  i=0
+  while [ "$i" -lt 100 ]; do
+    hook_pid=$(epoch_field "$dir" owner_pid)
+    [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -n "$hook_pid" ] || fail "auto-arm did not publish its generation owner before the TERM barrage"
+  [ -e "$dir/state/arm-ran" ] || fail "auto-arm did not enter the foreground arm before the TERM barrage"
+
+  burst=0
+  while [ "$burst" -lt 10 ]; do
+    kill -TERM "$hook_pid" 2>/dev/null || true
+    burst=$((burst + 1))
+  done
+  i=0
+  while kill -0 "$hook_pid" 2>/dev/null && [ "$i" -lt 200 ]; do
+    kill -TERM "$hook_pid" 2>/dev/null || true
+    sleep 0.05
+    i=$((i + 1))
+  done
+  wait "$RUN_AUTOARM_BG_PID" || status=$?
+
+  expect_code 2 "$status" "a TERM barrage mid-arm must still end in Claude's rewake-triggering hook exit"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "a TERM barrage mid-arm left no durable failure marker"
+  [ "$(epoch_outcome "$dir")" = failed ] \
+    || fail "a TERM barrage mid-arm left a nonterminal ledger outcome: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  pass "auto-arm: a TERM barrage mid-arm still commits a durable failure and exits 2"
+}
+
 # --- abandoned single-flight claim recovery (legacy shim) ----------------------
 # The 2026-08-14 lapse: one cycle armed, beat its beacon, delivered a single
 # rewake, and exited, leaving its owner lock behind with a live pid. The single
@@ -1255,6 +1302,7 @@ test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_term_mid_arm_commits_failure_and_rewakes
+test_term_barrage_mid_arm_still_commits_failure
 test_abandoned_owner_claim_is_reclaimed_and_rearms
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed

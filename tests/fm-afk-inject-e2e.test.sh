@@ -421,8 +421,70 @@ test_scenario_c() {
   pass "Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
 }
 
+# --- Scenario D: a stop-signal barrage still runs the whole shutdown ---------
+# The daemon's stop handler flushes buffered escalations, stops its watcher
+# child, and releases its singleton lock and pid file. A repeated stop signal
+# landing inside that handler must be ignored: a handler that restored the
+# default disposition instead died on the second signal part way through and
+# left the lock, pid file, or watcher child behind. The burst is bounded and
+# the follow-up is paced for the reason tests/fm-remote-job.test.sh documents
+# beside its own repeated-signal shutdown test.
+daemon_watcher_child() {
+  local pid
+  for pid in $(pgrep -P "$DAEMON_PID" 2>/dev/null || true); do
+    case "$(ps -p "$pid" -o args= 2>/dev/null || true)" in
+      *fm-watch.sh*) printf '%s\n' "$pid"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+test_scenario_d() {
+  reset_state
+  afk_enter "$STATE_DIR"
+  start_daemon
+  local i=0 burst=0 watcher_pid=""
+  while [ "$i" -lt 50 ]; do
+    watcher_pid=$(daemon_watcher_child || true)
+    [ -n "$watcher_pid" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$watcher_pid" ] || fail "Scenario D: daemon did not start its watcher child"
+  while [ "$burst" -lt 10 ]; do
+    kill -TERM "$DAEMON_PID" 2>/dev/null || true
+    burst=$((burst + 1))
+  done
+  i=0
+  while kill -0 "$DAEMON_PID" 2>/dev/null && [ "$i" -lt 200 ]; do
+    kill -TERM "$DAEMON_PID" 2>/dev/null || true
+    sleep 0.05
+    i=$((i + 1))
+  done
+  wait "$DAEMON_PID" 2>/dev/null || true
+  DAEMON_PID=""
+  afk_exit "$STATE_DIR" 2>/dev/null || true
+  i=0
+  while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 40 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if kill -0 "$watcher_pid" 2>/dev/null; then
+    kill -KILL "$watcher_pid" 2>/dev/null || true
+    fail "Scenario D: a stop-signal barrage left the daemon's watcher child running"
+  fi
+  [ ! -e "$STATE_DIR/.supervise-daemon.lock" ] \
+    || fail "Scenario D: a stop-signal barrage left the daemon singleton lock behind"
+  [ ! -e "$STATE_DIR/.supervise-daemon.pid" ] \
+    || fail "Scenario D: a stop-signal barrage left the daemon pid file behind"
+  grep -q 'daemon shutting down' "$STATE_DIR/.supervise-daemon.log" \
+    || fail "Scenario D: a stop-signal barrage cut the daemon shutdown short"
+  pass "Scenario D: a stop-signal barrage still runs the daemon's whole shutdown"
+}
+
 test_scenario_a
 test_scenario_b
 test_scenario_c
+test_scenario_d
 
 echo "all e2e injection tests passed"

@@ -448,6 +448,52 @@ SH
   pass "fm-herdr-lab: interrupted viewer start cancels its launcher"
 }
 
+# An interrupted start can be signalled again while it is still cancelling its
+# launcher, for example by a second Ctrl-C. This launcher ignores TERM, so the
+# cancel must run its whole grace window and KILL escalation, and the barrage
+# lands inside that window. A handler that restored the default disposition
+# instead of ignoring repeats died on the second signal and left the launcher
+# running with nothing left to stop it.
+test_viewer_start_signal_barrage_still_cancels_launcher() {
+  local name="fm-lab-viewer-barrage-$$" command_pid launcher_pid burst i status=0
+  local started="$TMP_ROOT/viewer-barrage-started"
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-barrage fixture provision failed"
+  cat > "$FAKEBIN/python3" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+printf '%s\n' "$$" > "$FM_FAKE_VIEWER_STARTED"
+exec "$FM_FAKE_HERDR_REAL_SLEEP" 20
+SH
+  chmod +x "$FAKEBIN/python3"
+  FM_FAKE_VIEWER_STARTED="$started" run_with_fake exec "$ROOT/bin/fm-herdr-lab.sh" \
+    viewer start "$name" >/dev/null 2>&1 &
+  command_pid=$!
+  while [ ! -f "$started" ]; do
+    "$REAL_SLEEP" 0.01
+  done
+  launcher_pid=$(cat "$started")
+  burst=0
+  while [ "$burst" -lt 10 ]; do
+    kill -TERM "$command_pid" 2>/dev/null || true
+    burst=$((burst + 1))
+  done
+  i=0
+  while kill -0 "$command_pid" 2>/dev/null && [ "$i" -lt 300 ]; do
+    kill -TERM "$command_pid" 2>/dev/null || true
+    "$REAL_SLEEP" 0.05
+    i=$((i + 1))
+  done
+  wait "$command_pid" || status=$?
+  rm -f "$FAKEBIN/python3"
+  [ "$status" -ne 0 ] || fail "a repeatedly interrupted viewer start unexpectedly succeeded"
+  if kill -0 "$launcher_pid" 2>/dev/null; then
+    kill -KILL "$launcher_pid" 2>/dev/null || true
+    fail "a repeatedly interrupted viewer start left its launcher running"
+  fi
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-barrage fixture teardown failed"
+  pass "fm-herdr-lab: a repeatedly interrupted viewer start still cancels its launcher"
+}
+
 test_teardown_refuses_while_viewer_attached() {
   local name="fm-lab-viewer-teardown-$$" record status=0 pair="$TMP_ROOT/viewer-teardown-pair"
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-teardown fixture provision failed"
@@ -512,6 +558,7 @@ test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
 test_viewer_stop_requires_the_recorded_parent
 test_interrupted_viewer_start_cancels_launcher
+test_viewer_start_signal_barrage_still_cancels_launcher
 test_teardown_refuses_while_viewer_attached
 test_viewer_stop_retains_record_when_detach_is_unreadable
 test_viewer_launcher_refuses_unsafe_arguments

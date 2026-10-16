@@ -1658,7 +1658,8 @@ fm_super_main() {
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""
   cleanup() {
-    trap - TERM INT
+    # Ignore, never reset, repeats while this handler runs (firstmate-coding-guidelines, "Shell signal handlers and lock reclaim").
+    trap '' TERM INT
     wedge_alarm_stop_active_notifier
     escalate_flush "$STATE" 2>/dev/null || true
     if [ -n "${WATCHER_PID:-}" ]; then

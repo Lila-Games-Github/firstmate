@@ -220,7 +220,8 @@ autoarm_record() {  # <outcome>
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_autoarm_signal() {
   local signal=$1
-  trap - HUP TERM INT
+  # Ignore, never reset, repeats while this handler runs (firstmate-coding-guidelines, "Shell signal handlers and lock reclaim").
+  trap '' HUP TERM INT
   [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
   if [ -e "$FAILURE_ALARM" ]; then
     autoarm_record failed-suppressed

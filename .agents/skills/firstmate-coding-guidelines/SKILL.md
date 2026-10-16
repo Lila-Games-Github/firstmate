@@ -105,6 +105,25 @@ Every such check needs two tests, because they fail for different reasons:
 
 Record the dated per-harness result in `docs/verification/runtime-backends.md`, and point at the live guard as the command that refreshes it, rather than leaving a version-scoped observation to rot into a false claim.
 
+## Shell signal handlers and lock reclaim
+
+This section is the single owner of both rules.
+
+A shell signal handler that is unsafe to re-enter or to abort partway - it publishes a file, appends a record, releases a lock, or stops and waits on children - must begin with `trap '' <signals>` so every repeat of those signals is ignored for the rest of the handler.
+Never begin it with `trap - <signals>`: that restores the default disposition, so a second signal kills the shell mid-cleanup and leaves a half-published temp file, a held lock, or a missing terminal record behind.
+A repeat is the normal case, not an exception: a process-group stop and a supervisor forwarding its own stop both deliver the same signal to one child, and an operator presses Ctrl-C twice.
+A handler that stays installed while it runs is no better, because a repeat re-enters it from the top.
+A hung handler is still stoppable, because the caller's escalation to KILL cannot be ignored.
+`trap -` remains correct in three places only: immediately before `kill -<SIG> $$` to re-raise after cleanup, after a protected section finishes so later code regains default dispositions, and at the top of a child subshell to drop inherited parent traps.
+A handler whose whole body is one idempotent command plus `exit`, such as `rm -f "$tmp"; exit 143`, needs neither form.
+
+Every reclaim of a lock directory - a replacement clearing a dead owner, or the owner's own exit cleanup - must remove the temp-file patterns that the lock's publishers create inside it by mktemp-then-mv before it calls `rmdir`.
+Accept only regular, non-symlink files matching those exact patterns and refuse anything else, so a foreign entry still keeps the directory.
+A KILL between the mktemp and the mv always orphans one such temp, and without this sweep every later `rmdir` fails and the lock is unrecoverable without a manual delete.
+`worker_recover_lock_temps` in `bin/fm-remote-job-worker.sh` is the reference implementation.
+
+Cover each such handler with a regression that delivers a barrage of the signal across the whole shutdown window and asserts the terminal outcome survives, and cover each reclaim with one that plants a stray publisher temp in a dead owner's lock directory and asserts the reclaim still succeeds.
+
 ## Documentation change review
 
 For every changed maintained prose surface, identify its inventory audience, authoritative owner, current-behavior relevance, destination for supporting evidence, and any unique safety fact that removal could lose.
