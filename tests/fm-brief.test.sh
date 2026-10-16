@@ -1567,7 +1567,7 @@ Open question OQ-159: resolved 2026-10-15: page")
 test_registry_declared_register_scaffolds_section() {
   local home="$TMP_ROOT/oq-reg-home" out status brief
   mkdir -p "$home/data" "$home/projects/ProjectWhite"
-  printf -- '- ProjectWhite [no-mistakes] - main (added 2026-01-01)\n- prototype-game - the game at `%s` open-questions docs/wiki/open-questions.md (added 2026-01-01)\n- plain - nothing declared (added 2026-01-01)\n' \
+  printf -- '- ProjectWhite [no-mistakes] - main (added 2026-01-01)\n- prototype-game - the game at `%s` open-questions `docs/wiki/open-questions.md` (added 2026-01-01)\n- plain - surfaces open questions and no open-questions yet (added 2026-01-01)\n' \
     "$home/projects/ProjectWhite" > "$home/data/projects.md"
 
   for repo in ProjectWhite prototype-game; do

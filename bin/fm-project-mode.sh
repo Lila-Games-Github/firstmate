@@ -41,8 +41,8 @@
 # FM_HOME/projects/<name>. Missing, duplicate, or ambiguous entries fail closed.
 # --path is independent of --raw and leaves default posture output unchanged.
 # An exact registry entry may also declare its open design-question register as
-# "open-questions <relative path>" or "open-questions `<relative path>`" in its
-# description; the path is relative to the project's clone root. The declaration
+# "open-questions `<relative path>`" (backticks required, so prose never declares
+# one) in its description; the path is relative to the project's clone root. The declaration
 # is what makes bin/fm-brief.sh emit, and bin/fm-spawn.sh require, the
 # `# Open-question dependencies` section for that project's ship briefs
 # (bin/fm-open-questions-lib.sh owns the section).
@@ -74,7 +74,7 @@ if [ "${1:-}" = "--path" ]; then
   shift
 fi
 
-OQ_CLAUSE='open-questions (`[^`]+`|[^[:space:]`]+)'
+OQ_CLAUSE='open-questions `[^`]+`'
 
 if [ "${1:-}" = "--open-questions" ]; then
   NAME=${2:?usage: fm-project-mode.sh --open-questions <project-name>}
@@ -116,9 +116,8 @@ if [ "${1:-}" = "--declared-registers" ]; then
     [ -n "$cand" ] || continue
     reg_rc=0
     reg=$("$SCRIPT_DIR/fm-project-mode.sh" --open-questions "$cand" 2>/dev/null) || reg_rc=$?
-    if cand_path=$("$SCRIPT_DIR/fm-project-mode.sh" --path "$cand" 2>/dev/null); then
-      [ "$(canon_dir "$cand_path")" = "$target_dir" ] || continue
-    fi
+    cand_path=$("$SCRIPT_DIR/fm-project-mode.sh" --path "$cand" 2>/dev/null) || cand_path="$FM_HOME/projects/$cand"
+    [ "$(canon_dir "$cand_path")" = "$target_dir" ] || continue
     if [ "$reg_rc" -ne 0 ] || [ -z "$reg" ]; then
       echo "error: registry entry $cand declares an invalid open-questions register or clone path in $REG" >&2
       exit 1

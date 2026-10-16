@@ -1130,7 +1130,7 @@ test_registry_declared_register_requires_section_at_dispatch() {
     git -C "$CASE_DIR/publisher" add docs/open-questions.md
     git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm register
     git -C "$CASE_DIR/publisher" push --quiet origin "$DEFAULT_BRANCH"
-    printf -- '- registered-game - a game at `%s` open-questions docs/open-questions.md (added 2026-01-01)\n' \
+    printf -- '- registered-game - a game at `%s` open-questions `docs/open-questions.md` (added 2026-01-01)\n- broken-a - at `/nowhere/a` open-questions `/abs.md` (added 2026-01-01)\n- broken-b - x open-questions `docs/x.md` (added 2026-01-01)\n- broken-b - dup open-questions `docs/y.md` (added 2026-01-01)\n- prose - surfaces open questions and no open-questions yet (added 2026-01-01)\n' \
       "$PROJECT_DIR" > "$HOME_DIR/data/projects.md"
     case "$case_name" in
       missing) ;;
