@@ -286,17 +286,16 @@ fm_test_run_spawn() {
   # so every launch-shape assertion in the suite keeps reading the same command.
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   # A ship spawn refuses a worktree with no Git commit identity
-  # (bin/fm-dispatch-preflight-lib.sh). tests/git-config-helpers.sh supplies one,
-  # and the throwaway HOME carries it too for a launch-env allowlist that drops
-  # GIT_CONFIG_GLOBAL; FM_TEST_SPAWN_GIT_IDENTITY=0 removes both.
+  # (bin/fm-dispatch-preflight-lib.sh); the throwaway HOME carries one
+  # (fm_test_home_git_identity), and FM_TEST_SPAWN_GIT_IDENTITY=0 removes it and
+  # the fixture global layer for the refusal case.
   local spawn_home=$home/user-home spawn_gitconfig=${GIT_CONFIG_GLOBAL:-/dev/null}
   mkdir -p "$spawn_home"
   if [ "${FM_TEST_SPAWN_GIT_IDENTITY:-1}" = 0 ]; then
     spawn_gitconfig=/dev/null
     rm -f "$spawn_home/.gitconfig"
-  elif [ ! -e "$spawn_home/.gitconfig" ]; then
-    git config --file "$spawn_home/.gitconfig" user.name 'Firstmate Spawn Fixture'
-    git config --file "$spawn_home/.gitconfig" user.email 'spawn-fixture@example.invalid'
+  else
+    fm_test_home_git_identity "$spawn_home"
   fi
   GIT_CONFIG_GLOBAL="$spawn_gitconfig" \
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
