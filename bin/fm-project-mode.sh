@@ -74,6 +74,7 @@ if [ "${1:-}" = "--path" ]; then
   shift
 fi
 
+# shellcheck disable=SC2016 # Literal backticks are registry syntax.
 OQ_CLAUSE='open-questions `[^`]+`'
 
 if [ "${1:-}" = "--open-questions" ]; then
