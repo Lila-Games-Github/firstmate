@@ -291,8 +291,9 @@ fm_herdr_lab_viewer_start() { # <session>
   launcher_pid=
   if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     interrupt_traps=1
-    trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
-    trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
+    # Ignore, never reset, repeats while this handler runs (firstmate-coding-guidelines, "Shell signal handlers and lock reclaim").
+    trap 'trap "" INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
+    trap 'trap "" INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
   fi
   nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
   launcher_pid=$!

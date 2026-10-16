@@ -187,6 +187,56 @@ test_attached_arm_reports_the_delivered_wake() {
   pass "watch-arm: an attached arm reports the wake its cycle delivered instead of a false failure"
 }
 
+# A harness stop can reach the arm more than once, for example a process-group
+# TERM followed by the harness's own escalation, and every repeat lands while
+# the arm's stop handler is still stopping its watcher child. A handler that
+# restored the default disposition instead of ignoring repeats died on the second
+# signal before it stopped that child, leaving an unowned watcher running and the
+# arm's output temp file behind in the state directory. The burst is bounded and
+# the follow-up is paced for the reason tests/fm-remote-job.test.sh documents
+# beside its own repeated-signal shutdown test.
+test_arm_signal_barrage_stops_its_watcher_child() {
+  local dir home state fakebin armout watcher_pid burst i temp
+  dir=$(make_case arm-signal-barrage)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  watcher_pid=$(sed -n 's/^watcher: started pid=\([0-9][0-9]*\).*$/\1/p' "$armout")
+  [ -n "$watcher_pid" ] || fail "the barrage fixture arm did not start its own watcher: $(cat "$armout")"
+  is_live_non_zombie "$watcher_pid" || fail "the barrage fixture watcher did not stay live"
+
+  burst=0
+  while [ "$burst" -lt 10 ]; do
+    kill -TERM "$ARM_PID" 2>/dev/null || true
+    burst=$((burst + 1))
+  done
+  i=0
+  while is_live_non_zombie "$ARM_PID" && [ "$i" -lt 200 ]; do
+    kill -TERM "$ARM_PID" 2>/dev/null || true
+    sleep 0.05
+    i=$((i + 1))
+  done
+  wait "$ARM_PID" 2>/dev/null || true
+  i=0
+  while is_live_non_zombie "$watcher_pid" && [ "$i" -lt 40 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$watcher_pid"; then
+    kill -KILL "$watcher_pid" 2>/dev/null || true
+    fail "a TERM barrage on the arm left its watcher child running unowned"
+  fi
+  for temp in "$state"/.watch-arm-output.*; do
+    [ ! -e "$temp" ] || fail "a TERM barrage on the arm left its output temp behind: $temp"
+  done
+  grep -q 'reason=arm-interrupted' "$state/.watch-cycle-exits.log" \
+    || fail "a TERM barrage on the arm did not record the interrupted cycle"
+  pass "watch-arm: a TERM barrage on the arm still stops its watcher child and cleans up"
+}
+
 test_attached_arm_reports_the_delivered_wake_after_drain() {
   local dir state fakebin out armout status
   dir=$(make_case attached-drained-wake)
@@ -843,6 +893,7 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
 
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
+test_arm_signal_barrage_stops_its_watcher_child
 test_arm_refuses_an_unusable_launch_confirm_window
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision

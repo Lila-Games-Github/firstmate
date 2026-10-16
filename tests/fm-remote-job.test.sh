@@ -865,6 +865,56 @@ wait "$REPEAT_WORKER_PID" 2>/dev/null || true
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
 
+# The Linux supervisor's own stop handler forwards TERM to its serving child and
+# then waits for it. Signal the supervisor alone with the same bounded burst and
+# paced follow-up as above: a handler that restored the default disposition
+# instead of ignoring repeats died on the second signal before it forwarded the
+# first, so the serving child outlived it as an orphan that kept its ownership
+# lock and readiness heartbeat with nothing left to stop it.
+SUPERVISOR_SIGNAL_HOME="$TMP_ROOT/supervisor-signal-account"
+SUPERVISOR_SIGNAL_STATE="$TMP_ROOT/supervisor-signal-jobs"
+mkdir -p "$SUPERVISOR_SIGNAL_HOME"
+chmod 700 "$SUPERVISOR_SIGNAL_HOME"
+HOME="$SUPERVISOR_SIGNAL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$SUPERVISOR_SIGNAL_STATE" \
+  FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
+  > "$TMP_ROOT/supervisor-signal.out" 2> "$TMP_ROOT/supervisor-signal.err" &
+REPEAT_WORKER_PID=$!
+for _ in $(seq 1 300); do
+  [ -f "$SUPERVISOR_SIGNAL_STATE/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$SUPERVISOR_SIGNAL_STATE/worker.ready" "the signalled supervisor's worker did not become ready"
+SUPERVISED_CHILD_PID=$(cat "$SUPERVISOR_SIGNAL_STATE/worker.pid")
+[ "$SUPERVISED_CHILD_PID" != "$REPEAT_WORKER_PID" ] \
+  || fail "the supervisor fixture did not start a separate serving child"
+REPEAT_DEADLINE=$((SECONDS + 30))
+REPEAT_BURST=0
+while [ "$REPEAT_BURST" -lt 10 ]; do
+  kill -TERM "$REPEAT_WORKER_PID" 2>/dev/null || true
+  REPEAT_BURST=$((REPEAT_BURST + 1))
+done
+while kill -0 "$REPEAT_WORKER_PID" 2>/dev/null && [ "$SECONDS" -lt "$REPEAT_DEADLINE" ]; do
+  kill -TERM "$REPEAT_WORKER_PID" 2>/dev/null || true
+  sleep 0.05
+done
+if kill -0 "$REPEAT_WORKER_PID" 2>/dev/null; then
+  kill -KILL "$REPEAT_WORKER_PID" "$SUPERVISED_CHILD_PID" 2>/dev/null || true
+  wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+  REPEAT_WORKER_PID=
+  fail "the repeatedly signalled supervisor never finished its shutdown"
+fi
+wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+REPEAT_WORKER_PID=
+if kill -0 "$SUPERVISED_CHILD_PID" 2>/dev/null; then
+  kill -KILL "$SUPERVISED_CHILD_PID" 2>/dev/null || true
+  fail "a repeatedly signalled supervisor exited and orphaned its serving child"
+fi
+assert_absent "$SUPERVISOR_SIGNAL_STATE/worker.lock" \
+  "a repeatedly signalled supervisor left its child's ownership lock behind"
+assert_absent "$SUPERVISOR_SIGNAL_STATE/worker.ready" \
+  "a repeatedly signalled supervisor left its child's readiness heartbeat behind"
+pass "a repeatedly signalled supervisor stops its serving child before it exits"
+
 # A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
 # consecutive-failure backoff, so a child that dies just past that threshold
 # used to reset the only guard the supervisor had and restart forever. The

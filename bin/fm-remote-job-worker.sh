@@ -1085,7 +1085,8 @@ worker_supervisor_cleanup_dead_child() { # <account-home> <pid>
 
 worker_supervisor_shutdown() {
   local pid=${WORKER_SUPERVISED_PID:-}
-  trap - HUP INT TERM
+  # Ignore, never reset, repeats while this handler runs (firstmate-coding-guidelines, "Shell signal handlers and lock reclaim").
+  trap '' HUP INT TERM
   if [ -n "$pid" ]; then
     kill -TERM "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true

@@ -341,7 +341,8 @@ attach_and_wait() {
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_attached_signal() {
   local signal=$1 rc=$2
-  trap - HUP TERM INT
+  # Ignore, never reset, repeats while this handler runs (firstmate-coding-guidelines, "Shell signal handlers and lock reclaim").
+  trap '' HUP TERM INT
   cycle_log_append "$rc" "$signal" arm-interrupted none
   exit "$rc"
 }
@@ -460,7 +461,8 @@ cleanup_child() {
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_arm_signal() {
   local signal=$1 rc=$2
-  trap - HUP TERM INT
+  # Ignore, never reset, repeats while this handler runs (firstmate-coding-guidelines, "Shell signal handlers and lock reclaim").
+  trap '' HUP TERM INT
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
     wait "$child" 2>/dev/null || true
