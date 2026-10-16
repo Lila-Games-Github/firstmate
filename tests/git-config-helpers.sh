@@ -9,6 +9,11 @@
 # Fixture Git processes must not inherit host signing, hooks, or other global and
 # system preferences: with commit.gpgsign=true set globally and no secret key for
 # the fixture identities, every fixture commit fails before its assertion.
+# The global layer becomes tests/git-fixture-identity.gitconfig, which carries
+# only a commit identity, because a host may resolve none (no global identity
+# and a hostname git cannot turn into an email) and bin/fm-spawn.sh refuses a
+# ship worktree without one; a case that needs no identity points
+# GIT_CONFIG_GLOBAL at /dev/null itself.
 # Isolation is limited to those two layers on purpose, so repository-local config,
 # inline `git -c`, GIT_CONFIG_COUNT, and a GIT_CONFIG_GLOBAL the caller supplies
 # after sourcing all stay authoritative - the Git-config suites assert on them.
@@ -23,4 +28,5 @@
 # shared helpers, the runner, and the standalone entry points that run without a
 # live vendor - and the changed-file map selects it for a change to this file.
 
-export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+GIT_CONFIG_GLOBAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/git-fixture-identity.gitconfig"
+export GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM=1

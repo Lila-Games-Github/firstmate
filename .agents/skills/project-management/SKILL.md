@@ -60,6 +60,9 @@ A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote 
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
+Every clone this skill adds or creates must resolve a Git commit identity (`git -C projects/<name> var GIT_AUTHOR_IDENT` and `GIT_COMMITTER_IDENT`), because ship workers commit unattended from linked worktrees that share the clone's configuration and `bin/fm-spawn.sh` refuses a ship dispatch without one.
+When no global identity covers it, set the captain's chosen `user.name` and `user.email` on the clone as part of registration.
+
 ## Create a project
 
 Creating a GitHub repository is outward-facing.

@@ -1,0 +1,6 @@
+# The fixture-owned global Git layer tests/git-config-helpers.sh selects: an
+# identity only, so fixture commits and fm-spawn's commit-identity preflight never
+# depend on the host's identity or hostname.
+[user]
+	name = Firstmate Fixture
+	email = fixture@example.invalid

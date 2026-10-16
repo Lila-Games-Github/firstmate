@@ -666,6 +666,27 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+## Required-tool MCP probe
+
+The dispatch preflight's `Required tool: mcp <server>` verdict (`bin/fm-dispatch-preflight-lib.sh`) reads vendor CLI output: claude's rendered `Status:` line from `claude mcp get`, and the `enabled` and `auth_status` fields of `codex mcp list --json`.
+Verified 2026-10-16 on Linux x86_64 with Claude Code 2.1.301 and codex-cli 0.157.0, each against a private config directory holding a real stdio MCP server, a server that cannot connect (claude) or is disabled (codex), and an unknown name.
+
+```sh
+tests/fm-dispatch-preflight-live-e2e.test.sh
+```
+
+```text
+ok - claude 2.1.301 (Claude Code): the MCP probe tells a connected server from a broken or unknown one
+ok - codex codex-cli 0.157.0: the MCP probe tells an enabled server from a disabled or unknown one
+# harnesses checked: 2
+```
+
+Two vendor facts shape the probe.
+`claude mcp get` exits 0 for a connected server and equally for one that failed to connect or needs authentication, so only the `Status:` line carries the verdict, while an unknown name exits 1 with `No MCP server named`.
+`codex mcp list --json` reports configuration, enablement, and authentication but performs no connection health check, so codex's verdict is "configured, enabled, and not logged out" rather than "connected".
+No other harness has a verified probe, so there an MCP requirement counts as not callable and the preflight bundles preserved inputs or refuses.
+The guard submits no prompt and spends no tokens, is default-on wherever python3 and jq are installed, reports an absent harness explicitly, and refuses a forced run that checked nothing; run it after any claude or codex upgrade.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.
