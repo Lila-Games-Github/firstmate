@@ -1,0 +1,39 @@
+== fm-afk-inject-e2e
+ok - Scenario A: partial input defers injection; digest arrives clean after idle
+ok - Scenario B: swallowed Enter produces exactly one clean digest
+ok - Scenario C: a normal captain status injects exactly one clean single-line sentinel digest
+ok - Scenario D: a stop-signal barrage still runs the daemon's whole shutdown
+all e2e injection tests passed
+rc=0
+== fm-claude-stop-autoarm
+ok - auto-arm: a superseded owner goes silent - one supersession episode, one translation, no held mutex
+ok - auto-arm: need vanishing mid-cycle closes without a rewake
+ok - auto-arm: mid-cycle AFK hands triage to the daemon with no rewake
+ok - auto-arm: active in a marked secondmate home
+ok - auto-arm: a long FM_POLL with FM_GUARD_GRACE unset reaches fm-watch-arm.sh with the derived grace
+ok - fm-lock: shared session-lock lib preserves the status path
+rc=0
+== fm-herdr-lab
+ok - fm-herdr-lab: viewer ownership requires the recorded parent
+ok - fm-herdr-lab: interrupted viewer start cancels its launcher
+ok - fm-herdr-lab: a repeatedly interrupted viewer start still cancels its launcher
+ok - fm-herdr-lab: teardown refuses to destroy a session an attached viewer still holds
+ok - fm-herdr-lab: unreadable detach results fail closed on running sessions
+ok - fm-herdr-lab: the viewer launcher refuses unsafe sessions and pidfiles
+rc=0
+== fm-remote-job
+ok - failed shutdown quarantines ownership against replacement workers
+ok - quarantine recovery refuses unverifiable supervisors and ignores reused pids
+ok - a repeatedly signalled shutdown still releases ownership for the next worker
+ok - a repeatedly signalled supervisor stops its serving child before it exits
+ok - barely healthy worker failures remain bounded by the restart guard
+ALL TESTS PASSED
+rc=0
+== fm-watch-arm
+ok - watch-arm: restart publishes recovery before clearing a reused-pid watcher lock
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 7 --recovery-generation 3749446.1792129986.9cRkjJ
+ok - watch-arm: markerless legacy queues are adopted and recovered
+ok - watch-arm: a watcher close during handling keeps the printed acknowledgement valid
+ok - watch-arm: a moved recovery generation consumes handled rows and names its remedy
+ok - watch-arm: downtime marker publication does not follow symlinks
+rc=0
