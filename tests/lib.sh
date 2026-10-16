@@ -603,6 +603,17 @@ fm_git_identity() {
   export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 }
 
+# fm_test_home_git_identity <home>: give a throwaway HOME the commit identity a
+# configured launching user has. tests/git-config-helpers.sh already supplies one
+# through GIT_CONFIG_GLOBAL, but a spawn under a launch-env allowlist drops that
+# variable, and bin/fm-spawn.sh refuses a ship worktree without an identity.
+fm_test_home_git_identity() {
+  mkdir -p "$1"
+  [ -e "$1/.gitconfig" ] && return 0
+  git config --file "$1/.gitconfig" user.name 'Firstmate Spawn Fixture'
+  git config --file "$1/.gitconfig" user.email 'spawn-fixture@example.invalid'
+}
+
 # fm_git_init_commit <dir>: create a git repo at <dir> with a README and one
 # commit. Uses an inline identity so it works whether or not fm_git_identity was
 # called. The initial branch is pinned rather than inherited from

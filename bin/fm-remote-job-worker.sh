@@ -1089,7 +1089,11 @@ worker_supervisor_shutdown() {
   trap '' HUP INT TERM
   if [ -n "$pid" ]; then
     kill -TERM "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
+    # A signal that raced the disposition change above can end one wait early, so
+    # exit only once the serving child is really gone.
+    while kill -0 "$pid" 2>/dev/null; do
+      wait "$pid" 2>/dev/null || sleep 0.05
+    done
   fi
   exit 0
 }

@@ -285,6 +285,18 @@
 #   containment test reads local refs only and never fetches, so this gate stays
 #   usable offline; a stale remote-tracking ref can therefore make an unpushed
 #   commit look contained, which is exactly why no remedy command is printed.
+#   Once that fresh worktree sits on its selected base, and before any worker
+#   starts, the dispatch preflight runs (bin/fm-dispatch-preflight-lib.sh owns
+#   the probes and the brief marker forms; malformed markers refuse earlier,
+#   before any endpoint exists). A ship spawn refuses when the worktree resolves
+#   no Git author or committer identity, naming the clone-registration remedy.
+#   A ship or scout spawn refuses, for re-triage, when an `Existing input:` the
+#   brief declares is absent from that base, and probes each `Required tool:` in
+#   the selected harness: when one is not callable it bundles the brief's
+#   `Preserved input:` paths into data/<id>/inputs/ or refuses when there are
+#   none, and records the outcome in data/<id>/dispatch-preflight.md, which the
+#   launch brief carries on this spawn and on every relaunch. Relaunch never
+#   re-runs the probes.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -500,6 +512,12 @@ if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist
   exit 1
 fi
 LAUNCH_ENV_NAMES=
+# The operational floor every filtered launch keeps (header above).
+LAUNCH_ENV_FLOOR='HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE
+  TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH
+  HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID
+  CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION
+  FM_TASK_ID'
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   if [ ! -f "$CONFIG/launch-env-allowlist" ] || [ ! -r "$CONFIG/launch-env-allowlist" ]; then
     echo "error: config/launch-env-allowlist must be a readable regular file" >&2
@@ -586,6 +604,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-codex-catalog-lib.sh
 . "$SCRIPT_DIR/fm-codex-catalog-lib.sh"
+# shellcheck source=bin/fm-dispatch-preflight-lib.sh
+. "$SCRIPT_DIR/fm-dispatch-preflight-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2747,6 +2767,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       fi
     fi
   fi
+  if ! fm_preflight_markers_check "$BRIEF"; then
+    echo "error: $BRIEF has a malformed dispatch preflight marker: $FM_PREFLIGHT_REASON (bin/fm-dispatch-preflight-lib.sh owns the marker forms)" >&2
+    exit 1
+  fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
       CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
@@ -2773,6 +2797,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
           fm_brief_intent_overlay "$CAPTAIN_INTENT"
       elif [ "$KIND" = ship ] && [ "$MODE" = direct-PR ]; then
         fm_direct_pr_target_block "$LANDING_BRANCH"
+      fi &&
+      # A relaunch keeps the fresh spawn's preflight outcome in front of the
+      # replacement worker; a fresh spawn writes its own after the probes.
+      if [ "$RELAUNCH" -eq 1 ] && [ -f "$DATA/$ID/dispatch-preflight.md" ]; then
+        printf '\n' && cat "$DATA/$ID/dispatch-preflight.md"
       fi
   } >"$BRIEF_TMP" || {
     rm -f -- "$BRIEF_TMP"
@@ -4024,6 +4053,46 @@ if [ "${OPEN_QUESTIONS_DECLARED:-0}" -eq 1 ]; then
     exit 1
   }
 fi
+# Dispatch preflight (bin/fm-dispatch-preflight-lib.sh owns each probe): the
+# worktree now sits on its selected base and no worker has started, so this is
+# the last point a refusal costs nothing but the endpoint the abort trap removes.
+if [ "$RELAUNCH" -eq 0 ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  PREFLIGHT_BASE="${LANDING_BRANCH:-the default branch} at $(git -C "$WT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  if [ "$KIND" = ship ]; then
+    # shellcheck disable=SC2086 # names are validated environment identifiers
+    if ! fm_preflight_git_identity "$WT" "$LAUNCH_ENV_ENABLED" $LAUNCH_ENV_FLOOR $LAUNCH_ENV_NAMES; then
+      echo "error: task worktree $WT has no resolvable Git author/committer identity: $FM_PREFLIGHT_REASON; configure a commit identity on the project clone as part of its registration (git -C $PROJ_ABS config user.name '<name>' and git -C $PROJ_ABS config user.email '<email>') or globally, then dispatch again" >&2
+      exit 1
+    fi
+  fi
+  PREFLIGHT_RC=0
+  fm_preflight_existing_inputs "$WT" "$SOURCE_BRIEF" || PREFLIGHT_RC=$?
+  case $PREFLIGHT_RC in
+  0) ;;
+  1)
+    echo "error: the brief for $ID names existing inputs absent from $PREFLIGHT_BASE: $FM_PREFLIGHT_REASON; the brief is stale, so route it back for re-triage instead of dispatching a worker" >&2
+    exit 1 ;;
+  *)
+    echo "error: could not resolve the brief's existing inputs for $ID against $PREFLIGHT_BASE: $FM_PREFLIGHT_REASON" >&2
+    exit 1 ;;
+  esac
+  if ! fm_preflight_required_tools "$WT" "$SOURCE_BRIEF" "$HARNESS" "$RAW_LAUNCH" \
+    "$DATA/$ID/inputs" "$DATA/$ID/dispatch-preflight.md"; then
+    echo "error: a required tool is not callable for $ID in harness ${HARNESS:-unknown}: $FM_PREFLIGHT_REASON; select a harness where it is callable or add Preserved input lines to the brief" >&2
+    exit 1
+  fi
+  if [ -f "$DATA/$ID/dispatch-preflight.md" ]; then
+    if ! { printf '\n' && cat "$DATA/$ID/dispatch-preflight.md"; } >>"$BRIEF"; then
+      echo "error: could not add the dispatch preflight record to $BRIEF" >&2
+      exit 1
+    fi
+    if grep -q '^- Bundled instead:' "$DATA/$ID/dispatch-preflight.md"; then
+      echo "notice: $ID required-tool preflight bundled the preserved inputs at $DATA/$ID/inputs (record: $DATA/$ID/dispatch-preflight.md)" >&2
+    else
+      echo "notice: $ID required-tool preflight found every declared tool callable (record: $DATA/$ID/dispatch-preflight.md)" >&2
+    fi
+  fi
+fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -4820,12 +4889,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
-  for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
-    TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
-    HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
-    CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID \
-    $LAUNCH_ENV_NAMES; do
+  for env_name in $LAUNCH_ENV_FLOOR $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
     # shellcheck disable=SC2016

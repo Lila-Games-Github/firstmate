@@ -344,7 +344,7 @@ family_for_basename() {
     fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
-    fm-composer-codex-idle-live-e2e.test.sh|\
+    fm-composer-codex-idle-live-e2e.test.sh|fm-dispatch-preflight-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-layer-live-e2e.test.sh|\
     fm-grok-continuity-live-e2e.test.sh|\
     fm-cursor-primary-live-e2e.test.sh|\
@@ -371,7 +371,7 @@ family_for_basename() {
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
-    fm-teardown-endpoint-safety.test.sh)
+    fm-dispatch-preflight.test.sh|fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-merge-local.test.sh|fm-pr-check-security.test.sh|\
@@ -1553,6 +1553,10 @@ families_for_changed_path() {
     bin/fm-open-questions-lib.sh)
       printf '%s\n' '__script__:fm-brief.test.sh'
       printf '%s\n' '__script__:fm-spawn-pool-base-freshen.test.sh'
+      ;;
+    bin/fm-dispatch-preflight-lib.sh)
+      printf '%s\n' '__script__:fm-dispatch-preflight.test.sh'
+      printf '%s\n' '__script__:fm-dispatch-preflight-live-e2e.test.sh'
       ;;
     bin/fm-landing-health-lib.sh)
       printf '%s\n' '__script__:fm-merge-local.test.sh'

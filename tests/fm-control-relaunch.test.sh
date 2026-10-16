@@ -1015,6 +1015,24 @@ test_spawn_relaunch_skips_the_green_final_head_base_receipt() {
   pass "fm-spawn --relaunch: a green-final-head ship task relaunches without repeating the dispatch base-health check"
 }
 
+test_spawn_relaunch_carries_the_dispatch_preflight_record_without_reprobing() {
+  local dir out rc launch
+  dir=$(new_case preflightrelaunch rl23)
+  add_ship_task "$dir" rl23 claude
+  # The fresh spawn's probes already ran; an input absent now must not stop
+  # a relaunch that keeps the work already on the worktree.
+  printf '\nExisting input: path no/longer/here.md\nRequired tool: mcp figma\n' >> "$dir/home/data/rl23/brief.md"
+  printf '# Dispatch preflight\n- Bundled instead: preserved inputs recorded by the fresh spawn.\n' \
+    > "$dir/home/data/rl23/dispatch-preflight.md"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl23 --relaunch 2>&1); rc=$?
+  expect_code 0 "$rc" "a relaunch must not repeat the dispatch preflight probes"$'\n'"$out"
+  launch="$dir/home/data/rl23/launch-brief.md"
+  assert_grep '- Bundled instead: preserved inputs recorded by the fresh spawn.' "$launch" \
+    "the relaunched worker's brief lost the fresh spawn's preflight record"
+  pass "fm-spawn --relaunch: the replacement worker keeps the dispatch preflight record and nothing is re-probed"
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
   for mode in no-mistakes direct-PR local-only; do
@@ -1868,6 +1886,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_skips_the_green_final_head_base_receipt
+test_spawn_relaunch_carries_the_dispatch_preflight_record_without_reprobing
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

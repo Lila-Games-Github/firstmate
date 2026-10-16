@@ -34,6 +34,10 @@
 #   project root, for a project the registry does not declare. For a declared
 #   project it must name one of its declared registers, which is also required to
 #   choose among several; a conflicting value is refused.
+#   Ship and scout briefs may also carry dispatch preflight marker lines
+#   (`Existing input:`, `Required tool:`, `Preserved input:`) that Firstmate adds
+#   by hand; bin/fm-dispatch-preflight-lib.sh owns their forms and fm-spawn.sh
+#   probes them before the worker starts.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`

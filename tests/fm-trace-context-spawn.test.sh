@@ -124,6 +124,8 @@ run_spawn() {
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
   mkdir -p "$home/user-home"
+  # The enabled case's launch-env allowlist drops GIT_CONFIG_GLOBAL.
+  fm_test_home_git_identity "$home/user-home"
   env -u FM_TRACE_CONTEXT \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \

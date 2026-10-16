@@ -74,6 +74,9 @@ SH
 . "$1"
 fm_git_init_commit "$2"
 [ "$(git -C "$2" log -1 --format=%s)" = initial ] || fail "fixture has no initial commit"
+# The fixture global layer supplies a commit identity even with auto-detection off.
+git -C "$2" -c user.useConfigOnly=true var GIT_AUTHOR_IDENT | grep -q '<fixture@example.invalid>' \
+  || fail "the fixture global layer supplies no commit identity"
 fm_git_identity
 # Child Git processes and direct commits inherit the same isolation.
 bash -eu -c 'git -C "$1" commit -q --allow-empty -m child' _ "$2"

@@ -920,6 +920,10 @@ test_spawn_environment_allowlist_credential_preflight() {
 $rec
 EOF
     : > "$home/config/launch-env-allowlist"
+    # The filtered launch drops the fixture's global Git layer, so the clone
+    # carries the commit identity the ship preflight requires, as registration sets it.
+    git -C "$proj" config user.name 'Muse Fixture'
+    git -C "$proj" config user.email muse-fixture@example.invalid
     case "$setting" in
       allowed) printf 'META_API_KEY\n' > "$home/config/launch-env-allowlist" ;;
       stored)
