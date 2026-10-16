@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Shared contract for a ship brief's open design-question dependencies.
 # A project may keep a register of unresolved design questions. A ship brief for
-# such a project is scaffolded with `bin/fm-brief.sh --open-questions <register>`,
-# which emits this section for firstmate to fill before dispatch:
+# such a project is scaffolded by bin/fm-brief.sh, which emits this section for
+# firstmate to fill before dispatch (`--open-questions <register>` declares it for
+# a project the registry does not):
 #   # Open-question dependencies
 #   Open-question register: <register path relative to the project root>
 #   {OPEN_QUESTION_DEPENDENCIES}
@@ -16,6 +17,12 @@
 # A provisional default names the default and the scope it is authorized for; its
 # date is when that authorization was given. Dates are real calendar days no
 # later than the dispatch day.
+# Only lines inside that section, up to the next top-level heading outside a fenced
+# block, are read; task text and the captain's intent never count.
+# A project whose data/projects.md entry declares a register (see
+# bin/fm-project-mode.sh) gets the section from bin/fm-brief.sh automatically, and
+# bin/fm-spawn.sh refuses fresh ship dispatch when the section is missing or names
+# a register that project did not declare.
 # bin/fm-spawn.sh refuses fresh dispatch of a brief that declares a register while
 # the placeholder remains, a line is malformed or duplicated, `none` is mixed with
 # dependency lines, or any named question is still `open`. After the dispatch
@@ -28,9 +35,22 @@
 
 FM_OQ_PLACEHOLDER='{OPEN_QUESTION_DEPENDENCIES}'
 
-# Return 0 when the brief declares an open-question register.
+FM_OQ_HEADING='# Open-question dependencies'
+
+# Print the lines of the brief's dependency section: from its heading to the next
+# top-level heading outside a fenced block, so task text and the captain's intent
+# never count as dependency lines.
+fm_oq_section() { # <brief>
+  awk -v heading="$FM_OQ_HEADING" '
+    /^(```|~~~)/ { fence = !fence }
+    !fence && /^# / { in_section = ($0 == heading); next }
+    in_section { print }
+  ' "$1"
+}
+
+# Return 0 when the brief carries the dependency section.
 fm_oq_brief_declares() { # <brief>
-  [ -f "$1" ] && grep -q '^Open-question register:' "$1"
+  [ -f "$1" ] && grep -qxF "$FM_OQ_HEADING" "$1"
 }
 
 fm_oq_valid_date() { # <YYYY-MM-DD> <today YYYY-MM-DD>
@@ -118,7 +138,9 @@ fm_oq_brief_check() { # <brief> <today YYYY-MM-DD>
         esac
         ;;
     esac
-  done < "$brief"
+  done <<EOF
+$(fm_oq_section "$brief")
+EOF
   if [ "$registers" -ne 1 ] || [ -z "$FM_OQ_REGISTER" ]; then
     echo "error: $brief must declare exactly one non-empty Open-question register line" >&2
     bad=1

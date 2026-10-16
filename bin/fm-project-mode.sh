@@ -40,7 +40,22 @@
 # "at `/path with spaces`" in its description; absent that clause, the path is
 # FM_HOME/projects/<name>. Missing, duplicate, or ambiguous entries fail closed.
 # --path is independent of --raw and leaves default posture output unchanged.
-# Usage: fm-project-mode.sh [--raw|--path] <project-name>
+# An exact registry entry may also declare its open design-question register as
+# "open-questions <relative path>" or "open-questions `<relative path>`" in its
+# description; the path is relative to the project's clone root. The declaration
+# is what makes bin/fm-brief.sh emit, and bin/fm-spawn.sh require, the
+# `# Open-question dependencies` section for that project's ship briefs
+# (bin/fm-open-questions-lib.sh owns the section).
+# --open-questions <project-name> prints the declared register path, or nothing
+# when the entry declares none. It exits 2 when the project has no registry entry
+# and 1 when the entry is duplicated, declares more than one register, or names
+# an absolute path or one containing "..".
+# --declared-registers <clone-path> prints, one per line, every register declared
+# by a registry entry whose registered clone path (see --path) is that directory,
+# because a registry name can differ from the clone basename. It prints nothing
+# when no entry maps there and exits 1 when a declaring entry is invalid.
+# Usage: fm-project-mode.sh [--raw|--path|--open-questions] <project-name>
+#        fm-project-mode.sh --declared-registers <clone-path>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,7 +73,65 @@ if [ "${1:-}" = "--path" ]; then
   PATH_ONLY=1
   shift
 fi
-NAME=${1:?usage: fm-project-mode.sh [--raw|--path] <project-name>}
+
+OQ_CLAUSE='open-questions (`[^`]+`|[^[:space:]`]+)'
+
+if [ "${1:-}" = "--open-questions" ]; then
+  NAME=${2:?usage: fm-project-mode.sh --open-questions <project-name>}
+  [ -f "$REG" ] || exit 2
+  rc=0
+  out=$(awk -v n="$NAME" -v clause=" $OQ_CLAUSE" '
+    $1=="-" && $2==n {
+      count++;
+      rest=$0;
+      while (match(rest, clause)) {
+        value=substr(rest, RSTART+16, RLENGTH-16);
+        if (value ~ /^`/) { sub(/^`/, "", value); sub(/`$/, "", value) }
+        if (value ~ /^\// || value ~ /(^|\/)\.\.(\/|$)/ || value ~ /^[[:space:]]*$/) invalid=1;
+        found++; result=value;
+        rest=substr(rest, RSTART+RLENGTH);
+      }
+    }
+    END {
+      if (count==0) exit 2;
+      if (count!=1 || found>1 || invalid) exit 1;
+      if (found==1) print result;
+    }
+  ' "$REG") || rc=$?
+  case "$rc" in
+    0) [ -z "$out" ] || printf '%s\n' "$out"; exit 0 ;;
+    2) exit 2 ;;
+    *) echo "error: open-questions declaration for $NAME is duplicated, repeated, or not a relative path inside the project in $REG" >&2; exit 1 ;;
+  esac
+fi
+
+if [ "${1:-}" = "--declared-registers" ]; then
+  TARGET=${2:?usage: fm-project-mode.sh --declared-registers <clone-path>}
+  [ -f "$REG" ] || exit 0
+  canon_dir() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+  target_dir=$(canon_dir "$TARGET")
+  candidates=$(awk -v clause=" $OQ_CLAUSE" '$1=="-" && $2!="" && match($0, clause) { if (!seen[$2]++) print $2 }' "$REG")
+  found=
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    reg_rc=0
+    reg=$("$SCRIPT_DIR/fm-project-mode.sh" --open-questions "$cand" 2>/dev/null) || reg_rc=$?
+    if cand_path=$("$SCRIPT_DIR/fm-project-mode.sh" --path "$cand" 2>/dev/null); then
+      [ "$(canon_dir "$cand_path")" = "$target_dir" ] || continue
+    fi
+    if [ "$reg_rc" -ne 0 ] || [ -z "$reg" ]; then
+      echo "error: registry entry $cand declares an invalid open-questions register or clone path in $REG" >&2
+      exit 1
+    fi
+    found="${found}${reg}"$'\n'
+  done <<EOF
+$candidates
+EOF
+  [ -z "$found" ] || printf '%s' "$found" | awk '!seen[$0]++'
+  exit 0
+fi
+
+NAME=${1:?usage: fm-project-mode.sh [--raw|--path|--open-questions] <project-name>}
 
 if [ "$PATH_ONLY" -eq 1 ]; then
   awk -v n="$NAME" -v fallback="$FM_HOME/projects/$NAME" '

@@ -1118,6 +1118,43 @@ test_green_final_head_requires_current_clean_base_receipt() {
   pass 'green final-head dispatch requires a clean receipt on the exact refreshed landing tip'
 }
 
+test_registry_declared_register_requires_section_at_dispatch() {
+  local rec id out status case_name today
+  today=$(date +%Y-%m-%d)
+  for case_name in missing foreign none settled; do
+    id="pool-oq-reg-$case_name-r1"
+    rec=$(make_case "oq-reg-$case_name" "$id")
+    read_case_record "$rec"
+    mkdir -p "$CASE_DIR/publisher/docs"
+    printf -- '- **OQ-076 - reward settlement:** open\n' > "$CASE_DIR/publisher/docs/open-questions.md"
+    git -C "$CASE_DIR/publisher" add docs/open-questions.md
+    git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm register
+    git -C "$CASE_DIR/publisher" push --quiet origin "$DEFAULT_BRANCH"
+    printf -- '- registered-game - a game at `%s` open-questions docs/open-questions.md (added 2026-01-01)\n' \
+      "$PROJECT_DIR" > "$HOME_DIR/data/projects.md"
+    case "$case_name" in
+      missing) ;;
+      foreign) printf '\n# Open-question dependencies\nOpen-question register: docs/other.md\nOpen questions: none\n' >> "$HOME_DIR/data/$id/brief.md" ;;
+      none) printf '\n# Open-question dependencies\nOpen-question register: docs/open-questions.md\nOpen questions: none\n' >> "$HOME_DIR/data/$id/brief.md" ;;
+      settled) printf '\n# Open-question dependencies\nOpen-question register: docs/open-questions.md\nOpen question OQ-076: provisional default authorized %s: one item per success, expedition only\n' "$today" >> "$HOME_DIR/data/$id/brief.md" ;;
+    esac
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    case "$case_name" in
+      none|settled) expect_code 0 "$status" "declared project with a settled section should dispatch: $out" ;;
+      *)
+        [ "$status" -ne 0 ] || fail "$case_name: declared project dispatched: $out"
+        [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$case_name: refusal published task metadata"
+        ;;
+    esac
+    case "$case_name" in
+      missing) assert_contains "$out" 'has no' "missing-section refusal does not explain itself" ;;
+      foreign) assert_contains "$out" 'docs/other.md' "foreign-register refusal does not name the register" ;;
+    esac
+  done
+  pass 'a project whose registry entry declares a register refuses dispatch without a matching dependency section'
+}
+
 test_open_question_dependencies_refuse_dispatch() {
   local rec id out status case_name deps today
   today=$(date +%Y-%m-%d)
@@ -1185,5 +1222,6 @@ test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
 test_green_final_head_requires_current_clean_base_receipt
 test_open_question_dependencies_refuse_dispatch
+test_registry_declared_register_requires_section_at_dispatch
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

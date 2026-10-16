@@ -1562,9 +1562,60 @@ Open question OQ-159: resolved 2026-10-15: page")
   pass "fm-brief.sh --open-questions: dependencies are named and dispatch is refused while any is open without a dated scoped default"
 }
 
+# A project whose registry entry declares a register gets the section without the
+# flag, and a conflicting flag, a lane, or an undeclared project behave as noted.
+test_registry_declared_register_scaffolds_section() {
+  local home="$TMP_ROOT/oq-reg-home" out status brief
+  mkdir -p "$home/data" "$home/projects/ProjectWhite"
+  printf -- '- ProjectWhite [no-mistakes] - main (added 2026-01-01)\n- prototype-game - the game at `%s` open-questions docs/wiki/open-questions.md (added 2026-01-01)\n- plain - nothing declared (added 2026-01-01)\n' \
+    "$home/projects/ProjectWhite" > "$home/data/projects.md"
+
+  for repo in ProjectWhite prototype-game; do
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "oq-reg-$repo" "$repo" --mode local-only 2>&1); status=$?
+    expect_code 0 "$status" "declared project $repo scaffold failed: $out"
+    brief="$home/data/oq-reg-$repo/brief.md"
+    grep -qx '# Open-question dependencies' "$brief" || fail "declared project $repo got no section"
+    grep -qx 'Open-question register: docs/wiki/open-questions.md' "$brief" || fail "declared project $repo got the wrong register"
+    assert_contains "$out" '{OPEN_QUESTION_DEPENDENCIES}' "declared scaffold output does not name the placeholder"
+  done
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-explicit prototype-game --mode local-only \
+    --open-questions docs/wiki/open-questions.md 2>&1); status=$?
+  expect_code 0 "$status" "a matching explicit register should be accepted: $out"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-conflict prototype-game --mode local-only \
+    --open-questions docs/other.md 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a conflicting explicit register was accepted"
+  [ ! -e "$home/data/oq-reg-conflict/brief.md" ] || fail "a conflicting register still wrote a brief"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-lane prototype-game --mode local-only --lane --landing-branch main 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a lane brief for a declared project was scaffolded without the check"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-plain plain --mode local-only 2>&1); status=$?
+  expect_code 0 "$status" "undeclared project scaffold failed: $out"
+  assert_no_grep 'Open-question' "$home/data/oq-reg-plain/brief.md" "an undeclared project gained the section"
+  pass "fm-brief.sh: a registry-declared register adds the section automatically; undeclared projects are unchanged"
+}
+
+# Only the dependency section counts: task text and the captain's intent that
+# happen to start with the dependency line forms never reach the check.
+test_open_question_check_ignores_lines_outside_section() {
+  local brief out status
+  OQ_HOME="$TMP_ROOT/oq-home"
+  mkdir -p "$OQ_HOME/data"
+  brief=$(oq_brief oq-scoped 'Open question OQ-076: resolved 2026-10-15: page')
+  { printf 'Open question OQ-999: open\nOpen questions: none\nOpen question OQ-076: open\n'; cat "$brief"; } > "$brief.tmp" &&
+    mv "$brief.tmp" "$brief"
+  printf '\n# Setup\nOpen question OQ-998: open\n' >> "$brief"
+  out=$(oq_check "$brief"); status=$?
+  expect_code 0 "$status" "lines outside the dependency section changed the check: $out"
+  pass "fm_oq_brief_check reads only the dependency section"
+}
+
+
 test_recorded_direct_pr_base
 test_recorded_no_mistakes_target
 test_open_question_dependencies_gate_dispatch
+test_registry_declared_register_scaffolds_section
+test_open_question_check_ignores_lines_outside_section
 test_no_mistakes_target_metacharacter_branch
 test_worker_role_scope
 test_script_parses

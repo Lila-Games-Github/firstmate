@@ -21,14 +21,19 @@
 #   green full-suite receipt on its final head. The marker is consumed by
 #   fm-spawn.sh, which requires a zero-failure receipt on the selected landing
 #   base before dispatch. The marker is preserved in the worker brief.
-#   --open-questions <register> declares the project's open design-question
-#   register, as a path relative to the project root, for a ship brief. It emits an
+#   A ship brief for a project whose data/projects.md entry declares an open
+#   design-question register (bin/fm-project-mode.sh owns the declaration, matched
+#   by the project's registry name or its clone path) always gets an
 #   `# Open-question dependencies` section whose {OPEN_QUESTION_DEPENDENCIES}
 #   placeholder firstmate replaces with every register question the work depends
 #   on. bin/fm-open-questions-lib.sh owns the line forms; fm-spawn.sh refuses
 #   dispatch while any named question is still open without a scoped provisional
-#   default carrying its authorization date. Lane briefs refuse the flag because
-#   Playbot dispatch does not consume it.
+#   default carrying its authorization date. Lane briefs for a declared project are
+#   refused because Playbot dispatch does not check the section.
+#   --open-questions <register> declares the register, as a path relative to the
+#   project root, for a project the registry does not declare. For a declared
+#   project it must name one of its declared registers, which is also required to
+#   choose among several; a conflicting value is refused.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -315,6 +320,37 @@ if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
       echo "error: --open-questions needs a register path inside the project (got '$OPEN_QUESTIONS')" >&2
       exit 1 ;;
   esac
+fi
+if [ "$KIND" = ship ] && [ -n "${POS[1]:-}" ]; then
+  DECLARED_REGISTERS=$(
+    {
+      "$SCRIPT_DIR/fm-project-mode.sh" --declared-registers "$FM_HOME/projects/${POS[1]}" || echo "__invalid__"
+      if REG_PATH=$("$SCRIPT_DIR/fm-project-mode.sh" --path "${POS[1]}" 2>/dev/null); then
+        "$SCRIPT_DIR/fm-project-mode.sh" --declared-registers "$REG_PATH" || echo "__invalid__"
+      fi
+    } | awk 'NF && !seen[$0]++'
+  )
+  if [ -n "$DECLARED_REGISTERS" ]; then
+    case "$DECLARED_REGISTERS" in
+      *__invalid__*) echo "error: the registry declaration of ${POS[1]}'s open-questions register is invalid; fix data/projects.md before scaffolding" >&2; exit 1 ;;
+    esac
+    [ "$LANE" -eq 0 ] || {
+      echo "error: ${POS[1]} declares an open-questions register, and Playbot lane intake does not check open-question dependencies; dispatch it through fm-spawn" >&2
+      exit 1
+    }
+    if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
+      printf '%s\n' "$DECLARED_REGISTERS" | grep -Fqx -- "$OPEN_QUESTIONS" || {
+        echo "error: --open-questions '$OPEN_QUESTIONS' is not a register declared for ${POS[1]} (declared: $(printf '%s' "$DECLARED_REGISTERS" | tr '\n' ' '))" >&2
+        exit 1
+      }
+    elif [ "$(printf '%s\n' "$DECLARED_REGISTERS" | wc -l)" -gt 1 ]; then
+      echo "error: ${POS[1]} declares several open-questions registers ($(printf '%s' "$DECLARED_REGISTERS" | tr '\n' ' ')); pass --open-questions <register> to choose the one this task reads" >&2
+      exit 1
+    else
+      OPEN_QUESTIONS=$DECLARED_REGISTERS
+      OPEN_QUESTIONS_SET=1
+    fi
+  fi
 fi
 ID=${POS[0]}
 
