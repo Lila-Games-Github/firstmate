@@ -14,13 +14,21 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--green-final-head] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--green-final-head] [--open-questions <register>] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --green-final-head marks a ship task whose definition of done requires a
 #   green full-suite receipt on its final head. The marker is consumed by
 #   fm-spawn.sh, which requires a zero-failure receipt on the selected landing
 #   base before dispatch. The marker is preserved in the worker brief.
+#   --open-questions <register> declares the project's open design-question
+#   register, as a path relative to the project root, for a ship brief. It emits an
+#   `# Open-question dependencies` section whose {OPEN_QUESTION_DEPENDENCIES}
+#   placeholder firstmate replaces with every register question the work depends
+#   on. bin/fm-open-questions-lib.sh owns the line forms; fm-spawn.sh refuses
+#   dispatch while any named question is still open without a scoped provisional
+#   default carrying its authorization date. Lane briefs refuse the flag because
+#   Playbot dispatch does not consume it.
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -221,6 +229,8 @@ NO_PROJECTS=0
 MODE=
 MODE_SET=0
 GREEN_FINAL_HEAD=0
+OPEN_QUESTIONS=
+OPEN_QUESTIONS_SET=0
 LANE=0
 LANE_BRANCH=
 LANE_BRANCH_SET=0
@@ -235,6 +245,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      open-questions) OPEN_QUESTIONS=$a; OPEN_QUESTIONS_SET=1 ;;
       lane-branch) LANE_BRANCH=$a; LANE_BRANCH_SET=1 ;;
       landing-branch) LANDING_BRANCH=$a; LANDING_BRANCH_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -250,6 +261,8 @@ for a in "$@"; do
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --green-final-head) GREEN_FINAL_HEAD=1 ;;
+    --open-questions) want_value='open-questions' ;;
+    --open-questions=*) OPEN_QUESTIONS=${a#--open-questions=}; OPEN_QUESTIONS_SET=1 ;;
     --lane) LANE=1 ;;
     --lane-branch) want_value=lane-branch ;;
     --lane-branch=*) LANE_BRANCH=${a#--lane-branch=}; LANE_BRANCH_SET=1 ;;
@@ -290,6 +303,19 @@ fi
   echo "error: --green-final-head requires fm-spawn dispatch; Playbot lane intake cannot verify a base-health receipt" >&2
   exit 1
 }
+if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
+  [ "$KIND" = ship ] || { echo "error: --open-questions applies only to ship briefs" >&2; exit 1; }
+  [ "$LANE" -eq 0 ] || {
+    echo "error: --open-questions requires fm-spawn dispatch; Playbot lane intake does not check open-question dependencies" >&2
+    exit 1
+  }
+  case "/$OPEN_QUESTIONS/" in
+    //|//*|*/../*|*"
+"*)
+      echo "error: --open-questions needs a register path inside the project (got '$OPEN_QUESTIONS')" >&2
+      exit 1 ;;
+  esac
+fi
 ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
@@ -790,12 +816,21 @@ WORKSPACE_KIND=crewmate
 [ "$LANE" -eq 0 ] || WORKSPACE_KIND=lane
 HEALTH_MARKER=
 [ "$GREEN_FINAL_HEAD" -eq 0 ] || HEALTH_MARKER='Final-head health: green'
+OPEN_QUESTIONS_SECTION=
+if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
+  OPEN_QUESTIONS_SECTION="# Open-question dependencies
+Open-question register: $OPEN_QUESTIONS
+{OPEN_QUESTION_DEPENDENCIES}
+Each line above names a register question this work depends on and how it stands; a provisional default holds only within its stated scope.
+"
+fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 Execution contract: workspace=$WORKSPACE_KIND
 
 $TASK_SECTION
 $HEALTH_MARKER
+$OPEN_QUESTIONS_SECTION
 
 $LANE_CONTRACT_BLOCK
 $HERDR_SECTION
@@ -863,6 +898,8 @@ $DOD
 EOF
 if [ "$LANE" -eq 1 ]; then
   echo "scaffolded: $BRIEF (ship lane, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+elif [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK}, {FIRSTMATE_SPEC}, and {OPEN_QUESTION_DEPENDENCIES})"
 else
   echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
 fi

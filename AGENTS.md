@@ -324,6 +324,7 @@ Treat file or subsystem overlap as a risk signal rather than an automatic reason
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 Fill the task subsections according to section 11.
+When the project keeps a register of open design questions, scaffold the ship brief with `--open-questions <register>` and name every register question the work depends on; the spawn refuses while any is still open without a scoped provisional default carrying its authorization date (`bin/fm-open-questions-lib.sh` owns the line forms).
 
 ### Dispatch and supervision handoff
 
