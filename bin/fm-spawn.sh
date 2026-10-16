@@ -32,6 +32,16 @@
 #   resolved landing base HEAD after refresh and its failure count must be zero.
 #   The check runs before the worker receives its brief. Relaunches preserve
 #   work and do not repeat the initial dispatch check.
+#   A ship brief with an `# Open-question dependencies` section is refused at
+#   fresh dispatch while its named open-question dependencies are unfilled,
+#   malformed, or still open without a dated, scoped provisional default, and
+#   again once the worktree is on its landing base if that register or a named
+#   question is absent there. When the project's data/projects.md entry declares a
+#   register (bin/fm-project-mode.sh --declared-registers, matched by registered
+#   clone path against the spawned project directory), fresh dispatch also
+#   refuses a brief without the section or whose register is not one of those
+#   declared; an explicit `Open questions: none` is allowed. bin/fm-open-questions-lib.sh
+#   owns the line forms and checks; relaunches do not repeat them.
 #   --landing-branch <branch> records landing_branch=<branch> in the task's meta:
 #   the project branch this task's work is expected to land on when the captain's
 #   posture for the project lands work somewhere other than the default branch
@@ -566,6 +576,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-open-questions-lib.sh
+. "$SCRIPT_DIR/fm-open-questions-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
@@ -2713,6 +2725,28 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
     exit 1
   fi
+  OPEN_QUESTIONS_DECLARED=0
+  if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ]; then
+    PROJECT_REGISTERS=$("$FM_ROOT/bin/fm-project-mode.sh" --declared-registers "$PROJ_ABS") || {
+      echo "error: refusing to dispatch $ID: the registry's open-questions declaration for $PROJ_ABS is invalid" >&2
+      exit 1
+    }
+    if [ -n "$PROJECT_REGISTERS" ] && ! fm_oq_brief_declares "$BRIEF"; then
+      echo "error: refusing to dispatch $ID: its project declares an open-questions register ($(printf '%s' "$PROJECT_REGISTERS" | tr '\n' ' ')) but $BRIEF has no '# Open-question dependencies' section; re-scaffold it with bin/fm-brief.sh" >&2
+      exit 1
+    fi
+    if fm_oq_brief_declares "$BRIEF"; then
+      OPEN_QUESTIONS_DECLARED=1
+      fm_oq_brief_check "$BRIEF" "$(date +%Y-%m-%d)" || {
+        echo "error: refusing to dispatch $ID while its open-question dependencies are not settled" >&2
+        exit 1
+      }
+      if [ -n "$PROJECT_REGISTERS" ] && ! printf '%s\n' "$PROJECT_REGISTERS" | grep -Fqx -- "$FM_OQ_REGISTER"; then
+        echo "error: refusing to dispatch $ID: $BRIEF names register $FM_OQ_REGISTER but its project declares $(printf '%s' "$PROJECT_REGISTERS" | tr '\n' ' ')" >&2
+        exit 1
+      fi
+    fi
+  fi
   if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
     if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
       CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
@@ -3981,6 +4015,12 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$BASE_HEALTH_SET" -eq 1 ]; then
   [ "$FM_HEALTH_COUNT" -eq 0 ] || {
     printf 'error: landing tip %s has %s baseline failure(s) in %s; make it green before dispatching %s:\n%s\n' \
       "$BASE_SHA" "$FM_HEALTH_COUNT" "$BASE_HEALTH_RECEIPT" "$ID" "$FM_HEALTH_SET" >&2
+    exit 1
+  }
+fi
+if [ "${OPEN_QUESTIONS_DECLARED:-0}" -eq 1 ]; then
+  fm_oq_register_check "$WT" || {
+    echo "error: refusing to dispatch $ID: its open-question dependencies do not match the register on the dispatch base" >&2
     exit 1
   }
 fi

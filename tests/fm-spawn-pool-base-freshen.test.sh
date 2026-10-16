@@ -1118,6 +1118,82 @@ test_green_final_head_requires_current_clean_base_receipt() {
   pass 'green final-head dispatch requires a clean receipt on the exact refreshed landing tip'
 }
 
+test_registry_declared_register_requires_section_at_dispatch() {
+  local rec id out status case_name today
+  today=$(date +%Y-%m-%d)
+  for case_name in missing foreign none settled; do
+    id="pool-oq-reg-$case_name-r1"
+    rec=$(make_case "oq-reg-$case_name" "$id")
+    read_case_record "$rec"
+    mkdir -p "$CASE_DIR/publisher/docs"
+    printf -- '- **OQ-076 - reward settlement:** open\n' > "$CASE_DIR/publisher/docs/open-questions.md"
+    git -C "$CASE_DIR/publisher" add docs/open-questions.md
+    git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm register
+    git -C "$CASE_DIR/publisher" push --quiet origin "$DEFAULT_BRANCH"
+    # shellcheck disable=SC2016 # Literal backticks are registry syntax.
+    printf -- '- registered-game - a game at `%s` open-questions `docs/open-questions.md` (added 2026-01-01)\n- broken-a - at `/nowhere/a` open-questions `/abs.md` (added 2026-01-01)\n- broken-b - x open-questions `docs/x.md` (added 2026-01-01)\n- broken-b - dup open-questions `docs/y.md` (added 2026-01-01)\n- prose - surfaces open questions and no open-questions yet (added 2026-01-01)\n' \
+      "$PROJECT_DIR" > "$HOME_DIR/data/projects.md"
+    case "$case_name" in
+      missing) ;;
+      foreign) printf '\n# Open-question dependencies\nOpen-question register: docs/other.md\nOpen questions: none\n' >> "$HOME_DIR/data/$id/brief.md" ;;
+      none) printf '\n# Open-question dependencies\nOpen-question register: docs/open-questions.md\nOpen questions: none\n' >> "$HOME_DIR/data/$id/brief.md" ;;
+      settled) printf '\n# Open-question dependencies\nOpen-question register: docs/open-questions.md\nOpen question OQ-076: provisional default authorized %s: one item per success, expedition only\n' "$today" >> "$HOME_DIR/data/$id/brief.md" ;;
+    esac
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    case "$case_name" in
+      none|settled) expect_code 0 "$status" "declared project with a settled section should dispatch: $out" ;;
+      *)
+        [ "$status" -ne 0 ] || fail "$case_name: declared project dispatched: $out"
+        [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$case_name: refusal published task metadata"
+        ;;
+    esac
+    case "$case_name" in
+      missing) assert_contains "$out" 'has no' "missing-section refusal does not explain itself" ;;
+      foreign) assert_contains "$out" 'docs/other.md' "foreign-register refusal does not name the register" ;;
+    esac
+  done
+  pass 'a project whose registry entry declares a register refuses dispatch without a matching dependency section'
+}
+
+test_open_question_dependencies_refuse_dispatch() {
+  local rec id out status case_name deps today
+  today=$(date +%Y-%m-%d)
+  for case_name in open unnamed provisional; do
+    id="pool-oq-$case_name-r1"
+    rec=$(make_case "oq-$case_name" "$id")
+    read_case_record "$rec"
+    mkdir -p "$CASE_DIR/publisher/docs"
+    printf -- '- **OQ-076 - reward settlement:** open\n- **OQ-159 - attempt recovery:** open\n' \
+      > "$CASE_DIR/publisher/docs/open-questions.md"
+    git -C "$CASE_DIR/publisher" add docs/open-questions.md
+    git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm register
+    git -C "$CASE_DIR/publisher" push --quiet origin "$DEFAULT_BRANCH"
+    case "$case_name" in
+      open) deps="Open question OQ-076: provisional default authorized $today: one item per success, expedition only
+Open question OQ-159: open" ;;
+      unnamed) deps="Open question OQ-160: provisional default authorized $today: not in the register" ;;
+      provisional) deps="Open question OQ-076: provisional default authorized $today: one item per success, expedition only
+Open question OQ-159: provisional default authorized $today: one settlement transaction, expedition only" ;;
+    esac
+    printf '\n# Open-question dependencies\nOpen-question register: docs/open-questions.md\n%s\n' "$deps" \
+      >> "$HOME_DIR/data/$id/brief.md"
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off 2>&1)
+    status=$?
+    if [ "$case_name" = provisional ]; then
+      expect_code 0 "$status" "settled open-question dependencies should dispatch: $out"
+    else
+      [ "$status" -ne 0 ] || fail "$case_name open-question dependency dispatched: $out"
+      [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$case_name open-question refusal published task metadata"
+      case "$case_name" in
+        open) assert_contains "$out" 'OQ-159' "open-question refusal does not name the open question" ;;
+        unnamed) assert_contains "$out" 'OQ-160 does not appear' "register refusal does not name the absent question" ;;
+      esac
+    fi
+  done
+  pass 'a ship brief naming a still-open design question, or one absent from the register on its base, is refused before dispatch'
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
@@ -1146,5 +1222,7 @@ test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
 test_green_final_head_requires_current_clean_base_receipt
+test_open_question_dependencies_refuse_dispatch
+test_registry_declared_register_requires_section_at_dispatch
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

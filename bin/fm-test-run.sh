@@ -1550,6 +1550,10 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
+    bin/fm-open-questions-lib.sh)
+      printf '%s\n' '__script__:fm-brief.test.sh'
+      printf '%s\n' '__script__:fm-spawn-pool-base-freshen.test.sh'
+      ;;
     bin/fm-landing-health-lib.sh)
       printf '%s\n' '__script__:fm-merge-local.test.sh'
       printf '%s\n' '__script__:fm-spawn-pool-base-freshen.test.sh'

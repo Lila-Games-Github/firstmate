@@ -1450,8 +1450,173 @@ test_no_mistakes_target_metacharacter_branch() {
   pass "no-mistakes target contract quotes only the command for metacharacter branches"
 }
 
+# A ship brief for a project with an open design-question register names every
+# question the work depends on, and the shared check refuses dispatch while one is
+# still open (the expedition incident: provisional defaults were authorized for
+# some questions while dependent settlement and reward questions stayed open).
+oq_brief() {  # <id> <dependency lines> -> path of a filled brief
+  local id=$1 deps=$2 brief
+  FM_HOME="$OQ_HOME" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only \
+    --open-questions docs/wiki/open-questions.md >/dev/null 2>&1 || fail "$id: --open-questions scaffold failed"
+  brief="$OQ_HOME/data/$id/brief.md"
+  if [ -n "$deps" ]; then
+    awk -v deps="$deps" '$0 == "{OPEN_QUESTION_DEPENDENCIES}" { print deps; next } { print }' "$brief" > "$brief.tmp" &&
+      mv "$brief.tmp" "$brief"
+  fi
+  printf '%s\n' "$brief"
+}
+
+oq_check() {  # <brief> -> stderr of the check; status is the check's
+  ( . "$ROOT/bin/fm-open-questions-lib.sh"; fm_oq_brief_check "$1" 2026-10-16 ) 2>&1
+}
+
+test_open_question_dependencies_gate_dispatch() {
+  local brief out status out_status id
+  OQ_HOME="$TMP_ROOT/oq-home"
+  mkdir -p "$OQ_HOME/data"
+
+  out=$(FM_HOME="$OQ_HOME" "$ROOT/bin/fm-brief.sh" oq-scaffold some-proj --mode no-mistakes \
+    --open-questions docs/wiki/open-questions.md 2>&1); status=$?
+  expect_code 0 "$status" "--open-questions ship scaffold should exit 0: $out"
+  brief="$OQ_HOME/data/oq-scaffold/brief.md"
+  grep -qx '# Open-question dependencies' "$brief" || fail "scaffold lacks the open-question section"
+  grep -qx 'Open-question register: docs/wiki/open-questions.md' "$brief" || fail "scaffold lacks the register line"
+  grep -qx '{OPEN_QUESTION_DEPENDENCIES}' "$brief" || fail "scaffold lacks the dependency placeholder"
+  assert_contains "$out" '{OPEN_QUESTION_DEPENDENCIES}' "scaffold output does not name the extra placeholder"
+  out=$(oq_check "$brief"); status=$?
+  [ "$status" -ne 0 ] || fail "an unfilled dependency placeholder passed the dispatch check"
+  assert_contains "$out" '{OPEN_QUESTION_DEPENDENCIES}' "placeholder refusal does not name the placeholder"
+
+  FM_HOME="$OQ_HOME" "$ROOT/bin/fm-brief.sh" oq-plain some-proj --mode no-mistakes >/dev/null 2>&1
+  assert_no_grep 'Open-question' "$OQ_HOME/data/oq-plain/brief.md" "a brief without --open-questions gained the section"
+
+  for args in '--scout' '--mode local-only --lane --landing-branch main' '--mode local-only --open-questions' ; do
+    id="oq-refused-$RANDOM"
+    # shellcheck disable=SC2086 # Deliberate word splitting of the flag set.
+    out=$(FM_HOME="$OQ_HOME" "$ROOT/bin/fm-brief.sh" "$id" some-proj $args --open-questions x 2>&1); out_status=$?
+    [ "$out_status" -ne 0 ] || fail "--open-questions was accepted with: $args"
+    [ ! -e "$OQ_HOME/data/$id/brief.md" ] || fail "--open-questions refusal still wrote a brief for: $args"
+  done
+  for bad in /abs/register.md ../outside.md 'docs/../../x.md'; do
+    out=$(FM_HOME="$OQ_HOME" "$ROOT/bin/fm-brief.sh" "oq-bad-$RANDOM" some-proj --mode local-only --open-questions "$bad" 2>&1) &&
+      fail "--open-questions accepted a register outside the project: $bad"
+  done
+
+  # The incident shape: one question has a provisional default, two dependent
+  # ones are still open, so dispatch is refused naming exactly those two.
+  brief=$(oq_brief oq-incident "Open question OQ-074: provisional default authorized 2026-09-07: energy charged at launch, expedition attempts only
+Open question OQ-076: open
+Open question OQ-159: open")
+  out=$(oq_check "$brief"); status=$?
+  [ "$status" -ne 0 ] || fail "dispatch check passed while OQ-076 and OQ-159 were still open"
+  assert_contains "$out" 'OQ-076 OQ-159' "refusal does not name every still-open question"
+  assert_not_contains "$out" 'OQ-074' "refusal named a question that carries a dated provisional default"
+
+  brief=$(oq_brief oq-settled "Open question OQ-074: provisional default authorized 2026-09-07: energy charged at launch, expedition attempts only
+Open question OQ-076: resolved 2026-10-15: expedition rewards page, settlement section
+Open question OQ-159: provisional default authorized 2026-02-29: one settlement transaction per attempt, expedition only")
+  out=$(oq_check "$brief"); status=$?
+  [ "$status" -ne 0 ] || fail "2026-02-29 is not a real day but passed"
+  brief=$(oq_brief oq-settled-ok "Open question OQ-074: provisional default authorized 2026-09-07: energy charged at launch, expedition attempts only
+Open question OQ-076: resolved 2026-10-15: expedition rewards page, settlement section
+Open question OQ-159: provisional default authorized 2024-02-29: one settlement transaction per attempt, expedition only")
+  out=$(oq_check "$brief"); status=$?
+  expect_code 0 "$status" "settled dependencies should pass the dispatch check: $out"
+
+  brief=$(oq_brief oq-none 'Open questions: none')
+  out=$(oq_check "$brief"); status=$?
+  expect_code 0 "$status" "an explicit none should pass the dispatch check: $out"
+
+  for deps in \
+    'Open questions: none
+Open question OQ-1: resolved 2026-10-01: page' \
+    'Open question OQ-1: provisional default authorized 2026-10-17: future authorization' \
+    'Open question OQ-1: provisional default authorized 2026-10-01:' \
+    'Open question OQ-1: provisional default authorized 2026-10-01 no scope separator' \
+    'Open question OQ-1: provisional default' \
+    'Open question OQ-1: maybe' \
+    'Open question bad id: open' \
+    'Open question OQ-1: resolved 2026-10-01: page
+Open question OQ-1: resolved 2026-10-02: page' \
+    'Free prose that names no dependency'; do
+    brief=$(oq_brief "oq-malformed-$RANDOM" "$deps")
+    out=$(oq_check "$brief"); status=$?
+    [ "$status" -ne 0 ] || fail "malformed or unsettled dependencies passed the dispatch check: $deps"
+  done
+
+  # The register on the dispatch base must hold every named question, matched as
+  # a whole identifier rather than a prefix.
+  mkdir -p "$TMP_ROOT/oq-wt/docs/wiki"
+  printf -- '- **OQ-0740 - x:** open\n- **OQ-076 - y:** open\n- **OQ-159 (resolved):** see page.\n' \
+    > "$TMP_ROOT/oq-wt/docs/wiki/open-questions.md"
+  brief=$(oq_brief oq-register "Open question OQ-076: resolved 2026-10-15: page
+Open question OQ-159: resolved 2026-10-15: page")
+  out=$( . "$ROOT/bin/fm-open-questions-lib.sh"; fm_oq_brief_check "$brief" 2026-10-16 && fm_oq_register_check "$TMP_ROOT/oq-wt" 2>&1); status=$?
+  expect_code 0 "$status" "named questions present in the register should pass: $out"
+  brief=$(oq_brief oq-register-missing "Open question OQ-074: resolved 2026-10-15: page")
+  out=$( . "$ROOT/bin/fm-open-questions-lib.sh"; fm_oq_brief_check "$brief" 2026-10-16 && fm_oq_register_check "$TMP_ROOT/oq-wt" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "OQ-074 matched the register only through OQ-0740"
+  assert_contains "$out" 'OQ-074 does not appear' "missing-question refusal does not name the question"
+  out=$( . "$ROOT/bin/fm-open-questions-lib.sh"; fm_oq_brief_check "$brief" 2026-10-16 && fm_oq_register_check "$TMP_ROOT/no-such-wt" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "an absent register passed the dispatch-base check"
+  pass "fm-brief.sh --open-questions: dependencies are named and dispatch is refused while any is open without a dated scoped default"
+}
+
+# A project whose registry entry declares a register gets the section without the
+# flag, and a conflicting flag, a lane, or an undeclared project behave as noted.
+test_registry_declared_register_scaffolds_section() {
+  local home="$TMP_ROOT/oq-reg-home" out status brief
+  mkdir -p "$home/data" "$home/projects/ProjectWhite"
+  # shellcheck disable=SC2016 # Literal backticks are registry syntax.
+  printf -- '- ProjectWhite [no-mistakes] - main (added 2026-01-01)\n- prototype-game - the game at `%s` open-questions `docs/wiki/open-questions.md` (added 2026-01-01)\n- plain - surfaces open questions and no open-questions yet (added 2026-01-01)\n' \
+    "$home/projects/ProjectWhite" > "$home/data/projects.md"
+
+  for repo in ProjectWhite prototype-game; do
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "oq-reg-$repo" "$repo" --mode local-only 2>&1); status=$?
+    expect_code 0 "$status" "declared project $repo scaffold failed: $out"
+    brief="$home/data/oq-reg-$repo/brief.md"
+    grep -qx '# Open-question dependencies' "$brief" || fail "declared project $repo got no section"
+    grep -qx 'Open-question register: docs/wiki/open-questions.md' "$brief" || fail "declared project $repo got the wrong register"
+    assert_contains "$out" '{OPEN_QUESTION_DEPENDENCIES}' "declared scaffold output does not name the placeholder"
+  done
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-explicit prototype-game --mode local-only \
+    --open-questions docs/wiki/open-questions.md 2>&1); status=$?
+  expect_code 0 "$status" "a matching explicit register should be accepted: $out"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-conflict prototype-game --mode local-only \
+    --open-questions docs/other.md 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a conflicting explicit register was accepted"
+  [ ! -e "$home/data/oq-reg-conflict/brief.md" ] || fail "a conflicting register still wrote a brief"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-lane prototype-game --mode local-only --lane --landing-branch main 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a lane brief for a declared project was scaffolded without the check"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-plain plain --mode local-only 2>&1); status=$?
+  expect_code 0 "$status" "undeclared project scaffold failed: $out"
+  assert_no_grep 'Open-question' "$home/data/oq-reg-plain/brief.md" "an undeclared project gained the section"
+  pass "fm-brief.sh: a registry-declared register adds the section automatically; undeclared projects are unchanged"
+}
+
+# Only the dependency section counts: task text and the captain's intent that
+# happen to start with the dependency line forms never reach the check.
+test_open_question_check_ignores_lines_outside_section() {
+  local brief out status
+  OQ_HOME="$TMP_ROOT/oq-home"
+  mkdir -p "$OQ_HOME/data"
+  brief=$(oq_brief oq-scoped 'Open question OQ-076: resolved 2026-10-15: page')
+  { printf 'Open question OQ-999: open\nOpen questions: none\nOpen question OQ-076: open\n'; cat "$brief"; } > "$brief.tmp" &&
+    mv "$brief.tmp" "$brief"
+  printf '\n# Setup\nOpen question OQ-998: open\n' >> "$brief"
+  out=$(oq_check "$brief"); status=$?
+  expect_code 0 "$status" "lines outside the dependency section changed the check: $out"
+  pass "fm_oq_brief_check reads only the dependency section"
+}
+
+
 test_recorded_direct_pr_base
 test_recorded_no_mistakes_target
+test_open_question_dependencies_gate_dispatch
+test_registry_declared_register_scaffolds_section
+test_open_question_check_ignores_lines_outside_section
 test_no_mistakes_target_metacharacter_branch
 test_worker_role_scope
 test_script_parses
