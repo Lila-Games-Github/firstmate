@@ -59,6 +59,12 @@ test_fold_follows_reported_phases_and_waking_states() {
   assert_equals 'ready-to-merge|PR https://example.test/pull/1 checks green' \
     "$(fold ship $'phase: ready-to-merge - https://example.test/pull/1\ndone: PR https://example.test/pull/1 checks green\n')" \
     "done confirms ready-to-merge"
+  assert_equals 'working|addressing review comments' \
+    "$(fold ship $'phase: ready-to-merge - https://example.test/pull/1\ndone: PR ready\nworking: addressing review comments\n')" \
+    "work after done does not return to ready-to-merge"
+  assert_equals 'working|retrying' \
+    "$(fold ship $'phase: testing\nfailed: suite crashed\nworking: retrying\n')" \
+    "work after failed does not return to the earlier phase"
   assert_equals 'needs-decision|board owner' "$(fold ship $'phase: fixing\ncaptain-held: board owner\n')" \
     "captain-held shows as waiting on a decision"
   pass "the fold shows the worker's own phase, the waiting states as themselves, and older logs' last state"
