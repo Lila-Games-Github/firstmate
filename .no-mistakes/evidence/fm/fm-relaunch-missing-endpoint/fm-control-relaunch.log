@@ -64,4 +64,3 @@ ok - fm-spawn --relaunch: an unrecorded task is refused
 ok - fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work
 ok - skipped: tasks-axi is not installed, so the backlog transition is inert
 ok - skipped: tasks-axi is not installed, so the backlog transition is inert
-exit=0

@@ -1,4 +1,5 @@
-++ bash tests/fm-control-herdr-missing.test.sh
+$ herdr --version
+herdr 0.9.5
+$ PATH=/home/linuxbrew/.linuxbrew/bin:$PATH bash tests/fm-control-herdr-missing.test.sh
 ok - real Herdr: a missing workspace relaunches in a new endpoint on the same worktree
-++ echo exit=0
 exit=0

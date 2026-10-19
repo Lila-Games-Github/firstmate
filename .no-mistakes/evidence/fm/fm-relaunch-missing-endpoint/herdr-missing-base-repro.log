@@ -1,0 +1,4 @@
+# base 6a67e78 bin/ + new test (herdr 0.9.5, isolated lab)
+not ok - relaunch after workspace loss failed: error: task hmissing's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action
+error: relaunch of hmissing failed while stopping the old agent and its state is 'missing'; the durable record and progress note were retained for recovery
+exit=1
