@@ -207,7 +207,8 @@ status_is_terminal_verb() {
 
 # 0 if the given (last) status line matches a captain-relevant verb.
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
-# (working, resolved, captain-held) and paused never match from free-text prose;
+# (working, resolved, captain-held), paused, and a self-reported phase line never
+# match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
 status_is_captain_relevant() {
@@ -215,7 +216,8 @@ status_is_captain_relevant() {
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
   case "$verb" in
-    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+    working|resolved|captain-held|"${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
+    "${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}")
       return 1
       ;;
   esac
@@ -278,6 +280,115 @@ status_paused_until() {  # <status-line> -> epoch on stdout
     | head -1)
   [ -n "$token" ] || return 1
   fm_utc_iso_to_epoch "$token"
+}
+
+# --- self-reported work phases ----------------------------------------------
+#
+# A worker reports what it is doing for the live crew board with
+#   phase: <phase> [- <one short line>]
+# appended to the same status log as every other line. This is the ONE owner of
+# the phase vocabulary and of how a log folds into a current phase; the worker
+# instructions (bin/fm-brief.sh) and the board (bin/fm-crew-board.sh, through
+# bin/fm-fleet-snapshot.sh) read it here.
+#
+# A phase line is presentation only, never a wake event: it is not in the event
+# scan above, not captain-relevant, and the watcher absorbs a status append made
+# only of known phase lines (status_span_phase_only) without the busy-evidence
+# check an ordinary no-verb append needs. The states that already wake firstmate
+# keep their own verbs, so a phase line never stands in for needs-decision,
+# blocked, paused, done, or failed; an unknown phase word gets no absorb and is
+# handled like any other no-verb line.
+FM_CLASSIFY_PHASE_VERB_DEFAULT='phase'
+FM_CLASSIFY_WORKER_PHASES='investigating building fixing testing validating ready-to-merge'
+
+# Print the phase a `phase:` line reports, or assign it to <out-var>; return 1
+# for any other line, including a phase word outside the vocabulary.
+# Its locals carry a private prefix so a caller's <out-var> is never shadowed.
+status_line_phase() {  # <status-line> [<out-var>]
+  local _slp_verb _slp_note _slp_word
+  status_line_verb "$1" _slp_verb
+  [ "$_slp_verb" = "${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}" ] || return 1
+  _slp_note=$(status_line_note "$1")
+  _slp_word=${_slp_note%%[[:space:]]*}
+  case " $FM_CLASSIFY_WORKER_PHASES " in
+    *" $_slp_word "*) ;;
+    *) return 1 ;;
+  esac
+  if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$_slp_word"; else printf '%s' "$_slp_word"; fi
+}
+
+# The free text of a phase line after its phase word and an optional `-` or `:`
+# separator.
+status_line_phase_note() {  # <status-line>
+  local note
+  note=$(status_line_note "$1")
+  case "$note" in *[[:space:]]*) note=${note#*[[:space:]]} ;; *) note= ;; esac
+  note=${note#"${note%%[![:space:]]*}"}
+  case "$note" in -*|:*) note=${note#?} ;; esac
+  printf '%s' "${note#"${note%%[![:space:]]*}"}"
+}
+
+# Fold a whole status log into "<phase>\t<note>": the worker's own latest phase
+# while it works, or the waking state it last declared. needs-decision, blocked,
+# paused, and failed show as themselves; captain-held shows as needs-decision.
+# working and resolved return to the last reported phase (plain `working` for a
+# log that never reported one, which is how an older brief still renders its last
+# known state); done shows as done unless the worker had just reported
+# ready-to-merge, which its done line confirms. A decision the keyed fold still
+# holds open outranks everything after it, exactly as status_current_line reads
+# it. An absent or empty log is `starting`.
+status_current_phase() {  # <status-file> [<kind>]
+  local f=$1 kind=${2:-} line verb phase='' worker='' note='' word open key ov onote
+  local pause resolve held
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { printf 'starting\t\n'; return 0; }
+  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *:*) ;; *) continue ;; esac
+    if status_line_phase "$line" word; then
+      worker=$word; phase=$word; note=$(status_line_phase_note "$line")
+      continue
+    fi
+    status_line_verb "$line" verb
+    case "$verb" in
+      working|"$resolve") phase=${worker:-working} ;;
+      needs-decision|blocked|failed|"$pause") phase=$verb ;;
+      "$held") phase=needs-decision ;;
+      "done") [ "$phase" = ready-to-merge ] || phase='done' ;;
+      *) continue ;;
+    esac
+    note=$(status_line_note "$line")
+  done < "$f"
+  open=$(status_open_decisions "$f" "$kind")
+  while IFS=$'\t' read -r key ov onote; do
+    [ -n "$ov" ] || continue
+    phase=$ov; note=$onote
+  done <<EOF
+$open
+EOF
+  printf '%s\t%s\n' "${phase:-starting}" "$note"
+}
+
+# 0 when the byte span [<start>, <end>) of a status log holds at least one line
+# and every nonblank line in it is a known phase line, so the watcher can absorb
+# the append outright. Anything else - an unreadable log, an empty span, one line
+# of any other kind - returns 1 and the append is triaged as before.
+status_span_phase_only() {  # <status-file> <start-offset> <end-offset>
+  local f=$1 start=$2 end=$3 chunk line seen=0 rc=0
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  case "$start:$end" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  [ "$end" -gt "$start" ] || return 1
+  chunk="$(_fm_status_span_scratch "$f").phase"
+  _fm_status_read_span "$f" "$start" "$((end - start))" > "$chunk" 2>/dev/null \
+    || { rm -f "$chunk"; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    status_line_phase "$line" >/dev/null || { rc=1; break; }
+    seen=1
+  done < "$chunk"
+  rm -f "$chunk"
+  [ "$rc" -eq 0 ] && [ "$seen" -eq 1 ]
 }
 
 # --- durable keyed decisions ------------------------------------------------
@@ -1061,6 +1172,8 @@ status_presentation_snapshot() {  # <state>
 }
 
 # Read the latest non-blank event through one captured presentation endpoint.
+# A self-reported phase line is not an event, so it is skipped and can never
+# hide the event before it.
 # This is the bounded latest-event owner for fleet-wide backstops: at most the
 # final 64 KiB is inspected, and a file that changes during the read is deferred
 # to the next snapshot instead of combining a line from one state with the mtime
@@ -1099,19 +1212,20 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   _fm_status_read_span "$f" "$start" "$length" > "$scratch" 2>/dev/null \
     || { rm -f "$scratch"; return 1; }
   if record=$(LC_ALL=C perl -e '
-    my ($path, $start, $skip_first) = @ARGV;
+    my ($path, $start, $skip_first, $phase) = @ARGV;
     open my $file, "<", $path or exit 1;
     binmode $file;
     scalar(<$file>) if $skip_first;
     my ($latest, $end);
     while (defined(my $line = <$file>)) {
       next unless $line =~ /[^\s]/;
+      next if $line =~ /\A\s*\Q$phase\E\s*:/;
       $line =~ s/[\r\n]+\z//;
       ($latest, $end) = ($line, $start + tell($file));
     }
     exit 1 unless defined $end;
     print "$end\t$latest";
-  ' "$scratch" "$start" "$skip_first"); then :; else rm -f "$scratch"; return 1; fi
+  ' "$scratch" "$start" "$skip_first" "${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}"); then :; else rm -f "$scratch"; return 1; fi
   rm -f "$scratch"
   event_endpoint=${record%%$'\t'*}
   line=${record#*$'\t'}

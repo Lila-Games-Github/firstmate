@@ -1515,6 +1515,68 @@ test_working_note_not_working_surfaced() {
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
 }
 
+# A self-reported phase line feeds the crew board and must never wake firstmate,
+# even when nothing proves the crew is still busy: the same idle verdict that
+# surfaces a working: note above absorbs a phase-only append.
+test_phase_only_signal_absorbed_without_busy_evidence() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case phase-only-signal); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  # A phase note may carry words the legacy free-text matcher treats as news.
+  printf 'phase: testing - running the focused suite\n\nphase: ready-to-merge - PR https://example.test/pull/1 checks green, merged base\n' > "$status_file"
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling step 2'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a phase-only append (should absorb): $(cat "$out")"
+  fi
+  wait_for_absorbed "$state" "$pid" "absorbed phase-only" \
+    || { reap "$pid"; fail "phase-only append was not recorded as absorbed: $(cat "$state/.watch-triage.log" 2>/dev/null)"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "phase-only append printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "phase-only append enqueued a durable wake record"; }
+  [ -s "$state/.seen-task_status" ] || { reap "$pid"; fail "phase-only append did not advance its .seen-* suppressor"; }
+  # The next append is a real event and still wakes: absorbing the phase span
+  # committed its position without swallowing what follows.
+  printf 'needs-decision: pick A or B\n' >> "$status_file"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a needs-decision after an absorbed phase line did not surface"; }
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "the needs-decision after a phase line was not printed"
+  pass "a phase-only append is absorbed without busy evidence, and the next real event still wakes"
+}
+
+# The away-mode daemon wants every ordinary wake, but a phase-only append is not
+# one: it is absorbed in that posture too.
+test_phase_only_signal_absorbed_while_away() {
+  local dir state fakebin out pid
+  dir=$(make_case phase-only-afk); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'away\n' > "$state/.afk"
+  printf 'phase: building - wiring the page\n' > "$state/task.status"
+  export FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling step 2'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed phase-only" \
+    || { reap "$pid"; fail "phase-only append was not absorbed while away: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "phase-only append enqueued a wake while away"; }
+  reap "$pid"
+  pass "a phase-only append is absorbed while the away-mode daemon owns triage"
+}
+
+# Only the phase vocabulary is absorbed outright. A waking state written as a
+# phase word, or a phase line batched with a real event, triages as before.
+test_phase_line_with_other_content_surfaced() {
+  local dir state fakebin out status_file pid case_line
+  for case_line in 'phase: blocked - the suite will not start' $'phase: testing - suite\nworking: compiling step 2'; do
+    dir=$(make_case "phase-mixed-$RANDOM"); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+    status_file="$state/task.status"
+    printf '%s\n' "$case_line" > "$status_file"
+    export FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling step 2'
+    watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher absorbed a non-phase-only append: $case_line"; }
+    grep -F "signal: $status_file" "$out" >/dev/null || fail "the non-phase-only append was not printed: $case_line"
+  done
+  pass "an unknown phase word or a phase line batched with another line is triaged as before"
+}
+
 test_secondmate_status_note_surfaced_despite_busy_agent() {
   local dir state fakebin out drain_out pid
   dir=$(make_case secondmate-note-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5484,6 +5546,9 @@ test_turn_ended_oversized_churn_bound_surfaced
 test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
+test_phase_only_signal_absorbed_without_busy_evidence
+test_phase_only_signal_absorbed_while_away
+test_phase_line_with_other_content_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does

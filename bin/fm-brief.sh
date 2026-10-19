@@ -431,6 +431,28 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+# The phase half of the status protocol, shared by ship and scout briefs. The
+# vocabulary and how a log folds into a phase are fm-classify-lib.sh's; a phase
+# line feeds the live crew board (bin/fm-crew-board.sh) and never wakes firstmate.
+# A ship brief adds where ready-to-merge goes, because a phase line written after
+# the ready line would sit behind the event firstmate still has to handle.
+phase_protocol() {  # <ship|scout>
+  local phases
+  phases=$(printf '%s' "$FM_CLASSIFY_WORKER_PHASES" | sed 's/ /, /g')
+  printf '%s\n' \
+    "   Also report every phase change yourself, for the live crew board the captain and firstmate watch:" \
+    "   \`echo \"${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}: {phase} - {one short line}\" >> $STATUS_FILE\`" \
+    "   Phases: $phases." \
+    "   A phase line never wakes firstmate, so append one each time you move between phases;" \
+    "   it adds to the states above and never replaces them: needs-decision, blocked, $PAUSED_VERB, done, and" \
+    "   failed are reported only with their own lines, never as a phase."
+  if [ "$1" = ship ]; then
+    printf '%s\n' \
+      "   When your work is ready to merge, append \`${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}: ready-to-merge - {PR URL or branch}\` just" \
+      "   before your ready \`done:\` line, and never append a phase line after a \`done:\` line in the same turn."
+  fi
+}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -628,9 +650,10 @@ The report is the only thing that survives, so anything worth keeping must be in
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   Each state line wakes firstmate, so report states sparingly: only milestones a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
+$(phase_protocol scout)
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
@@ -893,10 +916,11 @@ $RULE1
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
-   Each append wakes firstmate, so report sparingly: only phase changes a supervisor
+   Each state line wakes firstmate, so report states sparingly: only milestones a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
    firstmate reads your pane for that.
+$(phase_protocol ship)
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.

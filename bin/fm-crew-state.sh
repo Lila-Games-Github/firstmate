@@ -190,7 +190,9 @@ map_log_state() {  # <line>
     return
   fi
   case "$(status_line_verb "$1")" in
-    working)        echo working ;;
+    # A self-reported phase line is not an event, so it is the latest line only
+    # in a log holding nothing else; the worker that wrote it is working.
+    working|"${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}") echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
     done)           echo "done" ;;
