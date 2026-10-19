@@ -30,9 +30,16 @@ cat > "$SCRATCH/fakebin/codex" <<EOF
 exec -a codex "$(command -v sleep)" 120
 EOF
 chmod +x "$SCRATCH/fakebin/codex"
+# Herdr starts $SHELL (a login shell by default) in every pane, so host rc files
+# that prepend PATH (for example ~/.local/bin) would shadow the inert harness
+# with a real one. Pane shells skip rc files and keep the provisioned PATH.
+mkdir -p "$SCRATCH/shell"
+printf '#!/usr/bin/env bash\nexec -a bash %q --noprofile --norc "$@"\n' "$(command -v bash)" \
+  > "$SCRATCH/shell/bash"
+chmod +x "$SCRATCH/shell/bash"
 
 # Provision the named lab server with the inert harness first in its shell PATH.
-PATH="$SCRATCH/fakebin:$PATH" "$HERDR_LAB_HELPER" provision "$SESSION" \
+SHELL="$SCRATCH/shell/bash" PATH="$SCRATCH/fakebin:$PATH" "$HERDR_LAB_HELPER" provision "$SESSION" \
   || fail 'could not provision isolated Herdr session'
 
 PROJ="$SCRATCH/project"
