@@ -58,6 +58,23 @@ make_tmux_stub() {  # <dir>
 set -u
 D=$FM_FAKE_DIR
 case "${1:-}" in
+  has-session) exit 0 ;;
+  new-window)
+    window=
+    while [ $# -gt 0 ]; do
+      [ "$1" != -n ] || { window=$2; break; }
+      shift
+    done
+    [ -n "$window" ] || exit 1
+    printf '%s\n' "$window" > "$D/windows"
+    printf 'zsh' > "$D/command"
+    [ -z "${FM_FAKE_NEW_WINDOW_WRONG_CWD:-}" ] || printf '%s' "$D/../proj" > "$D/cwd"
+    : > "$D/new-window-created"
+    printf '@99\n'
+    exit 0 ;;
+  kill-window)
+    : > "$D/windows"
+    exit 0 ;;
   send-keys)
     shift
     literal=0
@@ -118,7 +135,10 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-windows)
+    [ -z "${FM_FAKE_INVENTORY_UNREADABLE:-}" ] || exit 1
+    [ -f "$D/windows" ] && cat "$D/windows"
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -1158,6 +1178,66 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
 
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
+test_missing_tmux_endpoint_relaunch_uses_recorded_copy_and_inbox() {
+  local dir out before
+  dir=$(new_case missingwindow rl42)
+  add_ship_task "$dir" rl42 claude
+  printf 'unfinished\n' > "$dir/wt/unfinished.txt"
+  mkdir -p "$dir/home/state/rl42.inbox/handled"
+  printf 'Continue this task.\n' > "$dir/home/state/rl42.inbox/001.msg"
+  before=$(cat "$dir/home/state/rl42.meta")
+  : > "$dir/fake/windows"
+  out=$(run_control "$dir" rl42 relaunch --note "Resume the recorded work") \
+    || fail "a missing tmux window should relaunch in a new window: $out"
+  assert_contains "$out" 'relaunched rl42' "the replacement should be confirmed"
+  assert_present "$dir/fake/new-window-created" "a fresh tmux window was not created"
+  [ "$(cat "$dir/wt/unfinished.txt")" = unfinished ] \
+    || fail "relaunch changed the unfinished work in the recorded copy"
+  [ "$(meta_field "$dir" rl42 worktree)" = "$dir/wt" ] \
+    || fail "the replacement changed its recorded worktree"
+  [ "$(meta_field "$dir" rl42 spawn_gen)" != "$(printf '%s\n' "$before" | sed -n 's/^spawn_gen=//p')" ] \
+    || fail "the replacement did not publish a new incarnation"
+  assert_present "$dir/home/state/rl42.inbox/001.msg" "the pending steer disappeared"
+  assert_contains "$(cat "$dir/home/data/rl42/brief.md")" 'First, check your instruction inbox' \
+    "the replacement brief did not carry the inbox instruction"
+  if grep -Eq '^(/exit|/quit)$' "$dir/fake/literal"; then
+    fail "a missing endpoint relaunch sent an exit command to the old endpoint"
+  fi
+  pass "fm-control relaunch: missing tmux window is recreated in the recorded copy with its inbox intact"
+}
+
+test_missing_tmux_endpoint_unreadable_inventory_refuses() {
+  local dir out rc before
+  dir=$(new_case unreadablewindow rl43)
+  add_ship_task "$dir" rl43 claude
+  before=$(cat "$dir/home/state/rl43.meta")
+  : > "$dir/fake/windows"
+  out=$(FM_FAKE_INVENTORY_UNREADABLE=1 run_control "$dir" rl43 relaunch --note "x") || rc=$?
+  expect_code 1 "${rc:-0}" "an unreadable tmux inventory must refuse"
+  assert_contains "$out" unreadable "the refusal should name the uncertain state"
+  [ "$(cat "$dir/home/state/rl43.meta")" = "$before" ] \
+    || fail "an unreadable inventory changed the task record"
+  assert_absent "$dir/fake/new-window-created" "an unreadable inventory created a window"
+  pass "fm-control relaunch: unreadable tmux inventory does not create an endpoint"
+}
+
+test_missing_tmux_endpoint_failed_launch_restores_prior_record() {
+  local dir out rc=0 before
+  dir=$(new_case missingfailure rl44)
+  add_ship_task "$dir" rl44 claude
+  before=$(cat "$dir/home/state/rl44.meta")
+  : > "$dir/fake/windows"
+  out=$(FM_FAKE_NEW_WINDOW_WRONG_CWD=1 run_control "$dir" rl44 relaunch --note "Keep this note") || rc=$?
+  expect_code 1 "$rc" "a replacement outside the recorded worktree must fail"
+  [ "$(cat "$dir/home/state/rl44.meta")" = "$before" ] \
+    || fail "a failed fresh-endpoint launch changed the prior task record"
+  [ -z "$(cat "$dir/fake/windows")" ] \
+    || fail "a failed fresh-endpoint launch left its unused window open"
+  assert_contains "$(cat "$dir/home/data/rl44/brief.md")" 'Keep this note' \
+    "rollback lost the progress note needed for a retry"
+  pass "fm-control relaunch: failed fresh-endpoint launch restores the prior record and closes the unused window"
+}
+
 test_missing_worktree_refuses_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nowt rl10)
@@ -1695,7 +1775,7 @@ test_spawn_relaunch_refuses_a_live_agent() {
   add_ship_task "$dir" rl15 claude
   out=$(run_spawn "$dir" rl15 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "relaunching into a live endpoint should refuse"
-  assert_contains "$out" "positively agent-free endpoint" "the refusal should demand an agent-free endpoint"
+  assert_contains "$out" "positively agent-free or authoritatively missing endpoint" "the refusal should demand a proven recoverable endpoint"
   assert_contains "$out" "fm-control.sh rl15 exit" "the refusal should point at the way to stop it"
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
@@ -1892,6 +1972,9 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
+test_missing_tmux_endpoint_relaunch_uses_recorded_copy_and_inbox
+test_missing_tmux_endpoint_unreadable_inventory_refuses
+test_missing_tmux_endpoint_failed_launch_restores_prior_record
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status

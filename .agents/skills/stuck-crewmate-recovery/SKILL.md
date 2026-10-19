@@ -37,6 +37,8 @@ Do not sweep another home's endpoints or infer ownership from a matching window 
 
 Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
 Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
+When the recovery-grade classifier reports the recorded tmux or Herdr endpoint `missing`, use `bin/fm-control.sh <task-id> relaunch --note '<progress so far>'`; it creates a fresh endpoint on the recorded backend in the same worktree and carries the pending steering inbox into the replacement brief.
+An ambiguous or unreadable endpoint state still refuses.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
