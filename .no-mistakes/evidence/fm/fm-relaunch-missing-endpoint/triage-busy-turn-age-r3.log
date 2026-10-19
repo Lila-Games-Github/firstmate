@@ -1,0 +1,5 @@
+ok - the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)
+
+real	0m4.484s
+user	0m1.122s
+sys	0m1.887s
