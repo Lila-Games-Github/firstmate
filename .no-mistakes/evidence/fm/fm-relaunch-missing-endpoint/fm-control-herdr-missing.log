@@ -1,0 +1,13 @@
+$ PATH=/home/linuxbrew/.linuxbrew/bin:$PATH bash tests/fm-control-herdr-missing.test.sh
+herdr: herdr 0.9.5
+2026-10-19T17:03:48+05:30
+ok - real Herdr: a missing workspace relaunches in a new endpoint on the same worktree
+exit=0
+--- rerun
+ok - real Herdr: a missing workspace relaunches in a new endpoint on the same worktree
+exit=0
+--- skip gate without herdr on PATH
+skip: herdr not found
+exit=0
+--- herdr sessions after (lab sessions must be gone)
+[{"name":"default","running":true}]

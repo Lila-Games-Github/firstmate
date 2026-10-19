@@ -1,0 +1,3 @@
+# herdr session list after the lab test (lab session torn down; default untouched)
+name                 status   directory                                        socket
+default              running  /home/sanchith/.config/herdr                     /home/sanchith/.config/herdr/herdr.sock

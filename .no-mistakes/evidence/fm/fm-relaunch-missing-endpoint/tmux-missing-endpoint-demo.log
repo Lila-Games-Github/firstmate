@@ -1,0 +1,34 @@
+### before restart: tmux windows
+bash
+fm-demo1
+### worker HEAD: 11a22ec worker progress  status: ?? unfinished.txt 
+### simulating terminal-server restart (tmux kill-server)
+    no server running on /tmp/fm-demo.JmMMY8/tmuxsock/tmux-1000/default
+### $ fm-control.sh demo1 relaunch --note 'Resume after server restart'
+warning: /tmp/fm-demo.JmMMY8/home/data/demo1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+relaunched demo1 harness=codex from=codex model=default effort=default backend=tmux endpoint=fmses:fm-demo1 worktree=/tmp/fm-demo.JmMMY8/worktree
+exit=0
+### after relaunch: tmux windows (pane cwd, command)
+bash  /var/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M59YEHBNTNKZXVHNFB4N703C  bash
+fm-demo1  /tmp/fm-demo.JmMMY8/worktree  codex
+### replacement agent started in /tmp/fm-demo.JmMMY8/worktree
+### meta: window=fmses:fm-demo1 worktree=/tmp/fm-demo.JmMMY8/worktree harness=codex 
+### worktrees for project:
+/tmp/fm-demo.JmMMY8/project  c10fbca [master]
+/tmp/fm-demo.JmMMY8/worktree 11a22ec [task-demo1]
+### worker HEAD: 11a22ec worker progress  status: ?? unfinished.txt 
+### inbox: 001.msg
+handled  -> Pending steer from captain.
+### brief tail:
+Keep going.
+
+## Progress note (2026-10-19T11:28:47Z)
+
+This task was relaunched. Continue from here; the local copy and every
+uncommitted change are exactly as the previous worker left them.
+
+First, check your instruction inbox: list /tmp/fm-demo.JmMMY8/home/state/demo1.inbox/*.msg, act on
+each message in numeric order, then mv each handled file into
+/tmp/fm-demo.JmMMY8/home/state/demo1.inbox/handled/. A steer sent before the relaunch survives there.
+
+Resume after server restart
