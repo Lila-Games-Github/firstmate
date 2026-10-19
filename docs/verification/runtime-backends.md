@@ -1387,6 +1387,18 @@ ok - real herdr: an agent that does not stop fails closed instead of being repor
 The registry read through `herdr pane report-agent` is the same source `fm_backend_herdr_agent_state` classifies, and since 2026-09-10 that registration counts as an agent only while `pane process-info` shows a harness process behind it, so the guard backs the registration with a real process named like a harness (a symlink to `sleep`) and then stops that process, with no real harness launched.
 That command is the guard that refreshes this record; run it after every Herdr upgrade rather than trusting the version above.
 
+The missing-workspace relaunch was verified on 2026-10-19 with Herdr 0.9.5 through the named-session lab helper (`bin/fm-herdr-lab.sh` by default):
+
+```sh
+tests/fm-control-herdr-missing.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Herdr: a missing workspace relaunches in a new endpoint on the same worktree
+```
+
 For Pi on Herdr 0.9.0, `herdr agent get` reflects whether the agent process remains live; its registration does not persist merely because the pane and parent shell do.
 A Pi launched as a child of the pane shell (not via `exec`) that then `/quit`s or is SIGKILL'd leaves the pane and shell in place, and `agent get` returns `agent_not_found`.
 A sibling live idle Pi stays `agent=pi` with `agent_status=idle`.

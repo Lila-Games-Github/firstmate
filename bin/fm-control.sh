@@ -32,7 +32,7 @@
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent).
 #   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
+#              SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
 #              of this verb. An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
@@ -46,7 +46,11 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              Records a durable checkpoint and that note, exits the old agent,
+#              A positively missing tmux or herdr endpoint has no agent to
+#              stop: create a fresh endpoint on the recorded backend in that
+#              worktree. Other endpoint states retain the existing refusals.
+#              Records a durable checkpoint and that note, exits the old agent
+#              when its endpoint exists,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
@@ -835,12 +839,23 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line prior_state
   local -a spawn_args
 
   refuse_relaunch_into_slot_another_record_owns
   require_state_verified_backend relaunch
   resolve_relaunch_profile
+  prior_state=$(agent_state)
+  case "$prior_state" in
+    alive|dead) ;;
+    missing)
+      case "$BACKEND:$KIND" in
+        tmux:ship|tmux:scout|herdr:ship|herdr:scout) ;;
+        *) die "task $ID's endpoint is missing; fresh-endpoint relaunch is supported only for local ship and scout tasks on tmux or herdr" ;;
+      esac
+      ;;
+    *) die "task $ID's endpoint reads '$prior_state' rather than a positively classified state; refusing to relaunch into an unattributed endpoint" ;;
+  esac
 
   case "$KIND" in
     ship|scout)
@@ -873,8 +888,12 @@ do_relaunch() {
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
-  journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  if [ "$prior_state" = missing ]; then
+    exit_result="endpoint-missing"
+  else
+    journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -892,6 +911,12 @@ do_relaunch() {
       || RELAUNCH_META_PUBLISHED=1
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
+
+  # A missing endpoint is replaced by a new one. The launch owner publishes
+  # its identity under the task meta lock; read that record before confirming
+  # the replacement, or the wait would keep polling the missing old endpoint.
+  fm_backend_validate_task_endpoint "$META" "$ID" || die "replacement endpoint metadata for $ID could not be validated"
+  T=$FM_BACKEND_VALIDATED_TARGET
 
   state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"

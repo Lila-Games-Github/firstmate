@@ -174,7 +174,21 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# Stop a test watcher and collect it, bounded. CI has twice seen a watcher
+# outlive a single TERM and keep polling until its own 999s test knob fired
+# (a ~1000s stall that timed out a serial shard, and a late stale wake queued
+# into a later assertion), so an unbounded `wait` is not safe here. A healthy
+# watcher exits within one POLL of the first TERM; one still alive after a
+# generous grace gets one more TERM so its EXIT cleanup can still run, then KILL.
+reap() {
+  local pid=$1
+  kill "$pid" 2>/dev/null || true
+  if wait_live "$pid" 150; then
+    kill "$pid" 2>/dev/null || true
+    wait_live "$pid" 50 && kill -KILL "$pid" 2>/dev/null
+  fi
+  wait "$pid" 2>/dev/null || true
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
