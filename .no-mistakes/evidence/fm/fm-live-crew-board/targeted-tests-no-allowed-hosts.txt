@@ -1,0 +1,37 @@
+== tests/fm-crew-board.test.sh
+ok - a worker whose record disappears is shown as left with its last phase, then expires
+ok - open serves and arms the board unbound, prints local and remote links, and its keeper follows phase changes
+ok - the keeper stops on its own once the board's session is no longer open
+ok - a row the captain points at reaches the durable wake queue and reads back exactly as shown
+rc=0
+== tests/fm-classify-phase.test.sh
+ok - the fold shows the worker's own phase, the waiting states as themselves, and older logs' last state
+ok - a decision or blocker still open in the keyed fold outranks later phase lines
+ok - only a non-empty span made entirely of vocabulary phase lines is phase-only
+ok - a phase line is neither the latest event nor captain-relevant
+rc=0
+== tests/fm-crew-board-render.test.sh
+ok - workers render grouped by what they need, with their own phase, latest note, and time in phase
+ok - pointing at a row queues one crew-point prompt carrying the row and note, and send delivers it
+ok - an empty home says so and a foreign payload refuses to render
+rc=0
+== tests/fm-watch-triage.test.sh
+ok - the daemon-owned one-shot never hands off a captain-held pane while the away-posture record exists
+ok - a declared wait naming a near-future until time stays quiet until that time
+ok - a wrong-year declared time cannot silence the watcher beyond the recheck cadence
+ok - a declared wait whose until time has passed is rechecked at once, then held to the cadence
+rc=0
+== tests/fm-brief.test.sh
+ok - fm-brief.sh: nonsensical lane flag combinations are refused, never emitted as a confusing brief
+ok - fm-brief.sh: --landing-branch and --lane-branch refuse values that are not plain branch names
+ok - fm-brief.sh: non-lane ship briefs keep the crewmate convention and no lane vocabulary
+ok - fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor
+rc=0
+== tests/fm-wake-drain-outcome-backstop.test.sh
+ok - held-lock initialization accepts a descendant of the outcome lock owner
+ok - index self-heal runs only while the outcome lock is held
+ok - an over-bound unclassifiable routine event stays silent
+ok - the outcome backstop caps each item and its total task output deterministically
+rc=0
+
+[exited with code 0]
