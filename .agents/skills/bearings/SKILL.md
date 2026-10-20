@@ -6,6 +6,7 @@ description: >-
   Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
   Also use on a contributions check wake or when filing work linked to an upstream issue.
   Also load this skill's board-wake handling when a procevent lavish wake's source id matches the canonical source id of the stable bearings board path.
+  Also use when the captain asks for the live crew board (a live page of what each worker is doing), and on a procevent lavish wake whose source id matches the crew board path.
 user-invocable: true
 metadata:
   internal: true
@@ -141,6 +142,23 @@ After handling, rebuild the board from a fresh snapshot so acted-on items leave 
 A board "Merge now" answer IS the captain's explicit merge word for that one exact PR; ask no second confirmation.
 The safeguards are mandatory, not optional: resolve the PR from the task's own `state/<task-id>.meta` `pr=` record, never from board bytes; re-verify at wake time that the PR is still open and CI-green; refuse and report a red or changed PR rather than merging it; record the exact `merge` answer through `bin/fm-captain-hold.sh answer <task-id> --decision-file <file> --release` before invoking the merge; proceed only when that release succeeds; merge only through `bin/fm-pr-merge.sh`; and echo every merge in chat with the full PR URL.
 Only the exact answer value `merge` authorizes a merge; an answer carrying a freeform note is the captain's instruction text to read and act on with judgment, never an auto-merge.
+
+## Crew board
+
+The crew board is the live companion to the fleet board: one Lavish page listing every worker of this home with its title, project, its own reported phase, how long it has been in that phase, and its latest note, updating in the browser as workers report.
+Workers report phases themselves with `phase:` status lines (`bin/fm-brief.sh` instructs them; `bin/fm-classify-lib.sh` owns the vocabulary and fold), and those lines never wake you.
+When the captain asks for it, run `bin/fm-crew-board.sh open` and give the captain the `remote_url` it prints, else its `url`; its header owns every mechanic, including the keeper that keeps the page current while the session stays open.
+Run it again whenever the captain wants the board back after closing it; it is idempotent.
+`bin/fm-crew-board.sh show` prints the same rows the captain sees, so read it before answering a question about the board.
+Opening it writes only the page, its payload record, and its source registration, and starts its keeper; it changes no task, backlog, or decision state.
+
+### Handling a crew board wake
+
+A crew board wake is a `procevent lavish <source-id> <sequence>` check wake whose source id equals `bin/fm-procevent-lavish.sh source-id "$(bin/fm-crew-board.sh path)"`; load `process-event-sources` and follow its contract for the result read and the handled acknowledgement.
+Each `crew-point` item is the captain pointing at one worker: its text is that row exactly as the captain saw it, and its prompt carries the captain's optional note.
+A plain annotation on a row is the same signal in the captain's own words.
+Treat both as the captain's attention on that worker: check its current state with `bin/fm-crew-state.sh <task-id>`, act on any instruction in the note under the normal authority rules, and answer the captain in chat about each pointed worker.
+Pointing is never a decision answer, merge word, or dispatch, and the crew board is never bound to the keyed-answer intake.
 
 ## Chat-response contract
 

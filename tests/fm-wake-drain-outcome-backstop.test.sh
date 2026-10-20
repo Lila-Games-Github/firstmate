@@ -56,6 +56,28 @@ test_uncovered_keyless_captain_events_surface_on_the_next_main_drain() {
   pass "a newest keyless done, blocked, or needs-decision event with no newer branch outcome surfaces on the next main drain"
 }
 
+# A worker's self-reported phase line is presentation for the crew board, not an
+# event, so one appended after an unhandled done line must not hide it.
+test_trailing_phase_line_cannot_hide_a_captain_event() {
+  local dir state out body old
+  dir=$(make_case trailing-phase)
+  state="$dir/state"
+  out="$dir/drain.out"
+  old=$(( $(date +%s) - 20 ))
+
+  printf 'done: PR https://example.test/77 checks green\nphase: validating - re-running CI\n' > "$state/phase-task.status"
+  printf 'working: setup\nphase: testing - focused suite\n' > "$state/routine-phase.status"
+  set_mtime "$old" "$state/phase-task.status"
+  set_mtime "$old" "$state/routine-phase.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "main drain failed for a done line followed by a phase line"
+  body=$(backstop_body "$out")
+  case "$body" in *'phase-task done: PR https://example.test/77 checks green'*) ;; *) fail "a trailing phase line hid the done event: $(cat "$out")" ;; esac
+  case "$body" in *routine-phase*) fail "a routine log ending in a phase line was presented: $body" ;; esac
+  pass "a trailing phase line neither hides a captain event nor becomes one"
+}
+
 test_newer_task_outcome_and_routine_latest_events_stay_silent() {
   local dir state out old
   dir=$(make_case covered-and-routine)
@@ -530,6 +552,7 @@ test_backstop_output_is_bounded() {
 }
 
 test_uncovered_keyless_captain_events_surface_on_the_next_main_drain
+test_trailing_phase_line_cannot_hide_a_captain_event
 test_newer_task_outcome_and_routine_latest_events_stay_silent
 test_device_bearing_outcome_index_still_suppresses_the_backstop
 test_older_or_other_task_outcome_cannot_hide_a_new_captain_event

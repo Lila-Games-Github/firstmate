@@ -1802,6 +1802,26 @@ signal_files_actionable() {  # <status-file> ...
   return "$found"
 }
 
+# 0 when every file in a signal batch is a status log whose span since its
+# classified position, up to the endpoint signal_files_actionable just captured,
+# holds only self-reported phase lines (fm-classify-lib.sh owns the vocabulary
+# and status_span_phase_only). Such an append feeds the crew board and never
+# wakes firstmate in either posture, so it needs no busy evidence. A batch with
+# a turn-end marker, an unclassified log, or any other line returns 1 and is
+# triaged exactly as before. Call it only after signal_files_actionable.
+signal_files_phase_only() {  # <file> ...
+  local f endpoint
+  [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) return 1 ;; esac
+    endpoint=$(printf '%s' "$FM_SIGNAL_SURFACE_ENDPOINTS" \
+      | awk -F '\t' -v f="$f" '$1 == f { print $2; exit }')
+    [ -n "$endpoint" ] || return 1
+    status_span_phase_only "$f" "$(fm_wake_signal_seen_size "$STATE" "$f")" "$endpoint" \
+      || return 1
+  done
+}
+
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
 # fm-push-transition-lib.sh because push and poll paths must write one format.
 # Mark each actionable status log through the endpoint captured by the heartbeat
@@ -2379,7 +2399,9 @@ EOF
 $pending
 EOF
     reason="signal:$files"
-    # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
+    # Triage: a batch whose only new lines are self-reported phase lines is
+    # never actionable (signal_files_phase_only). Otherwise a signal is
+    # ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file gained a captain-relevant event since it was last
     #     classified (its whole new span, not merely its last line);
@@ -2417,9 +2439,14 @@ EOF
     # fm-primary-pi-watch.ts), and the away daemon, whose handle_durable_wakes
     # passes it to handle_wake (see the comment above handle_wake in
     # bin/fm-supervise-daemon.sh).
+    signal_phase_only=1
     # shellcheck disable=SC2086  # same space-separated status-path list
-    if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+    if [ "$signal_actionable" -ne 0 ] && signal_files_phase_only $files; then
+      signal_phase_only=0
+    fi
+    # shellcheck disable=SC2086  # same space-separated status-path list
+    if [ "$signal_phase_only" -ne 0 ] && { afk_present || [ "$signal_actionable" -eq 0 ] \
+      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
@@ -2477,7 +2504,11 @@ $pending
 EOF
         wake "$reason"
       fi
-      triage_log "absorbed benign $reason"
+      if [ "$signal_phase_only" -eq 0 ]; then
+        triage_log "absorbed phase-only $reason"
+      else
+        triage_log "absorbed benign $reason"
+      fi
     fi
   fi
 

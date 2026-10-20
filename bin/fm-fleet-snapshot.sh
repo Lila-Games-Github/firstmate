@@ -57,6 +57,10 @@
 #     supervision rather than this snapshot path.
 #     paths.status_log.last_event is historical wake-event data only, never
 #     current state.
+#     phase: {name,note} is the worker's self-reported phase folded from the
+#     whole status log by fm-classify-lib.sh's status_current_phase, which owns
+#     the vocabulary and the fold; it is what the worker said, never a
+#     current-state verdict, and the crew board (bin/fm-crew-board.sh) renders it.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -731,7 +735,7 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json phase_tsv phase_name phase_note
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -799,6 +803,9 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
+    phase_tsv=$(status_current_phase "$status_log" "$kind")
+    phase_name=${phase_tsv%%$'\t'*}
+    phase_note=${phase_tsv#*$'\t'}
     open_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
@@ -841,9 +848,10 @@ task_json_lines() {
     # The status log's own text is unbounded, and Linux caps each argv element at
     # 128 KiB, so every value that can carry it travels on stdin. Bounded scalars
     # and paths stay as arguments.
-    printf '%s\n%s\n%s\n%s\n' \
+    printf '%s\n%s\n%s\n%s\n%s\n' \
       "$current_json" "$status_json" "$open_decisions_json" \
-      "$(printf '%s' "$last_event_raw" | jq -Rs .)" | jq -s \
+      "$(printf '%s' "$last_event_raw" | jq -Rs .)" \
+      "$(printf '%s' "$phase_note" | jq -Rs .)" | jq -s \
       --arg id "$id" \
       --arg kind "$kind" \
       --arg harness "$harness" \
@@ -863,6 +871,7 @@ task_json_lines() {
       --arg pr_head "$(meta_value "$meta" pr_head)" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
+      --arg phase_name "$phase_name" \
       --argjson meta_path "$meta_json" \
       --argjson report "$report_json" \
       --argjson worktree_path "$worktree_json" \
@@ -872,7 +881,7 @@ task_json_lines() {
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
       '.[0] as $current_state | .[1] as $status_log | .[2] as $open_decisions
-      | .[3] as $last_event_raw
+      | .[3] as $last_event_raw | .[4] as $phase_note
       | {
         id:$id,
         kind:$kind,
@@ -892,6 +901,7 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        phase:{name:$phase_name,note:$phase_note},
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
