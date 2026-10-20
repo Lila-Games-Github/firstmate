@@ -62,6 +62,9 @@ test_fold_follows_reported_phases_and_waking_states() {
   assert_equals 'working|addressing review comments' \
     "$(fold ship $'phase: ready-to-merge - https://example.test/pull/1\ndone: PR ready\nworking: addressing review comments\n')" \
     "work after done does not return to ready-to-merge"
+  assert_equals 'done|merged' \
+    "$(fold ship $'phase: ready-to-merge - https://example.test/pull/1\ndone: PR ready\ndone: merged\n')" \
+    "only the first done after ready-to-merge confirms it"
   assert_equals 'working|retrying' \
     "$(fold ship $'phase: testing\nfailed: suite crashed\nworking: retrying\n')" \
     "work after failed does not return to the earlier phase"

@@ -357,7 +357,7 @@ status_current_phase() {  # <status-file> [<kind>]
       needs-decision|blocked|"$pause") phase=$verb ;;
       failed) phase=$verb; worker='' ;;
       "$held") phase=needs-decision ;;
-      "done") [ "$phase" = ready-to-merge ] || phase='done'; worker='' ;;
+      "done") [ "$phase" = ready-to-merge ] && [ "$worker" = ready-to-merge ] || phase='done'; worker='' ;;
       *) continue ;;
     esac
     note=$(status_line_note "$line")
