@@ -182,8 +182,9 @@ test_open_serves_arms_and_keeps_the_board_current() {
   assert_not_contains "$out" "bound:" "the crew board was bound to the keyed-answer intake"
   [ -z "$(ls -A "$home/state/decision-bindings" 2>/dev/null)" ] || fail "the crew board created a decision binding"
 
-  out=$(run_board "$home" open) || fail "a second open failed: $out"
+  out=$(unset LAVISH_AXI_ALLOWED_HOSTS; run_board "$home" open) || fail "a second open failed: $out"
   assert_contains "$out" "keeper: running" "a second open started a second keeper"
+  assert_not_contains "$out" "remote_url:" "an open without allowed hosts printed a remote url"
 
   printf 'phase: fixing - one red\n' >> "$home/state/alpha.status"
   wait_for 50 grep -sq '"phase":"fixing"' "$home/.lavish/crew-board.html" \

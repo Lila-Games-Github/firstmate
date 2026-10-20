@@ -344,7 +344,7 @@ command_stop() {
 }
 
 command_open() {
-  local board sid id host
+  local board sid id host hosts=${LAVISH_AXI_ALLOWED_HOSTS:-}
   command_refresh >/dev/null
   board=$(board_path)
   printf 'board: %s\n' "$board"
@@ -357,7 +357,7 @@ command_open() {
     id=${BOARD_SESSION_URL##*/session/}
     id=${id%%[/?#]*}
     if [ -n "$id" ] && [ "$id" != "$BOARD_SESSION_URL" ]; then
-      for host in ${LAVISH_AXI_ALLOWED_HOSTS//,/ }; do
+      for host in ${hosts//,/ }; do
         case "$host" in ''|*[!A-Za-z0-9.:-]*) continue ;; esac
         printf 'remote_url: https://%s/session/%s\n' "$host" "$id"
       done
