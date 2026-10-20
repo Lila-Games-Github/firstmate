@@ -334,10 +334,11 @@ status_line_phase_note() {  # <status-line>
 # working and resolved return to the last reported phase (plain `working` for a
 # log that never reported one, which is how an older brief still renders its last
 # known state); done shows as done unless the worker had just reported
-# ready-to-merge, which its done line confirms. done and failed forget the
-# reported phase, so later work without a new phase line shows as plain working. A decision the keyed fold still
-# holds open outranks everything after it, exactly as status_current_line reads
-# it. An absent or empty log is `starting`.
+# ready-to-merge, which its first done line confirms. done and failed forget the
+# reported phase, so later work without a new phase line shows as plain working
+# and a later done shows as done. A decision the keyed fold still holds open
+# outranks everything after it, exactly as status_current_line reads it. An
+# absent or empty log is `starting`.
 status_current_phase() {  # <status-file> [<kind>]
   local f=$1 kind=${2:-} line verb phase='' worker='' note='' word open key ov onote
   local pause resolve held
