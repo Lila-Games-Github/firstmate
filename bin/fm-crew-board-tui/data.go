@@ -17,6 +17,7 @@ import (
 
 type worker struct {
 	ID         string `json:"id"`
+	Kind       string `json:"kind"`
 	Project    string `json:"project"`
 	Title      string `json:"title"`
 	Phase      string `json:"phase"`
@@ -29,6 +30,7 @@ type worker struct {
 
 type item struct {
 	ID     string `json:"id"`
+	Group  string `json:"-"`
 	Title  string `json:"title"`
 	Detail string `json:"detail"`
 	Status string `json:"status"`
@@ -206,6 +208,10 @@ func readFeed(state string) ([]item, error) {
 	}
 	var events []event
 	for _, path := range matches {
+		id := strings.TrimSuffix(filepath.Base(path), ".status")
+		if strings.HasPrefix(id, ".") {
+			continue
+		}
 		info, err := os.Stat(path)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
@@ -221,14 +227,23 @@ func readFeed(state string) ([]item, error) {
 			}
 		}
 		lines := strings.Split(string(data), "\n")
-		id := strings.TrimSuffix(filepath.Base(path), ".status")
+		latest := -1
+		for index, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				latest = index
+			}
+		}
 		for index, line := range lines {
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}
+			status := ""
+			if index == latest {
+				status = info.ModTime().Format("15:04:05")
+			}
 			events = append(events, event{info.ModTime(), index,
-				item{ID: id, Title: id + ": " + line, Detail: line, Status: "event"}})
+				item{ID: id, Title: id + ": " + line, Detail: line, Status: status}})
 		}
 	}
 	sort.SliceStable(events, func(i, j int) bool {
@@ -242,9 +257,7 @@ func readFeed(state string) ([]item, error) {
 	}
 	rows := make([]item, 0, len(events))
 	for _, event := range events {
-		value := event.value
-		value.Status = event.timestamp.Format("15:04:05")
-		rows = append(rows, value)
+		rows = append(rows, event.value)
 	}
 	if ack := latestInboxAcknowledgement(state); ack != nil {
 		rows = append([]item{*ack}, rows...)

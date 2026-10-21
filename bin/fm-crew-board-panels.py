@@ -2,12 +2,16 @@
 """Project local fleet records into the crew board's optional panels.
 
 Usage: fm-crew-board-panels.py <fleet-snapshot.json>
+       fm-crew-board-panels.py --refresh-allowance|--allowance-loop
 
-The optional data/crew-board-cache.json is maintained by firstmate, not this
-script. It supplies observations that have no cheap local source (phone locks,
-builds, daily routines, Rocketboard bugs, and provider allowance). This script
-never queries a network service. Its output is embedded in crew-board.json by
-fm-crew-board.sh refresh.
+Connected phones come from a bounded local adb query. Playbot lane rows come
+from local persisted state. AI allowance uses a separately scheduled quota-axi
+snapshot, never the fast board refresh. The optional
+data/crew-board-cache.json supplies phone observations such as locks and panels
+without a cheap local source (builds, daily routines, and Rocketboard bugs),
+plus optional allowance overlays. The fast projection never queries a network service;
+the separately launched allowance sampler may ask quota-axi for provider data.
+Its output is embedded in crew-board.json by fm-crew-board.sh refresh.
 """
 
 import csv
@@ -26,6 +30,8 @@ HOME = Path(os.environ.get("FM_HOME", SCRIPT_DIR.parent))
 DATA = Path(os.environ.get("FM_DATA_OVERRIDE", HOME / "data"))
 STATE = Path(os.environ.get("FM_STATE_OVERRIDE", HOME / "state"))
 SOURCE = DATA / "crew-board-cache.json"
+QUOTA = STATE / "crew-board-quota.json"
+QUOTA_ERROR = STATE / ".crew-board-quota-error"
 
 
 def item(title, detail="", status="", link="", alert=False, item_id=""):
@@ -37,13 +43,16 @@ def question_entries(path):
     if not path.is_file():
         return []
     rows = []
-    section = "Questions"
+    section = None
     entry = []
 
     def flush():
         if not entry:
             return
         title = re.sub(r"^\[[ xX]\]\s*", "", entry[0]).strip()
+        bold = re.match(r"^\*\*(.+?)\*\*", title)
+        if bold:
+            title = bold.group(1)
         rows.append(item(title, "\n".join(entry).strip(), item_id=f"question-{len(rows)}"))
         entry.clear()
 
@@ -53,10 +62,20 @@ def question_entries(path):
             section = line[3:].strip()
             rows.append(item(section.upper(), status="section"))
             continue
+        if line.strip() == "---":
+            flush()
+            continue
+        if section is None:
+            continue
+        bold = re.match(r"^\*\*(.+?)\*\*", line)
+        if bold:
+            flush()
+            entry.append(line.strip())
+            continue
         if line.startswith("- ") or line.startswith("* "):
             flush()
             entry.append(line[2:].strip())
-        elif entry and (line.startswith(("  ", "\t")) or not line.strip()):
+        elif entry:
             entry.append(line.strip())
     flush()
     return rows
@@ -193,6 +212,143 @@ def entries(cache, key):
     return rows
 
 
+def local_phones():
+    try:
+        run = subprocess.run(["adb", "devices", "-l"], capture_output=True,
+                             text=True, timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if run.returncode:
+        return []
+    rows = []
+    for line in run.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 2 or fields[1] not in ("device", "unauthorized", "offline"):
+            continue
+        serial, state = fields[:2]
+        model = next((field.removeprefix("model:").replace("_", " ")
+                      for field in fields[2:] if field.startswith("model:")), serial)
+        rows.append(item(model, serial, "connected" if state == "device" else state,
+                         alert=state != "device", item_id=serial))
+    return rows
+
+
+def phone_entries(cache):
+    cached = entries(cache, "phones")
+    rows = local_phones()
+    for row in rows:
+        match = next((index for index, entry in enumerate(cached)
+                      if entry["id"] == row["id"] or entry["title"] == row["title"]), None)
+        if match is not None:
+            entry = cached.pop(match)
+            row.update(status=entry["status"] or row["status"],
+                       detail=entry["detail"] or row["detail"],
+                       link=entry["link"], alert=entry["alert"] or row["alert"])
+    return rows + cached
+
+
+def playbot_workers():
+    try:
+        run = subprocess.run(["node", "--no-warnings", str(SCRIPT_DIR / "fm-playbot-lanes.mjs"),
+                              "board-lanes", str(STATE)], capture_output=True, text=True,
+                             timeout=1.5, check=False)
+        if run.returncode == 0:
+            rows = json.loads(run.stdout)
+            return rows if isinstance(rows, list) else []
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    return []
+
+
+def refresh_allowance():
+    temp = None
+    try:
+        run = subprocess.run(["quota-axi", "--json", "--no-credential-refresh"],
+                             capture_output=True, text=True, timeout=15, check=False)
+        if run.returncode:
+            raise ValueError("quota-axi failed")
+        payload = json.loads(run.stdout)
+        if not isinstance(payload, dict) or not isinstance(payload.get("providers"), list):
+            raise ValueError("quota-axi returned no providers")
+        data = json.dumps({"observed_at": time.time(), "payload": payload})
+        temp = QUOTA.with_name(f".{QUOTA.name}.{os.getpid()}.tmp")
+        with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
+            output.write(data)
+        os.replace(temp, QUOTA)
+        QUOTA_ERROR.unlink(missing_ok=True)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+        QUOTA_ERROR.touch()
+
+
+def quota_entries():
+    try:
+        snapshot = json.loads(QUOTA.read_text(encoding="utf-8"))
+        age = max(0, int(time.time() - float(snapshot["observed_at"])))
+        providers = snapshot["payload"]["providers"]
+        failed = QUOTA_ERROR.is_file() and QUOTA_ERROR.stat().st_mtime >= QUOTA.stat().st_mtime
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(providers, list):
+        return []
+    stale = failed or age > 360
+    age_label = f"{age // 60}m ago" + (" (stale)" if stale else "")
+    rows = []
+    unavailable = []
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        name = str(provider.get("provider") or "provider")
+        raw_windows = provider.get("windows")
+        windows = {window.get("id"): window for window in (raw_windows if isinstance(raw_windows, list) else [])
+                   if isinstance(window, dict)}
+        semantics = provider.get("quotaSemantics")
+        scopes = semantics.get("effectiveAvailability") if isinstance(semantics, dict) else []
+        scopes = scopes if isinstance(scopes, list) else []
+        for scope in scopes:
+            if not isinstance(scope, dict):
+                continue
+            percent = scope.get("effectivePercentRemaining")
+            if not isinstance(percent, (int, float)):
+                continue
+            window_ids = scope.get("limitingWindowIds")
+            limits = [windows.get(key, {}) for key in window_ids] if isinstance(window_ids, list) else []
+            limit = ", ".join(str(window.get("label") or window.get("id")) for window in limits) or "unknown"
+            reset = ", ".join(str(window.get("resetsAt") or window.get("resetText") or "unknown")
+                              for window in limits) or "unknown"
+            runway_info = scope.get("runway")
+            runway = runway_info.get("status") if isinstance(runway_info, dict) else "unknown"
+            runway = runway or "unknown"
+            title = name if scope.get("scope") == "all_models" else f"{name} / {scope.get('scope')}"
+            detail = f"limit: {limit}; reset: {reset}; runway: {runway}; observed: {age_label}"
+            rows.append(item(title, detail, f"{percent:g}% left · {age_label}",
+                             alert=runway == "projected_exhaustion"))
+        if scopes:
+            continue
+        credits = provider.get("credits")
+        credits = credits if isinstance(credits, dict) else {}
+        remaining = credits.get("remaining")
+        if isinstance(remaining, (int, float)):
+            unit = credits.get("unit") or "credits"
+            credit_window = next((window for window in windows.values()
+                                  if window.get("kind") == "credits"), next(iter(windows.values()), {}))
+            limit = credit_window.get("label") or credit_window.get("id") or "unknown"
+            reset = credit_window.get("resetsAt") or credit_window.get("resetText") or "unknown"
+            detail = f"limit: {limit}; reset: {reset}; runway: unknown; observed: {age_label}"
+            rows.append(item(name, detail,
+                             f"{remaining:g} {unit} · {age_label}"))
+        else:
+            state_info = provider.get("state")
+            state = state_info.get("status") if isinstance(state_info, dict) else "unavailable"
+            state = state or "unavailable"
+            unavailable.append(f"{name}: {state}")
+    if unavailable:
+        rows.append(item(f"{len(unavailable)} providers unavailable",
+                         "\n".join(unavailable) + f"\nobserved: {age_label}", "unavailable"))
+    return rows
+
+
 def watcher_alert():
     beat = STATE / ".last-watcher-beat"
     try:
@@ -235,7 +391,7 @@ def project(snapshot):
             alerts.append(item(f"{task.get('id', 'worker')}: {name}",
                                str(phase.get("note", "")), name, alert=True,
                                item_id=str(task.get("id", ""))))
-    phones = entries(cache, "phones")
+    phones = phone_entries(cache)
     for phone in phones:
         if phone["status"] in ("locked", "unavailable"):
             alerts.append(item(f"Phone {phone['title']} {phone['status']}",
@@ -263,18 +419,26 @@ def project(snapshot):
         "full_backlog": full_backlog(),
         "ready": ready,
         "phones": phones,
+        "playbot_workers": playbot_workers(),
         "test_queue": entries(cache, "test_queue"),
         "landings": landed_today(snapshot) + entries(cache, "landings"),
         "builds": entries(cache, "builds"),
         "routines": entries(cache, "routines"),
         "bugs": entries(cache, "bugs"),
         "backlog": backlog,
-        "allowance": entries(cache, "allowance"),
+        "allowance": quota_entries() + entries(cache, "allowance"),
         "cached_at": str(cache.get("observed_at", "")),
     }
 
 
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == "--refresh-allowance":
+        refresh_allowance()
+        return
+    if len(sys.argv) == 2 and sys.argv[1] == "--allowance-loop":
+        while True:
+            refresh_allowance()
+            time.sleep(300)
     if len(sys.argv) != 2:
         raise SystemExit("usage: fm-crew-board-panels.py <fleet-snapshot.json>")
     snapshot = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))

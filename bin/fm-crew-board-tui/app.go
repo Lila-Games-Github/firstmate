@@ -2,13 +2,14 @@ package main
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/harmonica"
 )
 
 type panelSpec struct{ id, title string }
@@ -23,9 +24,10 @@ var pages = [][]panelSpec{
 }
 
 var pageNames = []string{"NOW", "TESTING", "PLANNING", "QUESTIONS"}
+var questionLabelPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+)\.`)
 
 type tickMsg time.Time
-type motionMsg time.Time
+type motionMsg struct{}
 type refreshedMsg struct {
 	data board
 	feed []item
@@ -42,35 +44,32 @@ type focusMsg struct {
 }
 
 type app struct {
-	paths                    paths
-	data                     board
-	feed                     []item
-	width, height            int
-	page                     int
-	focus                    string
-	selected                 map[string]int
-	expanded                 map[string]int
-	collapsed                map[string]bool
-	filters                  map[string]string
-	peekText                 map[string]string
-	scrollOffset             map[string]int
-	peekLoading              string
-	input                    textinput.Model
-	inputActive              bool
-	filterInput              textinput.Model
-	filterActive             bool
-	commandMode              bool
-	help                     bool
-	pendingG, pendingZ       bool
-	spinner                  spinner.Model
-	notice                   string
-	lastRefresh              time.Time
-	refreshing               bool
-	spring                   harmonica.Spring
-	focusSize, focusVelocity float64
-	slide, slideVelocity     float64
-	animating                bool
-	lastRects                []panelRect
+	paths                 paths
+	data                  board
+	feed                  []item
+	width, height         int
+	page                  int
+	focus                 string
+	selected              map[string]int
+	expanded              map[string]int
+	collapsed             map[string]bool
+	filters               map[string]string
+	peekText              map[string]string
+	scrollOffset          map[string]int
+	peekLoading           string
+	input                 textinput.Model
+	inputActive           bool
+	filterInput           textinput.Model
+	filterActive          bool
+	commandMode           bool
+	help                  bool
+	pendingG, pendingZ    bool
+	spinner               spinner.Model
+	notice                string
+	lastRefresh           time.Time
+	refreshing            bool
+	lastRects             []panelRect
+	slide, slideDirection int
 }
 
 func newApp(p paths, data board, feed []item) *app {
@@ -87,8 +86,6 @@ func newApp(p paths, data board, feed []item) *app {
 		selected: map[string]int{}, expanded: map[string]int{}, collapsed: map[string]bool{},
 		filters: map[string]string{}, peekText: map[string]string{}, scrollOffset: map[string]int{},
 		input: input, filterInput: filter, spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		spring:    harmonica.NewSpring(harmonica.FPS(30), 8, 0.8),
-		focusSize: 0.68,
 	}
 }
 
@@ -97,7 +94,12 @@ func (m *app) Init() tea.Cmd {
 }
 func tick() tea.Cmd { return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }) }
 func motionTick() tea.Cmd {
-	return tea.Tick(time.Second/30, func(t time.Time) tea.Msg { return motionMsg(t) })
+	return tea.Tick(35*time.Millisecond, func(time.Time) tea.Msg { return motionMsg{} })
+}
+
+func (m *app) beginTransition(direction int) {
+	m.slide = 2
+	m.slideDirection = direction
 }
 
 func (m *app) refreshCmd() tea.Cmd {
@@ -158,13 +160,37 @@ func (m *app) rawItems(id string) []item {
 		return append(rows, back.Next...)
 	case "workers":
 		workers := m.data.liveWorkers()
+		order := map[string]int{}
+		for _, worker := range workers {
+			project := worker.Project
+			if project == "" {
+				project = "unknown project"
+			}
+			if _, exists := order[project]; !exists {
+				order[project] = len(order)
+			}
+		}
+		sort.SliceStable(workers, func(i, j int) bool {
+			left, right := workers[i].Project, workers[j].Project
+			if left == "" {
+				left = "unknown project"
+			}
+			if right == "" {
+				right = "unknown project"
+			}
+			return order[left] < order[right]
+		})
 		rows := make([]item, 0, len(workers))
 		for _, worker := range workers {
+			project := worker.Project
+			if project == "" {
+				project = "unknown project"
+			}
 			detail := worker.Note
 			if worker.PRURL != "" {
 				detail += "\nPR: " + worker.PRURL
 			}
-			rows = append(rows, item{ID: worker.ID, Title: worker.Project + " / " + worker.Title,
+			rows = append(rows, item{ID: worker.ID, Group: project, Title: project + " / " + worker.Title,
 				Detail: strings.TrimSpace(detail), Status: worker.Phase, Link: worker.PRURL})
 		}
 		return rows
@@ -197,6 +223,24 @@ func (m *app) focusedItem() *item {
 	return &selected
 }
 
+func (m *app) selectedQuestion() *item {
+	if m.focus != "questions" && m.focus != "full_questions" {
+		return nil
+	}
+	row := m.focusedItem()
+	if row == nil || row.Status == "section" {
+		return nil
+	}
+	return row
+}
+
+func questionLabel(title string) string {
+	if match := questionLabelPattern.FindStringSubmatch(title); match != nil {
+		return match[1]
+	}
+	return title
+}
+
 func (m *app) alertCount(page int) int {
 	count := 0
 	for _, spec := range pages[page] {
@@ -218,15 +262,7 @@ func (m *app) setPage(page int) {
 	if page == 0 {
 		m.focus = "workers"
 	}
-	m.beginMotion()
-}
-
-func (m *app) beginMotion() {
-	m.focusSize = 0.48
-	m.focusVelocity = 0
-	m.slide = 6
-	m.slideVelocity = 0
-	m.animating = true
+	m.beginTransition(1)
 }
 
 func (m *app) changeFocus(step int) {
@@ -240,65 +276,17 @@ func (m *app) changeFocus(step int) {
 	}
 	index = (index + step + len(list)) % len(list)
 	m.focus = list[index].id
-	m.beginMotion()
+	m.beginTransition(step)
 }
 
-// moveFocusSpatial follows the panel positions currently shown on screen.
 func (m *app) moveFocusSpatial(dx, dy int) {
-	if len(m.lastRects) == 0 {
-		_ = m.View()
-	}
-	var current panelRect
-	found := false
-	for _, rect := range m.lastRects {
-		if rect.id == m.focus {
-			current, found = rect, true
-			break
-		}
-	}
-	if !found {
+	if dx != 0 {
+		m.changeFocus(dx)
 		return
 	}
-	anchorY := current.y + 1 + m.selected[m.focus]
-	best, bestDistance := "", int(^uint(0)>>1)
-	for _, rect := range m.lastRects {
-		if rect.id == m.focus {
-			continue
-		}
-		gap, offset := 0, 0
-		switch {
-		case dx > 0:
-			gap = rect.x - (current.x + current.width)
-			offset = absInt(2*rect.y + rect.height - 2*anchorY)
-		case dx < 0:
-			gap = current.x - (rect.x + rect.width)
-			offset = absInt(2*rect.y + rect.height - 2*anchorY)
-		case dy > 0:
-			gap = rect.y - (current.y + current.height)
-			offset = absInt(2*rect.x + rect.width - 2*current.x - current.width)
-		case dy < 0:
-			gap = current.y - (rect.y + rect.height)
-			offset = absInt(2*rect.x + rect.width - 2*current.x - current.width)
-		}
-		if gap < 0 {
-			continue
-		}
-		distance := gap*1000 + offset
-		if distance < bestDistance {
-			best, bestDistance = rect.id, distance
-		}
+	if dy != 0 {
+		m.changeFocus(dy)
 	}
-	if best != "" {
-		m.focus = best
-		m.beginMotion()
-	}
-}
-
-func absInt(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
 }
 
 func (m *app) moveSelection(step int) {
@@ -372,14 +360,6 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(commands...)
-	case motionMsg:
-		m.focusSize, m.focusVelocity = m.spring.Update(m.focusSize, m.focusVelocity, 0.68)
-		m.slide, m.slideVelocity = m.spring.Update(m.slide, m.slideVelocity, 0)
-		if abs(m.focusSize-0.68) < 0.01 && abs(m.slide) < 0.1 {
-			m.focusSize, m.slide, m.animating = 0.68, 0, false
-			return m, nil
-		}
-		return m, motionTick()
 	case refreshedMsg:
 		m.refreshing = false
 		if msg.err != nil {
@@ -416,15 +396,47 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		var command tea.Cmd
 		m.spinner, command = m.spinner.Update(msg)
 		return m, command
+	case motionMsg:
+		if m.slide > 0 {
+			m.slide--
+			if m.slide > 0 {
+				return m, motionTick()
+			}
+		}
+		return m, nil
 	case tea.MouseClickMsg:
 		for _, rect := range m.lastRects {
 			if msg.X >= rect.x && msg.X < rect.x+rect.width && msg.Y >= rect.y && msg.Y < rect.y+rect.height {
-				m.focus = rect.id
-				m.beginMotion()
-				if msg.Y > rect.y+1 {
-					m.selected[rect.id] = min(max(0, msg.Y-rect.y-2), max(0, len(m.items(rect.id))-1))
+				if rect.id != m.focus {
+					return m, nil
 				}
-				return m, motionTick()
+				innerWidth := max(1, rect.width-4)
+				if msg.Y == rect.y+1 {
+					if id := m.subTabAt(msg.X-rect.x-1, innerWidth); id != "" && id != m.focus {
+						direction := 1
+						for _, spec := range pages[m.page] {
+							if spec.id == id {
+								direction = -1
+								break
+							}
+							if spec.id == m.focus {
+								break
+							}
+						}
+						m.focus = id
+						m.beginTransition(direction)
+						return m, motionTick()
+					}
+					return m, nil
+				}
+				if msg.Y >= rect.y+3 && !m.collapsed[rect.id] {
+					_, owners := m.panelLines(panelSpec{id: rect.id}, innerWidth)
+					line := msg.Y - rect.y - 3 + m.panelOffset(panelSpec{id: rect.id}, innerWidth, rect.height, owners)
+					if line >= 0 && line < len(owners) && owners[line] >= 0 {
+						m.selected[rect.id] = owners[line]
+					}
+				}
+				return m, nil
 			}
 		}
 	case tea.KeyPressMsg:
@@ -471,6 +483,9 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					text = strings.TrimPrefix(text, ":")
 				}
 				selected := m.focusedItem()
+				if question := m.selectedQuestion(); question != nil && strings.TrimSpace(text) != "" {
+					text = fmt.Sprintf("Reply [%s]: %s\nAnswer: %s", questionLabel(question.Title), question.Title, text)
+				}
 				m.input.Reset()
 				m.input.Blur()
 				m.inputActive = false
@@ -502,7 +517,10 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "1", "2", "3", "4":
 			m.setPage(int(key[0] - '1'))
-			return m, motionTick()
+			if m.slide > 0 {
+				return m, motionTick()
+			}
+			return m, nil
 		case "tab":
 			m.changeFocus(1)
 			return m, motionTick()
@@ -517,27 +535,39 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, motionTick()
 		case "down", "j":
 			m.moveSelection(1)
-			return m, motionTick()
+			if m.slide > 0 {
+				return m, motionTick()
+			}
+			return m, nil
 		case "up", "k":
 			m.moveSelection(-1)
-			return m, motionTick()
+			if m.slide > 0 {
+				return m, motionTick()
+			}
+			return m, nil
 		case "ctrl+d":
 			for range 5 {
 				m.moveSelection(1)
+			}
+			if m.slide > 0 {
+				return m, motionTick()
 			}
 			return m, nil
 		case "ctrl+u":
 			for range 5 {
 				m.moveSelection(-1)
 			}
+			if m.slide > 0 {
+				return m, motionTick()
+			}
 			return m, nil
 		case "ctrl+f":
-			if m.page == 3 {
+			if m.focus == "questions" || m.focus == "full_questions" || m.focus == "full_backlog" {
 				m.scrollOffset[m.focus] += max(1, m.height/3)
 			}
 			return m, nil
 		case "ctrl+b":
-			if m.page == 3 {
+			if m.focus == "questions" || m.focus == "full_questions" || m.focus == "full_backlog" {
 				m.scrollOffset[m.focus] = max(0, m.scrollOffset[m.focus]-max(1, m.height/3))
 			}
 			return m, nil
@@ -573,6 +603,15 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterInput.SetValue(m.filters[m.focus])
 			return m, m.filterInput.Focus()
 		case "i":
+			m.inputActive = true
+			m.commandMode = false
+			m.input.Reset()
+			return m, m.input.Focus()
+		case "r":
+			if m.selectedQuestion() == nil {
+				m.notice = "Select a question to reply"
+				return m, nil
+			}
 			m.inputActive = true
 			m.commandMode = false
 			m.input.Reset()

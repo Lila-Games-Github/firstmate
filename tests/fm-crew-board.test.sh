@@ -83,7 +83,7 @@ test_tui_render_and_note() {
   local home result
   home=$(make_home tui)
   result=$(python3 "$HARNESS" "$BOARD" "$home") || fail "terminal harness failed: $result"
-  assert_equals 0 "$(jq -r '.exit' <<< "$result")" "TUI exit"
+  assert_equals 0 "$(jq -r '.exit' <<< "$result")" "TUI exit: $(jq -c '.errors' <<< "$result")"
   assert_equals true "$(jq -r '.workers and .feed and .row and .phase' <<< "$result")" "worker/feed rendering"
   assert_equals true "$(jq -r '.counts' <<< "$result")" "phase counts"
   assert_equals true "$(jq -r '.input' <<< "$result")" "note input rendering"
@@ -102,8 +102,8 @@ test_narrow_terminal() {
   home=$(make_home narrow)
   result=$(TUI_TEST_WIDTH=55 TUI_TEST_HEIGHT=18 python3 "$HARNESS" "$BOARD" "$home") \
     || fail "narrow terminal harness failed: $result"
-  assert_equals true "$(jq -r '.workers and .feed and .counts and .input' <<< "$result")" \
-    "stacked panels did not retain counts and input"
+  assert_equals true "$(jq -r '.workers and .counts and .input' <<< "$result")" \
+    "narrow active panel did not retain counts and input"
   assert_contains "$(jq -r '.note' <<< "$result")" 'Note: why so slow?' "narrow note input lost text"
   pass "a narrow terminal stacks both panels and retains note input"
 }
@@ -129,6 +129,7 @@ test_panel_projection_and_launcher() {
   cat > "$home/data/captain-questions.md" <<'EOF'
 # Open questions
 
+## Decisions
 - Which release should ship?
   Blocks the Android build.
 EOF
@@ -138,7 +139,7 @@ EOF
   run_board "$home" refresh >/dev/null || fail "panel refresh failed"
   assert_equals 1 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" "question count"
   assert_contains "$(jq -r '.panels.questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "question blocker"
-  assert_equals 'S22' "$(jq -r '.panels.phones[0].title' "$home/state/crew-board.json")" "phone cache"
+  assert_equals 1 "$(jq '[.panels.phones[] | select(.title == "S22")] | length' "$home/state/crew-board.json")" "phone cache"
   assert_equals 2 "$(jq '.panels.backlog.in_flight' "$home/state/crew-board.json")" "in-flight count from tasks-axi"
   assert_equals 'Rocketboard login bug' "$(jq -r '.panels.bugs[0].title' "$home/state/crew-board.json")" "bug cache"
   install_dir="$home/local-bin"
@@ -148,6 +149,137 @@ EOF
   result=$(PATH="$install_dir:$PATH" command -v firstmate)
   assert_equals "$install_dir/firstmate" "$result" "launcher not on test PATH"
   pass "local panel cache, captain questions, tasks-axi backlog, and one-word launcher"
+}
+
+test_local_phones_and_cache_overlay() {
+  local home stub
+  home=$(make_home phones)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two device product:red model:Galaxy_S22 device:red\nserial-three unauthorized\nserial-four offline\n'
+EOF
+  chmod +x "$stub/adb"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone refresh failed"
+  assert_equals 4 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "adb phone count"
+  assert_equals 'Pixel 8' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .title' "$home/state/crew-board.json")" "adb model"
+  assert_equals 'serial-one' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .detail' "$home/state/crew-board.json")" "adb serial detail"
+  assert_equals 'unauthorized' "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .status' "$home/state/crew-board.json")" "unauthorized state"
+  assert_equals 'offline' "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .status' "$home/state/crew-board.json")" "offline state"
+  cat > "$home/data/crew-board-cache.json" <<'EOF'
+{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-one","title":"Old title","status":"locked","detail":"held by worker"},{"title":"Galaxy S22","status":"busy","detail":"reserved"},{"title":"Cache only","status":"ready","detail":"manual"}]}
+EOF
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone overlay refresh failed"
+  assert_equals 5 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "merged phone count"
+  assert_equals 'locked' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .status' "$home/state/crew-board.json")" "serial overlay"
+  assert_equals 'held by worker' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .detail' "$home/state/crew-board.json")" "overlay detail"
+  assert_equals 'busy' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .status' "$home/state/crew-board.json")" "title overlay"
+  rm "$stub/adb" "$home/data/crew-board-cache.json"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "missing adb refresh failed"
+  assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "missing adb phone count"
+  pass "local adb phones, unavailable states, cache overlay, and missing adb"
+}
+
+test_bold_question_paragraphs() {
+  local home
+  home=$(make_home bold_questions)
+  cat > "$home/data/captain-questions.md" <<'EOF'
+# Open questions
+This preamble is not a question.
+
+---
+
+## Your decisions
+**UIX. Prototype vs Claude Design UI: four calls.** Source: design review.
+The full decision needs a longer explanation on its own line.
+
+**OPS. Release timing.** Choose the release window.
+
+---
+
+## For Tarun
+- Can we use the staging phone?
+  Production stays locked.
+EOF
+  run_board "$home" refresh >/dev/null || fail "bold question refresh failed"
+  assert_equals 3 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" "bold and bullet questions"
+  assert_equals 'UIX. Prototype vs Claude Design UI: four calls.' "$(jq -r '.panels.questions[0].title' "$home/state/crew-board.json")" "bold label title"
+  assert_contains "$(jq -r '.panels.questions[0].detail' "$home/state/crew-board.json")" 'The full decision needs a longer explanation' "full question paragraph"
+  assert_equals 5 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "section rows and questions"
+  assert_not_contains "$(jq -r '[.panels.questions[].detail] | join(" ")' "$home/state/crew-board.json")" 'This preamble' "preamble leaked"
+  pass "bold-led question paragraphs and bullet questions are readable"
+}
+
+test_quota_allowance_snapshot() {
+  local home stub source
+  home=$(make_home quota)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  source="$home/quota.json"
+  cat > "$source" <<'EOF'
+{"providers":[{"provider":"claude","windows":[{"id":"seven_day","label":"week","resetsAt":"tomorrow"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":70,"limitingWindowIds":["seven_day"],"runway":{"status":"through_reset"}}]}},{"provider":"codex","windows":[{"id":"weekly","label":"week","resetsAt":"Friday"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":17,"limitingWindowIds":["weekly"],"runway":{"status":"projected_exhaustion"}}]}},{"provider":"openrouter","credits":{"remaining":27.3,"unit":"usd"},"quotaSemantics":{"effectiveAvailability":[]}},{"provider":"cursor","state":{"status":"auth_required"},"quotaSemantics":{"effectiveAvailability":[]}}]}
+EOF
+  cat > "$stub/quota-axi" <<'EOF'
+#!/usr/bin/env bash
+printf 'called\n' >> "$FM_HOME/quota-calls"
+if [ "${QUOTA_FAIL:-}" = 1 ]; then exit 1; fi
+cat "$QUOTA_OUTPUT"
+EOF
+  chmod +x "$stub/quota-axi"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_OUTPUT="$source" PATH="$stub:/usr/bin:/bin" \
+    python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota snapshot failed"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
+  assert_equals 1 "$(wc -l < "$home/quota-calls")" "fast refresh called quota"
+  assert_equals 4 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "allowance provider rows"
+  assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "codex") | .alert' "$home/state/crew-board.json")" "projected exhaustion alert"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: tomorrow' "quota reset"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .status' "$home/state/crew-board.json")" '27.3 usd' "credit balance"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .detail' "$home/state/crew-board.json")" 'runway: unknown' "credit runway"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.status == "unavailable") | .detail' "$home/state/crew-board.json")" 'cursor: auth_required' "unavailable provider"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_FAIL=1 PATH="$stub:/usr/bin:/bin" \
+    python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota failure crashed"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "stale quota refresh failed"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'stale' "last good quota not marked stale"
+  pass "quota allowance uses a slow structured snapshot and keeps the last good result"
+}
+
+test_playbot_lane_projection() {
+  local home
+  command -v node >/dev/null 2>&1 || { echo "skip: node unavailable for Playbot lane projection"; return; }
+  home=$(make_home playbot_lanes)
+  mkdir -p "$home/playbot"
+  python3 - "$home" <<'PY'
+import hashlib, pathlib, sqlite3, sys
+home = pathlib.Path(sys.argv[1])
+db = sqlite3.connect(home / "playbot" / "playbot.db")
+db.executescript("""
+CREATE TABLE projects (id TEXT, name TEXT);
+CREATE TABLE workspaces (id TEXT, project_id TEXT, name TEXT, kind TEXT, is_selected INTEGER, archive_state TEXT);
+CREATE TABLE workspace_threads (id TEXT, title TEXT, workspace_id TEXT, session_id TEXT, agent_status TEXT,
+ pending_queue_json TEXT, has_unread INTEGER, is_active INTEGER, archived INTEGER, approval_mode TEXT,
+ plan_mode TEXT, last_user_activity_at TEXT, created_at TEXT, updated_at TEXT, position INTEGER);
+INSERT INTO projects VALUES ('project-live', 'rocketboard');
+INSERT INTO workspaces VALUES ('space-live', 'project-live', 'Workspace', 'normal', 0, 'active');
+INSERT INTO workspace_threads VALUES ('thread-live', 'Implement launch', 'space-live', '', 'working', '[]', 0, 1, 0, '', '', '', '', '2026-10-21T09:00:00Z', 0);
+INSERT INTO workspace_threads VALUES ('thread-stale', 'Finished work', 'space-live', '', 'ready', '[]', 0, 1, 0, '', '', '', '', '2026-10-21T09:00:00Z', 1);
+""")
+db.commit()
+db.close()
+for task, thread, armed in [('lane-live', 'thread-live', True), ('lane-stale', 'thread-stale', True), ('lane-orphan', 'thread-live', False)]:
+    key = 'sha256:' + hashlib.sha256(thread.encode()).hexdigest()
+    (home / 'state' / f'{task}.lane-poll').write_text(f'fm-playbot-lane-poll-v8\nworking\n2026-10-21T09:00:00Z\ndelivered\n' + 'a'*32 + f'\nnone\nnone\n{key}\n')
+    if armed:
+        check = b'#!/usr/bin/env bash\n# fm-playbot-lane-supervision-poll v1\n'
+        (home / 'state' / f'{task}.check.sh').write_bytes(check)
+        (home / 'state' / f'{task}.check-trust').write_text('fm-custom-check-v1\n' + hashlib.sha256(check).hexdigest() + '\n')
+PY
+  PLAYBOT_DESKTOP_DIR="$home/playbot" run_board "$home" refresh >/dev/null || fail "Playbot lane refresh failed"
+  PLAYBOT_DESKTOP_DIR="$home/playbot" run_board "$home" refresh >/dev/null || fail "second Playbot lane refresh failed"
+  assert_equals 1 "$(jq '[.rows[] | select(.kind == "playbot" and (.gone | not))] | length' "$home/state/crew-board.json")" "live Playbot lane count"
+  assert_equals 'rocketboard' "$(jq -r '.rows[] | select(.kind == "playbot" and (.gone | not)) | .project' "$home/state/crew-board.json")" "Playbot project"
+  assert_contains "$(jq -r '.rows[] | select(.kind == "playbot" and (.gone | not)) | .title' "$home/state/crew-board.json")" '[Playbot]' "Playbot marker"
+  pass "armed live Playbot lane joins ordinary workers without stale sidecars"
 }
 
 test_full_questions_and_backlog() {
@@ -222,4 +354,8 @@ test_tui_render_and_note
 test_narrow_terminal
 test_note_without_selection_and_point_without_text
 test_panel_projection_and_launcher
+test_local_phones_and_cache_overlay
+test_bold_question_paragraphs
+test_quota_allowance_snapshot
+test_playbot_lane_projection
 test_full_questions_and_backlog

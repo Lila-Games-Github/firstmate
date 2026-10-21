@@ -6,7 +6,7 @@
 // caller without one is an external terminal that dispatches without a lane
 // and supervises by polling.
 //
-// This executable has twelve entry points:
+// This executable has thirteen entry points:
 //   serve             Run the stdio MCP server.
 //   call              Invoke one MCP tool from a terminal and print the same
 //                     result object the stdio transport returns.
@@ -16,6 +16,7 @@
 //   supervision-poll  Report one dispatched worker's persisted state as the
 //                     firstmate watcher check that dispatch armed for it.
 //   lane-task-state   Read a lane metadata record's persisted worker state.
+//   board-lanes       Read current, trusted Playbot lanes for the crew board.
 //   lane-task-retirable  Refuse local record cleanup while its worker or queue
 //                     is active or unreadable; prove archived or unconfirmed
 //                     work against the project clone and landing branch.
@@ -5141,6 +5142,46 @@ function supervisionReadSidecar(state, taskId) {
   };
 }
 
+// A bounded, read-only projection for the crew board. An armed check and its
+// observed-state sidecar identify a dispatched lane; Playbot's current thread
+// row decides whether that lane is still live.
+function boardLanes(state) {
+  let threads;
+  try { threads = threadRows(); } catch { return []; }
+  let names;
+  try { names = fs.readdirSync(state); } catch { return []; }
+  const rows = [];
+  for (const name of names.filter((value) => value.endsWith(".lane-poll"))) {
+    const taskId = name.slice(0, -".lane-poll".length);
+    if (!supervisionTaskIdValid(taskId)) continue;
+    const check = path.join(state, `${taskId}.check.sh`);
+    const trust = path.join(state, `${taskId}.check-trust`);
+    try {
+      if (!fs.lstatSync(check).isFile() || !fs.lstatSync(trust).isFile()) continue;
+      const bytes = fs.readFileSync(check);
+      const binding = `fm-custom-check-v1\n${crypto.createHash("sha256").update(bytes).digest("hex")}\n`;
+      if (fs.readFileSync(trust, "utf8") !== binding
+        || !supervisionCheckIsOurs(bytes.toString("utf8"))) continue;
+    } catch { continue; }
+    const record = supervisionReadSidecar(state, taskId);
+    if (!record?.threadKey) continue;
+    const thread = threads.find((row) => supervisionThreadKey(row.thread_id) === record.threadKey);
+    if (!thread || thread.archived || thread.archive_state !== "active") continue;
+    const delivery = record.deliveryState;
+    const status = String(thread.agent_status ?? "unknown");
+    if (["failed", "recalled"].includes(delivery)) continue;
+    if (status !== "working" && !["queued", "sending", "recall-pending", "unconfirmed"].includes(delivery)) continue;
+    const since = Date.parse(thread.updated_at ?? "");
+    rows.push({
+      id: taskId, kind: "playbot", project: thread.project_name || "unknown project",
+      title: `[Playbot] ${thread.title || taskId}`, phase: status === "working" ? "working" : delivery,
+      phase_since: Number.isFinite(since) ? Math.floor(since / 1000) : Math.floor(Date.now() / 1000),
+      note: `Playbot lane ${delivery}`, pr_url: null, endpoint: "playbot", gone: false, left_at: null,
+    });
+  }
+  return rows;
+}
+
 function supervisionCheckLockAcquire(state, taskId, taskRecord = false) {
   const helper = path.join(path.dirname(supervisionSelfScript()), "fm-check-publish-lock.sh");
   return new Promise((resolve, reject) => {
@@ -7107,6 +7148,7 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs addon-guard verify|check-index|reset <ref>|stash [--all|--include-untracked] [--message text]",
     "  fm-playbot-lanes.mjs lane-task-state <task.meta> [state-dir]",
     "  fm-playbot-lanes.mjs lane-task-retirable <task.meta> [state-dir]",
+    "  fm-playbot-lanes.mjs board-lanes <state-dir>",
     "",
     `MCP tools: ${toolDefinitions().map((tool) => tool.name).join(", ")}`,
   ].join("\n");
@@ -7266,6 +7308,10 @@ async function main() {
     return;
   }
   if (command === "supervision-poll") return await supervisionPoll(process.argv.slice(3));
+  if (command === "board-lanes") {
+    if (process.argv.length !== 4) throw new Error("board-lanes requires one state directory");
+    return console.log(JSON.stringify(boardLanes(process.argv[3])));
+  }
   if (command === "lane-task-state" || command === "lane-task-retirable") {
     const landedVia = process.argv[5] === "--landed-via" && command === "lane-task-retirable" && process.argv.length === 7
       ? process.argv[6] : null;

@@ -60,6 +60,27 @@ func TestBoardRowsAndCountsRender(t *testing.T) {
 	}
 }
 
+func TestHeaderShowsHomeAndTabState(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Home = "firstmate"
+	m.data.Panels.Alerts = []item{{Title: "Needs attention", Alert: true}}
+	header := m.header()
+	if strings.Contains(header, "//  firstmate") || !strings.Contains(header, "WORKERS 2") {
+		t.Fatalf("primary header has duplicate home or no worker count: %q", header)
+	}
+	active := lipgloss.NewStyle().Foreground(background).Background(yellow).Bold(true).Render(" 1 NOW ")
+	badge := lipgloss.NewStyle().Foreground(background).Background(red).Bold(true).Render(" 1 ")
+	if !strings.Contains(header, active) || !strings.Contains(header, badge) {
+		t.Fatal("active tab or red alert badge missing")
+	}
+	m.data.Home = "secondmate"
+	m.page = 1
+	header = m.header()
+	if !strings.Contains(header, "FIRSTMATE  //  secondmate") || strings.Contains(header, active) {
+		t.Fatal("secondmate home or changed active tab missing")
+	}
+}
+
 func TestAllPagesRenderLocalPanels(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.Phones = []item{{Title: "S22", Status: "locked", Alert: true}}
@@ -98,10 +119,13 @@ func TestQuestionsPageShowsBothFullPanels(t *testing.T) {
 	}
 	press(m, key('4'))
 	view := m.View().Content
-	for _, value := range []string{"CAPTAIN QUESTIONS", "BACKLOG", "Which device?", "Build widget [widget]"} {
+	for _, value := range []string{"CAPTAIN QUESTIONS", "BACKLOG", "Which device?"} {
 		if !strings.Contains(view, value) {
 			t.Fatalf("questions page missing %q", value)
 		}
+	}
+	if strings.Contains(view, "Build widget [widget]") {
+		t.Fatal("inactive backlog row appeared on the questions sub-tab")
 	}
 	press(m, key('j'))
 	press(m, key('j'))
@@ -130,9 +154,45 @@ func TestQuestionsPageShowsBothFullPanels(t *testing.T) {
 	}
 }
 
+func TestQuestionsPageFocusCueFollowsPanel(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.FullQuestions = []item{{Title: "Which device?"}}
+	m.data.Panels.FullBacklog = []item{{Title: "Build widget"}}
+	m.selected["full_questions"] = 0
+	m.selected["full_backlog"] = 0
+	press(m, key('4'))
+	questions := pages[3][0]
+	backlog := pages[3][1]
+	before := m.View().Content
+	questionFocused := m.renderFocused(questions, 60, 22)
+	backlogUnfocused := m.renderFocused(backlog, 60, 22)
+	if !strings.Contains(before, "Which device?") || strings.Contains(before, "Build widget") {
+		t.Fatal("questions page did not isolate the active panel")
+	}
+	press(m, special(tea.KeyTab))
+	after := m.View().Content
+	questionUnfocused := m.renderFocused(questions, 60, 22)
+	backlogFocused := m.renderFocused(backlog, 60, 22)
+	if m.focus != "full_backlog" || before == after || !strings.Contains(after, "Build widget") || strings.Contains(after, "Which device?") {
+		t.Fatal("moving focus did not change the multi-panel view")
+	}
+	if questionFocused == questionUnfocused || backlogFocused == backlogUnfocused {
+		t.Fatal("panel border and title did not change with focus")
+	}
+	for _, id := range []string{"full_questions", "full_backlog"} {
+		m.focus = id
+		focused := m.rowLine(id, m.items(id)[0], 0, 40)
+		m.focus = "other"
+		unfocused := m.rowLine(id, m.items(id)[0], 0, 40)
+		if focused == unfocused {
+			t.Errorf("%s selected row has no focus cue", id)
+		}
+	}
+}
+
 func TestCollapseAndNarrowLayout(t *testing.T) {
 	m := fixtureApp(t)
-	if collapsedHeight(0) != 1 || collapsedHeight(2) != 3 {
+	if collapsedHeight(0) != 4 || collapsedHeight(2) != 4 {
 		t.Fatal("wrong collapse heights")
 	}
 	press(m, key(' '))
@@ -150,7 +210,7 @@ func TestCollapseAndNarrowLayout(t *testing.T) {
 	}
 	m.width, m.height = 55, 18
 	view := m.View().Content
-	for _, text := range []string{"WORKERS", "FEED", "NOTE [all]"} {
+	for _, text := range []string{"WORKERS", "NOTE [all]"} {
 		if !strings.Contains(view, text) {
 			t.Errorf("narrow render missing %q", text)
 		}
@@ -166,7 +226,7 @@ func TestViewFitsTerminal(t *testing.T) {
 			m.slide = 0
 			switch mode {
 			case "motion":
-				m.beginMotion()
+				m.beginTransition(1)
 			case "help":
 				m.help = true
 			case "filter":
@@ -236,7 +296,7 @@ func TestVimKeys(t *testing.T) {
 		t.Fatal("o did not close selected row")
 	}
 	press(m, key('l'))
-	if m.focus != "alerts" {
+	if m.focus != "questions" {
 		t.Fatalf("l focus = %s", m.focus)
 	}
 	_ = m.View()
@@ -302,34 +362,264 @@ func TestFeedShowsLatestFirstmateAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestFeedSkipsInternalFilesAndDatesOnlyNewestLine(t *testing.T) {
+	m := fixtureApp(t)
+	for name, body := range map[string]string{
+		"alpha.status":            "working: started\nphase: testing - suite\n",
+		".startup-network.status": "state=done\npid=123\n",
+	} {
+		if err := os.WriteFile(filepath.Join(m.paths.State, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	feed, err := readFeed(m.paths.State)
+	if err != nil || len(feed) != 2 {
+		t.Fatalf("feed should contain only two task events: %v, %v", feed, err)
+	}
+	if feed[0].Status != "" || feed[1].Status == "" ||
+		!strings.Contains(feed[0].Title, "started") || !strings.Contains(feed[1].Title, "testing") {
+		t.Fatalf("feed assigned an inaccurate time or order: %v", feed)
+	}
+}
+
 func TestSpatialPanelNavigation(t *testing.T) {
 	m := fixtureApp(t)
 	press(m, key('j'))
 	_ = m.View()
 	press(m, key('l'))
-	if m.focus != "alerts" {
-		t.Fatalf("right chose %s instead of the visible adjacent panel", m.focus)
+	if m.focus != "questions" {
+		t.Fatalf("right chose %s instead of the next sub-tab", m.focus)
 	}
 	_ = m.View()
 	press(m, key('h'))
 	if m.focus != "workers" {
-		t.Fatal("left did not focus the visible panel to the left")
+		t.Fatal("left did not focus the previous sub-tab")
 	}
 	m.width = 55
 	m.focus = "workers"
 	m.selected["workers"] = 1
 	_ = m.View()
 	press(m, key('l'))
-	if m.focus != "workers" {
-		t.Fatal("right moved in a one-column layout")
+	if m.focus != "questions" {
+		t.Fatal("right did not step through the sub-tabs in a one-column layout")
 	}
+	m.focus = "workers"
 	press(m, key('j'))
-	if m.focus != "alerts" {
-		t.Fatalf("j at row edge moved to %s, want panel below", m.focus)
+	if m.focus != "questions" {
+		t.Fatalf("j at row edge moved to %s, want next panel", m.focus)
 	}
 	press(m, key('k'))
 	if m.focus != "workers" {
-		t.Fatalf("k in empty panel moved to %s, want panel above", m.focus)
+		t.Fatalf("k in empty panel moved to %s, want previous panel", m.focus)
+	}
+}
+
+func TestSubTabsStayAboveFixedLargePanel(t *testing.T) {
+	m := fixtureApp(t)
+	for page := 0; page < 4; page++ {
+		m.page = page
+		m.focus = pages[page][0].id
+		strip := m.subTabs(200)
+		last := -1
+		for _, spec := range pages[page] {
+			index := strings.Index(strip, spec.title)
+			if index <= last {
+				t.Fatalf("page %d sub-tabs out of order: %q", page, strip)
+			}
+			last = index
+		}
+		active := lipgloss.NewStyle().Foreground(background).Background(yellow).Bold(true).
+			Render(" " + pages[page][0].title + " ")
+		if !strings.Contains(strip, active) {
+			t.Fatalf("page %d has no active sub-tab", page)
+		}
+		_ = m.View()
+		first := m.lastRects[0]
+		positions := map[string]int{}
+		for _, rect := range m.lastRects[1:] {
+			positions[rect.id] = rect.y
+		}
+		press(m, key('l'))
+		_ = m.View()
+		second := m.lastRects[0]
+		if m.focus != pages[page][1].id || first.x != second.x || first.width != second.width {
+			t.Fatalf("page %d large panel moved or skipped sub-tab", page)
+		}
+		for _, rect := range m.lastRects[1:] {
+			if before, ok := positions[rect.id]; ok && before != rect.y {
+				t.Fatalf("page %d summary %s moved from %d to %d", page, rect.id, before, rect.y)
+			}
+		}
+		if !strings.Contains(m.subTabs(200), lipgloss.NewStyle().Foreground(background).
+			Background(yellow).Bold(true).Render(" "+pages[page][1].title+" ")) {
+			t.Fatalf("page %d active cue did not move", page)
+		}
+	}
+}
+
+func TestEverySubTabReachableByArrows(t *testing.T) {
+	m := fixtureApp(t)
+	for page, specs := range pages {
+		m.page, m.focus = page, specs[0].id
+		for index := 1; index < len(specs); index++ {
+			press(m, key('l'))
+			if m.focus != specs[index].id {
+				t.Fatalf("page %d right skipped %s", page, specs[index].id)
+			}
+		}
+		for index := len(specs) - 2; index >= 0; index-- {
+			press(m, key('h'))
+			if m.focus != specs[index].id {
+				t.Fatalf("page %d left skipped %s", page, specs[index].id)
+			}
+		}
+	}
+}
+
+func TestNarrowTabStripKeepsFocusedTabVisible(t *testing.T) {
+	m := fixtureApp(t)
+	m.width, m.height = 55, 18
+	m.focus = "feed"
+	if !strings.Contains(m.View().Content, "FEED") {
+		t.Fatal("focused FEED sub-tab was clipped at narrow width")
+	}
+	m.page, m.focus = 3, "full_backlog"
+	view := m.View().Content
+	if !strings.Contains(view, "4 QUESTIONS") || !strings.Contains(view, "BACKLOG") {
+		t.Fatal("focused QUESTIONS page or BACKLOG sub-tab was clipped")
+	}
+}
+
+func TestSummaryCardsAndEmptyFocusedPanel(t *testing.T) {
+	m := fixtureApp(t)
+	empty := m.renderCompact(panelSpec{"phones", "PHONES"}, 40)
+	m.data.Panels.Landings = []item{{Title: "Release A"}, {Title: "Release B"}}
+	filled := m.renderCompact(panelSpec{"landings", "TODAY'S LANDINGS"}, 40)
+	m.data.Panels.Alerts = []item{{Title: "Device locked", Alert: true}}
+	alert := m.renderCompact(panelSpec{"alerts", "ALERTS"}, 40)
+	for _, card := range []string{empty, filled, alert} {
+		if len(strings.Split(card, "\n")) != 4 || !strings.Contains(card, "latest:") {
+			t.Fatalf("summary is not a uniform two-line card: %q", card)
+		}
+	}
+	if !strings.Contains(empty, "none") || !strings.Contains(filled, "2 landed") ||
+		!strings.Contains(filled, "latest: Release B") || !strings.Contains(alert, "1 alerts") {
+		t.Fatal("summary labels or latest item missing")
+	}
+	m.page, m.focus = 1, "phones"
+	emptyFull := m.renderFocused(panelSpec{"phones", "PHONES"}, 80, 22)
+	m.data.Panels.Phones = []item{{Title: "Pixel 8"}}
+	filledFull := m.renderFocused(panelSpec{"phones", "PHONES"}, 80, 22)
+	if len(strings.Split(emptyFull, "\n")) != len(strings.Split(filledFull, "\n")) ||
+		!strings.Contains(emptyFull, "No phones connected") {
+		t.Fatal("empty focused panel did not keep its full-size slot")
+	}
+}
+
+func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Rows = append(m.data.Rows, worker{ID: "gamma", Kind: "playbot", Project: "widget",
+		Title: "[Playbot] UI review", Phase: "working"})
+	rows := m.items("workers")
+	lines, owners := m.panelLines(panelSpec{id: "workers"}, 80)
+	joined := strings.Join(lines, "\n")
+	for _, value := range []string{"WIDGET  2 workers", "GADGET  1 worker", "[Playbot] UI review"} {
+		if !strings.Contains(joined, value) {
+			t.Fatalf("project grouping missing %q", value)
+		}
+	}
+	if len(rows) != 3 || owners[0] != -1 || !strings.Contains(panelSummary(panelSpec{id: "workers", title: "WORKERS"}, rows, 80), "widget 2") {
+		t.Fatal("headings became selectable or summary lost project counts")
+	}
+	for index := range rows {
+		press(m, key('j'))
+		if m.selected["workers"] != index {
+			t.Fatalf("j selected %d, want worker %d", m.selected["workers"], index)
+		}
+	}
+}
+
+func TestQuestionReplyAndFullDetail(t *testing.T) {
+	m := fixtureApp(t)
+	m.page, m.focus = 0, "questions"
+	m.data.Panels.Questions = []item{{ID: "question-1", Title: "UIX. Prototype or design UI.",
+		Detail: "UIX. Prototype or design UI. " + strings.Repeat("Consider the detailed constraint. ", 25) + "Final decision needed."}}
+	m.selected["questions"] = 0
+	m.expanded["questions"] = 1
+	if !strings.Contains(m.detail("questions", m.data.Panels.Questions[0], 40), "Final") ||
+		!strings.Contains(m.detail("questions", m.data.Panels.Questions[0], 40), "needed.") {
+		t.Fatal("question detail was truncated")
+	}
+	if !strings.Contains(m.View().Content, "REPLY [UIX]") {
+		t.Fatal("question reply label missing")
+	}
+	for range 10 {
+		press(m, ctrl('f'))
+	}
+	if !strings.Contains(m.View().Content, "Final decision") {
+		t.Fatal("expanded question on NOW could not scroll to its end")
+	}
+	code := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(code, "bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ncat > \"$FM_HOME/reply.txt\"\n"
+	if err := os.WriteFile(filepath.Join(code, "bin", "fm-inbox.sh"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	m.paths.Code = code
+	press(m, key('r'))
+	if !m.inputActive {
+		t.Fatal("r did not open the reply input")
+	}
+	m.input.SetValue("Use the prototype")
+	command := press(m, special(tea.KeyEnter))
+	if command == nil {
+		t.Fatal("reply did not submit")
+	}
+	command()
+	message, err := os.ReadFile(filepath.Join(m.paths.Home, "reply.txt"))
+	if err != nil || !strings.Contains(string(message), "Reply [UIX]: UIX. Prototype or design UI.") ||
+		!strings.Contains(string(message), "Answer: Use the prototype") {
+		t.Fatalf("reply lost its question context: %q, %v", message, err)
+	}
+}
+
+func TestMouseSelectsDisplayedRowsAndTabs(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Rows[0].Note = "first detail\nsecond detail\nthird detail"
+	m.selected["workers"] = 0
+	m.expanded["workers"] = 1
+	_ = m.View()
+	rect := m.lastRects[0]
+	m.slide = 0
+	activeX := rect.x + 1 + lipgloss.Width(m.subTab(pages[0][0])) + 2
+	m.Update(tea.MouseClickMsg{X: activeX, Y: rect.y + 1})
+	if m.slide != 0 || m.focus != "workers" {
+		t.Fatal("clicking the active sub-tab started motion")
+	}
+	m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: rect.y + 3 + 8})
+	if m.selected["workers"] != 1 || m.slide != 0 {
+		_, owners := m.panelLines(panelSpec{id: "workers"}, rect.width-4)
+		t.Fatalf("click after expanded detail chose row %d or slide %d; owners=%v", m.selected["workers"], m.slide, owners)
+	}
+	m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: rect.y + 1})
+	if m.focus != "alerts" || m.slide == 0 {
+		t.Fatal("clicking another sub-tab did not focus and animate it")
+	}
+	m.focus, m.slide = "workers", 0
+	m.expanded["workers"] = 0
+	m.data.Rows = nil
+	for index := range 20 {
+		m.data.Rows = append(m.data.Rows, worker{ID: fmt.Sprintf("w%d", index), Title: fmt.Sprintf("Worker %d", index)})
+	}
+	m.selected["workers"] = 0
+	m.scrollOffset["workers"] = 15
+	_ = m.View()
+	rect = m.lastRects[0]
+	m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: rect.y + 3})
+	if m.selected["workers"] != 3 || m.slide != 0 {
+		t.Fatalf("click in scrolled panel selected row %d", m.selected["workers"])
 	}
 }
 
