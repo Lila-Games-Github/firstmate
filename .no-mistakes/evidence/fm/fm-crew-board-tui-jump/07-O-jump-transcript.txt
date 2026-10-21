@@ -1,0 +1,10 @@
+$ tmux list-clients  # before pressing O
+client session=board window=bash
+# pressed O on selected worker alpha (meta window=ship:fm-alpha)
+$ tmux list-clients  # after pressing O
+client session=ship window=fm-alpha
+# what the user's terminal now shows:
+WORKER ALPHA PANE: running test suite...
+
+# board footer:
+Focused worker alpha in tmux

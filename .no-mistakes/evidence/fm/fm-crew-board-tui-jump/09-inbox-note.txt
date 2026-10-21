@@ -1,0 +1,7 @@
+$ cat state/inbox/*.note
+id=1792572012-WOzJ2S
+at=2026-10-21T08:40:12Z
+source=text
+--
+Crew board item: alpha | widget / Build widget | testing
+Note: please prioritise the release decision
