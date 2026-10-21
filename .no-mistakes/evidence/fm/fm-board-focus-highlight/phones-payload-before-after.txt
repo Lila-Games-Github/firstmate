@@ -1,0 +1,43 @@
+# PHONES: 2 attached devices, panel was empty before this change
+
+## The machine the bug was reported from: adb is not on PATH, two phones are attached
+
+$ command -v adb
+(no output - not on PATH)
+
+$ /home/linuxbrew/.linuxbrew/bin/adb devices -l
+List of devices attached
+R5CT32HRVNM            device usb:3-3.2 product:r0qxxx model:SM_S901E device:r0q transport_id:2
+RZ8N71EC9ZB            device usb:3-3.3 product:m31nnxx model:SM_M315F device:m31 transport_id:1
+
+
+## BEFORE - base commit 534b7a6 panels projection on that same fleet snapshot
+$ python3 <534b7a6:bin/fm-crew-board-panels.py> /tmp/fm-ev/snapshot.json | jq -c "{phones: [.phones[].title], phone_count: (.phones|length)}"
+{"phones":[],"phone_count":0}
+
+## AFTER - target commit cfd5a2c
+$ python3 bin/fm-crew-board-panels.py /tmp/fm-ev/snapshot.json | jq -c "{phones: [.phones[] | {id, title, status, adb}], phone_count: (.phones|length)}"
+{"phones":[{"id":"R5CT32HRVNM","title":"SM S901E","status":"connected","adb":"device"},{"id":"RZ8N71EC9ZB","title":"SM M315F","status":"connected","adb":"device"}],"phone_count":2}
+
+## The published board payload the terminal reads
+$ bin/fm-crew-board.sh refresh && jq ".panels.phones" state/crew-board.json
+[
+  {
+    "id": "R5CT32HRVNM",
+    "title": "SM S901E",
+    "detail": "R5CT32HRVNM",
+    "status": "connected",
+    "link": "",
+    "alert": false,
+    "adb": "device"
+  },
+  {
+    "id": "RZ8N71EC9ZB",
+    "title": "SM M315F",
+    "detail": "RZ8N71EC9ZB",
+    "status": "connected",
+    "link": "",
+    "alert": false,
+    "adb": "device"
+  }
+]

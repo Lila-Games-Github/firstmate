@@ -1,0 +1,59 @@
+# How the board screenshots were produced
+
+The change under test was never modified in the worktree. Every build and every
+capture below ran from throwaway copies under /tmp.
+
+## 1. The target tree does not build
+
+    cd bin/fm-crew-board-tui && go build .
+    ./view.go:456:10: declared and not used: spec
+
+bin/fm-crew-board.sh tui -> build_tui_if_needed -> `go build` -> "Go crew board
+build failed", so the terminal board cannot start at commit cfd5a2c.
+
+## 2. Throwaway build of the target
+
+    cp -a bin/fm-crew-board-tui /tmp/fm-ev/tui-src
+    # in the copy only: `for _, spec := range list {` -> `for range list {`  (view.go:456)
+    go build -o /tmp/fm-ev/board-tui .
+
+That single binding removal is the only difference from the worktree sources
+(see compile-error-and-suite-failure.txt).
+
+## 3. Throwaway build of the base
+
+    git show 534b7a6:bin/fm-crew-board-tui/<file>  ->  /tmp/fm-ev/tui-base/<file>
+    cd /tmp/fm-ev/tui-base && go build -o /tmp/fm-ev/board-tui-base .
+
+The base board also needs the base projections, so /tmp/fm-ev/repo-base/bin holds
+symlinks to the worktree's scripts except for the two files this change rewrites
+(fm-crew-board.sh, fm-crew-board-panels.py), which come from 534b7a6.
+
+## 4. Fixture home
+
+    /tmp/fm-ev/home/{data/captain-questions.md,data/backlog.md,state/alpha.*,state/beta.*}
+
+Two questions, three backlog tasks (one captain hold, one external hold, one
+queued). The machine really has two Android phones attached and `adb` is not on
+PATH, which is the environment the phones bug was reported from.
+
+## 5. Capture
+
+    tmux -L fmev-<label> new-session -d -s board -x 120 -y 34 \
+      -e FM_HOME=... -e FM_STATE_OVERRIDE=... -e FM_DATA_OVERRIDE=... \
+      -e FM_CODE_ROOT=<repo|repo-base> -e FM_CREW_BOARD_ALLOWANCE_DISABLE=1 \
+      "env PATH=/tmp/fm-ev/stub-bin:/usr/bin:/bin <binary> run"
+
+    tmux send-keys '2'  -> capture-pane -p -e   (TESTING page, PHONES panel)
+    tmux send-keys '4' 'j'          -> capture   (QUESTIONS, focus CAPTAIN QUESTIONS)
+    tmux send-keys 'l' 'j'          -> capture   (QUESTIONS, focus BACKLOG)
+
+`capture-pane -p -e` writes the pane exactly as the terminal displays it, with
+colour escapes. The PNGs are those captures rendered with the SGR colours
+mapped back to RGB (256-colour palette, Noto Sans Mono), so the yellow focus
+highlight, the yellow cursor row and the red/green accents are what the captain
+sees. board-screens-plaintext.txt holds the same six screens with the escapes
+stripped, for reading in the PR.
+
+`stub-bin` contains only `node` and `tasks-axi` (needed for the BACKLOG panel);
+it deliberately does not contain `adb`, matching the reported environment.

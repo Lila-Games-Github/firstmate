@@ -1,0 +1,43 @@
+## 1. The change does not compile (target commit cfd5a2c)
+
+$ cd bin/fm-crew-board-tui && go build -o /tmp/probe .
+# github.com/Lila-Games-Github/firstmate/bin/fm-crew-board-tui
+./view.go:456:10: declared and not used: spec
+
+$ go test ./...
+# github.com/Lila-Games-Github/firstmate/bin/fm-crew-board-tui [github.com/Lila-Games-Github/firstmate/bin/fm-crew-board-tui.test]
+./view.go:456:10: declared and not used: spec
+FAIL	github.com/Lila-Games-Github/firstmate/bin/fm-crew-board-tui [build failed]
+FAIL
+
+## 2. So the board itself cannot start
+
+$ bash tests/fm-crew-board.test.sh    # run in the worktree, PATH includes go
+ok - payload uses worker reports and keeps time in the current phase
+ok - refresh preserves unchanged payloads and retains a departed worker
+not ok - TUI exit: ["fm-crew-board: Go crew board build failed\r"] (expected '0', got '1')
+
+## 3. With only that one binding removed (for _, spec := range list -> for range list),
+##    a throwaway copy of the tree builds and both suites pass
+
+$ go test ./...   (bin/fm-crew-board-tui, in a copy of the tree)
+ok  	github.com/Lila-Games-Github/firstmate/bin/fm-crew-board-tui	0.445s
+
+$ bash tests/fm-crew-board.test.sh   (in the same copy)
+ok - payload uses worker reports and keeps time in the current phase
+ok - refresh preserves unchanged payloads and retains a departed worker
+ok - terminal renders rows and phase counts, typed notes reach the captain inbox, and stop closes it
+ok - a narrow terminal stacks both panels and retains note input
+ok - plain notes and worker-only pointing reach the same captain inbox
+ok - local panel cache, captain questions, tasks-axi backlog, and one-word launcher
+ok - local adb phones, unavailable states, cache overlay, and missing adb
+ok - connected and unauthorized phone rows are told apart and alert the captain
+ok - adb resolves from PATH, the Android SDK variables and locations, and Linuxbrew
+ok - an unanswered phone check alerts with its reason instead of claiming no phones
+ok - bold-led question paragraphs and bullet questions are readable
+ok - questions count before the first heading and preamble prose is ignored
+ok - quota allowance uses a slow structured snapshot and keeps the last good result
+ok - unknown headroom and exhausted_now runways stay visible and alert
+ok - an unresolved limiting window reads unknown instead of None
+ok - armed live Playbot lane joins ordinary workers without stale sidecars
+ok - full questions and backlog parsers retain grouped entries, hold reasons, and notes

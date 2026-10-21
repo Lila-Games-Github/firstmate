@@ -1,0 +1,42 @@
+Evidence: crew board PHONES panel and QUESTIONS focus cue, on the real machine
+date: 2026-10-21T17:41:20+05:30   repo commit: eb41c29   base: 534b7a6
+
+1. adb is NOT on PATH in a non-login shell; two phones are attached:
+   $ command -v adb          -> (no output, exit 1)
+   confirmed: adb absent from PATH
+   $ /home/linuxbrew/.linuxbrew/bin/adb devices -l
+   List of devices attached
+   R5CT32HRVNM            device usb:3-3.2 product:r0qxxx model:SM_S901E device:r0q transport_id:2
+   RZ8N71EC9ZB            device usb:3-3.3 product:m31nnxx model:SM_M315F device:m31 transport_id:1
+   
+
+2. Same fleet snapshot projected by the base commit and by this change
+   (PATH deliberately without adb, so resolution has to use the Linuxbrew fallback):
+   $ python3 <base:bin/fm-crew-board-panels.py> snapshot.json | jq .phones
+   []
+   $ python3 bin/fm-crew-board-panels.py snapshot.json | jq .phones
+   [{"id":"R5CT32HRVNM","title":"SM S901E","detail":"R5CT32HRVNM","status":"connected","link":"","alert":false,"adb":"device"},{"id":"RZ8N71EC9ZB","title":"SM M315F","detail":"RZ8N71EC9ZB","status":"connected","link":"","alert":false,"adb":"device"}]
+
+3. Board payload written by the shipped launcher refresh (FM_HOME=<fixture home>):
+   $ bin/fm-crew-board.sh refresh && jq .panels.phones state/crew-board.json
+   refresh: changed
+   [{"id":"R5CT32HRVNM","title":"SM S901E","detail":"R5CT32HRVNM","status":"connected","link":"","alert":false,"adb":"device"},{"id":"RZ8N71EC9ZB","title":"SM M315F","detail":"RZ8N71EC9ZB","status":"connected","link":"","alert":false,"adb":"device"}]
+
+4. Screenshots (phones-panel-before-after.png, questions-focus-before-after.png,
+   questions-focus-toggle.gif) were captured from the real Go board running in a
+   tmux pane (140x36, and 60x20 for the narrow pair), then rendered from
+   'tmux capture-pane -p -e' output with the SGR colors preserved.
+   The QUESTIONS frames come from bin/fm-crew-board.sh tui; the PHONES frames come
+   from the binary that same command builds and runs ($state/.crew-board-tui-bin run)
+   with PATH=/tmp/.../stub-bin:/home/sanchith/.local/bin:/usr/bin:/bin, i.e. without
+   adb and without Linuxbrew, so the Linuxbrew fallback is what answers.
+   adb was the real platform-tools binary answering for both attached phones.
+   Only bin/fm-tasks-axi.sh's tasks-axi CLI was doubled (it is not installed here)
+   so the BACKLOG sub-tab had rows instead of 'Backlog unavailable'.
+
+5. The same cue was captured in a 60x20 pane (questions-focus-narrow-terminal.png), so a
+   small terminal shows it too.
+
+6. Focus cue, measured not eyeballed: with the clock masked out, the QUESTIONS page
+   screen is byte-identical before and after pressing Tab on the base commit, and
+   different on this change (see questions-focus-before-after.png / .gif).
