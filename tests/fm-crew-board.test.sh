@@ -179,6 +179,9 @@ EOF
 - [ ] beta - Pick release (repo: widget) (kind: captain) (since 2026-10-21) (hold: choose release A or B) (hold-kind: captain)
   Release A is stable; B has the new screen.
 
+- [ ] delta - Ship patch (repo: widget) (kind: ship) (since 2026-10-21) (hold: waiting on store review) (hold-kind: external) (hold-until: 2026-12-01)
+  Store review usually takes two days.
+
 ## Queued
 
 - [ ] gamma - Write tests (repo: gadget) (kind: ship)
@@ -193,7 +196,7 @@ EOF
   assert_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" \
     'The Android build is waiting.' 'full question text'
   assert_equals 4 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" 'Now page summary count'
-  assert_equals 6 "$(jq '.panels.full_backlog | length' "$home/state/crew-board.json")" 'backlog groups and items'
+  assert_equals 8 "$(jq '.panels.full_backlog | length' "$home/state/crew-board.json")" 'backlog groups and items'
   assert_equals 'HELD FOR THE CAPTAIN' \
     "$(jq -r '.panels.full_backlog[2].title' "$home/state/crew-board.json")" 'captain hold section'
   assert_contains "$(jq -r '.panels.full_backlog[3].title' "$home/state/crew-board.json")" \
@@ -202,6 +205,14 @@ EOF
     'Release A is stable; B has the new screen.' 'full backlog note'
   assert_not_contains "$(jq -r '.panels.full_backlog[3].title' "$home/state/crew-board.json")" \
     'beta' 'backlog title leaked its task id'
+  assert_equals 'HELD (OTHER)' \
+    "$(jq -r '.panels.full_backlog[4].title' "$home/state/crew-board.json")" 'other hold section'
+  assert_contains "$(jq -r '.panels.full_backlog[5].title' "$home/state/crew-board.json")" \
+    'waiting on store review' 'visible non-captain hold reason'
+  assert_contains "$(jq -r '.panels.full_backlog[5].detail' "$home/state/crew-board.json")" \
+    'Held until: 2026-12-01' 'non-captain hold until-date'
+  assert_equals 'QUEUED' \
+    "$(jq -r '.panels.full_backlog[6].title' "$home/state/crew-board.json")" 'queued section after holds'
   pass 'full questions and backlog parsers retain grouped entries, hold reasons, and notes'
 }
 

@@ -102,7 +102,7 @@ def tasks_axi_full(state):
     try:
         run = subprocess.run(
             [str(SCRIPT_DIR / "fm-tasks-axi.sh"), "list", "--state", state,
-             "--fields", "body,hold_reason,hold_kind"],
+             "--fields", "body,hold_reason,hold_kind,hold_until"],
             capture_output=True, text=True, timeout=3, check=False,
             env={**os.environ, "FM_HOME": str(HOME), "FM_DATA_OVERRIDE": str(DATA)},
         )
@@ -112,7 +112,7 @@ def tasks_axi_full(state):
         return None
     lines = run.stdout.splitlines()
     start = next((i for i, line in enumerate(lines) if re.match(
-        r"^tasks\[\d+\]\{id,state,kind,repo,title,body,hold_reason,hold_kind\}:$", line)), None)
+        r"^tasks\[\d+\]\{id,state,kind,repo,title,body,hold_reason,hold_kind,hold_until\}:$", line)), None)
     if start is None:
         return None
     end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("help[")), len(lines))
@@ -122,13 +122,14 @@ def tasks_axi_full(state):
         return None
     result = []
     for fields in records:
-        if len(fields) != 8:
+        if len(fields) != 9:
             continue
-        task_id, _, _, repo, title, body, reason, kind = fields
+        task_id, _, _, repo, title, body, reason, kind, until = fields
         result.append({"id": task_id, "repo": repo, "title": title,
                        "body": "" if body == "-" else body,
                        "reason": "" if reason == "-" else reason,
-                       "kind": kind})
+                       "kind": kind,
+                       "until": "" if until == "-" else until})
     return result
 
 
@@ -139,10 +140,12 @@ def full_backlog():
     if in_flight is None or held is None or queued is None:
         return [item("Backlog unavailable", "Could not read bin/fm-tasks-axi.sh", "error")]
     captain_held = [task for task in held if task["kind"] == "captain"]
-    held_ids = {task["id"] for task in captain_held}
+    other_held = [task for task in held if task["kind"] != "captain"]
+    held_ids = {task["id"] for task in held}
     groups = [
         ("IN FLIGHT", [task for task in in_flight if task["id"] not in held_ids]),
         ("HELD FOR THE CAPTAIN", captain_held),
+        ("HELD (OTHER)", other_held),
         ("QUEUED", [task for task in queued if task["id"] not in held_ids]),
     ]
     rows = []
@@ -152,7 +155,13 @@ def full_backlog():
             title = f"{task['title']} [{task['repo']}]" if task["repo"] not in ("", "-") else task["title"]
             if heading == "HELD FOR THE CAPTAIN" and task["reason"]:
                 title += f" - {task['reason']}"
+            elif heading == "HELD (OTHER)":
+                hold = task["reason"] or (f"until {task['until']}" if task["until"] else "")
+                if hold:
+                    title += f" - {hold}"
             detail = task["body"]
+            if task["until"]:
+                detail = (f"Held until: {task['until']}\n" + detail).strip()
             if task["reason"]:
                 detail = (f"Hold: {task['reason']}\n" + detail).strip()
             rows.append(item(title, detail, item_id=task["id"]))
