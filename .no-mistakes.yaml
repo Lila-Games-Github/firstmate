@@ -38,3 +38,8 @@ commands:
 test:
   evidence:
     store_in_repo: true
+
+# Opt in to bounded diff chunking for review so only large changes are split.
+# Must be 0 or greater than 500; honored only from the default-branch copy.
+review:
+  chunk_threshold_lines: 800
