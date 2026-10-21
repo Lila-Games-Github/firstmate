@@ -479,12 +479,6 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if len(key) == 1 && key[0] >= 'a' && key[0] <= 'z' {
-				m.inputActive = true
-				m.input.SetValue(key)
-				m.input.CursorEnd()
-				return m, m.input.Focus()
-			}
 		}
 	}
 	return m, nil

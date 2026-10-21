@@ -264,6 +264,30 @@ func TestFilterAndNoteFocus(t *testing.T) {
 	}
 }
 
+func TestStrayLetterSendsNothing(t *testing.T) {
+	m := fixtureApp(t)
+	code, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.paths.Code = code
+	for _, r := range "xwnd" {
+		press(m, key(r))
+		if m.inputActive {
+			t.Fatalf("%q opened note input", r)
+		}
+		if cmd := press(m, special(tea.KeyEnter)); cmd != nil {
+			cmd()
+		}
+	}
+	if files, _ := filepath.Glob(filepath.Join(m.paths.State, "inbox", "*.note")); len(files) != 0 {
+		t.Fatalf("stray letter sent notes: %v", files)
+	}
+	if _, err := os.Stat(filepath.Join(m.paths.State, ".wake-queue")); err == nil {
+		t.Fatal("stray letter woke firstmate")
+	}
+}
+
 func TestInboxNote(t *testing.T) {
 	m := fixtureApp(t)
 	code, err := filepath.Abs(filepath.Join("..", ".."))
