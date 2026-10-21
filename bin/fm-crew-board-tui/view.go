@@ -453,7 +453,7 @@ func (m *app) View() tea.View {
 		}
 	} else {
 		summaryHeight := 0
-		for _, spec := range list {
+		for range list {
 			if m.page != 3 {
 				summaryHeight += summaryCardHeight
 			}
