@@ -609,6 +609,25 @@ Task teardown supplies the acceptance-check label: `accepted` from `teardown-lan
 `bin/fm-jev-report.sh` treats only a use's positive label as the positive class - `accepted` for acceptance checks - counts every other label including `discarded` as negative, and reports rows still awaiting a label under `unlabelled`.
 No adapter writes an advisory to a task's status file, because a `note:` line there is a status event that would supersede a worker's terminal `done:` line and re-arm supervision's wedge aging for a finished task; advisories live in `data/<id>/acceptance.json`, `data/<id>/commit-lint.json`, and the `advisories:` section of `bin/fm-jev-report.sh`.
 
+## Live crew board
+
+Run `bin/fm-install-firstmate-cli.sh` to link `bin/firstmate` into `~/.local/bin`, then run `firstmate` from any working directory with that directory on `PATH`.
+Set `FM_HOME` when opening another firstmate home; the launcher otherwise uses the checkout containing its target.
+The terminal dashboard needs Go 1.27.2 or newer for its first build, plus `jq`, Python 3, and the existing fleet commands used by `bin/fm-crew-board.sh refresh`.
+It uses Bubble Tea, Lip Gloss, Bubbles, and Harmonica for a terminal interface with focus transitions, scrolling, text input, and activity animation; the Go source and module lockfile live under `bin/fm-crew-board-tui/`.
+The launcher builds a private binary in `state/.crew-board-tui-bin` when the Go source changes, and `bin/fm-crew-board.sh stop` closes the board for that home.
+Use `bin/fm-crew-board.sh --help` for the key map, `refresh` for the JSON payload, and `show` for a text view.
+
+The NOW page reads workers and phase counts from `state/crew-board.json`, questions from `data/captain-questions.md`, and a feed from worker status files.
+The TESTING page shows phones, test queue, landings, builds, and daily routines; PLANNING shows Rocketboard bugs, backlog, and AI allowance.
+The backlog panel reads local counts and next tasks through `bin/fm-tasks-axi.sh`; the remaining observations without a cheap local source may be supplied by a firstmate-maintained `data/crew-board-cache.json`.
+That optional file uses `{"schema":"fm-crew-board-cache.v1","observed_at":"<ISO 8601>","phones":[{"title":"S22","status":"locked","detail":"held by worker"}]}`.
+Its optional arrays are `alerts`, `ready`, `phones`, `test_queue`, `landings`, `builds`, `routines`, `bugs`, and `allowance`; each entry may have `id`, `title`, `detail`, `status`, `link`, and `alert` fields.
+Firstmate updates that cache from its normal work; the board refresh and terminal UI make no network request.
+An absent cache leaves those panels empty, and the terminal retains the last published board if a refresh fails.
+Typing a note with `i` or `:` and Enter sends it through `bin/fm-inbox.sh note` and wakes firstmate; selecting a row attaches its item ID and title to the same note.
+Expanded worker rows show a read-only tail from `bin/fm-peek.sh` for the selected worker.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.

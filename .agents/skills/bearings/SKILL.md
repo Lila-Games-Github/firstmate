@@ -6,7 +6,7 @@ description: >-
   Plain /bearings is chat-only by default, /bearings file explicitly writes the dated data/status-report-<YYYY-MM-DD>.md artifact, and /bearings lavish additionally builds and arms the interactive fleet board; live PR enrichment remains opt-in and composes with the other modes.
   Also use on a contributions check wake or when filing work linked to an upstream issue.
   Also load this skill's board-wake handling when a procevent lavish wake's source id matches the canonical source id of the stable bearings board path.
-  Also use when the captain asks for the live crew board (a live page of what each worker is doing), and on a procevent lavish wake whose source id matches the crew board path.
+  Also use when the captain asks for the live crew board (a terminal dashboard of what each worker is doing).
 user-invocable: true
 metadata:
   internal: true
@@ -145,20 +145,18 @@ Only the exact answer value `merge` authorizes a merge; an answer carrying a fre
 
 ## Crew board
 
-The crew board is the live companion to the fleet board: one Lavish page listing every worker of this home with its title, project, its own reported phase, how long it has been in that phase, and its latest note, updating in the browser as workers report.
+The crew board is the live terminal companion to the fleet board: it lists every active worker of this home with its title, project, its own reported phase, how long it has been in that phase, and a feed of status events.
 Workers report phases themselves with `phase:` status lines (`bin/fm-brief.sh` instructs them; `bin/fm-classify-lib.sh` owns the vocabulary and fold), and those lines never wake you.
-When the captain asks for it, run `bin/fm-crew-board.sh open` and give the captain the `remote_url` it prints, else its `url`; its header owns every mechanic, including the keeper that keeps the page current while the session stays open.
-Run it again whenever the captain wants the board back after closing it; it is idempotent.
-`bin/fm-crew-board.sh show` prints the same rows the captain sees, so read it before answering a question about the board.
-Opening it writes only the page, its payload record, and its source registration, and starts its keeper; it changes no task, backlog, or decision state.
+When the captain asks for it, run `bin/fm-crew-board.sh tui` in the terminal where the dashboard should appear; its header owns the controls and refresh behavior.
+The dashboard runs in the foreground until `q` or `bin/fm-crew-board.sh stop` closes it.
+`bin/fm-crew-board.sh show` prints the payload rows, including recently departed workers, so read it before answering a question about the board.
+Opening it writes only the payload and terminal process record; it changes no task, backlog, or decision state.
 
-### Handling a crew board wake
+### Handling a crew board note
 
-A crew board wake is a `procevent lavish <source-id> <sequence>` check wake whose source id equals `bin/fm-procevent-lavish.sh source-id "$(bin/fm-crew-board.sh path)"`; load `process-event-sources` and follow its contract for the result read and the handled acknowledgement.
-Each `crew-point` item is the captain pointing at one worker: its text is that row exactly as the captain saw it, and its prompt carries the captain's optional note.
-A plain annotation on a row is the same signal in the captain's own words.
-Treat both as the captain's attention on that worker: check its current state with `bin/fm-crew-state.sh <task-id>`, act on any instruction in the note under the normal authority rules, and answer the captain in chat about each pointed worker.
-Pointing is never a decision answer, merge word, or dispatch, and the crew board is never bound to the keyed-answer intake.
+The dashboard sends notes through `bin/fm-inbox.sh note`, which produces the ordinary `check: captain inbox note` wake.
+When that note names a selected worker, check its current state with `bin/fm-crew-state.sh <task-id>`, act on any instruction in the note under the normal authority rules, and answer the captain in chat.
+Selecting a worker is attention, never a decision answer, merge word, or dispatch.
 
 ## Chat-response contract
 

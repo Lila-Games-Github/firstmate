@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # fm-lavish-board-lib.sh - serve a stable Lavish board and keep its listener live.
 #
-# Sourced by the board builders (bin/fm-bearings-board.sh, bin/fm-crew-board.sh)
-# so the session-liveness proof and the listener guarantee have one owner. The
+# Sourced by the board builder (bin/fm-bearings-board.sh) so the
+# session-liveness proof and the listener guarantee have one owner. The
 # sourcing script defines SCRIPT_DIR (this repo's bin/) and a `fail <message>`
 # that prints and exits non-zero; every refusal below goes through it.
 #

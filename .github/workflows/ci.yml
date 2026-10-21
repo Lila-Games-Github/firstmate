@@ -68,12 +68,22 @@ jobs:
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
-    # Hang tripwire: the coverage guard is a seconds-long local computation.
+    # Hang tripwire: the coverage guard and the Go crew board build are each
+    # seconds-long (the whole job measured ~40s).
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - name: Prove complete regression partition
         run: bin/fm-test-run.sh --check-coverage
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: bin/fm-crew-board-tui/go.mod
+          cache-dependency-path: bin/fm-crew-board-tui/go.sum
+      - name: Build and test the crew board TUI
+        working-directory: bin/fm-crew-board-tui
+        run: |
+          go test ./...
+          go build ./...
 
   # Two duration-balanced portable parallel shards of the Phase 2 proven-isolated
   # set only. Composition owner: bin/fm-test-run.sh (docs/fm-test-portable-shards.md).
@@ -253,6 +263,13 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # fm-crew-board.test.sh belongs to portable serial shard 7 and builds
+      # the real Go TUI while driving it through a pseudo-terminal.
+      - uses: actions/setup-go@v6
+        if: matrix.shard == 7
+        with:
+          go-version-file: bin/fm-crew-board-tui/go.mod
+          cache-dependency-path: bin/fm-crew-board-tui/go.sum
       # The Pi extension tests read the installed Pi package's own types and
       # runtime, so without it they gate-skip and pass silently. It is a public
       # npm package and needs no credential, so CI can hold the real thing.
