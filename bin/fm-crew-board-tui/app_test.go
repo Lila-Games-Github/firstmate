@@ -558,6 +558,12 @@ func TestPhoneCardCountsOnlyConnectedDevices(t *testing.T) {
 	if card := m.renderCompact(spec, 60); !strings.Contains(card, "1 connected") || strings.Contains(card, "cached") {
 		t.Fatalf("phone card with one attached device reads: %q", card)
 	}
+	m.data.Panels.Phones = []item{{
+		Title: "Phone check", Detail: "adb was not found on PATH", Status: "unavailable", ADB: "unavailable", Alert: true,
+	}}
+	if card := m.renderCompact(spec, 60); !strings.Contains(card, "PHONES  unavailable") || strings.Contains(card, "connected") {
+		t.Fatalf("unanswered phone check reads: %q", card)
+	}
 }
 
 func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {

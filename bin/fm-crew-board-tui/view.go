@@ -82,11 +82,13 @@ func panelSummary(spec panelSpec, rows []item, width int) string {
 			count += " (" + strings.Join(parts, ", ") + ")"
 		}
 		if spec.id == "phones" {
-			connected, cached := 0, 0
+			connected, cached, unavailable := 0, 0, 0
 			for _, row := range rows {
 				switch row.ADB {
 				case "device":
 					connected++
+				case "unavailable":
+					unavailable++
 				case "":
 					cached++
 				}
@@ -94,6 +96,9 @@ func panelSummary(spec panelSpec, rows []item, width int) string {
 			count = fmt.Sprintf("%d %s", connected, nouns[spec.id])
 			if cached > 0 {
 				count += fmt.Sprintf(" (%d cached)", cached)
+			}
+			if unavailable > 0 {
+				count = "unavailable"
 			}
 		}
 		latest = "latest: " + rows[len(rows)-1].Title

@@ -177,9 +177,14 @@ EOF
   assert_equals 'held by worker' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .detail' "$home/state/crew-board.json")" "overlay detail"
   assert_equals 'busy' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .status' "$home/state/crew-board.json")" "normalized title overlay"
   assert_equals 0 "$(jq '[.panels.phones[] | select(.title == "Cache only" and .adb != null)] | length' "$home/state/crew-board.json")" "cache-only row marked attached"
-  rm "$stub/adb" "$home/data/crew-board-cache.json"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "missing adb refresh failed"
-  assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "missing adb phone count"
+  rm -f "$home/data/crew-board-cache.json"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\n'
+EOF
+  chmod +x "$stub/adb"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "device-free adb refresh failed"
+  assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "attached-phone-free adb"
   pass "local adb phones, unavailable states, cache overlay, and missing adb"
 }
 
@@ -226,6 +231,73 @@ EOF
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two offline" and .status == "offline")] | length' "$home/state/crew-board.json")" "offline alert under a cache status"
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two busy")] | length' "$home/state/crew-board.json")" "busy cache status is not an alert"
   pass "connected and unauthorized phone rows are told apart and alert the captain"
+}
+
+test_phone_adb_fallbacks() {
+  local home stub
+  home=$(make_home phone_fallbacks)
+  stub="$home/stub-bin"
+  mkdir -p "$stub" "$home/nohome" "$home/sdk/platform-tools" "$home/sdkroot/platform-tools" \
+    "$home/sdkhome/Android/Sdk/platform-tools" "$home/brew/bin"
+  write_adb() {
+    printf '#!/usr/bin/env bash\nprintf "List of devices attached\\n%s device product:blue model:Pixel_8 device:blue\\n"\n' "$2" > "$1"
+    chmod +x "$1"
+  }
+  write_adb "$stub/adb" serial-path
+  write_adb "$home/sdk/platform-tools/adb" serial-android-home
+  write_adb "$home/sdkroot/platform-tools/adb" serial-android-sdk-root
+  write_adb "$home/sdkhome/Android/Sdk/platform-tools/adb" serial-home-sdk
+  write_adb "$home/brew/bin/adb" serial-brew
+  PATH="$stub:/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
+    run_board "$home" refresh >/dev/null || fail "PATH adb refresh failed"
+  assert_equals 'serial-path' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb on PATH"
+  PATH="/usr/bin:/bin" ANDROID_HOME="$home/sdk" ANDROID_SDK_ROOT="$home/sdkroot" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
+    run_board "$home" refresh >/dev/null || fail "ANDROID_HOME adb refresh failed"
+  assert_equals 'serial-android-home' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under ANDROID_HOME"
+  PATH="/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/sdkroot" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
+    run_board "$home" refresh >/dev/null || fail "ANDROID_SDK_ROOT adb refresh failed"
+  assert_equals 'serial-android-sdk-root' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under ANDROID_SDK_ROOT"
+  PATH="/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/sdkhome" HOMEBREW_PREFIX="$home/nohome" \
+    run_board "$home" refresh >/dev/null || fail "HOME SDK adb refresh failed"
+  assert_equals 'serial-home-sdk' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under the home Android SDK"
+  PATH="/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/brew" \
+    run_board "$home" refresh >/dev/null || fail "Linuxbrew adb refresh failed"
+  assert_equals 'serial-brew' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb in Linuxbrew"
+  assert_equals 'device' "$(jq -r '.panels.phones[0].adb' "$home/state/crew-board.json")" "fallback adb reports a device"
+  pass "adb resolves from PATH, the Android SDK variables and locations, and Linuxbrew"
+}
+
+test_phone_check_unavailable() {
+  local home stub
+  home=$(make_home phone_unavailable)
+  stub="$home/stub-bin"
+  mkdir -p "$stub" "$home/nohome"
+  PATH="/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
+    run_board "$home" refresh >/dev/null || fail "unresolvable adb refresh failed"
+  assert_equals 1 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "one row when adb cannot be found"
+  assert_equals 'Phone check' "$(jq -r '.panels.phones[0].title' "$home/state/crew-board.json")" "unanswered check row"
+  assert_equals 'unavailable' "$(jq -r '.panels.phones[0].status' "$home/state/crew-board.json")" "unanswered check state"
+  assert_equals 'unavailable' "$(jq -r '.panels.phones[0].adb' "$home/state/crew-board.json")" "unanswered check marker"
+  assert_equals true "$(jq -r '.panels.phones[0].alert' "$home/state/crew-board.json")" "unanswered check alerts"
+  assert_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'adb was not found' "missing adb reason"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone check")] | length' "$home/state/crew-board.json")" "unanswered check reaches ALERTS"
+  printf '#!/usr/bin/env bash\nexit 3\n' > "$stub/adb"
+  chmod +x "$stub/adb"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "failing adb refresh failed"
+  assert_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'exited 3' "failed adb reason"
+  assert_equals 'unavailable' "$(jq -r '.panels.phones[0].adb' "$home/state/crew-board.json")" "failed adb row"
+  printf '#!/usr/bin/env bash\nsleep 6\n' > "$stub/adb"
+  chmod +x "$stub/adb"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "hanging adb refresh failed"
+  assert_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'did not answer within 2s' "timed-out adb reason"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\n'
+EOF
+  chmod +x "$stub/adb"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "empty adb refresh failed"
+  assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "adb that answers with no devices"
+  pass "an unanswered phone check alerts with its reason instead of claiming no phones"
 }
 
 test_bold_question_paragraphs() {
@@ -488,6 +560,8 @@ test_note_without_selection_and_point_without_text
 test_panel_projection_and_launcher
 test_local_phones_and_cache_overlay
 test_phone_connection_states
+test_phone_adb_fallbacks
+test_phone_check_unavailable
 test_bold_question_paragraphs
 test_questions_without_headings
 test_quota_allowance_snapshot

@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -208,14 +209,37 @@ def entries(cache, key):
     return rows
 
 
+def adb_binary():
+    found = shutil.which("adb")
+    if found:
+        return found
+    for root in (os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT"),
+                 str(Path.home() / "Android" / "Sdk")):
+        if not root:
+            continue
+        candidate = Path(root) / "platform-tools" / "adb"
+        if candidate.is_file():
+            return str(candidate)
+    homebrew = Path(os.environ.get("HOMEBREW_PREFIX") or "/home/linuxbrew/.linuxbrew") / "bin" / "adb"
+    if homebrew.is_file():
+        return str(homebrew)
+    return None
+
+
 def local_phones():
+    binary = adb_binary()
+    if binary is None:
+        return None, ("adb was not found on PATH, under ANDROID_HOME or ANDROID_SDK_ROOT, "
+                      "in ~/Android/Sdk, or in Linuxbrew")
     try:
-        run = subprocess.run(["adb", "devices", "-l"], capture_output=True,
+        run = subprocess.run([binary, "devices", "-l"], capture_output=True,
                              text=True, timeout=2, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return []
+    except subprocess.TimeoutExpired:
+        return None, f"{binary} devices -l did not answer within 2s"
+    except OSError as error:
+        return None, f"{binary} devices -l could not run: {error}"
     if run.returncode:
-        return []
+        return None, f"{binary} devices -l exited {run.returncode}"
     rows = []
     for line in run.stdout.splitlines():
         fields = line.split()
@@ -229,7 +253,7 @@ def local_phones():
                    alert=state != "device", item_id=serial)
         row["adb"] = state
         rows.append(row)
-    return rows
+    return rows, ""
 
 
 def normalized_phone_title(value):
@@ -243,8 +267,12 @@ def phone_entry_match(entry, row, by_serial):
 
 
 def phone_entries(cache):
+    rows, failure = local_phones()
+    if failure:
+        row = item("Phone check", failure, "unavailable", alert=True)
+        row["adb"] = "unavailable"
+        return [row]
     cached = entries(cache, "phones")
-    rows = local_phones()
     matched = [False] * len(rows)
     for by_serial in (True, False):
         for index, row in enumerate(rows):
@@ -428,6 +456,9 @@ def project(snapshot):
     phones = phone_entries(cache)
     for phone in phones:
         adb = phone.get("adb")
+        if adb == "unavailable":
+            alerts.append(item(phone["title"], phone["detail"], phone["status"], alert=True))
+            continue
         if adb in ("unauthorized", "offline"):
             alerts.append(item(f"Phone {phone['title']} {adb}",
                                f"adb reports {adb}, so the phone cannot take tests",
