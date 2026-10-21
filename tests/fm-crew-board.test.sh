@@ -230,6 +230,15 @@ EOF
   assert_equals 'offline' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .adb' "$home/state/crew-board.json")" "offline adb state kept under a cache status"
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two offline" and .status == "offline")] | length' "$home/state/crew-board.json")" "offline alert under a cache status"
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two busy")] | length' "$home/state/crew-board.json")" "busy cache status is not an alert"
+  rm -f "$home/data/crew-board-cache.json"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf "adb server version (41) doesn't match this client (39); killing...\n* daemon started successfully\nList of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-five offline\n"
+EOF
+  chmod +x "$stub/adb"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "banner adb refresh failed"
+  assert_equals 2 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "client banner lines are not devices"
+  assert_equals 0 "$(jq '[.panels.phones[] | select(.id == "adb")] | length' "$home/state/crew-board.json")" "version banner became a phone row"
   pass "connected and unauthorized phone rows are told apart and alert the captain"
 }
 
@@ -377,7 +386,7 @@ EOF
 test_quota_check_unavailable() {
   local home
   home=$(make_home quota_unavailable)
-  mkdir -p "$home/nohome"
+  mkdir -p "$home/nohome" "$home/stub-bin"
   PATH="/usr/bin:/bin" HOMEBREW_PREFIX="$home/nohome" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance \
     || fail "a missing quota-axi crashed the sampler"
@@ -390,6 +399,25 @@ test_quota_check_unavailable() {
   assert_equals true "$(jq -r '.panels.allowance[0].alert' "$home/state/crew-board.json")" "allowance check alerts"
   assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'quota-axi' "allowance check reason"
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Allowance check")] | length' "$home/state/crew-board.json")" "allowance check reaches ALERTS"
+  cat > "$home/empty.json" <<'EOF'
+{"providers":[]}
+EOF
+  cat > "$home/stub-bin/quota-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${QUOTA_FAIL:-}" = 1 ]; then exit 1; fi
+cat "$QUOTA_OUTPUT"
+EOF
+  chmod +x "$home/stub-bin/quota-axi"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_OUTPUT="$home/empty.json" \
+    PATH="$home/stub-bin:/usr/bin:/bin" python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance \
+    || fail "empty quota snapshot failed"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_FAIL=1 \
+    PATH="$home/stub-bin:/usr/bin:/bin" python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance \
+    || fail "a failing quota-axi crashed the sampler"
+  run_board "$home" refresh >/dev/null || fail "empty snapshot refresh failed"
+  assert_equals 1 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "one row for a snapshot without providers"
+  assert_not_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'no quota snapshot' "reason claimed no snapshot while one exists"
+  assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'quota-axi attempt failed' "failure age reason"
   pass "a sampler that never succeeded is visible instead of an empty allowance panel"
 }
 

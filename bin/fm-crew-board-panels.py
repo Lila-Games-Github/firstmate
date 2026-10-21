@@ -255,9 +255,13 @@ def local_phones():
     if run.returncode:
         return None, f"{binary} devices -l exited {run.returncode}"
     rows = []
+    listed = False
     for line in run.stdout.splitlines():
+        if line.startswith("List of devices"):
+            listed = True
+            continue
         fields = line.split()
-        if len(fields) < 2 or line.startswith("*") or line.startswith("List of devices"):
+        if not listed or len(fields) < 2 or line.startswith("*"):
             continue
         serial = fields[0]
         state = " ".join(fields[1:3]) if fields[1:3] == ["no", "permissions"] else fields[1]
@@ -267,6 +271,8 @@ def local_phones():
                    alert=state != "device", item_id=serial)
         row["adb"] = state
         rows.append(row)
+    if not listed:
+        return None, f"{binary} devices -l printed no device list"
     return rows, ""
 
 
@@ -426,7 +432,8 @@ def allowance_failure():
         age = max(0, int(time.time() - QUOTA_ERROR.stat().st_mtime))
     except OSError:
         return ""
-    return f"no quota snapshot is recorded; the last quota-axi attempt failed {age // 60}m ago"
+    unrecorded = "no quota snapshot is recorded; " if not QUOTA.is_file() else ""
+    return f"{unrecorded}the last quota-axi attempt failed {age // 60}m ago"
 
 
 def allowance_entries(cache):
