@@ -620,7 +620,7 @@ Use `bin/fm-crew-board.sh --help` for the key map, `refresh` for the JSON payloa
 
 The NOW page reads workers and phase counts from `state/crew-board.json`, questions from `data/captain-questions.md`, and a feed from worker status files.
 The TESTING page shows phones, test queue, landings, builds, and daily routines; PLANNING shows Rocketboard bugs, backlog, and AI allowance.
-The QUESTIONS page shows every open captain question grouped by its heading beside every in-flight, captain-held, and queued backlog item read through `bin/fm-tasks-axi.sh`; select a row and press Enter to read its full text, then use Ctrl-f/Ctrl-b to scroll long entries.
+The QUESTIONS page shows every open captain question grouped by its heading beside every in-flight, held, and queued backlog item read through `bin/fm-tasks-axi.sh`, with captain holds listed apart from other holds; select a row and press Enter to read its full text, then use Ctrl-f/Ctrl-b to scroll long entries.
 The backlog panel reads local counts and next tasks through `bin/fm-tasks-axi.sh`; the remaining observations without a cheap local source may be supplied by a firstmate-maintained `data/crew-board-cache.json`.
 That optional file uses `{"schema":"fm-crew-board-cache.v1","observed_at":"<ISO 8601>","phones":[{"title":"S22","status":"locked","detail":"held by worker"}]}`.
 Its optional arrays are `alerts`, `ready`, `phones`, `test_queue`, `landings`, `builds`, `routines`, `bugs`, and `allowance`; each entry may have `id`, `title`, `detail`, `status`, `link`, and `alert` fields.
