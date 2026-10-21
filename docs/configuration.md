@@ -233,8 +233,8 @@ That branch shares no history with code branches, so evidence never enters a pus
 The [`firstmate-coding-guidelines` skill](../.agents/skills/firstmate-coding-guidelines/SKILL.md#no-mistakes-test-configuration) owns why `commands.test` stays absent and targeted validation belongs to the evidence path.
 It also sets `review.chunk_threshold_lines: 800`, which turns on chunked review mode for a diff larger than that many changed lines.
 The split inside that mode follows the reviewer's fixed per-chunk patch budget, so a change that crosses the line threshold but stays under that budget is still reviewed as one chunk.
-The value must be 0 (disabled) or greater than 500, and no-mistakes honors it only from the default-branch copy.
-`commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; a pushed branch cannot change what the gate runs.
+The value must be 0 (disabled) or greater than 500.
+`commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; it reads the review chunk threshold from that same trusted copy, and a pushed branch cannot change what the gate runs either way.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
