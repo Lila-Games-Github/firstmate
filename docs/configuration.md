@@ -621,7 +621,8 @@ It uses Bubble Tea, Lip Gloss, and Bubbles for a terminal interface with focus t
 The launcher builds a private binary in `state/.crew-board-tui-bin` when the Go source changes, and `bin/fm-crew-board.sh stop` closes the board for that home.
 Use `bin/fm-crew-board.sh --help` for the key map, `refresh` for the JSON payload, and `show` for a text view.
 
-Each page shows its focused sub-tab as the large panel, marked by the highlighted border, the sub-tab strip, and the focus cue on its cursor row, and the page's other sub-tabs as summary cards beside or below it, except on QUESTIONS where one sub-tab fills the page.
+Each page shows its focused sub-tab as the large panel, marked by the highlighted border, the sub-tab strip, and the focus cue on its cursor row, and lists every sub-tab, the focused one included, as a summary card beside or below that panel; a terminal too short for both drops the cards, and QUESTIONS shows only its focused sub-tab.
+Clicking a summary card focuses that sub-tab with the same change animation as picking it from the sub-tab strip, while a click that lands outside every panel does nothing.
 The NOW page reads workers and phase counts from `state/crew-board.json`, questions from `data/captain-questions.md`, and a feed from worker status files.
 The TESTING page shows phones, test queue, landings, builds, and daily routines; PLANNING shows Rocketboard bugs, backlog, and AI allowance.
 The QUESTIONS page offers every open captain question grouped by its heading as its CAPTAIN QUESTIONS sub-tab and every in-flight, held, and queued backlog item read through `bin/fm-tasks-axi.sh` as its BACKLOG sub-tab, with captain holds listed apart from other holds; select a row and press Enter to read its full text, then use Ctrl-f/Ctrl-b to scroll long entries.

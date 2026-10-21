@@ -289,6 +289,25 @@ func (m *app) moveFocusSpatial(dx, dy int) {
 	}
 }
 
+func (m *app) focusSubTab(id string) bool {
+	if id == "" || id == m.focus {
+		return false
+	}
+	direction := 1
+	for _, spec := range pages[m.page] {
+		if spec.id == id {
+			direction = -1
+			break
+		}
+		if spec.id == m.focus {
+			break
+		}
+	}
+	m.focus = id
+	m.beginTransition(direction)
+	return true
+}
+
 func (m *app) moveSelection(step int) {
 	rows := m.items(m.focus)
 	if len(rows) == 0 {
@@ -408,23 +427,14 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		for _, rect := range m.lastRects {
 			if msg.X >= rect.x && msg.X < rect.x+rect.width && msg.Y >= rect.y && msg.Y < rect.y+rect.height {
 				if rect.id != m.focus {
+					if m.focusSubTab(rect.id) {
+						return m, motionTick()
+					}
 					return m, nil
 				}
 				innerWidth := max(1, rect.width-4)
 				if msg.Y == rect.y+1 {
-					if id := m.subTabAt(msg.X-rect.x-1, innerWidth); id != "" && id != m.focus {
-						direction := 1
-						for _, spec := range pages[m.page] {
-							if spec.id == id {
-								direction = -1
-								break
-							}
-							if spec.id == m.focus {
-								break
-							}
-						}
-						m.focus = id
-						m.beginTransition(direction)
+					if m.focusSubTab(m.subTabAt(msg.X-rect.x-1, innerWidth)) {
 						return m, motionTick()
 					}
 					return m, nil

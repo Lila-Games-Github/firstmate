@@ -277,9 +277,12 @@ def refresh_allowance():
         os.replace(temp, QUOTA)
         QUOTA_ERROR.unlink(missing_ok=True)
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        if temp is not None:
-            temp.unlink(missing_ok=True)
-        QUOTA_ERROR.touch()
+        try:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+            QUOTA_ERROR.touch()
+        except OSError:
+            pass
 
 
 def quota_entries():

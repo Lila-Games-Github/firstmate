@@ -181,6 +181,15 @@ build_tui_if_needed() {
   mv -f -- "$tmp" "$GO_BIN"
 }
 
+stop_allowance_sampler() {
+  local pid="${FM_CREW_BOARD_ALLOWANCE_PID:-}" cmdline
+  [ -n "$pid" ] || return 0
+  cmdline=$(ps -p "$pid" -o command= 2>/dev/null) || return 0
+  case "$cmdline" in *"fm-crew-board-panels.py --allowance-loop"*) ;; *) return 0 ;; esac
+  kill "$pid" 2>/dev/null || :
+  wait "$pid" 2>/dev/null || :
+}
+
 command_tui() {
   [ -t 0 ] && [ -t 1 ] || fail "tui requires an interactive terminal"
   command_refresh >/dev/null
@@ -189,7 +198,7 @@ command_tui() {
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       python3 "$SCRIPT_DIR/fm-crew-board-panels.py" --allowance-loop >/dev/null 2>&1 &
     FM_CREW_BOARD_ALLOWANCE_PID=$!
-    trap 'kill "$FM_CREW_BOARD_ALLOWANCE_PID" 2>/dev/null || :; wait "$FM_CREW_BOARD_ALLOWANCE_PID" 2>/dev/null || :' EXIT
+    trap stop_allowance_sampler EXIT
   fi
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_CODE_ROOT="$FM_ROOT" "$GO_BIN" run

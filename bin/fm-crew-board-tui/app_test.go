@@ -620,6 +620,37 @@ func TestMouseSelectsDisplayedRowsAndTabs(t *testing.T) {
 	}
 }
 
+func TestMouseFocusesSummaryCards(t *testing.T) {
+	for _, size := range [][2]int{{120, 30}, {55, 40}} {
+		m := fixtureApp(t)
+		m.width, m.height = size[0], size[1]
+		_ = m.View()
+		var card panelRect
+		for _, rect := range m.lastRects {
+			if rect.id != m.focus {
+				card = rect
+				break
+			}
+		}
+		if card.id == "" {
+			t.Fatalf("%dx%d layout recorded no summary card for an unfocused sub-tab", size[0], size[1])
+		}
+		m.Update(tea.MouseClickMsg{X: card.x + 2, Y: card.y + 1})
+		if m.focus != card.id {
+			t.Errorf("%dx%d click on the %s card focused %s instead", size[0], size[1], card.id, m.focus)
+		}
+		if m.slide == 0 {
+			t.Errorf("%dx%d click on the %s card did not animate the change", size[0], size[1], card.id)
+		}
+		m.slide = 0
+		_ = m.View()
+		m.Update(tea.MouseClickMsg{X: 0, Y: 0})
+		if m.focus != card.id || m.slide != 0 {
+			t.Errorf("%dx%d click outside every panel focused %s or animated", size[0], size[1], m.focus)
+		}
+	}
+}
+
 func TestFilterAndNoteFocus(t *testing.T) {
 	m := fixtureApp(t)
 	press(m, key('/'))
