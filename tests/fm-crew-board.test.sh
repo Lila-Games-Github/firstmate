@@ -129,7 +129,6 @@ test_panel_projection_and_launcher() {
   cat > "$home/data/captain-questions.md" <<'EOF'
 # Open questions
 
-## Decisions
 - Which release should ship?
   Blocks the Android build.
 EOF
@@ -338,6 +337,57 @@ PY
   pass "armed live Playbot lane joins ordinary workers without stale sidecars"
 }
 
+test_questions_without_headings() {
+  local home
+  home=$(make_home headingless)
+  cat > "$home/data/captain-questions.md" <<'EOF'
+# Open questions
+This preamble is not a question.
+
+- Which release should ship?
+  Blocks the Android build.
+
+**OPS. Release timing.** Choose the release window.
+The window needs one more line.
+EOF
+  run_board "$home" refresh >/dev/null || fail "heading-less question refresh failed"
+  assert_equals 2 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" "question count before any heading"
+  assert_equals 'Which release should ship?' "$(jq -r '.panels.questions[0].title' "$home/state/crew-board.json")" "bullet before any heading"
+  assert_equals 'OPS. Release timing.' "$(jq -r '.panels.questions[1].title' "$home/state/crew-board.json")" "bold paragraph before any heading"
+  assert_contains "$(jq -r '.panels.questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "bullet detail before any heading"
+  assert_contains "$(jq -r '.panels.questions[1].detail' "$home/state/crew-board.json")" 'The window needs one more line' "bold detail before any heading"
+  assert_not_contains "$(jq -r '[.panels.questions[].detail] | join(" ")' "$home/state/crew-board.json")" 'This preamble' "preamble leaked"
+  assert_equals 2 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "heading-less registers add no section rows"
+  pass "questions count before the first heading and preamble prose is ignored"
+}
+
+test_quota_unknown_headroom_and_exhaustion() {
+  local home stub source
+  home=$(make_home quota_unknown)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  source="$home/quota.json"
+  cat > "$source" <<'EOF'
+{"providers":[{"provider":"codex","state":{"status":"fresh"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","runway":{"status":"exhausted_now"}}]}},{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}},{"provider":"mistral","quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","runway":{"status":"through_reset"}}]}}]}
+EOF
+  cat > "$stub/quota-axi" <<'EOF'
+#!/usr/bin/env bash
+cat "$QUOTA_OUTPUT"
+EOF
+  chmod +x "$stub/quota-axi"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_OUTPUT="$source" PATH="$stub:/usr/bin:/bin" \
+    python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota snapshot failed"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
+  assert_equals 3 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "every provider keeps a row"
+  assert_equals 'exhausted now' "$(jq -r '.panels.allowance[] | select(.title == "codex") | .status' "$home/state/crew-board.json")" "unknown headroom that is exhausted now"
+  assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "codex") | .alert' "$home/state/crew-board.json")" "exhausted unknown headroom alerts"
+  assert_equals 'headroom unknown' "$(jq -r '.panels.allowance[] | select(.title == "mistral") | .status' "$home/state/crew-board.json")" "unknown headroom row"
+  assert_equals false "$(jq -r '.panels.allowance[] | select(.title == "mistral") | .alert' "$home/state/crew-board.json")" "unknown headroom alone is not an alert"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .status' "$home/state/crew-board.json")" '0% left' "exhausted scope kept its percent"
+  assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "claude") | .alert' "$home/state/crew-board.json")" "exhausted now alerts"
+  pass "unknown headroom and exhausted_now runways stay visible and alert"
+}
+
 test_full_questions_and_backlog() {
   local home
   home=$(make_home full_page)
@@ -413,6 +463,8 @@ test_panel_projection_and_launcher
 test_local_phones_and_cache_overlay
 test_phone_connection_states
 test_bold_question_paragraphs
+test_questions_without_headings
 test_quota_allowance_snapshot
+test_quota_unknown_headroom_and_exhaustion
 test_playbot_lane_projection
 test_full_questions_and_backlog

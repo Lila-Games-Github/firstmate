@@ -43,7 +43,6 @@ def question_entries(path):
     if not path.is_file():
         return []
     rows = []
-    section = None
     entry = []
 
     def flush():
@@ -59,13 +58,10 @@ def question_entries(path):
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("## "):
             flush()
-            section = line[3:].strip()
-            rows.append(item(section.upper(), status="section"))
+            rows.append(item(line[3:].strip().upper(), status="section"))
             continue
         if line.strip() == "---":
             flush()
-            continue
-        if section is None:
             continue
         bold = re.match(r"^\*\*(.+?)\*\*", line)
         if bold:
@@ -328,25 +324,33 @@ def quota_entries():
         semantics = provider.get("quotaSemantics")
         scopes = semantics.get("effectiveAvailability") if isinstance(semantics, dict) else []
         scopes = scopes if isinstance(scopes, list) else []
+        scoped = 0
+        exhausted = False
         for scope in scopes:
             if not isinstance(scope, dict):
                 continue
+            runway_info = scope.get("runway")
+            runway = runway_info.get("status") if isinstance(runway_info, dict) else "unknown"
+            runway = runway or "unknown"
             percent = scope.get("effectivePercentRemaining")
             if not isinstance(percent, (int, float)):
+                exhausted = exhausted or runway == "exhausted_now"
                 continue
             window_ids = scope.get("limitingWindowIds")
             limits = [windows.get(key, {}) for key in window_ids] if isinstance(window_ids, list) else []
             limit = ", ".join(str(window.get("label") or window.get("id")) for window in limits) or "unknown"
             reset = ", ".join(str(window.get("resetsAt") or window.get("resetText") or "unknown")
                               for window in limits) or "unknown"
-            runway_info = scope.get("runway")
-            runway = runway_info.get("status") if isinstance(runway_info, dict) else "unknown"
-            runway = runway or "unknown"
             title = name if scope.get("scope") == "all_models" else f"{name} / {scope.get('scope')}"
             detail = f"limit: {limit}; reset: {reset}; runway: {runway}; observed: {age_label}"
             rows.append(item(title, detail, f"{percent:g}% left · {age_label}",
-                             alert=runway == "projected_exhaustion"))
+                             alert=runway in ("projected_exhaustion", "exhausted_now")))
+            scoped += 1
         if scopes:
+            if not scoped:
+                runway = "exhausted_now" if exhausted else "unknown"
+                rows.append(item(name, f"limit: unknown; reset: unknown; runway: {runway}; observed: {age_label}",
+                                 "exhausted now" if exhausted else "headroom unknown", alert=exhausted))
             continue
         credits = provider.get("credits")
         credits = credits if isinstance(credits, dict) else {}
