@@ -37,8 +37,21 @@ EOF
 run_board() {
   local home=$1
   shift
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$BOARD" "$@"
+  FM_CREW_BOARD_PHONE_QUEUE_ROOT="${FM_CREW_BOARD_PHONE_QUEUE_ROOT:-$home/locks}" \
+    FROGPILE_SUITE_LOCK="${FROGPILE_SUITE_LOCK:-$home/locks/frogpile-suite.lock}" \
+    FROGPILE_SUITE_LOCK_HOLDER="${FROGPILE_SUITE_LOCK_HOLDER:-$home/locks/suite.holder}" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$BOARD" "$@"
 }
+
+run_panels() {
+  local home=$1
+  FM_CREW_BOARD_PHONE_QUEUE_ROOT="$home/locks" FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" \
+    FROGPILE_SUITE_LOCK_HOLDER="$home/locks/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" python3 "$ROOT/bin/fm-crew-board-panels.py" "$2"
+}
+
+# Starts a sleeping process whose working directory is $1 and prints its pid.
+sleeper_in() { (cd "$1" && exec sleep 60) >/dev/null 2>&1 & printf '%s\n' "$!"; }
 
 row_field() { jq -r --arg id "$2" --arg f "$3" '.rows[] | select(.id == $id) | .[$f]' "$1/state/crew-board.json"; }
 set_mtime() { perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"; }
@@ -536,6 +549,131 @@ EOF
   pass "an unresolved limiting window reads unknown instead of None"
 }
 
+test_phone_testing_and_test_queue() {
+  local home stub queue holder waiter suite_pid suite_waiter='' blocker='' now
+  home=$(make_home test_queue)
+  mkdir -p "$home/wt-alpha" "$home/wt-beta" "$home/locks"
+  printf 'worktree=%s\n' "$home/wt-alpha" >> "$home/state/alpha.meta"
+  printf 'worktree=%s\n' "$home/wt-beta" >> "$home/state/beta.meta"
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\nbusy-one device model:Pixel_8\nidle-two device model:Galaxy_S22\n'
+EOF
+  chmod +x "$stub/adb"
+  holder=$(sleeper_in "$home/wt-alpha")
+  waiter=$(sleeper_in "$home/wt-beta")
+  suite_pid=$(sleeper_in "$home/wt-beta")
+  queue="$home/locks/frogpile-phone-busy-one.queue"
+  mkdir -p "$queue/tickets"
+  now=$(date -u +%Y-%m-%dT%H:%M:%S.000+00:00)
+  printf '{"pid": %s}\n' "$holder" > "$queue/tickets/001-held.json"
+  printf '{"pid": %s}\n' "$waiter" > "$queue/tickets/002-wait.json"
+  printf '{"pid": 999999999}\n' > "$queue/tickets/003-dead.json"
+  {
+    printf '{"event": "acquire", "ticket": "000-old", "time": "%s"}\n' "$now"
+    printf '{"event": "release", "ticket": "000-old", "time": "%s"}\n' "$now"
+    printf '{"event": "request", "ticket": "001-held", "time": "%s"}\n' "$now"
+    printf '{"event": "acquire", "ticket": "001-held", "time": "%s"}\n' "$now"
+    printf '{"event": "request", "ticket": "002-wait", "time": "%s"}\n' "$now"
+  } > "$queue/events.jsonl"
+  mkdir -p "$home/locks/frogpile-phone-idle-two.queue/tickets"
+  printf 'pid=%s\ncwd=%s\nstarted=%s\nheartbeat=%s\n' "$suite_pid" "$home/wt-beta" "$(( $(date +%s) - 600 ))" "$(date +%s)" \
+    > "$home/locks/suite.holder"
+  if command -v flock >/dev/null 2>&1 && [ -r /proc/locks ]; then
+    : > "$home/locks/frogpile-suite.lock"
+    flock "$home/locks/frogpile-suite.lock" sleep 60 >/dev/null 2>&1 &
+    blocker=$!
+    sleep 0.3
+    (cd "$home/wt-alpha" && exec flock "$home/locks/frogpile-suite.lock" true) >/dev/null 2>&1 &
+    suite_waiter=$!
+    sleep 0.3
+  fi
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'test queue refresh failed'
+  assert_equals testing "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'held phone is testing'
+  assert_contains "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .detail' "$home/state/crew-board.json")" \
+    'Testing: alpha (sleep) for <1m; 1 waiting' 'phone holder task, held time, and queue length'
+  assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "idle-two") | .status' "$home/state/crew-board.json")" 'free phone is idle'
+  assert_equals 'Full suite: beta' "$(jq -r '.panels.test_queue[0].title' "$home/state/crew-board.json")" 'running suite task'
+  assert_equals 'running 10m' "$(jq -r '.panels.test_queue[0].status' "$home/state/crew-board.json")" 'running suite time'
+  if [ -n "$suite_waiter" ]; then
+    assert_equals 'Full suite: alpha|waiting #1' \
+      "$(jq -r '.panels.test_queue[1] | .title + "|" + .status' "$home/state/crew-board.json")" 'suite waiter in order'
+  fi
+  assert_equals 'Phone Pixel 8: alpha|running <1m' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-"))][0] | .title + "|" + .status' "$home/state/crew-board.json")" 'phone holder row'
+  assert_equals 'Phone Pixel 8: beta|waiting #1' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-"))][1] | .title + "|" + .status' "$home/state/crew-board.json")" 'phone waiter row'
+  assert_equals 2 "$(jq '[.panels.test_queue[] | select(.id | startswith("phone-"))] | length' "$home/state/crew-board.json")" 'dead ticket shown'
+  kill "$holder" "$waiter" "$suite_pid" ${blocker:+"$blocker"} ${suite_waiter:+"$suite_waiter"} 2>/dev/null
+  wait 2>/dev/null
+  printf 'pid=1\ncwd=/\nstarted=1\nheartbeat=1\n' > "$home/locks/suite.holder"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'idle test queue refresh failed'
+  assert_equals 0 "$(jq '.panels.test_queue | length' "$home/state/crew-board.json")" 'stale suite heartbeat or dead holders kept'
+  assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'dead holder kept the phone busy'
+  pass 'phones show their tester and the test queue lists running and waiting suites and phone reservations'
+}
+
+test_daily_routines_from_checks() {
+  local home tomorrow
+  home=$(make_home routines)
+  cat > "$home/state/alpha-daily.check.sh" <<'EOF'
+#!/usr/bin/env bash
+m="$FM_HOME/state/.alpha-daily-last"
+today=$(date +%F); hour=$(date +%H)
+[ "$hour" -lt 10 ] && exit 0
+EOF
+  cat > "$home/state/beta-daily.check.sh" <<'EOF'
+#!/usr/bin/env bash
+today=$(date +%F); hour=$(date +%H)
+[ "$hour" -lt 0 ] && exit 0
+EOF
+  date +%F > "$home/state/.alpha-daily-last"
+  tomorrow=$(python3 -c 'import datetime as d; print(d.date.today() + d.timedelta(days=1))')
+  run_board "$home" refresh >/dev/null || fail 'routine refresh failed'
+  assert_equals 2 "$(jq '.panels.routines | length' "$home/state/crew-board.json")" 'one row per daily check'
+  assert_equals 'alpha-daily|done today' "$(jq -r '.panels.routines[0] | .title + "|" + .status' "$home/state/crew-board.json")" "today's run"
+  assert_contains "$(jq -r '.panels.routines[0].detail' "$home/state/crew-board.json")" "Next due: $tomorrow 10:00" 'next due tomorrow'
+  assert_equals 'beta-daily|due now' "$(jq -r '.panels.routines[1] | .title + "|" + .status' "$home/state/crew-board.json")" 'missed run is due'
+  assert_contains "$(jq -r '.panels.routines[1].detail' "$home/state/crew-board.json")" 'Last run: never' 'never-run routine'
+  pass 'daily routines come from registered checks and their last-run markers'
+}
+
+test_alerts_and_ready_from_real_state() {
+  local home snapshot
+  home=$(make_home alerts_ready)
+  touch "$home/state/.last-watcher-beat"
+  snapshot="$home/snapshot.json"
+  cat > "$snapshot" <<'EOF'
+{"schema":"fm-fleet-snapshot.v1","tasks":[
+ {"id":"waiting","phase":{"name":"paused","note":"store review"}},
+ {"id":"stuck","phase":{"name":"blocked","note":"needs a credential"}},
+ {"id":"broken","phase":{"name":"failed","note":"build crashed"}},
+ {"id":"asking","phase":{"name":"needs-decision","note":"pick A or B"},"backlog":{"hold_kind":null}},
+ {"id":"raised","phase":{"name":"needs-decision","note":"already raised"},"backlog":{"hold_kind":"captain"}},
+ {"id":"green","phase":{"name":"ready-to-merge"},"backlog":{"title":"Green fix"},"pr":{"url":"https://example.test/pr/1"},
+  "current_state":{"state":"done","source":"run-step","detail":"checks green: PR ready for review"}},
+ {"id":"early","phase":{"name":"ready-to-merge"},"backlog":{"title":"Unvalidated fix"},"pr":{"url":"https://example.test/pr/2"},
+  "current_state":{"state":"working","source":"run-step","detail":"review running"}},
+ {"id":"landing","mode":"local-only","backlog":{"title":"Local tidy"},"current_state":{"state":"done","source":"status-log"}},
+ {"id":"probe","kind":"scout","backlog":{"title":"Investigate crash"},"hints":{"scout_report_present":true},
+  "paths":{"report":{"path":"/reports/probe.md"}}}],
+ "backlog":{"records":[
+  {"id":"board","state":"in_flight","title":"New board","hold_kind":"captain","hold_reason":"captain preview before merge"},
+  {"id":"other","state":"in_flight","title":"Other call","hold_kind":"captain","hold_reason":"choose A or B"}]}}
+EOF
+  run_panels "$home" "$snapshot" > "$home/panels.json" || fail 'panel projection failed'
+  assert_equals 'stuck: blocked|broken: failed|asking: decision not yet raised with you' \
+    "$(jq -r '[.alerts[] | select(.id != "") | .title] | join("|")' "$home/panels.json")" 'alert workers'
+  assert_contains "$(jq -r '.alerts[] | select(.id == "stuck") | .detail' "$home/panels.json")" 'needs a credential' 'alert reason'
+  assert_equals 'Green fix|Local tidy|Investigate crash|New board' \
+    "$(jq -r '[.ready[].title] | join("|")' "$home/panels.json")" 'ready rows from real state'
+  assert_equals 'https://example.test/pr/1' "$(jq -r '.ready[0].link' "$home/panels.json")" 'ready PR link'
+  assert_equals '/reports/probe.md' "$(jq -r '.ready[2].link' "$home/panels.json")" 'ready report link'
+  pass 'alerts drop paused workers and ready rows come from green PRs, landings, reports, and preview holds'
+}
+
 test_full_questions_and_backlog() {
   local home
   home=$(make_home full_page)
@@ -577,13 +715,13 @@ EOF
 EOF
   run_board "$home" refresh >/dev/null || fail 'full page refresh failed'
   assert_equals 8 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" 'question section and entry count'
-  assert_equals 'DECISIONS FOR THE PRODUCT OWNER' \
+  assert_equals 'Decisions for the product owner' \
     "$(jq -r '.panels.full_questions[0].title' "$home/state/crew-board.json")" 'question section heading'
   assert_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" \
     'The Android build is waiting.' 'full question text'
   assert_equals 4 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" 'Now page summary count'
   assert_equals 8 "$(jq '.panels.full_backlog | length' "$home/state/crew-board.json")" 'backlog groups and items'
-  assert_equals 'HELD FOR THE CAPTAIN' \
+  assert_equals 'Held for the captain' \
     "$(jq -r '.panels.full_backlog[2].title' "$home/state/crew-board.json")" 'captain hold section'
   assert_contains "$(jq -r '.panels.full_backlog[3].title' "$home/state/crew-board.json")" \
     'choose release A or B' 'visible hold reason'
@@ -591,13 +729,13 @@ EOF
     'Release A is stable; B has the new screen.' 'full backlog note'
   assert_not_contains "$(jq -r '.panels.full_backlog[3].title' "$home/state/crew-board.json")" \
     'beta' 'backlog title leaked its task id'
-  assert_equals 'HELD (OTHER)' \
+  assert_equals 'Held (other)' \
     "$(jq -r '.panels.full_backlog[4].title' "$home/state/crew-board.json")" 'other hold section'
   assert_contains "$(jq -r '.panels.full_backlog[5].title' "$home/state/crew-board.json")" \
     'waiting on store review' 'visible non-captain hold reason'
   assert_contains "$(jq -r '.panels.full_backlog[5].detail' "$home/state/crew-board.json")" \
     'Held until: 2026-12-01' 'non-captain hold until-date'
-  assert_equals 'QUEUED' \
+  assert_equals 'Queued' \
     "$(jq -r '.panels.full_backlog[6].title' "$home/state/crew-board.json")" 'queued section after holds'
   pass 'full questions and backlog parsers retain grouped entries, hold reasons, and notes'
 }
@@ -620,3 +758,6 @@ test_quota_check_unavailable
 test_quota_unresolved_limiting_window
 test_playbot_lane_projection
 test_full_questions_and_backlog
+test_phone_testing_and_test_queue
+test_daily_routines_from_checks
+test_alerts_and_ready_from_real_state

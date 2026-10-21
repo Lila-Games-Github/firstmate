@@ -4,14 +4,24 @@
 Usage: fm-crew-board-panels.py <fleet-snapshot.json>
        fm-crew-board-panels.py --refresh-allowance|--allowance-loop
 
-Connected phones come from a bounded local adb query. Playbot lane rows come
-from local persisted state. AI allowance uses a separately scheduled quota-axi
-snapshot, never the fast board refresh. The optional
-data/crew-board-cache.json supplies phone observations such as locks and panels
-without a cheap local source (builds, daily routines, and Rocketboard bugs),
-plus optional allowance overlays. The fast projection never queries a network service;
-the separately launched allowance sampler may ask quota-axi for provider data.
-Its output is embedded in crew-board.json by fm-crew-board.sh refresh.
+Connected phones come from a bounded local adb query, and whether each one is
+testing comes from the shared FrogPile phone FIFO under
+/tmp/frogpile-phone-<serial>.queue (FM_CREW_BOARD_PHONE_QUEUE_ROOT overrides
+/tmp). The test queue reads that FIFO plus the full-suite lock named by
+FROGPILE_SUITE_LOCK and its holder sidecar FROGPILE_SUITE_LOCK_HOLDER, with the
+defaults tests/run_suite.sh uses; waiters on the suite lock come from
+/proc/locks. Daily routines come from this home's state/*-daily.check.sh
+scripts and their state/.<name>-last markers. Ready-for-you rows come from the
+fleet snapshot: a PR whose recorded run reports green checks, a finished
+local-only branch, an unrelayed scout report, or a captain hold whose reason
+names a preview. Playbot lane rows come from local persisted state. AI
+allowance uses a separately scheduled quota-axi snapshot, never the fast board
+refresh. The optional data/crew-board-cache.json supplies phone observations
+such as locks and panels without a cheap local source (builds and Rocketboard
+bugs), plus optional overlays for the other panels. The fast projection never
+queries a network service; the separately launched allowance sampler may ask
+quota-axi for provider data. Its output is embedded in crew-board.json by
+fm-crew-board.sh refresh.
 """
 
 import csv
@@ -59,7 +69,7 @@ def question_entries(path):
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("## "):
             flush()
-            rows.append(item(line[3:].strip().upper(), status="section"))
+            rows.append(item(line[3:].strip(), status="section"))
             continue
         if line.strip() == "---":
             flush()
@@ -159,19 +169,19 @@ def full_backlog():
     other_held = [task for task in held if task["kind"] != "captain"]
     held_ids = {task["id"] for task in held}
     groups = [
-        ("IN FLIGHT", [task for task in in_flight if task["id"] not in held_ids]),
-        ("HELD FOR THE CAPTAIN", captain_held),
-        ("HELD (OTHER)", other_held),
-        ("QUEUED", [task for task in queued if task["id"] not in held_ids]),
+        ("In flight", [task for task in in_flight if task["id"] not in held_ids]),
+        ("Held for the captain", captain_held),
+        ("Held (other)", other_held),
+        ("Queued", [task for task in queued if task["id"] not in held_ids]),
     ]
     rows = []
     for heading, tasks in groups:
         rows.append(item(heading, status="section"))
         for task in tasks:
             title = f"{task['title']} [{task['repo']}]" if task["repo"] not in ("", "-") else task["title"]
-            if heading == "HELD FOR THE CAPTAIN" and task["reason"]:
+            if heading == "Held for the captain" and task["reason"]:
                 title += f" - {task['reason']}"
-            elif heading == "HELD (OTHER)":
+            elif heading == "Held (other)":
                 hold = task["reason"] or (f"until {task['until']}" if task["until"] else "")
                 if hold:
                     title += f" - {hold}"
@@ -321,6 +331,314 @@ def playbot_workers():
     except (OSError, subprocess.TimeoutExpired, ValueError):
         pass
     return []
+
+
+def phone_queue_root():
+    return Path(os.environ.get("FM_CREW_BOARD_PHONE_QUEUE_ROOT", "/tmp"))
+
+
+def suite_lock_paths():
+    return (Path(os.environ.get("FROGPILE_SUITE_LOCK", "/tmp/frogpile-suite.lock")),
+            Path(os.environ.get("FROGPILE_SUITE_LOCK_HOLDER",
+                                Path.home() / ".frogpile-suite.lock.holder")))
+
+
+def start_ticks(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def pid_alive(pid, ticks=None):
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        pass
+    except (OSError, ValueError, TypeError, OverflowError):
+        return False
+    return ticks is None or start_ticks(pid) in (None, str(ticks))
+
+
+def duration(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "<1m"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{seconds % 3600 // 60}m"
+
+
+def task_worktrees(snapshot):
+    trees = []
+    for task in snapshot.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        tree = ((task.get("paths") or {}).get("worktree") or {}).get("path")
+        if isinstance(tree, str) and tree:
+            trees.append((os.path.realpath(tree), str(task.get("id", ""))))
+    return sorted(trees, key=lambda pair: len(pair[0]), reverse=True)
+
+
+def process_owner(pid, trees, cwd=""):
+    """Name the task whose worktree a process runs in, and what it runs."""
+    try:
+        cwd = os.readlink(f"/proc/{pid}/cwd")
+    except (OSError, ValueError, TypeError):
+        pass
+    kind = ""
+    try:
+        argv = [arg for arg in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if arg]
+        names = [os.path.basename(arg.decode(errors="replace")) for arg in argv]
+        kind = next((name for name in names[1:] if name.endswith((".py", ".sh", ".gd"))), names[0] if names else "")
+    except (OSError, IndexError):
+        pass
+    real = os.path.realpath(cwd) if cwd else ""
+    for tree, task in trees:
+        if real == tree or real.startswith(tree + os.sep):
+            return task, kind, cwd
+    return (os.path.basename(cwd.rstrip(os.sep)) if cwd else f"pid {pid}"), kind, cwd
+
+
+def tail_lines(path, limit=65536):
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - limit))
+            data = stream.read()
+    except OSError:
+        return []
+    lines = data.decode(errors="replace").splitlines()
+    return lines[1:] if size > limit else lines
+
+
+def epoch(value):
+    try:
+        return dt.datetime.fromisoformat(str(value)).timestamp()
+    except ValueError:
+        return None
+
+
+def phone_queue(serial, trees, now):
+    """Read one phone's FIFO: the live holder and live waiters in ticket order."""
+    queue = phone_queue_root() / f"frogpile-phone-{serial}.queue"
+    acquired = {}
+    for line in tail_lines(queue / "events.jsonl"):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        ticket = str(event.get("ticket", ""))
+        if event.get("event") == "acquire":
+            acquired[ticket] = epoch(event.get("time"))
+        elif event.get("event") in ("release", "crash_cleanup"):
+            acquired.pop(ticket, None)
+    holder = None
+    waiting = []
+    try:
+        tickets = sorted((queue / "tickets").glob("*.json"))
+    except OSError:
+        tickets = []
+    for path in tickets:
+        try:
+            owner = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(owner["pid"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if not pid_alive(pid, owner.get("start_ticks")):
+            continue
+        task, kind, _ = process_owner(pid, trees)
+        entry = {"task": task, "kind": kind, "pid": pid}
+        if path.stem in acquired and holder is None:
+            since = acquired[path.stem]
+            entry["for"] = duration(now - since) if since else "unknown time"
+            holder = entry
+        else:
+            waiting.append(entry)
+    return holder, waiting
+
+
+def phone_activity(phones, trees, now):
+    for phone in phones:
+        if phone.get("adb") in (None, "unavailable"):
+            continue
+        holder, waiting = phone_queue(phone["id"], trees, now)
+        behind = f"; {len(waiting)} waiting" if waiting else ""
+        if holder:
+            phone["detail"] = (f"Testing: {holder['task']} ({holder['kind'] or 'test'}) for "
+                               f"{holder['for']}{behind}\n{phone['detail']}")
+            if phone["status"] == "connected":
+                phone["status"] = "testing"
+        elif phone["status"] == "connected":
+            phone["status"] = "idle"
+            if waiting:
+                phone["detail"] = f"{len(waiting)} waiting\n{phone['detail']}"
+
+
+def suite_waiters(lock):
+    try:
+        info = lock.stat()
+    except OSError:
+        return []
+    device = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+    pids = []
+    try:
+        lines = Path("/proc/locks").read_text().splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 7 and fields[1] == "->" and fields[2] == "FLOCK" and fields[6] == device:
+            pids.append(int(fields[5]))
+    return pids
+
+
+def test_queue(snapshot, phones, now):
+    trees = task_worktrees(snapshot)
+    rows = []
+    lock, holder_path = suite_lock_paths()
+    holder = {}
+    try:
+        for line in holder_path.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            holder[key] = value
+    except OSError:
+        pass
+    try:
+        fresh = now - int(holder.get("heartbeat", "")) <= 30
+    except ValueError:
+        fresh = False
+    if fresh:
+        task, _, cwd = process_owner(holder.get("pid", ""), trees, holder.get("cwd", ""))
+        try:
+            ran = duration(now - int(holder.get("started", "")))
+        except ValueError:
+            ran = "unknown time"
+        rows.append(item(f"Full suite: {task}", f"Running for {ran}\npid {holder.get('pid', '?')} in {cwd}",
+                         f"running {ran}", item_id="suite-running"))
+    for position, pid in enumerate(suite_waiters(lock), 1):
+        task, kind, cwd = process_owner(pid, trees)
+        rows.append(item(f"Full suite: {task}", f"Waiting behind the running suite\npid {pid} in {cwd}",
+                         f"waiting #{position}", item_id=f"suite-wait-{pid}"))
+    serials = sorted(path.name[len("frogpile-phone-"):-len(".queue")]
+                     for path in phone_queue_root().glob("frogpile-phone-*.queue"))
+    names = {phone["id"]: phone["title"] for phone in phones if phone.get("id")}
+    for serial in serials:
+        active, waiting = phone_queue(serial, trees, now)
+        name = names.get(serial, serial)
+        if active:
+            rows.append(item(f"Phone {name}: {active['task']}",
+                             f"{active['kind'] or 'test'} holding {serial} for {active['for']}",
+                             f"running {active['for']}", item_id=f"phone-{serial}-running"))
+        for position, entry in enumerate(waiting, 1):
+            rows.append(item(f"Phone {name}: {entry['task']}",
+                             f"{entry['kind'] or 'test'} waiting for {serial}",
+                             f"waiting #{position}", item_id=f"phone-{serial}-wait-{entry['pid']}"))
+    return rows
+
+
+def daily_routines(now):
+    rows = []
+    today = dt.datetime.fromtimestamp(now).date()
+    for script in sorted(STATE.glob("*-daily.check.sh")):
+        name = script.name[:-len(".check.sh")]
+        try:
+            text = script.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        hour = re.search(r'\[\s*"\$hour"\s*-lt\s*(\d+)\s*\]', text)
+        hour = int(hour.group(1)) if hour else 0
+        marker = STATE / f".{name}-last"
+        try:
+            last = marker.read_text(encoding="utf-8").strip()
+            last_at = dt.datetime.fromtimestamp(marker.stat().st_mtime)
+        except OSError:
+            last, last_at = "", None
+        ran_today = last == today.isoformat()
+        due = dt.datetime.combine(today + dt.timedelta(days=1 if ran_today else 0), dt.time(hour))
+        if ran_today:
+            status = "done today"
+        elif dt.datetime.fromtimestamp(now) >= due:
+            status = "due now"
+        else:
+            status = "not yet today"
+        last_text = last_at.strftime("%Y-%m-%d %H:%M") if last_at else "never"
+        rows.append(item(name, f"Last run: {last_text}\nNext due: {due.strftime('%Y-%m-%d %H:%M')}\n"
+                         f"Runs once a day after {hour:02d}:00",
+                         status, item_id=name))
+    return rows
+
+
+def ready_entries(snapshot):
+    rows = []
+    for task in snapshot.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        task_id = str(task.get("id", ""))
+        title = str((task.get("backlog") or {}).get("title") or task_id)
+        current = task.get("current_state") or {}
+        hints = task.get("hints") or {}
+        pr = str((task.get("pr") or {}).get("url") or "")
+        done = current.get("state") == "done"
+        green = "checks green" in f"{current.get('detail', '')} {hints.get('last_event_text', '')}"
+        if pr and done and (green or current.get("source") == "run-step"):
+            rows.append(item(title, f"Checks are green; review and merge the PR\n{pr}", "merge?", pr, item_id=task_id))
+        elif task.get("mode") == "local-only" and done:
+            rows.append(item(title, "The local branch is finished; approve landing it", "land?", item_id=task_id))
+        elif task.get("kind") == "scout" and hints.get("scout_report_present"):
+            report = str(((task.get("paths") or {}).get("report") or {}).get("path") or "")
+            rows.append(item(title, f"Investigation finished; read the report\n{report}".strip(), "read",
+                             report, item_id=task_id))
+    for record in snapshot.get("backlog", {}).get("records", []):
+        if not isinstance(record, dict) or record.get("state") == "done":
+            continue
+        reason = str(record.get("hold_reason") or "")
+        if record.get("hold_kind") == "captain" and "preview" in reason.casefold():
+            rows.append(item(str(record.get("title") or record.get("id")),
+                             f"Preview it and give your word: {reason}", "preview",
+                             item_id=str(record.get("id", ""))))
+    return rows
+
+
+def alert_entries(snapshot, cache, phones, allowance):
+    alerts = entries(cache, "alerts")
+    warning = watcher_alert()
+    if warning:
+        alerts.append(warning)
+    for task in snapshot.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        task_id = str(task.get("id", "worker"))
+        phase = task.get("phase") or {}
+        name = phase.get("name", "")
+        note = str(phase.get("note", ""))
+        held = ((task.get("backlog") or {}).get("hold_kind")) == "captain"
+        if name in ("blocked", "failed"):
+            alerts.append(item(f"{task_id}: {name}", note or f"The worker reported {name}",
+                               name, alert=True, item_id=task_id))
+        elif (name == "needs-decision" or (task.get("hints") or {}).get("open_decisions")) and not held:
+            alerts.append(item(f"{task_id}: decision not yet raised with you",
+                               note or "The worker is waiting on a decision firstmate has not escalated",
+                               "needs-decision", alert=True, item_id=task_id))
+    for phone in phones:
+        adb = phone.get("adb")
+        if adb == "unavailable":
+            alerts.append(item(phone["title"], phone["detail"], phone["status"], alert=True))
+            continue
+        if adb in ("unauthorized", "offline"):
+            alerts.append(item(f"Phone {phone['title']} {adb}",
+                               f"adb reports {adb}, so the phone cannot take tests",
+                               adb, alert=True))
+        if phone["status"] in ("locked", "unavailable"):
+            alerts.append(item(f"Phone {phone['title']} {phone['status']}",
+                               phone["detail"], phone["status"], alert=True))
+    for row in allowance:
+        if row.get("quota") == "unavailable":
+            alerts.append(item(row["title"], row["detail"], row["status"], alert=True))
+    return alerts
 
 
 def refresh_allowance():
@@ -477,45 +795,10 @@ def landed_today(snapshot):
 
 def project(snapshot):
     cache = source_cache()
-    rows = snapshot.get("tasks", [])
-    alerts = entries(cache, "alerts")
-    warning = watcher_alert()
-    if warning:
-        alerts.append(warning)
-    for task in rows:
-        if not isinstance(task, dict):
-            continue
-        phase = task.get("phase") or {}
-        name = phase.get("name", "")
-        if name in ("paused", "blocked", "failed"):
-            alerts.append(item(f"{task.get('id', 'worker')}: {name}",
-                               str(phase.get("note", "")), name, alert=True,
-                               item_id=str(task.get("id", ""))))
+    now = time.time()
     phones = phone_entries(cache)
-    for phone in phones:
-        adb = phone.get("adb")
-        if adb == "unavailable":
-            alerts.append(item(phone["title"], phone["detail"], phone["status"], alert=True))
-            continue
-        if adb in ("unauthorized", "offline"):
-            alerts.append(item(f"Phone {phone['title']} {adb}",
-                               f"adb reports {adb}, so the phone cannot take tests",
-                               adb, alert=True))
-        if phone["status"] in ("locked", "unavailable"):
-            alerts.append(item(f"Phone {phone['title']} {phone['status']}",
-                               phone["detail"], phone["status"], alert=True))
+    phone_activity(phones, task_worktrees(snapshot), now)
     allowance = allowance_entries(cache)
-    for row in allowance:
-        if row.get("quota") == "unavailable":
-            alerts.append(item(row["title"], row["detail"], row["status"], alert=True))
-    ready = entries(cache, "ready")
-    for task in rows:
-        if not isinstance(task, dict) or (task.get("phase") or {}).get("name") != "ready-to-merge":
-            continue
-        pr = task.get("pr") or {}
-        ready.append(item(str((task.get("backlog") or {}).get("title") or task.get("id")),
-                          str((task.get("phase") or {}).get("note", "")), "ready-to-merge",
-                          str(pr.get("url") or ""), item_id=str(task.get("id", ""))))
     queued = tasks_axi_list("queued")
     in_flight = tasks_axi_list("in_flight")
     backlog = {
@@ -525,17 +808,17 @@ def project(snapshot):
         "source": "fm-tasks-axi.sh" if queued and in_flight else "unavailable",
     }
     return {
-        "alerts": alerts,
+        "alerts": alert_entries(snapshot, cache, phones, allowance),
         "questions": questions(DATA / "captain-questions.md"),
         "full_questions": question_entries(DATA / "captain-questions.md"),
         "full_backlog": full_backlog(),
-        "ready": ready,
+        "ready": ready_entries(snapshot) + entries(cache, "ready"),
         "phones": phones,
         "playbot_workers": playbot_workers(),
-        "test_queue": entries(cache, "test_queue"),
+        "test_queue": test_queue(snapshot, phones, now) + entries(cache, "test_queue"),
         "landings": landed_today(snapshot) + entries(cache, "landings"),
         "builds": entries(cache, "builds"),
-        "routines": entries(cache, "routines"),
+        "routines": daily_routines(now) + entries(cache, "routines"),
         "bugs": entries(cache, "bugs"),
         "backlog": backlog,
         "allowance": allowance,

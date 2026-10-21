@@ -15,12 +15,11 @@ import (
 type panelSpec struct{ id, title string }
 
 var pages = [][]panelSpec{
-	{{"alerts", "ALERTS"}, {"workers", "WORKERS"}, {"questions", "WAITING ON YOU"},
-		{"ready", "READY FOR YOU"}, {"feed", "FEED"}},
+	{{"alerts", "ALERTS"}, {"workers", "WORKERS"}, {"ready", "READY FOR YOU"}, {"feed", "FEED"}},
 	{{"phones", "PHONES"}, {"test_queue", "TEST QUEUE"}, {"landings", "TODAY'S LANDINGS"},
 		{"builds", "BUILDS"}, {"routines", "DAILY ROUTINES"}},
 	{{"bugs", "ROCKETBOARD BUGS"}, {"backlog", "BACKLOG"}, {"allowance", "AI ALLOWANCE"}},
-	{{"full_questions", "CAPTAIN QUESTIONS"}, {"full_backlog", "BACKLOG"}},
+	{{"full_questions", "CAPTAIN QUESTIONS"}},
 }
 
 var pageNames = []string{"NOW", "TESTING", "PLANNING", "QUESTIONS"}
@@ -124,12 +123,8 @@ func (m *app) rawItems(id string) []item {
 	switch id {
 	case "alerts":
 		return m.data.Panels.Alerts
-	case "questions":
-		return m.data.Panels.Questions
 	case "full_questions":
 		return m.data.Panels.FullQuestions
-	case "full_backlog":
-		return m.data.Panels.FullBacklog
 	case "ready":
 		return m.data.Panels.Ready
 	case "phones":
@@ -157,7 +152,10 @@ func (m *app) rawItems(id string) []item {
 			return fmt.Sprintf("%d", *value)
 		}
 		rows := []item{{ID: "counts", Title: fmt.Sprintf("In flight %s  /  Queued %s", count(back.InFlight), count(back.Queued)),
-			Detail: "Next up from fm-tasks-axi.sh", Status: back.Source}}
+			Status: "section"}}
+		if len(m.data.Panels.FullBacklog) > 0 {
+			return append(rows, m.data.Panels.FullBacklog...)
+		}
 		return append(rows, back.Next...)
 	case "workers":
 		workers := m.data.liveWorkers()
@@ -225,7 +223,7 @@ func (m *app) focusedItem() *item {
 }
 
 func (m *app) selectedQuestion() *item {
-	if m.focus != "questions" && m.focus != "full_questions" {
+	if m.focus != "full_questions" {
 		return nil
 	}
 	row := m.focusedItem()
@@ -263,7 +261,34 @@ func (m *app) setPage(page int) {
 	if page == 0 {
 		m.focus = "workers"
 	}
+	m.selectReadable()
 	m.beginTransition(1)
+}
+
+// selectReadable puts the cursor on the first question when the questions
+// panel gains focus, so its full text shows without a key press.
+func (m *app) selectReadable() {
+	if m.focus != "full_questions" {
+		return
+	}
+	if index, ok := m.selected[m.focus]; ok && index < len(m.items(m.focus)) {
+		return
+	}
+	if first := m.selectableFrom(0, 1); first >= 0 {
+		m.selected[m.focus] = first
+	}
+}
+
+// selectableFrom returns the first non-heading row from index in direction
+// step, or -1 when none remains.
+func (m *app) selectableFrom(index, step int) int {
+	rows := m.items(m.focus)
+	for ; index >= 0 && index < len(rows); index += step {
+		if rows[index].Status != "section" {
+			return index
+		}
+	}
+	return -1
 }
 
 func (m *app) changeFocus(step int) {
@@ -276,18 +301,12 @@ func (m *app) changeFocus(step int) {
 		}
 	}
 	index = (index + step + len(list)) % len(list)
-	m.focus = list[index].id
-	m.beginTransition(step)
-}
-
-func (m *app) moveFocusSpatial(dx, dy int) {
-	if dx != 0 {
-		m.changeFocus(dx)
+	if list[index].id == m.focus {
 		return
 	}
-	if dy != 0 {
-		m.changeFocus(dy)
-	}
+	m.focus = list[index].id
+	m.selectReadable()
+	m.beginTransition(step)
 }
 
 func (m *app) focusSubTab(id string) bool {
@@ -305,29 +324,26 @@ func (m *app) focusSubTab(id string) bool {
 		}
 	}
 	m.focus = id
+	m.selectReadable()
 	m.beginTransition(direction)
 	return true
 }
 
+// moveSelection moves the cursor within the focused panel only, skipping
+// section headings and stopping at the panel's first and last rows.
 func (m *app) moveSelection(step int) {
 	rows := m.items(m.focus)
-	if len(rows) == 0 {
-		m.moveFocusSpatial(0, step)
-		return
-	}
 	index, ok := m.selected[m.focus]
-	if !ok {
-		if step < 0 {
-			index = len(rows) - 1
-		} else {
-			index = 0
-		}
-	} else {
-		if index+step < 0 || index+step >= len(rows) {
-			m.moveFocusSpatial(0, step)
-			return
-		}
-		index = max(0, min(len(rows)-1, index+step))
+	switch {
+	case !ok && step < 0:
+		index = m.selectableFrom(len(rows)-1, -1)
+	case !ok:
+		index = m.selectableFrom(0, 1)
+	default:
+		index = m.selectableFrom(index+step, step)
+	}
+	if index < 0 {
+		return
 	}
 	m.selected[m.focus] = index
 	m.scrollOffset[m.focus] = 0
@@ -393,6 +409,7 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+			m.selectReadable()
 		}
 	case peekMsg:
 		m.peekLoading = ""
@@ -516,8 +533,8 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingG {
 			m.pendingG = false
 			if key == "g" {
-				if len(m.items(m.focus)) > 0 {
-					m.selected[m.focus] = 0
+				if first := m.selectableFrom(0, 1); first >= 0 {
+					m.selected[m.focus] = first
 				}
 				return m, nil
 			}
@@ -545,52 +562,40 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.changeFocus(-1)
 			return m, motionTick()
 		case "right", "l":
-			m.moveFocusSpatial(1, 0)
+			m.changeFocus(1)
 			return m, motionTick()
 		case "left", "h":
-			m.moveFocusSpatial(-1, 0)
+			m.changeFocus(-1)
 			return m, motionTick()
 		case "down", "j":
 			m.moveSelection(1)
-			if m.slide > 0 {
-				return m, motionTick()
-			}
 			return m, nil
 		case "up", "k":
 			m.moveSelection(-1)
-			if m.slide > 0 {
-				return m, motionTick()
-			}
 			return m, nil
 		case "ctrl+d":
 			for range 5 {
 				m.moveSelection(1)
-			}
-			if m.slide > 0 {
-				return m, motionTick()
 			}
 			return m, nil
 		case "ctrl+u":
 			for range 5 {
 				m.moveSelection(-1)
 			}
-			if m.slide > 0 {
-				return m, motionTick()
-			}
 			return m, nil
 		case "ctrl+f":
-			if m.focus == "questions" || m.focus == "full_questions" || m.focus == "full_backlog" {
+			if m.focus == "full_questions" || m.focus == "backlog" {
 				m.scrollOffset[m.focus] += max(1, m.height/3)
 			}
 			return m, nil
 		case "ctrl+b":
-			if m.focus == "questions" || m.focus == "full_questions" || m.focus == "full_backlog" {
+			if m.focus == "full_questions" || m.focus == "backlog" {
 				m.scrollOffset[m.focus] = max(0, m.scrollOffset[m.focus]-max(1, m.height/3))
 			}
 			return m, nil
 		case "G":
-			if n := len(m.items(m.focus)); n > 0 {
-				m.selected[m.focus] = n - 1
+			if last := m.selectableFrom(len(m.items(m.focus))-1, -1); last >= 0 {
+				m.selected[m.focus] = last
 			}
 			return m, nil
 		case "g":
@@ -650,7 +655,7 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			if strings.HasPrefix(key, "alt+") && len(key) == 5 && key[4] >= '1' && key[4] <= '9' {
 				index := int(key[4] - '1')
-				if index < len(m.items(m.focus)) {
+				if index < len(m.items(m.focus)) && m.items(m.focus)[index].Status != "section" {
 					m.selected[m.focus] = index
 				}
 				return m, nil

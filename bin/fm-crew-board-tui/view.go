@@ -39,7 +39,15 @@ func phaseColor(phase string) lipgloss.Style {
 		color = green
 	case "paused", "blocked", "needs-decision", "failed", "unauthorized", "offline", "locked":
 		color = red
-	case "unavailable", "auth_required":
+	case "unavailable", "auth_required", "idle", "not yet today":
+		color = muted
+	case "due now":
+		color = yellow
+	}
+	switch {
+	case strings.HasPrefix(phase, "running "):
+		color = cyan
+	case strings.HasPrefix(phase, "waiting #"):
 		color = muted
 	}
 	return lipgloss.NewStyle().Foreground(color)
@@ -56,11 +64,12 @@ func activePhase(phase string) bool {
 const summaryCardHeight = 4
 
 func panelSummary(spec panelSpec, rows []item, width int) string {
+	rows = withoutSections(rows)
 	nouns := map[string]string{
-		"alerts": "alerts", "workers": "workers", "questions": "questions", "ready": "ready",
+		"alerts": "alerts", "workers": "workers", "ready": "ready",
 		"feed": "updates", "phones": "connected", "test_queue": "queued", "landings": "landed",
 		"builds": "builds", "routines": "routines", "bugs": "bugs", "backlog": "tasks",
-		"allowance": "providers", "full_questions": "questions", "full_backlog": "tasks",
+		"allowance": "providers", "full_questions": "questions",
 	}
 	count := "none"
 	latest := "latest: none"
@@ -115,6 +124,16 @@ func panelSummary(spec panelSpec, rows []item, width int) string {
 	return first + "\n" + ansi.Truncate(latest, max(1, width), "…")
 }
 
+func withoutSections(rows []item) []item {
+	kept := make([]item, 0, len(rows))
+	for _, row := range rows {
+		if row.Status != "section" {
+			kept = append(kept, row)
+		}
+	}
+	return kept
+}
+
 func (m *app) header() string {
 	workers := len(m.data.liveWorkers())
 	var tabs []string
@@ -127,6 +146,10 @@ func (m *app) header() string {
 		tab := style.Render(" " + label + " ")
 		if count := m.alertCount(index); count > 0 {
 			tab += " " + lipgloss.NewStyle().Foreground(background).Background(red).Bold(true).
+				Render(fmt.Sprintf(" %d ", count))
+		}
+		if count := len(withoutSections(m.data.Panels.FullQuestions)); index == 3 && count > 0 {
+			tab += " " + lipgloss.NewStyle().Foreground(background).Background(cyan).Bold(true).
 				Render(fmt.Sprintf(" %d ", count))
 		}
 		tabs = append(tabs, tab)
@@ -282,9 +305,10 @@ func (m *app) detail(id string, row item, width int) string {
 	}
 	var display []string
 	for _, line := range strings.Split(strings.Join(lines, "\n"), "\n") {
-		if id == "questions" || id == "full_questions" || id == "full_backlog" {
-			for _, wrapped := range strings.Split(ansi.Wrap("    "+line, max(1, width), ""), "\n") {
-				display = append(display, lipgloss.NewStyle().Foreground(muted).Render(wrapped))
+		if id == "full_questions" || id == "backlog" {
+			line = strings.ReplaceAll(line, "**", "")
+			for _, wrapped := range strings.Split(ansi.Wrap(line, max(1, width-4), ""), "\n") {
+				display = append(display, lipgloss.NewStyle().Foreground(muted).Render("    "+wrapped))
 			}
 		} else {
 			display = append(display, lipgloss.NewStyle().Foreground(muted).Render("    "+ansi.Truncate(line, max(1, width-5), "…")))
@@ -305,6 +329,17 @@ func (m *app) panelLines(spec panelSpec, width int) ([]string, []int) {
 	}
 	lastGroup := ""
 	for index, row := range rows {
+		if row.Status == "section" {
+			if len(lines) > 0 {
+				lines = append(lines, "")
+				owners = append(owners, -1)
+			}
+			heading := lipgloss.NewStyle().Foreground(cyan).Bold(true).Render(ansi.Truncate(row.Title, width, "…"))
+			rule := lipgloss.NewStyle().Foreground(muted).Render(strings.Repeat("─", max(1, width)))
+			lines = append(lines, heading, rule)
+			owners = append(owners, -1, -1)
+			continue
+		}
 		if spec.id == "workers" && (index == 0 || row.Group != lastGroup) {
 			noun := "workers"
 			if groups[row.Group] == 1 {
@@ -317,7 +352,7 @@ func (m *app) panelLines(spec panelSpec, width int) ([]string, []int) {
 		lastGroup = row.Group
 		lines = append(lines, m.rowLine(spec.id, row, index, width))
 		owners = append(owners, index)
-		if m.expanded[spec.id] == index+1 {
+		if m.expanded[spec.id] == index+1 || m.readingQuestion(spec.id, index) {
 			for _, detail := range strings.Split(m.detail(spec.id, row, width), "\n") {
 				lines = append(lines, detail)
 				owners = append(owners, index)
@@ -325,6 +360,13 @@ func (m *app) panelLines(spec panelSpec, width int) ([]string, []int) {
 		}
 	}
 	return lines, owners
+}
+
+// readingQuestion reports whether a captain question row is under the cursor,
+// which shows its full text without Enter.
+func (m *app) readingQuestion(id string, index int) bool {
+	selected, ok := m.selected[id]
+	return id == "full_questions" && ok && selected == index
 }
 
 func (m *app) panelOffset(spec panelSpec, width, height int, owners []int) int {
@@ -337,6 +379,9 @@ func (m *app) panelOffset(spec panelSpec, width, height int, owners []int) int {
 				break
 			}
 		}
+	}
+	if selected, ok := m.selected[spec.id]; ok && m.readingQuestion(spec.id, selected) {
+		return min(max(0, len(owners)-viewHeight), max(0, selectedLine+m.scrollOffset[spec.id]))
 	}
 	return min(max(0, len(owners)-viewHeight), max(0, selectedLine-viewHeight/2+m.scrollOffset[spec.id]))
 }
@@ -353,10 +398,18 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 			message = "No phones connected"
 		case "landings":
 			message = "Nothing landed today"
-		case "full_questions", "questions":
+		case "full_questions":
 			message = "No captain questions"
+		case "alerts":
+			message = "Nothing needs your attention. ALERTS shows only monitoring outages, blocked or failed workers, decisions not yet raised with you, and unavailable phones."
+		case "ready":
+			message = "Nothing is waiting on you. READY FOR YOU shows green PRs to merge, finished local branches to land, unread investigation reports, and previews you asked to see."
+		case "test_queue":
+			message = "No full suite or phone test is running or waiting"
+		case "routines":
+			message = "No daily routines are registered in this home"
 		}
-		lines = []string{lipgloss.NewStyle().Foreground(muted).Render(message)}
+		lines = strings.Split(lipgloss.NewStyle().Foreground(muted).Render(ansi.Wrap(message, innerWidth, "")), "\n")
 	} else if m.collapsed[spec.id] {
 		lines = []string{lipgloss.NewStyle().Foreground(muted).Render("Panel collapsed")}
 		owners = nil
@@ -398,7 +451,7 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 
 func (m *app) helpOverlay(width, height int) string {
 	lines := []string{
-		"VIM KEYS", "j/k rows + vertical panels  h/l sub-tabs",
+		"VIM KEYS", "j/k rows within the panel  h/l sub-tabs",
 		"Tab cycles  Ctrl-d/u rows",
 		"Enter/o expand  O focus selected worker pane",
 		"za/Space collapse  Alt-1..9 select",

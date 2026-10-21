@@ -87,9 +87,9 @@ func TestAllPagesRenderLocalPanels(t *testing.T) {
 	m.data.Panels.Builds = []item{{Title: "Android build", Status: "passed"}}
 	m.data.Panels.Bugs = []item{{Title: "Rocketboard login", Status: "in progress"}}
 	m.data.Panels.Allowance = []item{{Title: "Codex", Status: "65% remaining"}}
-	m.data.Panels.Questions = []item{{Title: "Which release?", Detail: "Blocks Android build"}}
-	if view := m.View().Content; !strings.Contains(view, "WAITING ON YOU") || !strings.Contains(view, "Which release?") {
-		t.Fatal("NOW page did not show the captain question")
+	m.data.Panels.FullQuestions = []item{{Title: "Which release?", Detail: "Blocks Android build"}}
+	if view := m.View().Content; strings.Contains(view, "WAITING ON YOU") || strings.Contains(view, "Which release?") {
+		t.Fatal("NOW page still duplicates the captain questions")
 	}
 	press(m, key('2'))
 	view := m.View().Content
@@ -107,31 +107,33 @@ func TestAllPagesRenderLocalPanels(t *testing.T) {
 	}
 }
 
-func TestQuestionsPageShowsBothFullPanels(t *testing.T) {
+func TestQuestionsPageShowsOnlyCaptainQuestions(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.FullQuestions = []item{
-		{Title: "FOR TARUN", Status: "section"},
+		{Title: "For Tarun", Status: "section"},
 		{Title: "Which device?", Detail: "Use the staging device"},
 	}
 	m.data.Panels.FullBacklog = []item{
-		{Title: "IN FLIGHT", Status: "section"},
+		{Title: "In flight", Status: "section"},
 		{Title: "Build widget [widget]", Detail: "Finish the animation"},
 	}
 	press(m, key('4'))
+	if len(pages[3]) != 1 || pages[3][0].id != "full_questions" {
+		t.Fatalf("QUESTIONS sub-tabs = %#v, want only CAPTAIN QUESTIONS", pages[3])
+	}
 	view := m.View().Content
-	for _, value := range []string{"CAPTAIN QUESTIONS", "BACKLOG", "Which device?"} {
-		if !strings.Contains(view, value) {
-			t.Fatalf("questions page missing %q", value)
+	if !strings.Contains(view, "CAPTAIN QUESTIONS") || !strings.Contains(view, "Use the staging device") {
+		t.Fatal("questions page did not show the highlighted question in full")
+	}
+	if strings.Contains(view, "BACKLOG") || strings.Contains(view, "Build widget [widget]") {
+		t.Fatal("QUESTIONS still shows a backlog")
+	}
+	m.slide = 0
+	for _, step := range []rune{'l', 'h'} {
+		press(m, key(step))
+		if m.focus != "full_questions" || m.slide != 0 {
+			t.Fatalf("%c on a one-sub-tab page moved focus to %s or animated", step, m.focus)
 		}
-	}
-	if strings.Contains(view, "Build widget [widget]") {
-		t.Fatal("inactive backlog row appeared on the questions sub-tab")
-	}
-	press(m, key('j'))
-	press(m, key('j'))
-	press(m, special(tea.KeyEnter))
-	if !strings.Contains(m.View().Content, "Use the staging device") {
-		t.Fatal("Enter did not expand the full question")
 	}
 	m.width, m.height = 55, 18
 	var explanation []string
@@ -147,42 +149,79 @@ func TestQuestionsPageShowsBothFullPanels(t *testing.T) {
 	}
 	press(m, ctrl('f'))
 	if m.scrollOffset["full_questions"] == 0 {
-		t.Fatal("Ctrl-f did not scroll the expanded question")
+		t.Fatal("Ctrl-f did not scroll the highlighted question")
 	}
 	if scrolled := m.View().Content; scrolled == view {
 		t.Fatal("Ctrl-f did not change the visible question text")
 	}
 }
 
-func TestQuestionsPageFocusCueFollowsPanel(t *testing.T) {
+func TestPlanningBacklogCarriesTheFullBacklog(t *testing.T) {
 	m := fixtureApp(t)
-	m.data.Panels.FullQuestions = []item{{Title: "Which device?"}}
-	m.data.Panels.FullBacklog = []item{{Title: "Build widget"}}
-	m.selected["full_questions"] = 0
-	m.selected["full_backlog"] = 0
-	press(m, key('4'))
-	questions := pages[3][0]
-	backlog := pages[3][1]
-	before := m.View().Content
-	if !strings.Contains(before, "Which device?") || strings.Contains(before, "Build widget") {
-		t.Fatal("questions page did not isolate the active panel")
+	queued, inFlight := 1, 2
+	m.data.Panels.Backlog = backlog{Queued: &queued, InFlight: &inFlight, Next: []item{{Title: "Short next row"}}}
+	m.data.Panels.FullBacklog = []item{
+		{Title: "In flight", Status: "section"},
+		{Title: "Build widget [widget]", Detail: "Finish the **widget** animation"},
+		{Title: "Queued", Status: "section"},
+		{Title: "Write tests [gadget]", Detail: "Cover the startup path"},
 	}
+	press(m, key('3'))
+	press(m, key('l'))
+	if m.focus != "backlog" {
+		t.Fatalf("PLANNING second sub-tab = %s, want backlog", m.focus)
+	}
+	view := m.View().Content
+	for _, value := range []string{"In flight 2  /  Queued 1", "Build widget [widget]", "Write tests [gadget]"} {
+		if !strings.Contains(view, value) {
+			t.Fatalf("PLANNING backlog missing %q", value)
+		}
+	}
+	if strings.Contains(view, "Short next row") {
+		t.Fatal("PLANNING backlog showed the short next-up list instead of the full backlog")
+	}
+	press(m, key('j'))
+	if m.selected["backlog"] != 2 {
+		t.Fatalf("j selected backlog row %d, want the first task after the headings", m.selected["backlog"])
+	}
+	press(m, special(tea.KeyEnter))
+	if view := m.View().Content; !strings.Contains(view, "Finish the widget animation") {
+		t.Fatal("Enter did not show the backlog item's full note")
+	}
+	if summary := panelSummary(panelSpec{"backlog", "BACKLOG"}, m.items("backlog"), 60); !strings.Contains(summary, "2 tasks") {
+		t.Fatalf("backlog summary counted headings: %q", summary)
+	}
+	m.data.Panels.FullBacklog = nil
+	if !strings.Contains(m.View().Content, "Short next row") {
+		t.Fatal("backlog lost its next-up fallback when the full list is unavailable")
+	}
+}
+
+func TestPlanningFocusCueFollowsPanel(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Bugs = []item{{Title: "Login bug"}}
+	m.data.Panels.FullBacklog = []item{{Title: "Build widget"}}
+	m.selected["bugs"] = 0
+	m.selected["backlog"] = 1
+	press(m, key('3'))
+	bugs, plan := pages[2][0], pages[2][1]
+	before := m.View().Content
 	press(m, special(tea.KeyTab))
 	after := m.View().Content
-	if m.focus != "full_backlog" || before == after || !strings.Contains(after, "Build widget") || strings.Contains(after, "Which device?") {
-		t.Fatal("moving focus did not change the multi-panel view")
+	if m.focus != "backlog" || before == after || !strings.Contains(after, "Build widget") {
+		t.Fatal("moving focus did not change the large panel")
 	}
 	active := func(title string) string {
 		return lipgloss.NewStyle().Foreground(background).Background(yellow).Bold(true).Render(" " + title + " ")
 	}
-	if strip := m.subTabs(200); !strings.Contains(strip, active(backlog.title)) || strings.Contains(strip, active(questions.title)) {
+	if strip := m.subTabs(200); !strings.Contains(strip, active(plan.title)) || strings.Contains(strip, active(bugs.title)) {
 		t.Fatalf("sub-tab strip did not move its focus cue: %q", strip)
 	}
-	for _, id := range []string{"full_questions", "full_backlog"} {
-		selected := m.rowLine(id, m.items(id)[0], 0, 40)
+	for id, index := range map[string]int{"bugs": 0, "backlog": 1} {
+		selected := m.rowLine(id, m.items(id)[index], index, 40)
 		delete(m.selected, id)
-		unselected := m.rowLine(id, m.items(id)[0], 0, 40)
-		m.selected[id] = 0
+		unselected := m.rowLine(id, m.items(id)[index], index, 40)
+		m.selected[id] = index
 		if selected == unselected {
 			t.Errorf("%s selected row has no cursor cue", id)
 		}
@@ -292,7 +331,7 @@ func TestVimKeys(t *testing.T) {
 		t.Fatal("o did not close selected row")
 	}
 	press(m, key('l'))
-	if m.focus != "questions" {
+	if m.focus != "ready" {
 		t.Fatalf("l focus = %s", m.focus)
 	}
 	_ = m.View()
@@ -378,12 +417,12 @@ func TestFeedSkipsInternalFilesAndDatesOnlyNewestLine(t *testing.T) {
 	}
 }
 
-func TestSpatialPanelNavigation(t *testing.T) {
+func TestArrowsStepSubTabsAndJKStayInPanel(t *testing.T) {
 	m := fixtureApp(t)
 	press(m, key('j'))
 	_ = m.View()
 	press(m, key('l'))
-	if m.focus != "questions" {
+	if m.focus != "ready" {
 		t.Fatalf("right chose %s instead of the next sub-tab", m.focus)
 	}
 	_ = m.View()
@@ -392,27 +431,155 @@ func TestSpatialPanelNavigation(t *testing.T) {
 		t.Fatal("left did not focus the previous sub-tab")
 	}
 	m.width = 55
-	m.focus = "workers"
 	m.selected["workers"] = 1
 	_ = m.View()
 	press(m, key('l'))
-	if m.focus != "questions" {
+	if m.focus != "ready" {
 		t.Fatal("right did not step through the sub-tabs in a one-column layout")
 	}
 	m.focus = "workers"
+	for _, step := range []rune{'j', 'j', 'G'} {
+		press(m, key(step))
+		if m.focus != "workers" || m.selected["workers"] != 1 {
+			t.Fatalf("%c at the bottom row left the panel: focus %s row %d", step, m.focus, m.selected["workers"])
+		}
+	}
+	press(m, ctrl('d'))
+	if m.focus != "workers" {
+		t.Fatal("Ctrl-d at the bottom row left the panel")
+	}
+	m.selected["workers"] = 0
+	press(m, key('k'))
+	press(m, ctrl('u'))
+	if m.focus != "workers" || m.selected["workers"] != 0 {
+		t.Fatalf("k at the top row left the panel: focus %s", m.focus)
+	}
+	m.focus, m.slide = "ready", 0
 	press(m, key('j'))
-	if m.focus != "questions" {
-		t.Fatalf("j at row edge moved to %s, want next panel", m.focus)
+	press(m, key('k'))
+	if m.focus != "ready" || m.slide != 0 {
+		t.Fatalf("j/k in an empty panel changed sub-tab to %s", m.focus)
+	}
+}
+
+func TestSectionHeadingsAreStyledAndSkipped(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.FullQuestions = []item{
+		{Title: "Your decisions, something is blocked behind each", Status: "section"},
+		{Title: "UIX. Pick the UI.", Detail: "UIX. Pick the UI. Prototype or design."},
+		{Title: "For Tarun", Status: "section"},
+		{Title: "Can we use the staging phone?", Detail: "Production stays locked."},
+	}
+	press(m, key('4'))
+	lines, owners := m.panelLines(panelSpec{id: "full_questions"}, 60)
+	if owners[0] != -1 || owners[1] != -1 || !strings.Contains(lines[1], "────") {
+		t.Fatalf("first heading lacks its divider: %q", lines[:2])
+	}
+	if !strings.Contains(lines[0], "Your decisions, something is blocked behind each") ||
+		strings.Contains(strings.Join(lines, "\n"), "YOUR DECISIONS") || strings.Contains(lines[0], "section") {
+		t.Fatalf("heading rendered as tagged row text: %q", lines[0])
+	}
+	heading := lipgloss.NewStyle().Foreground(cyan).Bold(true).Render("For Tarun")
+	if !strings.Contains(strings.Join(lines, "\n"), heading) {
+		t.Fatal("second heading is not styled as a heading")
+	}
+	if m.selected["full_questions"] != 1 {
+		t.Fatalf("opening the page selected row %d, want the first question", m.selected["full_questions"])
+	}
+	press(m, key('j'))
+	if m.selected["full_questions"] != 3 {
+		t.Fatalf("j landed on row %d instead of skipping the heading", m.selected["full_questions"])
 	}
 	press(m, key('k'))
-	if m.focus != "workers" {
-		t.Fatalf("k in empty panel moved to %s, want previous panel", m.focus)
+	press(m, key('k'))
+	if m.selected["full_questions"] != 1 {
+		t.Fatalf("k selected heading row %d", m.selected["full_questions"])
+	}
+	press(m, key('G'))
+	press(m, key('g'))
+	press(m, key('g'))
+	if m.selected["full_questions"] != 1 {
+		t.Fatal("gg selected a heading")
+	}
+	_ = m.View()
+	rect := m.lastRects[0]
+	m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: rect.y + 3})
+	if m.selected["full_questions"] != 1 {
+		t.Fatal("a click on a heading changed the selection")
+	}
+}
+
+func TestHighlightedQuestionShowsFullTextWithoutEnter(t *testing.T) {
+	m := fixtureApp(t)
+	long := "UIX. Pick the UI. " + strings.Repeat("Consider the detailed constraint. ", 20) + "Final decision needed."
+	m.data.Panels.FullQuestions = []item{
+		{Title: "UIX. Pick the UI.", Detail: long},
+		{Title: "OPS. Release timing.", Detail: "OPS. Release timing. Choose the window."},
+	}
+	press(m, key('4'))
+	view := m.View().Content
+	if !strings.Contains(view, "Consider the detailed constraint.") || strings.Contains(view, "Choose the window.") {
+		t.Fatal("the highlighted question did not show its own full text")
+	}
+	for range 10 {
+		press(m, ctrl('f'))
+	}
+	if !strings.Contains(m.View().Content, "Final decision needed.") {
+		t.Fatal("the highlighted question could not scroll to its end")
+	}
+	press(m, key('j'))
+	view = m.View().Content
+	if !strings.Contains(view, "Choose the window.") || strings.Contains(view, "Consider the detailed constraint.") {
+		t.Fatal("moving the cursor did not move the shown question text")
+	}
+	m.width, m.height = 55, 18
+	for _, line := range strings.Split(m.View().Content, "\n") {
+		if lipgloss.Width(line) > m.width {
+			t.Fatal("highlighted question overflowed the narrow panel")
+		}
+	}
+}
+
+func TestQuestionsLiveOnlyOnTheirPageWithACountBadge(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.FullQuestions = []item{
+		{Title: "Decisions", Status: "section"},
+		{Title: "UIX. Pick the UI."},
+		{Title: "OPS. Release timing."},
+	}
+	for _, spec := range pages[0] {
+		if spec.id == "questions" || spec.title == "WAITING ON YOU" {
+			t.Fatal("NOW still carries a questions sub-tab")
+		}
+	}
+	badge := lipgloss.NewStyle().Foreground(background).Background(cyan).Bold(true).Render(" 2 ")
+	if header := m.header(); !strings.Contains(header, " 4 QUESTIONS ") || !strings.Contains(header, badge) {
+		t.Fatalf("questions tab has no open-question badge: %q", header)
+	}
+	m.data.Panels.FullQuestions = nil
+	if strings.Contains(m.header(), badge) {
+		t.Fatal("questions badge stayed with no open questions")
+	}
+}
+
+func TestEmptyAlertsAndReadyExplainThemselves(t *testing.T) {
+	m := fixtureApp(t)
+	m.focus = "alerts"
+	if view := m.View().Content; !strings.Contains(view, "Nothing needs your attention") {
+		t.Fatal("empty ALERTS did not explain what it shows")
+	}
+	m.focus = "ready"
+	if view := m.View().Content; !strings.Contains(view, "Nothing is waiting on you") {
+		t.Fatal("empty READY FOR YOU did not explain what it shows")
 	}
 }
 
 func TestSubTabsStayAboveFixedLargePanel(t *testing.T) {
 	m := fixtureApp(t)
 	for page := 0; page < 4; page++ {
+		if len(pages[page]) < 2 {
+			continue
+		}
 		m.page = page
 		m.focus = pages[page][0].id
 		strip := m.subTabs(200)
@@ -486,14 +653,14 @@ func TestNarrowTabStripKeepsFocusedTabVisible(t *testing.T) {
 	if !strings.Contains(m.View().Content, active("FEED")) {
 		t.Fatal("focused FEED sub-tab was clipped at narrow width")
 	}
-	m.page, m.focus = 3, "full_backlog"
+	m.page, m.focus = 2, "allowance"
 	strip = m.subTabs(m.width - 4)
-	if !strings.Contains(strip, active("BACKLOG")) || !strings.Contains(strip, "CAPTAIN QUESTIONS") {
-		t.Fatalf("QUESTIONS sub-tab strip lost its tabs: %q", strip)
+	if !strings.Contains(strip, active("AI ALLOWANCE")) {
+		t.Fatalf("PLANNING sub-tab strip lost its focused tab: %q", strip)
 	}
 	view := m.View().Content
-	if !strings.Contains(view, "4 QUESTIONS") || !strings.Contains(view, active("BACKLOG")) {
-		t.Fatal("focused QUESTIONS page or BACKLOG sub-tab was clipped")
+	if !strings.Contains(view, "3 PLANNING") || !strings.Contains(view, active("AI ALLOWANCE")) {
+		t.Fatal("focused PLANNING page or AI ALLOWANCE sub-tab was clipped")
 	}
 }
 
@@ -606,13 +773,12 @@ func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
 
 func TestQuestionReplyAndFullDetail(t *testing.T) {
 	m := fixtureApp(t)
-	m.page, m.focus = 0, "questions"
-	m.data.Panels.Questions = []item{{ID: "question-1", Title: "UIX. Prototype or design UI.",
+	m.page, m.focus = 3, "full_questions"
+	m.data.Panels.FullQuestions = []item{{ID: "question-1", Title: "UIX. Prototype or design UI.",
 		Detail: "UIX. Prototype or design UI. " + strings.Repeat("Consider the detailed constraint. ", 25) + "Final decision needed."}}
-	m.selected["questions"] = 0
-	m.expanded["questions"] = 1
-	if !strings.Contains(m.detail("questions", m.data.Panels.Questions[0], 40), "Final") ||
-		!strings.Contains(m.detail("questions", m.data.Panels.Questions[0], 40), "needed.") {
+	m.selected["full_questions"] = 0
+	if !strings.Contains(m.detail("full_questions", m.data.Panels.FullQuestions[0], 40), "Final") ||
+		!strings.Contains(m.detail("full_questions", m.data.Panels.FullQuestions[0], 40), "needed.") {
 		t.Fatal("question detail was truncated")
 	}
 	if !strings.Contains(m.View().Content, "REPLY [UIX]") {
@@ -622,7 +788,7 @@ func TestQuestionReplyAndFullDetail(t *testing.T) {
 		press(m, ctrl('f'))
 	}
 	if !strings.Contains(m.View().Content, "Final decision") {
-		t.Fatal("expanded question on NOW could not scroll to its end")
+		t.Fatal("highlighted question could not scroll to its end")
 	}
 	code := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(code, "bin"), 0700); err != nil {
@@ -669,12 +835,12 @@ func TestMouseIgnoresRowsPastThePanelWindow(t *testing.T) {
 
 func TestReplyKeepsItsQuestionWhenTheCursorMoves(t *testing.T) {
 	m := fixtureApp(t)
-	m.page, m.focus = 0, "questions"
-	m.data.Panels.Questions = []item{
+	m.page, m.focus = 3, "full_questions"
+	m.data.Panels.FullQuestions = []item{
 		{ID: "question-1", Title: "UIX. Prototype or design UI.", Detail: "first"},
 		{ID: "question-2", Title: "OPS. Release timing.", Detail: "second"},
 	}
-	m.selected["questions"] = 0
+	m.selected["full_questions"] = 0
 	code := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(code, "bin"), 0700); err != nil {
 		t.Fatal(err)
@@ -687,9 +853,14 @@ func TestReplyKeepsItsQuestionWhenTheCursorMoves(t *testing.T) {
 	m.input.SetValue("use the prototype")
 	_ = m.View()
 	rect := m.lastRects[0]
-	m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: rect.y + 4})
-	if m.selected["questions"] != 1 {
-		t.Fatalf("click left the selection on question %d", m.selected["questions"])
+	_, owners := m.panelLines(panelSpec{id: "full_questions"}, rect.width-4)
+	line := 0
+	for line < len(owners) && owners[line] != 1 {
+		line++
+	}
+	m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: rect.y + 3 + line - m.panelOffset(panelSpec{id: "full_questions"}, rect.width-4, rect.height, owners)})
+	if m.selected["full_questions"] != 1 {
+		t.Fatalf("click left the selection on question %d", m.selected["full_questions"])
 	}
 	if !strings.Contains(m.View().Content, "REPLY [UIX]") {
 		t.Fatal("reply label followed the click instead of the question the reply started on")
