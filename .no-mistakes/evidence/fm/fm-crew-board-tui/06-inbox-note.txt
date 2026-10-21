@@ -1,0 +1,9 @@
+# captain inbox note produced by: j (select) -> i -> 'why is this stuck in testing?' -> Enter
+id=1792566864-MxJbd7
+at=2026-10-21T07:14:24Z
+source=text
+--
+Crew board item: alpha | widget / Make the widget spin | building
+Note: why is this stuck in testing?
+
+# stray 'x' then Enter earlier in the same session produced no inbox entry (inbox dir did not exist before this note)
