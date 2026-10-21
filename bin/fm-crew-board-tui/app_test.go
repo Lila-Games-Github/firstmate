@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,6 +83,50 @@ func TestAllPagesRenderLocalPanels(t *testing.T) {
 		if !strings.Contains(view, value) {
 			t.Errorf("PLANNING page missing %q", value)
 		}
+	}
+}
+
+func TestQuestionsPageShowsBothFullPanels(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.FullQuestions = []item{
+		{Title: "FOR TARUN", Status: "section"},
+		{Title: "Which device?", Detail: "Use the staging device"},
+	}
+	m.data.Panels.FullBacklog = []item{
+		{Title: "IN FLIGHT", Status: "section"},
+		{Title: "Build widget [widget]", Detail: "Finish the animation"},
+	}
+	press(m, key('4'))
+	view := m.View().Content
+	for _, value := range []string{"CAPTAIN QUESTIONS", "BACKLOG", "Which device?", "Build widget [widget]"} {
+		if !strings.Contains(view, value) {
+			t.Fatalf("questions page missing %q", value)
+		}
+	}
+	press(m, key('j'))
+	press(m, key('j'))
+	press(m, special(tea.KeyEnter))
+	if !strings.Contains(m.View().Content, "Use the staging device") {
+		t.Fatal("Enter did not expand the full question")
+	}
+	m.width, m.height = 55, 18
+	var explanation []string
+	for index := range 20 {
+		explanation = append(explanation, fmt.Sprintf("Line %02d explains the question in detail.", index))
+	}
+	m.data.Panels.FullQuestions[1].Detail = strings.Join(explanation, "\n")
+	view = m.View().Content
+	for _, line := range strings.Split(view, "\n") {
+		if lipgloss.Width(line) > m.width {
+			t.Fatal("full question overflowed the narrow panel")
+		}
+	}
+	press(m, ctrl('f'))
+	if m.scrollOffset["full_questions"] == 0 {
+		t.Fatal("Ctrl-f did not scroll the expanded question")
+	}
+	if scrolled := m.View().Content; scrolled == view {
+		t.Fatal("Ctrl-f did not change the visible question text")
 	}
 }
 
@@ -191,12 +236,13 @@ func TestVimKeys(t *testing.T) {
 		t.Fatal("o did not close selected row")
 	}
 	press(m, key('l'))
-	if m.focus != "questions" {
+	if m.focus != "alerts" {
 		t.Fatalf("l focus = %s", m.focus)
 	}
+	_ = m.View()
 	press(m, key('h'))
 	if m.focus != "workers" {
-		t.Fatalf("h focus = %s", m.focus)
+		t.Fatalf("h did not return to the panel on the left: %s", m.focus)
 	}
 	press(m, key('2'))
 	if m.page != 1 {
@@ -217,6 +263,73 @@ func TestVimKeys(t *testing.T) {
 	press(m, special(tea.KeyEsc))
 	if m.help {
 		t.Fatal("Esc did not close help")
+	}
+}
+
+func TestWorkerFocusKey(t *testing.T) {
+	m := fixtureApp(t)
+	if cmd := press(m, key('O')); cmd != nil || !strings.Contains(m.notice, "Select a worker") {
+		t.Fatal("O without a selected worker did not give a hint")
+	}
+	press(m, key('j'))
+	if cmd := press(m, key('O')); cmd == nil {
+		t.Fatal("O did not request focus for the selected worker")
+	}
+	press(m, key('?'))
+	if !strings.Contains(m.View().Content, "O focus selected worker pane") {
+		t.Fatal("help did not document the worker jump")
+	}
+}
+
+func TestFeedShowsLatestFirstmateAcknowledgement(t *testing.T) {
+	m := fixtureApp(t)
+	handled := filepath.Join(m.paths.State, "inbox", "handled")
+	if err := os.MkdirAll(handled, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"old.note", "new.note"} {
+		if err := os.WriteFile(filepath.Join(handled, name), []byte("id="+name+"\n--\nmessage\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := filepath.Join(handled, "old.note")
+	if err := os.Chtimes(old, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	feed, err := readFeed(m.paths.State)
+	if err != nil || len(feed) == 0 || feed[0].ID != "new" || !strings.Contains(feed[0].Title, "Firstmate acknowledged") {
+		t.Fatalf("latest acknowledgement missing from feed: %v, %v", feed, err)
+	}
+}
+
+func TestSpatialPanelNavigation(t *testing.T) {
+	m := fixtureApp(t)
+	press(m, key('j'))
+	_ = m.View()
+	press(m, key('l'))
+	if m.focus != "alerts" {
+		t.Fatalf("right chose %s instead of the visible adjacent panel", m.focus)
+	}
+	_ = m.View()
+	press(m, key('h'))
+	if m.focus != "workers" {
+		t.Fatal("left did not focus the visible panel to the left")
+	}
+	m.width = 55
+	m.focus = "workers"
+	m.selected["workers"] = 1
+	_ = m.View()
+	press(m, key('l'))
+	if m.focus != "workers" {
+		t.Fatal("right moved in a one-column layout")
+	}
+	press(m, key('j'))
+	if m.focus != "alerts" {
+		t.Fatalf("j at row edge moved to %s, want panel below", m.focus)
+	}
+	press(m, key('k'))
+	if m.focus != "workers" {
+		t.Fatalf("k in empty panel moved to %s, want panel above", m.focus)
 	}
 }
 

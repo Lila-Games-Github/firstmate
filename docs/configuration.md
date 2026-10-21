@@ -620,13 +620,17 @@ Use `bin/fm-crew-board.sh --help` for the key map, `refresh` for the JSON payloa
 
 The NOW page reads workers and phase counts from `state/crew-board.json`, questions from `data/captain-questions.md`, and a feed from worker status files.
 The TESTING page shows phones, test queue, landings, builds, and daily routines; PLANNING shows Rocketboard bugs, backlog, and AI allowance.
+The QUESTIONS page shows every open captain question grouped by its heading beside every in-flight, captain-held, and queued backlog item read through `bin/fm-tasks-axi.sh`; select a row and press Enter to read its full text, then use Ctrl-f/Ctrl-b to scroll long entries.
 The backlog panel reads local counts and next tasks through `bin/fm-tasks-axi.sh`; the remaining observations without a cheap local source may be supplied by a firstmate-maintained `data/crew-board-cache.json`.
 That optional file uses `{"schema":"fm-crew-board-cache.v1","observed_at":"<ISO 8601>","phones":[{"title":"S22","status":"locked","detail":"held by worker"}]}`.
 Its optional arrays are `alerts`, `ready`, `phones`, `test_queue`, `landings`, `builds`, `routines`, `bugs`, and `allowance`; each entry may have `id`, `title`, `detail`, `status`, `link`, and `alert` fields.
 Firstmate updates that cache from its normal work; the board refresh and terminal UI make no network request.
 An absent cache leaves those panels empty, and the terminal retains the last published board if a refresh fails.
 Typing a note with `i` or `:` and Enter sends it through `bin/fm-inbox.sh note` and wakes firstmate; selecting a row attaches its item ID and title to the same note.
+The note line always shows the `i` shortcut, confirms a sent message, and the Feed shows the latest firstmate acknowledgement when the note reaches `state/inbox/handled/`.
+On each page `h`/`l` and Left/Right move to the visible panel in that direction, `j`/`k` move above or below at a row edge, and Tab/Shift-Tab cycle panels.
 Expanded worker rows show a read-only tail from `bin/fm-peek.sh` for the selected worker.
+Press `O` on a selected worker to focus its recorded tmux window or Herdr tab when the board runs inside that runtime; otherwise the board prints the exact attach command in its footer.
 
 ## Toolchain
 

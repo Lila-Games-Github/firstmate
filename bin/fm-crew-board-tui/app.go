@@ -19,9 +19,10 @@ var pages = [][]panelSpec{
 	{{"phones", "PHONES"}, {"test_queue", "TEST QUEUE"}, {"landings", "TODAY'S LANDINGS"},
 		{"builds", "BUILDS"}, {"routines", "DAILY ROUTINES"}},
 	{{"bugs", "ROCKETBOARD BUGS"}, {"backlog", "BACKLOG"}, {"allowance", "AI ALLOWANCE"}},
+	{{"full_questions", "CAPTAIN QUESTIONS"}, {"full_backlog", "BACKLOG"}},
 }
 
-var pageNames = []string{"NOW", "TESTING", "PLANNING"}
+var pageNames = []string{"NOW", "TESTING", "PLANNING", "QUESTIONS"}
 
 type tickMsg time.Time
 type motionMsg time.Time
@@ -35,6 +36,10 @@ type peekMsg struct {
 	err      error
 }
 type noteMsg struct{ err error }
+type focusMsg struct {
+	text string
+	err  error
+}
 
 type app struct {
 	paths                    paths
@@ -48,6 +53,7 @@ type app struct {
 	collapsed                map[string]bool
 	filters                  map[string]string
 	peekText                 map[string]string
+	scrollOffset             map[string]int
 	peekLoading              string
 	input                    textinput.Model
 	inputActive              bool
@@ -79,7 +85,7 @@ func newApp(p paths, data board, feed []item) *app {
 	return &app{
 		paths: p, data: data, feed: feed, page: 0, focus: "workers",
 		selected: map[string]int{}, expanded: map[string]int{}, collapsed: map[string]bool{},
-		filters: map[string]string{}, peekText: map[string]string{},
+		filters: map[string]string{}, peekText: map[string]string{}, scrollOffset: map[string]int{},
 		input: input, filterInput: filter, spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		spring:    harmonica.NewSpring(harmonica.FPS(30), 8, 0.8),
 		focusSize: 0.68,
@@ -106,6 +112,10 @@ func (m *app) noteCmd(text string, selected *item) tea.Cmd {
 	p := m.paths
 	return func() tea.Msg { return noteMsg{p.sendNote(text, selected)} }
 }
+func (m *app) focusCmd(id string) tea.Cmd {
+	p := m.paths
+	return func() tea.Msg { text, err := p.focusWorker(id); return focusMsg{text, err} }
+}
 
 func (m *app) rawItems(id string) []item {
 	switch id {
@@ -113,6 +123,10 @@ func (m *app) rawItems(id string) []item {
 		return m.data.Panels.Alerts
 	case "questions":
 		return m.data.Panels.Questions
+	case "full_questions":
+		return m.data.Panels.FullQuestions
+	case "full_backlog":
+		return m.data.Panels.FullBacklog
 	case "ready":
 		return m.data.Panels.Ready
 	case "phones":
@@ -229,9 +243,68 @@ func (m *app) changeFocus(step int) {
 	m.beginMotion()
 }
 
+// moveFocusSpatial follows the panel positions currently shown on screen.
+func (m *app) moveFocusSpatial(dx, dy int) {
+	if len(m.lastRects) == 0 {
+		_ = m.View()
+	}
+	var current panelRect
+	found := false
+	for _, rect := range m.lastRects {
+		if rect.id == m.focus {
+			current, found = rect, true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+	anchorY := current.y + 1 + m.selected[m.focus]
+	best, bestDistance := "", int(^uint(0)>>1)
+	for _, rect := range m.lastRects {
+		if rect.id == m.focus {
+			continue
+		}
+		gap, offset := 0, 0
+		switch {
+		case dx > 0:
+			gap = rect.x - (current.x + current.width)
+			offset = absInt(2*rect.y + rect.height - 2*anchorY)
+		case dx < 0:
+			gap = current.x - (rect.x + rect.width)
+			offset = absInt(2*rect.y + rect.height - 2*anchorY)
+		case dy > 0:
+			gap = rect.y - (current.y + current.height)
+			offset = absInt(2*rect.x + rect.width - 2*current.x - current.width)
+		case dy < 0:
+			gap = current.y - (rect.y + rect.height)
+			offset = absInt(2*rect.x + rect.width - 2*current.x - current.width)
+		}
+		if gap < 0 {
+			continue
+		}
+		distance := gap*1000 + offset
+		if distance < bestDistance {
+			best, bestDistance = rect.id, distance
+		}
+	}
+	if best != "" {
+		m.focus = best
+		m.beginMotion()
+	}
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 func (m *app) moveSelection(step int) {
 	rows := m.items(m.focus)
 	if len(rows) == 0 {
+		m.moveFocusSpatial(0, step)
 		return
 	}
 	index, ok := m.selected[m.focus]
@@ -242,9 +315,14 @@ func (m *app) moveSelection(step int) {
 			index = 0
 		}
 	} else {
+		if index+step < 0 || index+step >= len(rows) {
+			m.moveFocusSpatial(0, step)
+			return
+		}
 		index = max(0, min(len(rows)-1, index+step))
 	}
 	m.selected[m.focus] = index
+	m.scrollOffset[m.focus] = 0
 }
 
 func (m *app) expandSelected() tea.Cmd {
@@ -256,12 +334,16 @@ func (m *app) expandSelected() tea.Cmd {
 	if row == nil {
 		return nil
 	}
+	if row.Status == "section" {
+		return nil
+	}
 	index := m.selected[m.focus]
 	if m.expanded[m.focus] == index+1 {
 		delete(m.expanded, m.focus)
 		return nil
 	}
 	m.expanded[m.focus] = index + 1
+	m.scrollOffset[m.focus] = 0
 	if m.focus == "workers" {
 		m.peekLoading = row.ID
 		return m.peekCmd(row.ID)
@@ -323,7 +405,12 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.notice = msg.err.Error()
 		} else {
-			m.notice = "Note queued for firstmate"
+			m.notice = "Sent to firstmate"
+		}
+	case focusMsg:
+		m.notice = msg.text
+		if msg.err != nil && m.notice == "" {
+			m.notice = msg.err.Error()
 		}
 	case spinner.TickMsg:
 		var command tea.Cmd
@@ -413,19 +500,27 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "q", "ctrl+c":
 			return m, tea.Quit
-		case "1", "2", "3":
+		case "1", "2", "3", "4":
 			m.setPage(int(key[0] - '1'))
 			return m, motionTick()
-		case "tab", "right", "l":
+		case "tab":
 			m.changeFocus(1)
 			return m, motionTick()
-		case "shift+tab", "left", "h":
+		case "shift+tab":
 			m.changeFocus(-1)
+			return m, motionTick()
+		case "right", "l":
+			m.moveFocusSpatial(1, 0)
+			return m, motionTick()
+		case "left", "h":
+			m.moveFocusSpatial(-1, 0)
 			return m, motionTick()
 		case "down", "j":
 			m.moveSelection(1)
+			return m, motionTick()
 		case "up", "k":
 			m.moveSelection(-1)
+			return m, motionTick()
 		case "ctrl+d":
 			for range 5 {
 				m.moveSelection(1)
@@ -434,6 +529,16 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+u":
 			for range 5 {
 				m.moveSelection(-1)
+			}
+			return m, nil
+		case "ctrl+f":
+			if m.page == 3 {
+				m.scrollOffset[m.focus] += max(1, m.height/3)
+			}
+			return m, nil
+		case "ctrl+b":
+			if m.page == 3 {
+				m.scrollOffset[m.focus] = max(0, m.scrollOffset[m.focus]-max(1, m.height/3))
 			}
 			return m, nil
 		case "G":
@@ -452,6 +557,17 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter", "o":
 			return m, m.expandSelected()
+		case "O":
+			if m.focus != "workers" {
+				m.notice = "Select a worker in WORKERS first"
+				return m, nil
+			}
+			row := m.focusedItem()
+			if row == nil {
+				m.notice = "Select a worker with j/k first"
+				return m, nil
+			}
+			return m, m.focusCmd(row.ID)
 		case "/":
 			m.filterActive = true
 			m.filterInput.SetValue(m.filters[m.focus])

@@ -150,9 +150,65 @@ EOF
   pass "local panel cache, captain questions, tasks-axi backlog, and one-word launcher"
 }
 
+test_full_questions_and_backlog() {
+  local home
+  home=$(make_home full_page)
+  cat > "$home/data/captain-questions.md" <<'EOF'
+# Open questions
+
+## Decisions for the product owner
+- Which release should ship?
+  The Android build is waiting.
+
+## For Tarun
+- Can we use the staging phone?
+  The production phone stays locked.
+
+## For Arshnoor
+- Which color should launch?
+
+## For Aleksandra
+- Is the copy approved?
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+- [ ] alpha - Build widget (repo: widget) (kind: ship) (since 2026-10-21)
+  Finish the widget animation.
+
+- [ ] beta - Pick release (repo: widget) (kind: captain) (since 2026-10-21) (hold: choose release A or B) (hold-kind: captain)
+  Release A is stable; B has the new screen.
+
+## Queued
+
+- [ ] gamma - Write tests (repo: gadget) (kind: ship)
+  Cover the startup path.
+
+## Done
+EOF
+  run_board "$home" refresh >/dev/null || fail 'full page refresh failed'
+  assert_equals 8 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" 'question section and entry count'
+  assert_equals 'DECISIONS FOR THE PRODUCT OWNER' \
+    "$(jq -r '.panels.full_questions[0].title' "$home/state/crew-board.json")" 'question section heading'
+  assert_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" \
+    'The Android build is waiting.' 'full question text'
+  assert_equals 4 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" 'Now page summary count'
+  assert_equals 6 "$(jq '.panels.full_backlog | length' "$home/state/crew-board.json")" 'backlog groups and items'
+  assert_equals 'HELD FOR THE CAPTAIN' \
+    "$(jq -r '.panels.full_backlog[2].title' "$home/state/crew-board.json")" 'captain hold section'
+  assert_contains "$(jq -r '.panels.full_backlog[3].title' "$home/state/crew-board.json")" \
+    'choose release A or B' 'visible hold reason'
+  assert_contains "$(jq -r '.panels.full_backlog[3].detail' "$home/state/crew-board.json")" \
+    'Release A is stable; B has the new screen.' 'full backlog note'
+  assert_not_contains "$(jq -r '.panels.full_backlog[3].title' "$home/state/crew-board.json")" \
+    'beta' 'backlog title leaked its task id'
+  pass 'full questions and backlog parsers retain grouped entries, hold reasons, and notes'
+}
+
 test_rows_and_phase_time
 test_refresh_and_gone
 test_tui_render_and_note
 test_narrow_terminal
 test_note_without_selection_and_point_without_text
 test_panel_projection_and_launcher
+test_full_questions_and_backlog
