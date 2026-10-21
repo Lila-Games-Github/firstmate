@@ -1070,3 +1070,59 @@ func TestExpandedWorkerUsesPeek(t *testing.T) {
 		t.Fatalf("peek result = %#v", message)
 	}
 }
+
+func TestWorkerRowsShowTheirTagInThePhaseColour(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.WorkerTags = map[string]string{"alpha": "S22 TEST 5m"}
+	rows := m.items("workers")
+	var alpha, beta int
+	for index, row := range rows {
+		if row.ID == "alpha" {
+			alpha = index
+		} else {
+			beta = index
+		}
+	}
+	tagged := m.rowLine("workers", rows[alpha], alpha, 100)
+	if !strings.Contains(tagged, phaseColor("testing").Render("5m  S22 TEST 5m")) || strings.Contains(tagged, "TESTING") {
+		t.Fatalf("tagged worker row lost its tag or phase colour: %q", tagged)
+	}
+	if plain := m.rowLine("workers", rows[beta], beta, 100); !strings.Contains(plain, "FIXING") {
+		t.Fatalf("untagged worker did not fall back to its phase word: %q", plain)
+	}
+	if line := m.rowLine("workers", rows[alpha], alpha, 40); strings.Contains(line, "\n") || lipgloss.Width(line) > 40 {
+		t.Fatalf("tagged row is not one line within the panel: %q", line)
+	}
+	m.data.Rows[0].Note = "holding S22 for the merge benchmark; then the full suite"
+	m.selected["workers"] = alpha
+	m.expanded["workers"] = alpha + 1
+	if !strings.Contains(m.View().Content, "then the full suite") {
+		t.Fatal("expanding a tagged worker did not show its full note")
+	}
+}
+
+func TestSelectedRowTagStaysReadableOnTheHighlight(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.TestQueue = []item{{Title: "RUNNING: Build widget", Status: "running 8m"}}
+	for _, id := range []string{"workers", "test_queue"} {
+		row := m.items(id)[0]
+		delete(m.selected, id)
+		unselected := m.rowLine(id, row, 0, 80)
+		m.selected[id] = 0
+		selected := m.rowLine(id, row, 0, 80)
+		status := row.Status
+		if id == "workers" {
+			status = "5m  TESTING"
+			if row.ID != "alpha" {
+				status = "1m  FIXING"
+			}
+		}
+		chip := phaseChip(row.Status).Render(status)
+		if !strings.Contains(selected, chip) || strings.Contains(selected, phaseColor(row.Status).Render(status)) {
+			t.Fatalf("%s selected tag is not a dark-text chip: %q", id, selected)
+		}
+		if unselected == selected || !strings.Contains(unselected, phaseColor(row.Status).Render(status)) {
+			t.Fatalf("%s unselected tag lost its phase colour: %q", id, unselected)
+		}
+	}
+}

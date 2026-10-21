@@ -43,6 +43,10 @@ func phaseColor(phase string) lipgloss.Style {
 		color = muted
 	case "due now":
 		color = yellow
+	case "running":
+		color = cyan
+	case "next", "waiting":
+		color = muted
 	}
 	switch {
 	case strings.HasPrefix(phase, "running "):
@@ -51,6 +55,12 @@ func phaseColor(phase string) lipgloss.Style {
 		color = muted
 	}
 	return lipgloss.NewStyle().Foreground(color)
+}
+
+// phaseChip keeps a selected row's tag readable on the highlight bar: dark
+// text on its phase colour instead of that colour on the bar.
+func phaseChip(phase string) lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(background).Background(phaseColor(phase).GetForeground()).Bold(true)
 }
 
 func activePhase(phase string) bool {
@@ -270,7 +280,12 @@ func (m *app) rowLine(id string, row item, index, width int) string {
 	if id == "workers" {
 		for _, worker := range m.data.liveWorkers() {
 			if worker.ID == row.ID {
-				status = elapsed(worker.PhaseSince, time.Now()) + "  " + strings.ToUpper(row.Status)
+				tag := m.data.Panels.WorkerTags[row.ID]
+				if tag == "" {
+					tag = strings.ToUpper(row.Status)
+				}
+				status = elapsed(worker.PhaseSince, time.Now()) + "  " + tag
+				status = ansi.Truncate(status, max(8, width/2), "…")
 				break
 			}
 		}
@@ -278,7 +293,11 @@ func (m *app) rowLine(id string, row item, index, width int) string {
 	available := max(1, width-lipgloss.Width(prefix)-lipgloss.Width(status)-2)
 	name := ansi.Truncate(row.Title, available, "…")
 	spaces := strings.Repeat(" ", max(1, available-lipgloss.Width(name)+1))
-	line := prefix + name + spaces + phaseColor(row.Status).Render(status)
+	tag := phaseColor(row.Status).Render(status)
+	if selected {
+		tag = phaseChip(row.Status).Render(status)
+	}
+	line := prefix + name + spaces + tag
 	if selected {
 		line = lipgloss.NewStyle().Foreground(background).Background(yellow).Render(line)
 	}

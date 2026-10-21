@@ -14,7 +14,10 @@ defaults tests/run_suite.sh uses; waiters on the suite lock come from
 scripts and their state/.<name>-last markers. Ready-for-you rows come from the
 fleet snapshot: a PR whose recorded run reports green checks, a finished
 local-only branch, an unrelayed scout report, or a captain hold whose reason
-names a preview. Playbot lane rows come from local persisted state. AI
+names a preview. Each worker's tag names what it is doing: a phone or full
+suite it holds or waits on, else its live no-mistakes run's active step from a
+bounded local axi status read, else its own phase note shortened. Playbot lane
+rows come from local persisted state. AI
 allowance uses a separately scheduled quota-axi snapshot, never the fast board
 refresh. The optional data/crew-board-cache.json supplies phone observations
 such as locks and panels without a cheap local source (builds and Rocketboard
@@ -275,7 +278,7 @@ def local_phones():
             continue
         serial = fields[0]
         state = " ".join(fields[1:3]) if fields[1:3] == ["no", "permissions"] else fields[1]
-        model = next((field.removeprefix("model:").replace("_", " ")
+        model = next((friendly_phone(field.removeprefix("model:"))
                       for field in fields[2:] if field.startswith("model:")), serial)
         row = item(model, serial, "connected" if state == "device" else state,
                    alert=state != "device", item_id=serial)
@@ -284,6 +287,15 @@ def local_phones():
     if not listed:
         return None, f"{binary} devices -l printed no device list"
     return rows, ""
+
+
+FRIENDLY_PHONES = {"SM_S901E": "Galaxy S22", "SM_M315F": "Galaxy M31"}
+
+
+def friendly_phone(model):
+    """Name a known adb model the way people say it, else keep the model."""
+    key = re.sub(r"[\s-]+", "_", model.strip()).upper()
+    return FRIENDLY_PHONES.get(key, model.replace("_", " "))
 
 
 def normalized_phone_title(value):
@@ -461,14 +473,14 @@ def phone_queue(serial, trees, now):
     return holder, waiting
 
 
-def phone_activity(phones, trees, now):
+def phone_activity(phones, trees, now, titles):
     for phone in phones:
         if phone.get("adb") in (None, "unavailable"):
             continue
         holder, waiting = phone_queue(phone["id"], trees, now)
         behind = f"; {len(waiting)} waiting" if waiting else ""
         if holder:
-            phone["detail"] = (f"Testing: {holder['task']} ({holder['kind'] or 'test'}) for "
+            phone["detail"] = (f"Testing: {titles.get(holder['task'], holder['task'])} ({holder['kind'] or 'test'}) for "
                                f"{holder['for']}{behind}\n{phone['detail']}")
             if phone["status"] == "connected":
                 phone["status"] = "testing"
@@ -496,9 +508,44 @@ def suite_waiters(lock):
     return pids
 
 
-def test_queue(snapshot, phones, now):
+def task_titles(snapshot):
+    return {str(task.get("id")): str((task.get("backlog") or {}).get("title") or task.get("id"))
+            for task in snapshot.get("tasks", []) if isinstance(task, dict) and task.get("id")}
+
+
+def resource_tag(tags, task, priority, text):
+    """Keep the strongest resource tag per task: holding beats waiting."""
+    if task and (task not in tags or priority < tags[task][0]):
+        tags[task] = (priority, text)
+
+
+def resource_word(kind):
+    return "BENCHMARK" if re.search(r"bench|perf", kind or "", re.IGNORECASE) else "TEST"
+
+
+def test_queue(snapshot, phones, now, tags=None):
+    """Return TEST QUEUE rows grouped per shared resource and record each
+    worker's held or awaited resource in tags."""
+    tags = {} if tags is None else tags
     trees = task_worktrees(snapshot)
+    task_ids = {task for _, task in trees}
+    titles = task_titles(snapshot)
     rows = []
+
+    def group(heading, holder, waiting, key):
+        if not holder and not waiting:
+            return
+        rows.append(item(heading, status="section", item_id=f"{key}-heading"))
+        if holder:
+            rows.append(item(f"RUNNING: {titles.get(holder['task'], holder['task'])}",
+                             f"Task: {holder['task']} for {holder['for']}\n{holder['detail']}", f"running {holder['for']}",
+                             item_id=f"{key}-running"))
+        for position, entry in enumerate(waiting, 1):
+            label = "NEXT" if position == 1 else f"#{position}"
+            rows.append(item(f"{label}: {titles.get(entry['task'], entry['task'])}",
+                             f"Task: {entry['task']}\n{entry['detail']}", "next" if position == 1 else "waiting",
+                             item_id=f"{key}-wait-{entry['pid']}"))
+
     lock, holder_path = suite_lock_paths()
     holder = {}
     try:
@@ -511,33 +558,115 @@ def test_queue(snapshot, phones, now):
         fresh = now - int(holder.get("heartbeat", "")) <= 30
     except ValueError:
         fresh = False
+    running = None
     if fresh:
         task, _, cwd = process_owner(holder.get("pid", ""), trees, holder.get("cwd", ""))
         try:
             ran = duration(now - int(holder.get("started", "")))
         except ValueError:
             ran = "unknown time"
-        rows.append(item(f"Full suite: {task}", f"Running for {ran}\npid {holder.get('pid', '?')} in {cwd}",
-                         f"running {ran}", item_id="suite-running"))
+        running = {"task": task, "for": ran, "detail": f"pid {holder.get('pid', '?')} in {cwd}"}
+        if task in task_ids:
+            resource_tag(tags, task, 0, f"FULL SUITE {ran}")
+    suite_queue = []
     for position, pid in enumerate(suite_waiters(lock), 1):
-        task, kind, cwd = process_owner(pid, trees)
-        rows.append(item(f"Full suite: {task}", f"Waiting behind the running suite\npid {pid} in {cwd}",
-                         f"waiting #{position}", item_id=f"suite-wait-{pid}"))
+        task, _, cwd = process_owner(pid, trees)
+        suite_queue.append({"task": task, "pid": pid, "detail": f"pid {pid} in {cwd}"})
+        if task in task_ids:
+            resource_tag(tags, task, 1, f"WAITING FOR FULL SUITE #{position}")
+    group("FULL TEST SUITE", running, suite_queue, "suite")
     serials = sorted(path.name[len("frogpile-phone-"):-len(".queue")]
                      for path in phone_queue_root().glob("frogpile-phone-*.queue"))
     names = {phone["id"]: phone["title"] for phone in phones if phone.get("id")}
     for serial in serials:
         active, waiting = phone_queue(serial, trees, now)
         name = names.get(serial, serial)
+        short = re.sub(r"^Galaxy\s+", "", name).upper()
         if active:
-            rows.append(item(f"Phone {name}: {active['task']}",
-                             f"{active['kind'] or 'test'} holding {serial} for {active['for']}",
-                             f"running {active['for']}", item_id=f"phone-{serial}-running"))
+            active["detail"] = f"{active['kind'] or 'test'} holding {serial}"
+            if active["task"] in task_ids:
+                resource_tag(tags, active["task"], 0, f"{short} {resource_word(active['kind'])} {active['for']}")
         for position, entry in enumerate(waiting, 1):
-            rows.append(item(f"Phone {name}: {entry['task']}",
-                             f"{entry['kind'] or 'test'} waiting for {serial}",
-                             f"waiting #{position}", item_id=f"phone-{serial}-wait-{entry['pid']}"))
+            entry["detail"] = f"{entry['kind'] or 'test'} waiting for {serial}"
+            if entry["task"] in task_ids:
+                resource_tag(tags, entry["task"], 1, f"WAITING FOR {short} #{position}")
+        group(name, active, waiting, f"phone-{serial}")
     return rows
+
+
+STEP_NAMES = {"test": "TESTS", "document": "DOCS", "ci": "CI"}
+
+
+def pipeline_step(worktree, deadline):
+    """Name a live no-mistakes run's active step, read locally through axi status."""
+    budget = deadline - time.monotonic()
+    if budget <= 0.05 or not Path(worktree).is_dir():
+        return ""
+    try:
+        run = subprocess.run(["no-mistakes", "axi", "status"], cwd=worktree, capture_output=True,
+                             text=True, timeout=min(1.0, budget), check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if run.returncode:
+        return ""
+    lines = run.stdout.splitlines()
+    if not any(line.strip() == "status: running" for line in lines[:8]):
+        return ""
+    rows = []
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*active_steps\[\d+\]\{step,status,", line):
+            header = line.split("{", 1)[1].split("}", 1)[0].split(",")
+            for row in lines[index + 1:]:
+                if not row.startswith("    "):
+                    break
+                fields = next(csv.reader([row.strip()]))
+                rows.append(dict(zip(header, fields)))
+            break
+    if not rows:
+        return ""
+    step = rows[0]
+    name = STEP_NAMES.get(step.get("step", ""), step.get("step", "").upper())
+    status = step.get("status", "")
+    if status == "fixing":
+        return f"FIXING {name}"
+    if status in ("awaiting_approval", "fix_review"):
+        return f"{name} GATE"
+    round_number = step.get("round", "")
+    if round_number.isdigit() and int(round_number) > 1:
+        return f"{name} ROUND {round_number}"
+    return name
+
+
+def short_note(note, limit=24):
+    clause = re.split(r"\s*(?:;|\s-\s|:|,|\()\s*", note.strip(), maxsplit=1)[0]
+    words = clause.upper().split()
+    text = ""
+    for word in words[:4]:
+        if len(text) + len(word) + (1 if text else 0) > limit:
+            break
+        text = f"{text} {word}".strip()
+    return text
+
+
+def worker_tags(snapshot, resources):
+    """Pick each worker's tag: a test resource, then its live run step, then its phase note."""
+    tags = {}
+    deadline = time.monotonic() + 2.0
+    for task in snapshot.get("tasks", []):
+        if not isinstance(task, dict) or not task.get("id"):
+            continue
+        task_id = str(task["id"])
+        if task_id in resources:
+            tags[task_id] = resources[task_id][1]
+            continue
+        tag = ""
+        tree = ((task.get("paths") or {}).get("worktree") or {}).get("path")
+        if task.get("mode") == "no-mistakes" and isinstance(tree, str) and tree:
+            tag = pipeline_step(tree, deadline)
+        tag = tag or short_note(str((task.get("phase") or {}).get("note") or ""))
+        if tag:
+            tags[task_id] = tag
+    return tags
 
 
 def daily_routines(now):
@@ -797,8 +926,10 @@ def project(snapshot):
     cache = source_cache()
     now = time.time()
     phones = phone_entries(cache)
-    phone_activity(phones, task_worktrees(snapshot), now)
+    phone_activity(phones, task_worktrees(snapshot), now, task_titles(snapshot))
     allowance = allowance_entries(cache)
+    resources = {}
+    tests = test_queue(snapshot, phones, now, resources) + entries(cache, "test_queue")
     queued = tasks_axi_list("queued")
     in_flight = tasks_axi_list("in_flight")
     backlog = {
@@ -815,7 +946,8 @@ def project(snapshot):
         "ready": ready_entries(snapshot) + entries(cache, "ready"),
         "phones": phones,
         "playbot_workers": playbot_workers(),
-        "test_queue": test_queue(snapshot, phones, now) + entries(cache, "test_queue"),
+        "test_queue": tests,
+        "worker_tags": worker_tags(snapshot, resources),
         "landings": landed_today(snapshot) + entries(cache, "landings"),
         "builds": entries(cache, "builds"),
         "routines": daily_routines(now) + entries(cache, "routines"),

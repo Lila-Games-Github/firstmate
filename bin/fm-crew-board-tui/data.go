@@ -48,20 +48,21 @@ type backlog struct {
 }
 
 type panels struct {
-	Alerts        []item  `json:"alerts"`
-	Questions     []item  `json:"questions"`
-	FullQuestions []item  `json:"full_questions"`
-	FullBacklog   []item  `json:"full_backlog"`
-	Ready         []item  `json:"ready"`
-	Phones        []item  `json:"phones"`
-	TestQueue     []item  `json:"test_queue"`
-	Landings      []item  `json:"landings"`
-	Builds        []item  `json:"builds"`
-	Routines      []item  `json:"routines"`
-	Bugs          []item  `json:"bugs"`
-	Backlog       backlog `json:"backlog"`
-	Allowance     []item  `json:"allowance"`
-	CachedAt      string  `json:"cached_at"`
+	Alerts        []item            `json:"alerts"`
+	Questions     []item            `json:"questions"`
+	FullQuestions []item            `json:"full_questions"`
+	FullBacklog   []item            `json:"full_backlog"`
+	Ready         []item            `json:"ready"`
+	Phones        []item            `json:"phones"`
+	TestQueue     []item            `json:"test_queue"`
+	Landings      []item            `json:"landings"`
+	Builds        []item            `json:"builds"`
+	Routines      []item            `json:"routines"`
+	Bugs          []item            `json:"bugs"`
+	Backlog       backlog           `json:"backlog"`
+	Allowance     []item            `json:"allowance"`
+	WorkerTags    map[string]string `json:"worker_tags"`
+	CachedAt      string            `json:"cached_at"`
 }
 
 type board struct {

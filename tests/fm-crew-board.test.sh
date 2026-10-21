@@ -559,7 +559,7 @@ test_phone_testing_and_test_queue() {
   mkdir -p "$stub"
   cat > "$stub/adb" <<'EOF'
 #!/usr/bin/env bash
-printf 'List of devices attached\nbusy-one device model:Pixel_8\nidle-two device model:Galaxy_S22\n'
+printf 'List of devices attached\nbusy-one device model:Pixel_8\nidle-two device model:SM-S901E\nthird device model:SM_M315F\n'
 EOF
   chmod +x "$stub/adb"
   holder=$(sleeper_in "$home/wt-alpha")
@@ -593,19 +593,23 @@ EOF
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'test queue refresh failed'
   assert_equals testing "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'held phone is testing'
   assert_contains "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .detail' "$home/state/crew-board.json")" \
-    'Testing: alpha (sleep) for <1m; 1 waiting' 'phone holder task, held time, and queue length'
+    'Testing: Make the widget spin (sleep) for <1m; 1 waiting' 'phone holder task, held time, and queue length'
   assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "idle-two") | .status' "$home/state/crew-board.json")" 'free phone is idle'
-  assert_equals 'Full suite: beta' "$(jq -r '.panels.test_queue[0].title' "$home/state/crew-board.json")" 'running suite task'
-  assert_equals 'running 10m' "$(jq -r '.panels.test_queue[0].status' "$home/state/crew-board.json")" 'running suite time'
+  assert_equals 'Galaxy S22|Galaxy M31' \
+    "$(jq -r '[.panels.phones[] | select(.id == "idle-two" or .id == "third") | .title] | join("|")' "$home/state/crew-board.json")" \
+    'adb models map to friendly phone names'
+  assert_equals 'FULL TEST SUITE|section' "$(jq -r '.panels.test_queue[0] | .title + "|" + .status' "$home/state/crew-board.json")" 'suite heading'
+  assert_equals 'RUNNING: Fix the gadget|running 10m' \
+    "$(jq -r '.panels.test_queue[1] | .title + "|" + .status' "$home/state/crew-board.json")" 'running suite by task title'
+  assert_contains "$(jq -r '.panels.test_queue[1].detail' "$home/state/crew-board.json")" 'Task: beta' 'task id kept in detail'
   if [ -n "$suite_waiter" ]; then
-    assert_equals 'Full suite: alpha|waiting #1' \
-      "$(jq -r '.panels.test_queue[1] | .title + "|" + .status' "$home/state/crew-board.json")" 'suite waiter in order'
+    assert_equals 'NEXT: Make the widget spin|next' \
+      "$(jq -r '.panels.test_queue[2] | .title + "|" + .status' "$home/state/crew-board.json")" 'suite waiter in order'
   fi
-  assert_equals 'Phone Pixel 8: alpha|running <1m' \
-    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-"))][0] | .title + "|" + .status' "$home/state/crew-board.json")" 'phone holder row'
-  assert_equals 'Phone Pixel 8: beta|waiting #1' \
-    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-"))][1] | .title + "|" + .status' "$home/state/crew-board.json")" 'phone waiter row'
-  assert_equals 2 "$(jq '[.panels.test_queue[] | select(.id | startswith("phone-"))] | length' "$home/state/crew-board.json")" 'dead ticket shown'
+  assert_equals 'Pixel 8|RUNNING: Make the widget spin|NEXT: Fix the gadget' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-busy-one")) | .title] | join("|")' "$home/state/crew-board.json")" \
+    'phone group lists holder then waiters'
+  assert_equals 0 "$(jq '[.panels.test_queue[] | select(.id | startswith("phone-idle-two"))] | length' "$home/state/crew-board.json")" 'idle phone heading shown'
   kill "$holder" "$waiter" "$suite_pid" ${blocker:+"$blocker"} ${suite_waiter:+"$suite_waiter"} 2>/dev/null
   wait 2>/dev/null
   printf 'pid=1\ncwd=/\nstarted=1\nheartbeat=1\n' > "$home/locks/suite.holder"
@@ -672,6 +676,52 @@ EOF
   assert_equals 'https://example.test/pr/1' "$(jq -r '.ready[0].link' "$home/panels.json")" 'ready PR link'
   assert_equals '/reports/probe.md' "$(jq -r '.ready[2].link' "$home/panels.json")" 'ready report link'
   pass 'alerts drop paused workers and ready rows come from green PRs, landings, reports, and preview holds'
+}
+
+test_worker_tags_from_live_evidence() {
+  local home snapshot stub held waiter
+  home=$(make_home worker_tags)
+  stub="$home/stub-bin"
+  mkdir -p "$stub" "$home/wt-held" "$home/wt-wait" "$home/wt-review" "$home/wt-fix" "$home/wt-note" "$home/wt-bare" \
+    "$home/locks/frogpile-phone-S22.queue/tickets"
+  cat > "$stub/no-mistakes" <<'EOF'
+#!/usr/bin/env bash
+case "${PWD##*/}" in
+  wt-review) step='review,running,3m,1s ago,42,4' ;;
+  wt-fix) step='test,fixing,1m,1s ago,42,1' ;;
+  wt-held) step='ci,running,1m,1s ago,42,starting' ;;
+  *) printf 'run:\n  status: completed\n'; exit 0 ;;
+esac
+printf 'run:\n  id: "r1"\n  status: running\n  steps[1]{step,status,findings,duration_ms}:\n    review,running,0,0\n'
+printf '  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    %s\n' "$step"
+EOF
+  chmod +x "$stub/no-mistakes"
+  held=$(sleeper_in "$home/wt-held")
+  waiter=$(sleeper_in "$home/wt-wait")
+  printf '{"pid": %s}\n' "$held" > "$home/locks/frogpile-phone-S22.queue/tickets/001-held.json"
+  printf '{"pid": %s}\n' "$waiter" > "$home/locks/frogpile-phone-S22.queue/tickets/002-wait.json"
+  printf '{"event": "acquire", "ticket": "001-held", "time": "%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000+00:00)" \
+    > "$home/locks/frogpile-phone-S22.queue/events.jsonl"
+  snapshot="$home/snapshot.json"
+  jq -n --arg h "$home" '{schema: "fm-fleet-snapshot.v1", tasks: [
+    {id: "held", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-held")}}, phase: {name: "validating", note: "x"}},
+    {id: "wait", mode: "direct-PR", paths: {worktree: {path: ($h + "/wt-wait")}}, phase: {name: "testing", note: "x"}},
+    {id: "review", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-review")}}, phase: {name: "validating", note: "x"}},
+    {id: "fix", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-fix")}}, phase: {name: "validating", note: "x"}},
+    {id: "note", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-note")}},
+     phase: {name: "building", note: "building AN1 - wiring the merge animation; then tests"}},
+    {id: "bare", mode: "direct-PR", paths: {worktree: {path: ($h + "/wt-bare")}}, phase: {name: "investigating", note: ""}}]}' \
+    > "$snapshot"
+  PATH="$stub:/usr/bin:/bin" run_panels "$home" "$snapshot" > "$home/panels.json" || fail 'worker tag projection failed'
+  kill "$held" "$waiter" 2>/dev/null
+  wait 2>/dev/null
+  assert_equals 'S22 TEST <1m' "$(jq -r '.worker_tags.held' "$home/panels.json")" 'held phone beats the run step'
+  assert_equals 'WAITING FOR S22 #1' "$(jq -r '.worker_tags.wait' "$home/panels.json")" 'awaited phone'
+  assert_equals 'REVIEW ROUND 4' "$(jq -r '.worker_tags.review' "$home/panels.json")" 'review round from the live run'
+  assert_equals 'FIXING TESTS' "$(jq -r '.worker_tags.fix' "$home/panels.json")" 'fixing step from the live run'
+  assert_equals 'BUILDING AN1' "$(jq -r '.worker_tags.note' "$home/panels.json")" 'finished run falls back to the phase note'
+  assert_equals null "$(jq -r '.worker_tags.bare' "$home/panels.json")" 'no evidence leaves the phase word to the board'
+  pass 'worker tags come from held or awaited test resources, the live run step, then the phase note'
 }
 
 test_full_questions_and_backlog() {
@@ -761,3 +811,4 @@ test_full_questions_and_backlog
 test_phone_testing_and_test_queue
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
+test_worker_tags_from_live_evidence
