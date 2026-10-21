@@ -476,14 +476,44 @@ func TestEverySubTabReachableByArrows(t *testing.T) {
 func TestNarrowTabStripKeepsFocusedTabVisible(t *testing.T) {
 	m := fixtureApp(t)
 	m.width, m.height = 55, 18
+	active := func(title string) string {
+		return lipgloss.NewStyle().Foreground(background).Background(yellow).Bold(true).Render(" " + title + " ")
+	}
 	m.focus = "feed"
-	if !strings.Contains(m.View().Content, "FEED") {
+	strip := m.subTabs(m.width - 4)
+	if !strings.Contains(strip, active("FEED")) {
+		t.Fatalf("focused FEED sub-tab was clipped from the narrow strip: %q", strip)
+	}
+	if !strings.Contains(m.View().Content, active("FEED")) {
 		t.Fatal("focused FEED sub-tab was clipped at narrow width")
 	}
 	m.page, m.focus = 3, "full_backlog"
+	strip = m.subTabs(m.width - 4)
+	if !strings.Contains(strip, active("BACKLOG")) || !strings.Contains(strip, "CAPTAIN QUESTIONS") {
+		t.Fatalf("QUESTIONS sub-tab strip lost its tabs: %q", strip)
+	}
 	view := m.View().Content
-	if !strings.Contains(view, "4 QUESTIONS") || !strings.Contains(view, "BACKLOG") {
+	if !strings.Contains(view, "4 QUESTIONS") || !strings.Contains(view, active("BACKLOG")) {
 		t.Fatal("focused QUESTIONS page or BACKLOG sub-tab was clipped")
+	}
+}
+
+func TestShortWideLayoutKeepsCardsInsideTheBody(t *testing.T) {
+	m := fixtureApp(t)
+	m.width, m.height = 120, 24
+	body := max(5, m.height-8)
+	_ = m.View()
+	focus := m.focus
+	for _, rect := range m.lastRects {
+		if rect.y+rect.height > 4+body {
+			t.Fatalf("%s hit rect %d..%d reaches past the body ending at %d", rect.id, rect.y, rect.y+rect.height, 4+body)
+		}
+	}
+	for _, y := range []int{4 + body, 4 + body + 2, 4 + body + 3} {
+		m.Update(tea.MouseClickMsg{X: m.width - 2, Y: y})
+		if m.focus != focus {
+			t.Fatalf("click at y=%d below the cards focused %s", y, m.focus)
+		}
 	}
 }
 

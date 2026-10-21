@@ -237,16 +237,28 @@ def normalized_phone_title(value):
     return re.sub(r"[\s_-]+", "", value).casefold()
 
 
+def phone_entry_match(entry, row, by_serial):
+    if by_serial:
+        return entry["id"] == row["id"]
+    return normalized_phone_title(entry["title"]) == normalized_phone_title(row["title"])
+
+
 def phone_entries(cache):
     cached = entries(cache, "phones")
     rows = local_phones()
+    matched = [False] * len(rows)
     for row in rows:
         row["live"] = True
-        match = next((index for index, entry in enumerate(cached)
-                      if entry["id"] == row["id"]
-                      or normalized_phone_title(entry["title"]) == normalized_phone_title(row["title"])), None)
-        if match is not None:
+    for by_serial in (True, False):
+        for index, row in enumerate(rows):
+            if matched[index]:
+                continue
+            match = next((position for position, entry in enumerate(cached)
+                          if phone_entry_match(entry, row, by_serial)), None)
+            if match is None:
+                continue
             entry = cached.pop(match)
+            matched[index] = True
             row.update(status=entry["status"] or row["status"],
                        detail=entry["detail"] or row["detail"],
                        link=entry["link"], alert=entry["alert"] or row["alert"])

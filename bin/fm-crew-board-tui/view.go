@@ -435,7 +435,7 @@ func (m *app) View() tea.View {
 		var summaries []string
 		y := 4
 		for _, spec := range list {
-			if m.page == 3 {
+			if m.page == 3 || y+summaryCardHeight > 4+bodyHeight {
 				break
 			}
 			summary := m.renderCompact(spec, summaryWidth)
