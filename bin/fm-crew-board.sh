@@ -25,8 +25,9 @@
 # as a gone row for FM_CREW_BOARD_GONE_SECS (default 43200). TUI refreshes every
 # 2 seconds; it reads the same payload as show. Optional local panel records
 # come from bin/fm-crew-board-panels.py. The TUI sends notes through fm-inbox.sh.
-# A background quota sampler runs every five minutes while the TUI is open;
-# refresh reads its last good state/crew-board-quota.json without calling quota-axi.
+# A background quota sampler runs every five minutes while the TUI is open unless
+# FM_CREW_BOARD_ALLOWANCE_DISABLE=1; refresh reads its last good
+# state/crew-board-quota.json without calling quota-axi.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
