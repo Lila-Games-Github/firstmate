@@ -101,6 +101,14 @@ func panelSummary(spec panelSpec, rows []item, width int) string {
 				count = "unavailable"
 			}
 		}
+		if spec.id == "allowance" {
+			for _, row := range rows {
+				if row.Quota == "unavailable" {
+					count = "unavailable"
+					break
+				}
+			}
+		}
 		latest = "latest: " + rows[len(rows)-1].Title
 	}
 	first := ansi.Truncate(spec.title+"  "+count, max(1, width), "…")

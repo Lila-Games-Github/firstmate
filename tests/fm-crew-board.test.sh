@@ -368,7 +368,29 @@ EOF
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota failure crashed"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "stale quota refresh failed"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'stale' "last good quota not marked stale"
+  assert_equals 5 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "last good rows and the cache row kept after a failed attempt"
+  assert_equals 0 "$(jq '[.panels.allowance[] | select(.title == "Allowance check")] | length' "$home/state/crew-board.json")" "no check row while a snapshot exists"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .status' "$home/state/crew-board.json")" 'ago (stale)' "stale age on the last good rows"
   pass "quota allowance uses a slow structured snapshot and keeps the last good result"
+}
+
+test_quota_check_unavailable() {
+  local home
+  home=$(make_home quota_unavailable)
+  mkdir -p "$home/nohome"
+  PATH="/usr/bin:/bin" HOMEBREW_PREFIX="$home/nohome" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance \
+    || fail "a missing quota-axi crashed the sampler"
+  assert_equals true "$(test -f "$home/state/.crew-board-quota-error" && echo true || echo false)" "sampler failure marker"
+  run_board "$home" refresh >/dev/null || fail "failed sampler refresh failed"
+  assert_equals 1 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "one row when no snapshot exists"
+  assert_equals 'Allowance check' "$(jq -r '.panels.allowance[0].title' "$home/state/crew-board.json")" "allowance check row"
+  assert_equals 'unavailable' "$(jq -r '.panels.allowance[0].status' "$home/state/crew-board.json")" "allowance check state"
+  assert_equals 'unavailable' "$(jq -r '.panels.allowance[0].quota' "$home/state/crew-board.json")" "allowance check marker"
+  assert_equals true "$(jq -r '.panels.allowance[0].alert' "$home/state/crew-board.json")" "allowance check alerts"
+  assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'quota-axi' "allowance check reason"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Allowance check")] | length' "$home/state/crew-board.json")" "allowance check reaches ALERTS"
+  pass "a sampler that never succeeded is visible instead of an empty allowance panel"
 }
 
 test_playbot_lane_projection() {
@@ -566,6 +588,7 @@ test_bold_question_paragraphs
 test_questions_without_headings
 test_quota_allowance_snapshot
 test_quota_unknown_headroom_and_exhaustion
+test_quota_check_unavailable
 test_quota_unresolved_limiting_window
 test_playbot_lane_projection
 test_full_questions_and_backlog

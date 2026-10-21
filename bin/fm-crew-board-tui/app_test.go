@@ -566,6 +566,21 @@ func TestPhoneCardCountsOnlyConnectedDevices(t *testing.T) {
 	}
 }
 
+func TestAllowanceCardReadsUnavailableWithoutASnapshot(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Allowance = []item{{
+		Title: "Allowance check", Detail: "no quota snapshot is recorded", Status: "unavailable",
+		Quota: "unavailable", Alert: true,
+	}}
+	if card := m.renderCompact(panelSpec{"allowance", "AI ALLOWANCE"}, 60); !strings.Contains(card, "AI ALLOWANCE  unavailable") {
+		t.Fatalf("failed allowance sampler reads: %q", card)
+	}
+	m.data.Panels.Allowance = nil
+	if card := m.renderCompact(panelSpec{"allowance", "AI ALLOWANCE"}, 60); !strings.Contains(card, "none") {
+		t.Fatalf("allowance card without providers reads: %q", card)
+	}
+}
+
 func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Rows = append(m.data.Rows, worker{ID: "gamma", Kind: "playbot", Project: "widget",

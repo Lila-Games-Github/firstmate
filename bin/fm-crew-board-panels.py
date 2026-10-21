@@ -209,6 +209,16 @@ def entries(cache, key):
     return rows
 
 
+def homebrew_binary(name):
+    prefix = os.environ.get("HOMEBREW_PREFIX")
+    roots = [prefix] if prefix else ["/home/linuxbrew/.linuxbrew", "/var/home/linuxbrew/.linuxbrew"]
+    for root in roots:
+        candidate = Path(root) / "bin" / name
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def adb_binary():
     found = shutil.which("adb")
     if found:
@@ -220,10 +230,14 @@ def adb_binary():
         candidate = Path(root) / "platform-tools" / "adb"
         if candidate.is_file():
             return str(candidate)
-    homebrew = Path(os.environ.get("HOMEBREW_PREFIX") or "/home/linuxbrew/.linuxbrew") / "bin" / "adb"
-    if homebrew.is_file():
-        return str(homebrew)
-    return None
+    return homebrew_binary("adb")
+
+
+def quota_binary():
+    found = shutil.which("quota-axi")
+    if found:
+        return found
+    return homebrew_binary("quota-axi")
 
 
 def local_phones():
@@ -306,7 +320,10 @@ def playbot_workers():
 def refresh_allowance():
     temp = None
     try:
-        run = subprocess.run(["quota-axi", "--json", "--no-credential-refresh"],
+        binary = quota_binary()
+        if binary is None:
+            raise ValueError("quota-axi was not found on PATH or in Linuxbrew")
+        run = subprocess.run([binary, "--json", "--no-credential-refresh"],
                              capture_output=True, text=True, timeout=15, check=False)
         if run.returncode:
             raise ValueError("quota-axi failed")
@@ -404,8 +421,22 @@ def quota_entries():
     return rows
 
 
+def allowance_failure():
+    try:
+        age = max(0, int(time.time() - QUOTA_ERROR.stat().st_mtime))
+    except OSError:
+        return ""
+    return f"no quota snapshot is recorded; the last quota-axi attempt failed {age // 60}m ago"
+
+
 def allowance_entries(cache):
     rows = quota_entries()
+    if not rows:
+        failure = allowance_failure()
+        if failure:
+            row = item("Allowance check", failure, "unavailable", alert=True)
+            row["quota"] = "unavailable"
+            return [row]
     live = {row["title"].split(" / ", 1)[0].strip().casefold() for row in rows}
     return rows + [entry for entry in entries(cache, "allowance")
                    if entry["title"].split(" / ", 1)[0].strip().casefold() not in live]
@@ -466,6 +497,10 @@ def project(snapshot):
         if phone["status"] in ("locked", "unavailable"):
             alerts.append(item(f"Phone {phone['title']} {phone['status']}",
                                phone["detail"], phone["status"], alert=True))
+    allowance = allowance_entries(cache)
+    for row in allowance:
+        if row.get("quota") == "unavailable":
+            alerts.append(item(row["title"], row["detail"], row["status"], alert=True))
     ready = entries(cache, "ready")
     for task in rows:
         if not isinstance(task, dict) or (task.get("phase") or {}).get("name") != "ready-to-merge":
@@ -496,7 +531,7 @@ def project(snapshot):
         "routines": entries(cache, "routines"),
         "bugs": entries(cache, "bugs"),
         "backlog": backlog,
-        "allowance": allowance_entries(cache),
+        "allowance": allowance,
         "cached_at": str(cache.get("observed_at", "")),
     }
 
