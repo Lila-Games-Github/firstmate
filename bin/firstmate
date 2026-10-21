@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# firstmate - open the live crew board for this operational home.
+# Usage: firstmate
+#
+# Install with bin/fm-install-firstmate-cli.sh. FM_HOME selects another home;
+# otherwise the checkout containing this launcher is the home. The launcher
+# resolves its own symlink, so it works from any working directory.
+set -euo pipefail
+
+SELF=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$0")
+SCRIPT_DIR=$(cd "$(dirname "$SELF")" && pwd -P)
+[ "$#" -eq 0 ] || { printf 'usage: firstmate\n' >&2; exit 2; }
+FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd -P)}
+export FM_HOME
+exec "$SCRIPT_DIR/fm-crew-board.sh" tui

@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# Behavior tests for bin/fm-crew-board.sh: rows composed from this home's own
-# records only, phase start carried while a phase holds, workers that leave kept
-# as such and later expired, a page republished only when a row changes, and the
-# open command serving, arming without a keyed-answer binding, printing the
-# remote session link, and keeping the board current. The pointed-at-item case
-# drives a captured `crew-point` result through the real process-event runner to
-# the durable wake queue and reads it back the way firstmate does.
+# Behavior tests for the live board payload, terminal rendering, and inbox notes.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -13,225 +7,152 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOARD="$ROOT/bin/fm-crew-board.sh"
+HARNESS="$ROOT/tests/assets/crew-board-tui-harness.py"
 TMP_ROOT=$(fm_test_tmproot fm-crew-board)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
 
-# A lavish-axi stub in the shapes the shared board library verifies against
-# (tests/fm-bearings-board.test.sh owns the liveness edge cases). Its poll blocks
-# until `poll-trigger` exists, then returns one queued crew-point prompt in the
-# published prompts block shape, the row text and note exactly as the page
-# queues them.
-make_home() {  # <name>
-  local home="$TMP_ROOT/$1" fakebin
-  fm_test_track_procevent_home "$home" "$home/procevent-claims"
-  mkdir -p "$home/state" "$home/data" "$home/lavish-state"
-  fakebin=$(fm_fakebin "$home")
-  cat > "$fakebin/lavish-axi" <<'SH'
-#!/usr/bin/env bash
-set -u
-state=${LAVISH_FAKE_STATE:?}
-case "${1-}" in
-  --version) printf '0.1.61\n'; exit 0 ;;
-  poll)
-    limit=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
-    while [ ! -e "$state/poll-trigger" ]; do
-      [ "$SECONDS" -lt "$limit" ] || exit 75
-      sleep 0.05
-    done
-    rm -f "$state/poll-trigger"
-    printf 'session:\n  file: %s\n  status: feedback\n' "$2"
-    printf 'prompts[1]{uid,prompt,selector,tag,text}:\n'
-    printf '  "1","The captain pointed at worker alpha on the crew board: alpha | Testing | for 5m | widget | Make the widget spin | latest: suite\\nCaptain%ss note: why so slow?",div#cb-row-alpha,crew-point,alpha | Testing | for 5m | widget | Make the widget spin | latest: suite\n' "'"
-    exit 0
-    ;;
-  '')
-    printf 'sessions[1]{file,status,url,pending_prompts}:\n'
-    [ ! -s "$state/open" ] || printf '  %s,open,"http://127.0.0.1:4387/session/c0ffee",0\n' "$(cat "$state/open")"
-    exit 0
-    ;;
-  end) : > "$state/open"; exit 0 ;;
-esac
-real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
-printf '%s\n' "$real" > "$state/open"
-printf 'session:\n  file: %s\n  url: "http://127.0.0.1:4387/session/c0ffee"\n  status: opened\n' "$real"
-SH
-  chmod +x "$fakebin/lavish-axi"
+make_home() {
+  local home="$TMP_ROOT/$1"
+  mkdir -p "$home/state" "$home/data"
   cat > "$home/data/backlog.md" <<'EOF'
 # Backlog
 
 ## In flight
 - [ ] alpha - Make the widget spin (repo: widget) (kind: ship) (since 2026-10-19)
+- [ ] beta - Fix the gadget (repo: gadget) (kind: ship) (since 2026-10-19)
 
 ## Queued
 
 ## Done
 EOF
   printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\n' > "$home/state/alpha.meta"
-  printf 'working: setup done\nphase: testing - suite\n' > "$home/state/alpha.status"
-  printf 'kind=scout\nproject=/x/projects/gadget\nharness=claude\n' > "$home/state/beta.meta"
-  printf 'working: reading the code\n' > "$home/state/beta.status"
+  printf 'phase: testing - suite\n' > "$home/state/alpha.status"
+  printf 'kind=ship\nproject=/x/projects/gadget\nharness=claude\n' > "$home/state/beta.meta"
+  printf 'phase: fixing - investigating\n' > "$home/state/beta.status"
   printf '%s\n' "$home"
 }
 
-run_board() {  # <home> <args...>
+run_board() {
   local home=$1
   shift
-  PATH="$home/fakebin:$PATH" FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    LAVISH_FAKE_STATE="$home/lavish-state" FM_CREW_BOARD_INTERVAL=1 FM_CREW_BOARD_FULL_SECS=1 \
-    "$BOARD" "$@"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$BOARD" "$@"
 }
 
-rows() { jq -c '[.rows[] | {id, phase, title, project, note, gone}]' "$1/state/crew-board.json"; }
 row_field() { jq -r --arg id "$2" --arg f "$3" '.rows[] | select(.id == $id) | .[$f]' "$1/state/crew-board.json"; }
 set_mtime() { perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"; }
 
-wait_for() {  # <ticks> <command...>
-  local limit=$1 i=0
-  shift
-  while [ "$i" -lt "$limit" ]; do
-    "$@" && return 0
-    sleep 0.2
-    i=$((i + 1))
-  done
-  return 1
-}
-
-test_rows_come_from_this_home_only() {
-  local home other out
-  home=$(make_home own-home)
-  other="$TMP_ROOT/other-home"
-  mkdir -p "$other/state"
-  printf 'kind=ship\nproject=/x/projects/other\n' > "$other/state/foreign.meta"
-  printf 'phase: fixing - not ours\n' > "$other/state/foreign.status"
+test_rows_and_phase_time() {
+  local home out
+  home=$(make_home rows)
+  set_mtime 1700000000 "$home/state/alpha.status"
   out=$(run_board "$home" refresh) || fail "refresh failed: $out"
-  assert_equals changed "$out" "a first refresh reports a change"
-  assert_equals '[{"id":"alpha","phase":"testing","title":"Make the widget spin","project":"widget","note":"suite","gone":false},{"id":"beta","phase":"working","title":"beta","project":"gadget","note":"reading the code","gone":false}]' \
-    "$(rows "$home")" "rows"
-  assert_present "$home/.lavish/crew-board.html" "the page was not published"
-  assert_no_grep foreign "$home/.lavish/crew-board.html" "another home's worker reached the page"
-  out=$(run_board "$home" show)
-  assert_contains "$out" $'alpha\ttesting\tfor ' "show prints the row the page shows"
-  assert_contains "$out" $'Make the widget spin\tsuite' "show prints the title and note"
-  pass "rows carry title, project, the worker's own phase and note, from this home's records only"
+  assert_equals changed "$out" "first refresh"
+  assert_equals testing "$(row_field "$home" alpha phase)" "worker's testing phase"
+  assert_equals 'Make the widget spin' "$(row_field "$home" alpha title)" "worker title"
+  assert_equals 1700000000 "$(row_field "$home" alpha phase_since)" "phase start"
+  printf 'working: still running tests\n' >> "$home/state/alpha.status"
+  run_board "$home" refresh >/dev/null || fail "refresh failed"
+  assert_equals 1700000000 "$(row_field "$home" alpha phase_since)" "same phase keeps its time"
+  assert_equals 'still running tests' "$(row_field "$home" alpha note)" "latest status note"
+  printf 'phase: fixing - red test\n' >> "$home/state/alpha.status"
+  set_mtime 1700000900 "$home/state/alpha.status"
+  run_board "$home" refresh >/dev/null || fail "refresh failed"
+  assert_equals fixing "$(row_field "$home" alpha phase)" "changed phase"
+  assert_equals 1700000900 "$(row_field "$home" alpha phase_since)" "new phase resets its time"
+  assert_contains "$(run_board "$home" show)" $'alpha\tfixing\tfor ' "show reports the payload row"
+  pass "payload uses worker reports and keeps time in the current phase"
 }
 
-test_phase_start_is_kept_until_the_phase_changes() {
-  local home since status
-  home=$(make_home phase-since)
-  status="$home/state/alpha.status"
-  set_mtime 1700000000 "$status"
+test_refresh_and_gone() {
+  local home out
+  home=$(make_home gone)
   run_board "$home" refresh >/dev/null || fail "refresh failed"
-  assert_equals 1700000000 "$(row_field "$home" alpha phase_since)" "a newly seen phase starts at its log's time"
-  printf 'working: still on the suite\n' >> "$status"
-  set_mtime 1700000600 "$status"
-  run_board "$home" refresh >/dev/null || fail "refresh failed"
-  assert_equals 1700000000 "$(row_field "$home" alpha phase_since)" "an unchanged phase lost its start"
-  assert_equals 'still on the suite' "$(row_field "$home" alpha note)" "the latest note did not update"
-  printf 'phase: fixing - two red\n' >> "$status"
-  set_mtime 1700000900 "$status"
-  run_board "$home" refresh >/dev/null || fail "refresh failed"
-  since=$(row_field "$home" alpha phase_since)
-  assert_equals 1700000900 "$since" "a new phase did not restart the clock"
-  pass "time in phase holds while the phase is unchanged and restarts on a new phase"
-}
-
-test_unchanged_rows_do_not_republish_the_page() {
-  local home page out
-  home=$(make_home unchanged)
-  run_board "$home" refresh >/dev/null || fail "refresh failed"
-  page="$home/.lavish/crew-board.html"
-  set_mtime 1700000000 "$page"
+  set_mtime 1700000000 "$home/state/crew-board.json"
   out=$(run_board "$home" refresh) || fail "refresh failed"
-  assert_equals unchanged "$out" "an unchanged board reported a change"
-  assert_equals 1700000000 "$(perl -e 'print((stat $ARGV[0])[9])' "$page")" "an unchanged board rewrote the page"
-  pass "a refresh with no row change leaves the page untouched, so the browser does not reload"
-}
-
-test_a_worker_that_leaves_stays_then_expires() {
-  local home
-  home=$(make_home leaves)
-  run_board "$home" refresh >/dev/null || fail "refresh failed"
+  assert_equals unchanged "$out" "unchanged rows"
+  assert_equals 1700000000 "$(perl -e 'print((stat $ARGV[0])[9])' "$home/state/crew-board.json")" "unchanged payload rewritten"
   rm -f "$home/state/alpha.meta" "$home/state/alpha.status"
   run_board "$home" refresh >/dev/null || fail "refresh failed"
-  assert_equals true "$(row_field "$home" alpha gone)" "a cleaned-up worker was not shown as left"
-  assert_equals testing "$(row_field "$home" alpha phase)" "a left worker lost its last phase"
-  [ "$(row_field "$home" alpha left_at)" -gt 0 ] || fail "a left worker has no time it left"
-  assert_contains "$(run_board "$home" show)" $'alpha\tleft(testing)\tleft ' "show did not report the worker as left"
-  sleep 2
-  FM_CREW_BOARD_GONE_SECS=1 run_board "$home" refresh >/dev/null || fail "refresh failed"
-  assert_equals '' "$(row_field "$home" alpha id)" "a left worker outlived its retention"
-  pass "a worker whose record disappears is shown as left with its last phase, then expires"
+  assert_equals true "$(row_field "$home" alpha gone)" "left worker stays visible in payload"
+  pass "refresh preserves unchanged payloads and retains a departed worker"
 }
 
-test_open_serves_arms_and_keeps_the_board_current() {
-  local home out sid
-  home=$(make_home open)
-  out=$(LAVISH_AXI_ALLOWED_HOSTS='crew.example.ts.net,other.example' run_board "$home" open) \
-    || fail "open failed: $out"
-  sid=$(PATH="$home/fakebin:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$home/.lavish/crew-board.html")
-  assert_contains "$out" "board: $home/.lavish/crew-board.html" "open did not name the board"
-  assert_contains "$out" "served: $home/.lavish/crew-board.html" "open did not prove the session live"
-  assert_contains "$out" "armed: $sid" "open did not arm the board source"
-  assert_contains "$out" "url: http://127.0.0.1:4387/session/c0ffee" "open did not print the session url"
-  assert_contains "$out" "remote_url: https://crew.example.ts.net/session/c0ffee" "open did not print the remote url"
-  assert_contains "$out" "remote_url: https://other.example/session/c0ffee" "open skipped an allowed host"
-  assert_contains "$out" "keeper: started" "open did not start the keeper"
-  assert_not_contains "$out" "bound:" "the crew board was bound to the keyed-answer intake"
-  [ -z "$(ls -A "$home/state/decision-bindings" 2>/dev/null)" ] || fail "the crew board created a decision binding"
-
-  out=$(unset LAVISH_AXI_ALLOWED_HOSTS; run_board "$home" open) || fail "a second open failed: $out"
-  assert_contains "$out" "keeper: running" "a second open started a second keeper"
-  assert_not_contains "$out" "remote_url:" "an open without allowed hosts printed a remote url"
-
-  printf 'phase: fixing - one red\n' >> "$home/state/alpha.status"
-  wait_for 50 grep -sq '"phase":"fixing"' "$home/.lavish/crew-board.html" \
-    || fail "the keeper did not republish the page after a phase change"
-
-  out=$(run_board "$home" stop) || fail "stop failed: $out"
-  assert_contains "$out" "keeper: stopped" "stop did not stop the keeper"
-  assert_absent "$home/state/.crew-board-keeper.lock" "stop left the keeper lock behind"
-  pass "open serves and arms the board unbound, prints local and remote links, and its keeper follows phase changes"
+test_tui_render_and_note() {
+  local home result
+  home=$(make_home tui)
+  result=$(python3 "$HARNESS" "$BOARD" "$home") || fail "terminal harness failed: $result"
+  assert_equals 0 "$(jq -r '.exit' <<< "$result")" "TUI exit"
+  assert_equals true "$(jq -r '.workers and .feed and .row and .phase' <<< "$result")" "worker/feed rendering"
+  assert_equals true "$(jq -r '.counts' <<< "$result")" "phase counts"
+  assert_equals true "$(jq -r '.input' <<< "$result")" "note input rendering"
+  assert_contains "$(jq -r '.note' <<< "$result")" 'Crew board item: alpha | widget / Make the widget spin | testing' "selected row not in note"
+  assert_contains "$(jq -r '.note' <<< "$result")" 'Note: why so slow?' "typed note lost"
+  assert_contains "$(jq -r '.wake' <<< "$result")" 'check: captain inbox note' "firstmate was not woken"
+  assert_contains "$(jq -r '.stop' <<< "$result")" 'tui: stopped' "stop did not close the dashboard"
+  assert_equals true "$(jq -r '.pid_removed' <<< "$result")" "stop left the pid record"
+  assert_contains "$(env -u FM_HOME FM_STATE_OVERRIDE="$home/state" "$BOARD" stop)" 'tui: not running' \
+    "direct stop without FM_HOME failed"
+  pass "terminal renders rows and phase counts, typed notes reach the captain inbox, and stop closes it"
 }
 
-test_keeper_exits_when_the_session_ends() {
-  local home out pid
-  home=$(make_home session-ends)
-  out=$(run_board "$home" open) || fail "open failed: $out"
-  pid=$(cat "$home/state/.crew-board-keeper.lock/pid") || fail "no keeper pid"
-  : > "$home/lavish-state/open"
-  wait_for 50 eval '! kill -0 '"$pid"' 2>/dev/null' || { kill "$pid" 2>/dev/null; fail "the keeper outlived its ended session"; }
-  assert_absent "$home/state/.crew-board-keeper.lock" "an exited keeper left its lock behind"
-  pass "the keeper stops on its own once the board's session is no longer open"
+test_narrow_terminal() {
+  local home result
+  home=$(make_home narrow)
+  result=$(TUI_TEST_WIDTH=55 TUI_TEST_HEIGHT=18 python3 "$HARNESS" "$BOARD" "$home") \
+    || fail "narrow terminal harness failed: $result"
+  assert_equals true "$(jq -r '.workers and .feed and .counts and .input' <<< "$result")" \
+    "stacked panels did not retain counts and input"
+  assert_contains "$(jq -r '.note' <<< "$result")" 'Note: why so slow?' "narrow note input lost text"
+  pass "a narrow terminal stacks both panels and retains note input"
 }
 
-test_pointed_item_reaches_firstmate_as_a_durable_wake() {
-  local home out sid result read_out
-  home=$(make_home pointed)
-  out=$(run_board "$home" open) || fail "open failed: $out"
-  sid=$(PATH="$home/fakebin:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$home/.lavish/crew-board.html")
-  : > "$home/lavish-state/poll-trigger"
-  wait_for 75 grep -sqF "check: procevent lavish $sid 1" "$home/state/.wake-queue" \
-    || { run_board "$home" stop >/dev/null; fail "the pointed-at row did not become a durable wake: $(cat "$home/state/.wake-queue" 2>/dev/null)"; }
-  run_board "$home" stop >/dev/null
-  result="$home/state/procevent-inbox/$sid.1.result"
-  assert_present "$result" "the pointed-at row was not captured durably"
-  read_out=$("$ROOT/bin/fm-procevent-lavish.sh" read "$result") || fail "the captured result could not be read"
-  assert_contains "$read_out" "tag: crew-point" "the read lost the crew-point tag"
-  assert_contains "$read_out" "| alpha | Testing | for 5m | widget | Make the widget spin | latest: suite" \
-    "the read lost the row exactly as the captain saw it"
-  assert_contains "$read_out" "Captain's note: why so slow?" "the read lost the captain's note"
-  assert_contains "$read_out" "element_selector: div#cb-row-alpha" "the read lost which row was pointed at"
-  assert_equals '' "$("$ROOT/bin/fm-procevent-lavish.sh" answers "$result")" "a pointed row was read as a decision answer"
-  pass "a row the captain points at reaches the durable wake queue and reads back exactly as shown"
+test_note_without_selection_and_point_without_text() {
+  local home result
+  home=$(make_home plain-note)
+  result=$(TUI_TEST_KEYS='ilook at the backlog\r' python3 "$HARNESS" "$BOARD" "$home") \
+    || fail "plain note harness failed: $result"
+  assert_contains "$(jq -r '.note' <<< "$result")" 'look at the backlog' "plain note lost"
+  assert_not_contains "$(jq -r '.note' <<< "$result")" 'Crew board item:' "plain note got an unwanted worker"
+  home=$(make_home point-only)
+  result=$(TUI_TEST_KEYS='ji\r' python3 "$HARNESS" "$BOARD" "$home") \
+    || fail "point-only harness failed: $result"
+  assert_contains "$(jq -r '.note' <<< "$result")" 'Crew board item: alpha' "selected worker was not pointed out"
+  assert_not_contains "$(jq -r '.note' <<< "$result")" 'Note:' "pointing added an empty note"
+  pass "plain notes and worker-only pointing reach the same captain inbox"
 }
 
-test_rows_come_from_this_home_only
-test_phase_start_is_kept_until_the_phase_changes
-test_unchanged_rows_do_not_republish_the_page
-test_a_worker_that_leaves_stays_then_expires
-test_open_serves_arms_and_keeps_the_board_current
-test_keeper_exits_when_the_session_ends
-test_pointed_item_reaches_firstmate_as_a_durable_wake
+test_panel_projection_and_launcher() {
+  local home install_dir result
+  home=$(make_home panels)
+  cat > "$home/data/captain-questions.md" <<'EOF'
+# Open questions
+
+- Which release should ship?
+  Blocks the Android build.
+EOF
+  cat > "$home/data/crew-board-cache.json" <<'EOF'
+{"schema":"fm-crew-board-cache.v1","observed_at":"2026-10-21T06:00:00Z","phones":[{"title":"S22","status":"locked","detail":"held by alpha"}],"bugs":[{"title":"Rocketboard login bug","status":"in progress"}],"allowance":[{"title":"Claude","status":"45% remaining"}],"routines":[{"title":"Tip health","status":"green"}]}
+EOF
+  run_board "$home" refresh >/dev/null || fail "panel refresh failed"
+  assert_equals 1 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" "question count"
+  assert_contains "$(jq -r '.panels.questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "question blocker"
+  assert_equals 'S22' "$(jq -r '.panels.phones[0].title' "$home/state/crew-board.json")" "phone cache"
+  assert_equals 2 "$(jq '.panels.backlog.in_flight' "$home/state/crew-board.json")" "in-flight count from tasks-axi"
+  assert_equals 'Rocketboard login bug' "$(jq -r '.panels.bugs[0].title' "$home/state/crew-board.json")" "bug cache"
+  install_dir="$home/local-bin"
+  "$ROOT/bin/fm-install-firstmate-cli.sh" "$install_dir" >/dev/null || fail "launcher install failed"
+  assert_equals "$ROOT/bin/firstmate" "$(readlink "$install_dir/firstmate")" "launcher target"
+  "$ROOT/bin/fm-install-firstmate-cli.sh" "$install_dir" >/dev/null || fail "launcher reinstall failed"
+  result=$(PATH="$install_dir:$PATH" command -v firstmate)
+  assert_equals "$install_dir/firstmate" "$result" "launcher not on test PATH"
+  pass "local panel cache, captain questions, tasks-axi backlog, and one-word launcher"
+}
+
+test_rows_and_phase_time
+test_refresh_and_gone
+test_tui_render_and_note
+test_narrow_terminal
+test_note_without_selection_and_point_without_text
+test_panel_projection_and_launcher

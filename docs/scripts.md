@@ -19,7 +19,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
-| `fm-crew-board.sh`       | Build, open, and keep current the live crew board of every worker's self-reported phase |
+| `fm-crew-board.sh`       | Open the live terminal crew board, refresh its worker records, show them as text, or stop the dashboard |
+| `fm-install-firstmate-cli.sh` | Install the `firstmate` terminal launcher into a directory on PATH without replacing another executable |
 | `fm-lavish-board-lib.sh` | Shared proof that a board's Lavish session is live and its answer listener is running |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |
 | `fm-update.sh`           | Guarded self-update of firstmate and local or remote secondmate homes, reconciling redundant divergence and classifying every live mate left on the target commit for restart or fallback nudge |
