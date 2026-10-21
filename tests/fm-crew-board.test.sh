@@ -191,14 +191,20 @@ test_phone_connection_states() {
   mkdir -p "$stub"
   cat > "$stub/adb" <<'EOF'
 #!/usr/bin/env bash
-printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two unauthorized\n'
+printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two unauthorized\nserial-three no permissions (user in plugdev group; are your udev rules wrong?); see [http://developer.android.com/tools/device.html]\nserial-four recovery\n* daemon not running; starting now at tcp:5037\n'
 EOF
   chmod +x "$stub/adb"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone state refresh failed"
+  assert_equals 4 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "every adb device line becomes a row"
   assert_equals 1 "$(jq '[.panels.phones[] | select(.adb == "device")] | length' "$home/state/crew-board.json")" "connected device rows"
   assert_equals 1 "$(jq '[.panels.phones[] | select(.adb == "unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized device rows"
   assert_equals 'unauthorized' "$(jq -r '.panels.phones[] | select(.adb == "unauthorized") | .status' "$home/state/crew-board.json")" "unauthorized row state"
   assert_equals true "$(jq -r '.panels.phones[] | select(.adb == "unauthorized") | .alert' "$home/state/crew-board.json")" "unauthorized row is an alert"
+  assert_equals 'no permissions' "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .adb' "$home/state/crew-board.json")" "two-word adb state"
+  assert_equals true "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .alert' "$home/state/crew-board.json")" "no permissions row is an alert"
+  assert_equals 'serial-three' "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .title' "$home/state/crew-board.json")" "no model falls back to the serial"
+  assert_equals 'recovery' "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .adb' "$home/state/crew-board.json")" "unknown adb state is kept"
+  assert_equals true "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .alert' "$home/state/crew-board.json")" "unknown state row is an alert"
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized phone alert"
   assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Phone serial-two unauthorized") | .detail' "$home/state/crew-board.json")" 'adb reports unauthorized' "unauthorized alert reason"
   cat > "$home/data/crew-board-cache.json" <<'EOF'

@@ -223,9 +223,10 @@ def local_phones():
     rows = []
     for line in run.stdout.splitlines():
         fields = line.split()
-        if len(fields) < 2 or fields[1] not in ("device", "unauthorized", "offline"):
+        if len(fields) < 2 or line.startswith("*") or line.startswith("List of devices"):
             continue
-        serial, state = fields[:2]
+        serial = fields[0]
+        state = " ".join(fields[1:3]) if fields[1:3] == ["no", "permissions"] else fields[1]
         model = next((field.removeprefix("model:").replace("_", " ")
                       for field in fields[2:] if field.startswith("model:")), serial)
         row = item(model, serial, "connected" if state == "device" else state,
