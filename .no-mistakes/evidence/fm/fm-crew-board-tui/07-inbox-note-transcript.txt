@@ -1,0 +1,13 @@
+# firstmate crew board: captain note round trip (demo home /tmp/fmcb-demo)
+## inbox note written by 'j Enter i <text> Enter' in the TUI
+id=1792568477-joM4xd
+at=2026-10-21T07:41:17Z
+source=text
+--
+Crew board item: alpha | widget / Make the widget spin | ready-to-merge
+Note: why is the boot crash still testing?
+
+## firstmate wake queue entry
+1792568477	1	check	inbox:1792568477-joM4xd	check: captain inbox note 1792568477-joM4xd - Crew board item: alpha | widget / Make the widget spin | ready-to-merge Note: why is the boot crash 
+## after stray 'x' Enter (before the i-note): no inbox dir existed
+## after ':q' Enter: board exited, pid file removed, inbox note count unchanged (1)
