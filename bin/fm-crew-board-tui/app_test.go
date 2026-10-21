@@ -192,9 +192,6 @@ func TestQuestionsPageFocusCueFollowsPanel(t *testing.T) {
 
 func TestCollapseAndNarrowLayout(t *testing.T) {
 	m := fixtureApp(t)
-	if collapsedHeight(0) != 4 || collapsedHeight(2) != 4 {
-		t.Fatal("wrong collapse heights")
-	}
 	press(m, key(' '))
 	if !m.collapsed["workers"] {
 		t.Fatal("space did not collapse focused panel")

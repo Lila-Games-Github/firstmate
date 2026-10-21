@@ -147,6 +147,7 @@ command_refresh() {
   else
     printf 'unchanged\n'
   fi
+  rm -rf -- "$work"
 }
 
 command_show() {

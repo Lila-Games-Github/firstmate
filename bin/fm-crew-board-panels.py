@@ -349,6 +349,13 @@ def quota_entries():
     return rows
 
 
+def allowance_entries(cache):
+    rows = quota_entries()
+    live = {row["title"].split(" / ", 1)[0].strip().casefold() for row in rows}
+    return rows + [entry for entry in entries(cache, "allowance")
+                   if entry["title"].split(" / ", 1)[0].strip().casefold() not in live]
+
+
 def watcher_alert():
     beat = STATE / ".last-watcher-beat"
     try:
@@ -426,7 +433,7 @@ def project(snapshot):
         "routines": entries(cache, "routines"),
         "bugs": entries(cache, "bugs"),
         "backlog": backlog,
-        "allowance": quota_entries() + entries(cache, "allowance"),
+        "allowance": allowance_entries(cache),
         "cached_at": str(cache.get("observed_at", "")),
     }
 

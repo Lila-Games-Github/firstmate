@@ -617,21 +617,23 @@ No adapter writes an advisory to a task's status file, because a `note:` line th
 Run `bin/fm-install-firstmate-cli.sh` to link `bin/firstmate` into `~/.local/bin`, then run `firstmate` from any working directory with that directory on `PATH`.
 Set `FM_HOME` when opening another firstmate home; the launcher otherwise uses the checkout containing its target.
 The terminal dashboard needs Go 1.27.2 or newer for its first build, plus `jq`, Python 3, and the existing fleet commands used by `bin/fm-crew-board.sh refresh`.
-It uses Bubble Tea, Lip Gloss, Bubbles, and Harmonica for a terminal interface with focus transitions, scrolling, text input, and activity animation; the Go source and module lockfile live under `bin/fm-crew-board-tui/`.
+It uses Bubble Tea, Lip Gloss, and Bubbles for a terminal interface with focus transitions, scrolling, text input, and activity animation; the Go source and module lockfile live under `bin/fm-crew-board-tui/`.
 The launcher builds a private binary in `state/.crew-board-tui-bin` when the Go source changes, and `bin/fm-crew-board.sh stop` closes the board for that home.
 Use `bin/fm-crew-board.sh --help` for the key map, `refresh` for the JSON payload, and `show` for a text view.
 
+Each page shows its focused sub-tab as the large panel, marked by the highlighted border, the sub-tab strip, and the focus cue on its cursor row, and the page's other sub-tabs as summary cards beside or below it, except on QUESTIONS where one sub-tab fills the page.
 The NOW page reads workers and phase counts from `state/crew-board.json`, questions from `data/captain-questions.md`, and a feed from worker status files.
 The TESTING page shows phones, test queue, landings, builds, and daily routines; PLANNING shows Rocketboard bugs, backlog, and AI allowance.
-The QUESTIONS page shows every open captain question grouped by its heading beside every in-flight, held, and queued backlog item read through `bin/fm-tasks-axi.sh`, with captain holds listed apart from other holds; select a row and press Enter to read its full text, then use Ctrl-f/Ctrl-b to scroll long entries.
-The backlog panel reads local counts and next tasks through `bin/fm-tasks-axi.sh`; the remaining observations without a cheap local source may be supplied by a firstmate-maintained `data/crew-board-cache.json`.
+The QUESTIONS page offers every open captain question grouped by its heading as its CAPTAIN QUESTIONS sub-tab and every in-flight, held, and queued backlog item read through `bin/fm-tasks-axi.sh` as its BACKLOG sub-tab, with captain holds listed apart from other holds; select a row and press Enter to read its full text, then use Ctrl-f/Ctrl-b to scroll long entries.
+The backlog panel reads local counts and next tasks through `bin/fm-tasks-axi.sh`, and the PHONES panel reports what a bounded local `adb devices -l` query sees; the remaining observations without a cheap local source may be supplied by a firstmate-maintained `data/crew-board-cache.json`.
 That optional file uses `{"schema":"fm-crew-board-cache.v1","observed_at":"<ISO 8601>","phones":[{"title":"S22","status":"locked","detail":"held by worker"}]}`.
-Its optional arrays are `alerts`, `ready`, `phones`, `test_queue`, `landings`, `builds`, `routines`, `bugs`, and `allowance`; each entry may have `id`, `title`, `detail`, `status`, `link`, and `alert` fields.
-Firstmate updates that cache from its normal work; the board refresh and terminal UI make no network request.
-An absent cache leaves those panels empty, and the terminal retains the last published board if a refresh fails.
+Its optional arrays are `alerts`, `ready`, `phones`, `test_queue`, `landings`, `builds`, `routines`, `bugs`, and `allowance`; each entry may have `id`, `title`, `detail`, `status`, `link`, and `alert` fields, a cached `phones` entry overlays the live device it matches by id or title, and a cached `allowance` entry naming a provider the live quota snapshot already reports is dropped, so a provider with a live quota row never also appears from the cache.
+Firstmate updates that cache from its normal work, and the board refresh makes no network request of its own.
+While the terminal is open a background sampler asks `quota-axi` every five minutes and records the last good answer in `state/crew-board-quota.json`, which the refresh reads for the AI allowance panel.
+An absent cache leaves the panels that need it empty, a missing or failed quota snapshot leaves AI allowance with only its cached rows, and the terminal retains the last published board if a refresh fails.
 Typing a note with `i` or `:` and Enter sends it through `bin/fm-inbox.sh note` and wakes firstmate; selecting a row attaches its item ID and title to the same note.
 The note line always shows the `i` shortcut, confirms a sent message, and the Feed shows the latest firstmate acknowledgement when the note reaches `state/inbox/handled/`.
-On each page `h`/`l` and Left/Right move to the visible panel in that direction, `j`/`k` move above or below at a row edge, and Tab/Shift-Tab cycle panels.
+On each page `h`/`l` and Left/Right step through that page's sub-tabs, including empty ones, `j`/`k` move above or below at a row edge, and Tab/Shift-Tab cycle panels.
 Expanded worker rows show a read-only tail from `bin/fm-peek.sh` for the selected worker.
 Press `O` on a selected worker to focus its recorded tmux window or Herdr tab when the board runs inside that runtime; otherwise the board prints the exact attach command in its footer.
 

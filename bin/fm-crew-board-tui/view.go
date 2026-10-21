@@ -53,11 +53,7 @@ func activePhase(phase string) bool {
 	return false
 }
 
-func (m *app) panelCount(spec panelSpec) int { return len(m.items(spec.id)) }
-
-func collapsedHeight(count int) int {
-	return 4
-}
+const summaryCardHeight = 4
 
 func panelSummary(spec panelSpec, rows []item, width int) string {
 	nouns := map[string]string{
@@ -433,9 +429,9 @@ func (m *app) View() tea.View {
 			summary := m.renderCompact(spec, summaryWidth)
 			summaries = append(summaries, summary)
 			if spec.id != focus.id {
-				m.lastRects = append(m.lastRects, panelRect{spec.id, focusWidth, y, summaryWidth, collapsedHeight(m.panelCount(spec))})
+				m.lastRects = append(m.lastRects, panelRect{spec.id, focusWidth, y, summaryWidth, summaryCardHeight})
 			}
-			y += collapsedHeight(m.panelCount(spec))
+			y += summaryCardHeight
 		}
 		right := lipgloss.JoinVertical(lipgloss.Left, summaries...)
 		body = left
@@ -446,7 +442,7 @@ func (m *app) View() tea.View {
 		summaryHeight := 0
 		for _, spec := range list {
 			if m.page != 3 {
-				summaryHeight += collapsedHeight(m.panelCount(spec))
+				summaryHeight += summaryCardHeight
 			}
 		}
 		minimal := bodyHeight < summaryHeight+5
@@ -462,7 +458,7 @@ func (m *app) View() tea.View {
 			if m.page == 3 || minimal {
 				break
 			}
-			panelHeight := collapsedHeight(m.panelCount(spec))
+			panelHeight := summaryCardHeight
 			blocks = append(blocks, m.renderCompact(spec, m.width))
 			if spec.id != focus.id {
 				m.lastRects = append(m.lastRects, panelRect{spec.id, 0, y, m.width, panelHeight})

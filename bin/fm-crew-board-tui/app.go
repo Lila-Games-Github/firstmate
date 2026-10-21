@@ -638,10 +638,3 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
-
-func abs(value float64) float64 {
-	if value < 0 {
-		return -value
-	}
-	return value
-}
