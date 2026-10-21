@@ -143,7 +143,7 @@ EOF
   assert_equals 'Rocketboard login bug' "$(jq -r '.panels.bugs[0].title' "$home/state/crew-board.json")" "bug cache"
   install_dir="$home/local-bin"
   "$ROOT/bin/fm-install-firstmate-cli.sh" "$install_dir" >/dev/null || fail "launcher install failed"
-  assert_equals "$ROOT/bin/firstmate" "$(readlink "$install_dir/firstmate")" "launcher target"
+  assert_equals "$(cd "$ROOT/bin" && pwd -P)/firstmate" "$(readlink "$install_dir/firstmate")" "launcher target"
   "$ROOT/bin/fm-install-firstmate-cli.sh" "$install_dir" >/dev/null || fail "launcher reinstall failed"
   result=$(PATH="$install_dir:$PATH" command -v firstmate)
   assert_equals "$install_dir/firstmate" "$result" "launcher not on test PATH"
