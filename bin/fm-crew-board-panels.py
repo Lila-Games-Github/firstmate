@@ -421,13 +421,14 @@ def project(snapshot):
                                item_id=str(task.get("id", ""))))
     phones = phone_entries(cache)
     for phone in phones:
-        status = phone["status"]
-        if status not in ("locked", "unavailable", "unauthorized", "offline"):
-            continue
-        reason = phone["detail"]
-        if phone.get("adb") in ("unauthorized", "offline"):
-            reason = f"adb reports {status}, so the phone cannot take tests"
-        alerts.append(item(f"Phone {phone['title']} {status}", reason, status, alert=True))
+        adb = phone.get("adb")
+        if adb in ("unauthorized", "offline"):
+            alerts.append(item(f"Phone {phone['title']} {adb}",
+                               f"adb reports {adb}, so the phone cannot take tests",
+                               adb, alert=True))
+        if phone["status"] in ("locked", "unavailable"):
+            alerts.append(item(f"Phone {phone['title']} {phone['status']}",
+                               phone["detail"], phone["status"], alert=True))
     ready = entries(cache, "ready")
     for task in rows:
         if not isinstance(task, dict) or (task.get("phase") or {}).get("name") != "ready-to-merge":

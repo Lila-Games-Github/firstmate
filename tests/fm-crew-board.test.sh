@@ -201,6 +201,25 @@ EOF
   assert_equals true "$(jq -r '.panels.phones[] | select(.adb == "unauthorized") | .alert' "$home/state/crew-board.json")" "unauthorized row is an alert"
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized phone alert"
   assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Phone serial-two unauthorized") | .detail' "$home/state/crew-board.json")" 'adb reports unauthorized' "unauthorized alert reason"
+  cat > "$home/data/crew-board-cache.json" <<'EOF'
+{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-two","title":"Galaxy S22","status":"locked","detail":"held by worker"}]}
+EOF
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "unauthorized overlay refresh failed"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two unauthorized" and .status == "unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized alert under a cache status"
+  assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Phone serial-two unauthorized") | .detail' "$home/state/crew-board.json")" 'adb reports unauthorized' "unauthorized reason under a cache status"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two locked" and .detail == "held by worker")] | length' "$home/state/crew-board.json")" "cache lock alert kept"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two offline\n'
+EOF
+  chmod +x "$stub/adb"
+  cat > "$home/data/crew-board-cache.json" <<'EOF'
+{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-two","title":"Galaxy S22","status":"busy","detail":"reserved"}]}
+EOF
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "offline overlay refresh failed"
+  assert_equals 'offline' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .adb' "$home/state/crew-board.json")" "offline adb state kept under a cache status"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two offline" and .status == "offline")] | length' "$home/state/crew-board.json")" "offline alert under a cache status"
+  assert_equals 0 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two busy")] | length' "$home/state/crew-board.json")" "busy cache status is not an alert"
   pass "connected and unauthorized phone rows are told apart and alert the captain"
 }
 
