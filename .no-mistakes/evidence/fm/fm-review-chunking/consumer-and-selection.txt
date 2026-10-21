@@ -1,0 +1,10 @@
+$ no-mistakes --version
+no-mistakes version v1.58.1-lila-ee3d88a (ee3d88a) 2026-10-21T13:19:39Z
+
+$ no-mistakes eval run --help   # accepted domain for the setting this repo now tracks
+      --review-chunk-threshold-lines int   isolated replay override: 0 keeps one review turn; a value over 500 enables chunking above that diff size
+
+$ bin/fm-test-run.sh --list --changed --base 534b7a6   # family CI selects for this diff (59 scripts)
+selected scripts: 59
+14:tests/fm-documentation-audiences.test.sh
+59:tests/fm-nm-test-contract.test.sh

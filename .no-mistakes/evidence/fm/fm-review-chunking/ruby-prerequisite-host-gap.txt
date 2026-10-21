@@ -1,0 +1,16 @@
+$ command -v ruby   # this gate host
+ruby: not found on PATH
+
+$ bash tests/fm-nm-test-contract.test.sh   # branch copy, host bash
+not ok - ruby is required to parse .no-mistakes.yaml for this contract
+exit=1
+
+$ bash /tmp/nm-guard-neg/tests/fm-nm-test-contract.test.sh   # BASE 534b7a6 copy of the same file, host bash
+_: line 1: /tmp/nm-guard-neg/bin/fm-wake-lib.sh: No such file or directory
+_: line 1: fm_pid_identity: command not found
+not ok - ruby is required to parse .no-mistakes.yaml for this contract
+exit=1
+
+$ podman run ruby:3.3-slim bash tests/fm-nm-test-contract.test.sh   (base copy, ruby present)
+ok - no-mistakes does not configure commands.test
+exit=0

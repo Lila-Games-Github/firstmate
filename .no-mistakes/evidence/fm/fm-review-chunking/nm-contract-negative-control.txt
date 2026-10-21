@@ -1,0 +1,42 @@
+=== .no-mistakes.yaml review.chunk_threshold_lines: 800
+_: line 1: /repo/bin/fm-wake-lib.sh: No such file or directory
+_: line 1: fm_pid_identity: command not found
+ok - no-mistakes does not configure commands.test
+ok - no-mistakes review.chunk_threshold_lines passes trusted-copy validation
+exit=0
+=== .no-mistakes.yaml review.chunk_threshold_lines: 0
+_: line 1: /repo/bin/fm-wake-lib.sh: No such file or directory
+_: line 1: fm_pid_identity: command not found
+ok - no-mistakes does not configure commands.test
+ok - no-mistakes review.chunk_threshold_lines passes trusted-copy validation
+exit=0
+=== .no-mistakes.yaml review.chunk_threshold_lines: 501
+_: line 1: /repo/bin/fm-wake-lib.sh: No such file or directory
+_: line 1: fm_pid_identity: command not found
+ok - no-mistakes does not configure commands.test
+ok - no-mistakes review.chunk_threshold_lines passes trusted-copy validation
+exit=0
+=== .no-mistakes.yaml review.chunk_threshold_lines: 400
+_: line 1: /repo/bin/fm-wake-lib.sh: No such file or directory
+_: line 1: fm_pid_identity: command not found
+ok - no-mistakes does not configure commands.test
+not ok - review.chunk_threshold_lines must be absent, 0 (disabled), or greater than 500, or the trusted-copy gate read rejects every run; got: 400
+exit=1
+=== .no-mistakes.yaml review.chunk_threshold_lines: 500
+_: line 1: /repo/bin/fm-wake-lib.sh: No such file or directory
+_: line 1: fm_pid_identity: command not found
+ok - no-mistakes does not configure commands.test
+not ok - review.chunk_threshold_lines must be absent, 0 (disabled), or greater than 500, or the trusted-copy gate read rejects every run; got: 500
+exit=1
+=== .no-mistakes.yaml review.chunk_threshold_lines: -1
+_: line 1: /repo/bin/fm-wake-lib.sh: No such file or directory
+_: line 1: fm_pid_identity: command not found
+ok - no-mistakes does not configure commands.test
+not ok - review.chunk_threshold_lines must be absent, 0 (disabled), or greater than 500, or the trusted-copy gate read rejects every run; got: -1
+exit=1
+=== .no-mistakes.yaml review.chunk_threshold_lines: "800"
+_: line 1: /repo/bin/fm-wake-lib.sh: No such file or directory
+_: line 1: fm_pid_identity: command not found
+ok - no-mistakes does not configure commands.test
+not ok - review.chunk_threshold_lines must be absent, 0 (disabled), or greater than 500, or the trusted-copy gate read rejects every run; got: "800"
+exit=1

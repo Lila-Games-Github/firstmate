@@ -1,0 +1,17 @@
+# Static support for the rewritten docs/configuration.md sentence
+# Surface: text emitted by the installed reviewer v1.58.1-lila-ee3d88a (the fork the intent names)
+
+[1] every config key the chunking feature exposes (yaml tags in the binary):
+    yaml:"chunk_threshold_lines"
+    => no user-facing per-chunk patch-size knob exists, so the docs' 'fixed per-chunk patch budget' is accurate.
+
+[2] emitted chunked-review prompt (the generated interface delivered to the review agent):
+    Chunked review: %d of %d. This is a fresh, independent review turn. Review every assigned path and every patch byte below before returning findings, including paths matching an ignore pattern: this opt-in large-diff mode covers the complete changed set. The patch is exact git diff --unified=0 output, partitioned deterministically; no 
+    Exact patch segments follow. A segment ending before its file size continues in another chunk.
+
+[3] reviewer completion line:
+    Reviewed %d complete diff chunks across %d changed paths
+
+[4] validators for the tracked value:
+    review.chunk_threshold_lines must be 0 (disabled) or greater than 500
+    review chunk threshold must be 0 or greater than 500

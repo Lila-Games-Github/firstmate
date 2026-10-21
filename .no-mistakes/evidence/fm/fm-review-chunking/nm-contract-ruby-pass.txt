@@ -1,0 +1,2 @@
+ok - no-mistakes does not configure commands.test
+ok - no-mistakes review.chunk_threshold_lines passes trusted-copy validation
