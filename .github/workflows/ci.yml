@@ -68,8 +68,9 @@ jobs:
   test-coverage:
     name: Test coverage guard
     runs-on: ubuntu-latest
-    # The coverage guard is seconds-long; this job also builds the Go crew board.
-    timeout-minutes: 10
+    # Hang tripwire: the coverage guard and the Go crew board build are each
+    # seconds-long (the whole job measured ~40s).
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - name: Prove complete regression partition

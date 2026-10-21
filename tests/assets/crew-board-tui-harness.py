@@ -29,7 +29,9 @@ proc = subprocess.Popen(
 os.close(slave)
 output = bytearray()
 try:
-    deadline = time.monotonic() + 10
+    # The first frame waits on a per-home `go build`; a cold module and build
+    # cache on a small CI runner takes well over 10s, so allow for it here.
+    deadline = time.monotonic() + 180
     while b"WORKERS" not in output and time.monotonic() < deadline:
         ready, _, _ = select.select([master], [], [], 0.2)
         if ready:
