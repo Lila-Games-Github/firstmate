@@ -513,6 +513,24 @@ func TestSummaryCardsAndEmptyFocusedPanel(t *testing.T) {
 	}
 }
 
+func TestPhoneCardCountsOnlyLiveDevices(t *testing.T) {
+	m := fixtureApp(t)
+	spec := panelSpec{"phones", "PHONES"}
+	m.data.Panels.Phones = []item{
+		{ID: "serial-one", Title: "Pixel 8", Status: "locked", Live: true},
+		{ID: "serial-two", Title: "Galaxy S22", Status: "connected", Live: true},
+		{Title: "Cache only", Status: "ready", Detail: "manual"},
+	}
+	card := m.renderCompact(spec, 60)
+	if !strings.Contains(card, "2 connected") || !strings.Contains(card, "1 cached") {
+		t.Fatalf("phone card did not separate attached devices from cache rows: %q", card)
+	}
+	m.data.Panels.Phones = m.data.Panels.Phones[:2]
+	if card := m.renderCompact(spec, 60); !strings.Contains(card, "2 connected") || strings.Contains(card, "cached") {
+		t.Fatalf("phone card with only attached devices reads: %q", card)
+	}
+}
+
 func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Rows = append(m.data.Rows, worker{ID: "gamma", Kind: "playbot", Project: "widget",
@@ -579,6 +597,46 @@ func TestQuestionReplyAndFullDetail(t *testing.T) {
 	if err != nil || !strings.Contains(string(message), "Reply [UIX]: UIX. Prototype or design UI.") ||
 		!strings.Contains(string(message), "Answer: Use the prototype") {
 		t.Fatalf("reply lost its question context: %q, %v", message, err)
+	}
+}
+
+func TestReplyKeepsItsQuestionWhenTheCursorMoves(t *testing.T) {
+	m := fixtureApp(t)
+	m.page, m.focus = 0, "questions"
+	m.data.Panels.Questions = []item{
+		{ID: "question-1", Title: "UIX. Prototype or design UI.", Detail: "first"},
+		{ID: "question-2", Title: "OPS. Release timing.", Detail: "second"},
+	}
+	m.selected["questions"] = 0
+	code := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(code, "bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(code, "bin", "fm-inbox.sh"), []byte("#!/bin/sh\ncat > \"$FM_HOME/reply.txt\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	m.paths.Code = code
+	press(m, key('r'))
+	m.input.SetValue("use the prototype")
+	_ = m.View()
+	rect := m.lastRects[0]
+	m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: rect.y + 4})
+	if m.selected["questions"] != 1 {
+		t.Fatalf("click left the selection on question %d", m.selected["questions"])
+	}
+	if !strings.Contains(m.View().Content, "REPLY [UIX]") {
+		t.Fatal("reply label followed the click instead of the question the reply started on")
+	}
+	command := press(m, special(tea.KeyEnter))
+	if command == nil {
+		t.Fatal("reply did not submit")
+	}
+	command()
+	message, err := os.ReadFile(filepath.Join(m.paths.Home, "reply.txt"))
+	if err != nil || !strings.Contains(string(message), "Reply [UIX]: UIX. Prototype or design UI.") ||
+		!strings.Contains(string(message), "Answer: use the prototype") ||
+		strings.Contains(string(message), "Reply [OPS]") {
+		t.Fatalf("reply left its question after the cursor moved: %q, %v", message, err)
 	}
 }
 

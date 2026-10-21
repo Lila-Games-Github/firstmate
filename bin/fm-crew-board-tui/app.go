@@ -68,6 +68,7 @@ type app struct {
 	notice                string
 	lastRefresh           time.Time
 	refreshing            bool
+	replyTarget           *item
 	lastRects             []panelRect
 	slide, slideDirection int
 }
@@ -482,6 +483,7 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				m.inputActive = false
 				m.commandMode = false
+				m.replyTarget = nil
 				m.input.Blur()
 				return m, nil
 			case "enter":
@@ -493,9 +495,13 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					text = strings.TrimPrefix(text, ":")
 				}
 				selected := m.focusedItem()
-				if question := m.selectedQuestion(); question != nil && strings.TrimSpace(text) != "" {
-					text = fmt.Sprintf("Reply [%s]: %s\nAnswer: %s", questionLabel(question.Title), question.Title, text)
+				if question := m.replyTarget; question != nil {
+					selected = question
+					if strings.TrimSpace(text) != "" {
+						text = fmt.Sprintf("Reply [%s]: %s\nAnswer: %s", questionLabel(question.Title), question.Title, text)
+					}
 				}
+				m.replyTarget = nil
 				m.input.Reset()
 				m.input.Blur()
 				m.inputActive = false
@@ -613,20 +619,24 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterInput.SetValue(m.filters[m.focus])
 			return m, m.filterInput.Focus()
 		case "i":
+			m.replyTarget = m.selectedQuestion()
 			m.inputActive = true
 			m.commandMode = false
 			m.input.Reset()
 			return m, m.input.Focus()
 		case "r":
-			if m.selectedQuestion() == nil {
+			target := m.selectedQuestion()
+			if target == nil {
 				m.notice = "Select a question to reply"
 				return m, nil
 			}
+			m.replyTarget = target
 			m.inputActive = true
 			m.commandMode = false
 			m.input.Reset()
 			return m, m.input.Focus()
 		case ":":
+			m.replyTarget = m.selectedQuestion()
 			m.inputActive = true
 			m.commandMode = true
 			m.input.SetValue(":")

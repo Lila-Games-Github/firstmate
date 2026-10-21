@@ -81,6 +81,18 @@ func panelSummary(spec panelSpec, rows []item, width int) string {
 			}
 			count += " (" + strings.Join(parts, ", ") + ")"
 		}
+		if spec.id == "phones" {
+			connected := 0
+			for _, row := range rows {
+				if row.Live {
+					connected++
+				}
+			}
+			count = fmt.Sprintf("%d %s", connected, nouns[spec.id])
+			if cached := len(rows) - connected; cached > 0 {
+				count += fmt.Sprintf(" (%d cached)", cached)
+			}
+		}
 		latest = "latest: " + rows[len(rows)-1].Title
 	}
 	first := ansi.Truncate(spec.title+"  "+count, max(1, width), "…")
@@ -472,9 +484,13 @@ func (m *app) View() tea.View {
 	if row := m.focusedItem(); row != nil {
 		selected = row.ID
 	}
+	reply := m.selectedQuestion()
+	if m.inputActive {
+		reply = m.replyTarget
+	}
 	label := "NOTE [" + selected + "] i: message firstmate  "
-	if row := m.selectedQuestion(); row != nil {
-		label = "REPLY [" + ansi.Truncate(questionLabel(row.Title), 16, "…") + "] r/i: answer  "
+	if reply != nil {
+		label = "REPLY [" + ansi.Truncate(questionLabel(reply.Title), 16, "…") + "] r/i: answer  "
 	}
 	m.input.SetWidth(max(8, m.width-8-lipgloss.Width(label)))
 	note := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cyan).

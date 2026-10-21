@@ -168,13 +168,16 @@ EOF
   assert_equals 'unauthorized' "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .status' "$home/state/crew-board.json")" "unauthorized state"
   assert_equals 'offline' "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .status' "$home/state/crew-board.json")" "offline state"
   cat > "$home/data/crew-board-cache.json" <<'EOF'
-{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-one","title":"Old title","status":"locked","detail":"held by worker"},{"title":"Galaxy S22","status":"busy","detail":"reserved"},{"title":"Cache only","status":"ready","detail":"manual"}]}
+{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-one","title":"Old title","status":"locked","detail":"held by worker"},{"title":"Galaxy_S22","status":"busy","detail":"reserved"},{"title":"Cache only","status":"ready","detail":"manual"}]}
 EOF
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone overlay refresh failed"
   assert_equals 5 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "merged phone count"
+  assert_equals 4 "$(jq '[.panels.phones[] | select(.live)] | length' "$home/state/crew-board.json")" "attached device rows"
+  assert_equals 1 "$(jq '[.panels.phones[] | select(.live | not)] | length' "$home/state/crew-board.json")" "cache-only phone rows"
   assert_equals 'locked' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .status' "$home/state/crew-board.json")" "serial overlay"
   assert_equals 'held by worker' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .detail' "$home/state/crew-board.json")" "overlay detail"
-  assert_equals 'busy' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .status' "$home/state/crew-board.json")" "title overlay"
+  assert_equals 'busy' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .status' "$home/state/crew-board.json")" "normalized title overlay"
+  assert_equals 0 "$(jq '[.panels.phones[] | select(.title == "Cache only" and .live)] | length' "$home/state/crew-board.json")" "cache-only row marked live"
   rm "$stub/adb" "$home/data/crew-board-cache.json"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "missing adb refresh failed"
   assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "missing adb phone count"

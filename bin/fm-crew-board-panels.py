@@ -233,12 +233,18 @@ def local_phones():
     return rows
 
 
+def normalized_phone_title(value):
+    return re.sub(r"[\s_-]+", "", value).casefold()
+
+
 def phone_entries(cache):
     cached = entries(cache, "phones")
     rows = local_phones()
     for row in rows:
+        row["live"] = True
         match = next((index for index, entry in enumerate(cached)
-                      if entry["id"] == row["id"] or entry["title"] == row["title"]), None)
+                      if entry["id"] == row["id"]
+                      or normalized_phone_title(entry["title"]) == normalized_phone_title(row["title"])), None)
         if match is not None:
             entry = cached.pop(match)
             row.update(status=entry["status"] or row["status"],
