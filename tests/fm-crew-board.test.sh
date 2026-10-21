@@ -172,16 +172,36 @@ EOF
 EOF
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone overlay refresh failed"
   assert_equals 5 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "merged phone count"
-  assert_equals 4 "$(jq '[.panels.phones[] | select(.live)] | length' "$home/state/crew-board.json")" "attached device rows"
-  assert_equals 1 "$(jq '[.panels.phones[] | select(.live | not)] | length' "$home/state/crew-board.json")" "cache-only phone rows"
+  assert_equals 4 "$(jq '[.panels.phones[] | select(.adb != null)] | length' "$home/state/crew-board.json")" "attached device rows"
+  assert_equals 1 "$(jq '[.panels.phones[] | select(.adb == null)] | length' "$home/state/crew-board.json")" "cache-only phone rows"
   assert_equals 'locked' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .status' "$home/state/crew-board.json")" "serial overlay"
   assert_equals 'held by worker' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .detail' "$home/state/crew-board.json")" "overlay detail"
   assert_equals 'busy' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .status' "$home/state/crew-board.json")" "normalized title overlay"
-  assert_equals 0 "$(jq '[.panels.phones[] | select(.title == "Cache only" and .live)] | length' "$home/state/crew-board.json")" "cache-only row marked live"
+  assert_equals 0 "$(jq '[.panels.phones[] | select(.title == "Cache only" and .adb != null)] | length' "$home/state/crew-board.json")" "cache-only row marked attached"
   rm "$stub/adb" "$home/data/crew-board-cache.json"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "missing adb refresh failed"
   assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "missing adb phone count"
   pass "local adb phones, unavailable states, cache overlay, and missing adb"
+}
+
+test_phone_connection_states() {
+  local home stub
+  home=$(make_home phone_states)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two unauthorized\n'
+EOF
+  chmod +x "$stub/adb"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone state refresh failed"
+  assert_equals 1 "$(jq '[.panels.phones[] | select(.adb == "device")] | length' "$home/state/crew-board.json")" "connected device rows"
+  assert_equals 1 "$(jq '[.panels.phones[] | select(.adb == "unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized device rows"
+  assert_equals 'unauthorized' "$(jq -r '.panels.phones[] | select(.adb == "unauthorized") | .status' "$home/state/crew-board.json")" "unauthorized row state"
+  assert_equals true "$(jq -r '.panels.phones[] | select(.adb == "unauthorized") | .alert' "$home/state/crew-board.json")" "unauthorized row is an alert"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized phone alert"
+  assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Phone serial-two unauthorized") | .detail' "$home/state/crew-board.json")" 'adb reports unauthorized' "unauthorized alert reason"
+  pass "connected and unauthorized phone rows are told apart and alert the captain"
 }
 
 test_bold_question_paragraphs() {
@@ -366,6 +386,7 @@ test_narrow_terminal
 test_note_without_selection_and_point_without_text
 test_panel_projection_and_launcher
 test_local_phones_and_cache_overlay
+test_phone_connection_states
 test_bold_question_paragraphs
 test_quota_allowance_snapshot
 test_playbot_lane_projection

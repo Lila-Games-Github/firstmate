@@ -82,14 +82,17 @@ func panelSummary(spec panelSpec, rows []item, width int) string {
 			count += " (" + strings.Join(parts, ", ") + ")"
 		}
 		if spec.id == "phones" {
-			connected := 0
+			connected, cached := 0, 0
 			for _, row := range rows {
-				if row.Live {
+				switch row.ADB {
+				case "device":
 					connected++
+				case "":
+					cached++
 				}
 			}
 			count = fmt.Sprintf("%d %s", connected, nouns[spec.id])
-			if cached := len(rows) - connected; cached > 0 {
+			if cached > 0 {
 				count += fmt.Sprintf(" (%d cached)", cached)
 			}
 		}
@@ -241,11 +244,7 @@ func (m *app) rowLine(id string, row item, index, width int) string {
 	spaces := strings.Repeat(" ", max(1, available-lipgloss.Width(name)+1))
 	line := prefix + name + spaces + phaseColor(row.Status).Render(status)
 	if selected {
-		if id == m.focus {
-			line = lipgloss.NewStyle().Foreground(background).Background(yellow).Render(line)
-		} else {
-			line = lipgloss.NewStyle().Foreground(muted).Render(line)
-		}
+		line = lipgloss.NewStyle().Foreground(background).Background(yellow).Render(line)
 	}
 	return line
 }
@@ -353,11 +352,8 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 	view.SoftWrap = false
 	view.SetContent(strings.Join(lines, "\n"))
 	view.SetYOffset(m.panelOffset(spec, innerWidth, height, owners))
-	accent := muted
-	if spec.id == m.focus {
-		accent = yellow
-	}
-	title := lipgloss.NewStyle().Foreground(accent).Bold(spec.id == m.focus).Render(spec.title)
+	accent := yellow
+	title := lipgloss.NewStyle().Foreground(accent).Bold(true).Render(spec.title)
 	if spec.id == "workers" {
 		counts := phaseCounts(m.data.liveWorkers())
 		var parts []string

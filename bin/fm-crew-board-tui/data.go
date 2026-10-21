@@ -36,7 +36,7 @@ type item struct {
 	Status string `json:"status"`
 	Link   string `json:"link"`
 	Alert  bool   `json:"alert"`
-	Live   bool   `json:"live"`
+	ADB    string `json:"adb"`
 }
 
 type backlog struct {

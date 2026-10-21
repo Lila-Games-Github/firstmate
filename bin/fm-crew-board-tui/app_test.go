@@ -164,28 +164,27 @@ func TestQuestionsPageFocusCueFollowsPanel(t *testing.T) {
 	questions := pages[3][0]
 	backlog := pages[3][1]
 	before := m.View().Content
-	questionFocused := m.renderFocused(questions, 60, 22)
-	backlogUnfocused := m.renderFocused(backlog, 60, 22)
 	if !strings.Contains(before, "Which device?") || strings.Contains(before, "Build widget") {
 		t.Fatal("questions page did not isolate the active panel")
 	}
 	press(m, special(tea.KeyTab))
 	after := m.View().Content
-	questionUnfocused := m.renderFocused(questions, 60, 22)
-	backlogFocused := m.renderFocused(backlog, 60, 22)
 	if m.focus != "full_backlog" || before == after || !strings.Contains(after, "Build widget") || strings.Contains(after, "Which device?") {
 		t.Fatal("moving focus did not change the multi-panel view")
 	}
-	if questionFocused == questionUnfocused || backlogFocused == backlogUnfocused {
-		t.Fatal("panel border and title did not change with focus")
+	active := func(title string) string {
+		return lipgloss.NewStyle().Foreground(background).Background(yellow).Bold(true).Render(" " + title + " ")
+	}
+	if strip := m.subTabs(200); !strings.Contains(strip, active(backlog.title)) || strings.Contains(strip, active(questions.title)) {
+		t.Fatalf("sub-tab strip did not move its focus cue: %q", strip)
 	}
 	for _, id := range []string{"full_questions", "full_backlog"} {
-		m.focus = id
-		focused := m.rowLine(id, m.items(id)[0], 0, 40)
-		m.focus = "other"
-		unfocused := m.rowLine(id, m.items(id)[0], 0, 40)
-		if focused == unfocused {
-			t.Errorf("%s selected row has no focus cue", id)
+		selected := m.rowLine(id, m.items(id)[0], 0, 40)
+		delete(m.selected, id)
+		unselected := m.rowLine(id, m.items(id)[0], 0, 40)
+		m.selected[id] = 0
+		if selected == unselected {
+			t.Errorf("%s selected row has no cursor cue", id)
 		}
 	}
 }
@@ -543,21 +542,21 @@ func TestSummaryCardsAndEmptyFocusedPanel(t *testing.T) {
 	}
 }
 
-func TestPhoneCardCountsOnlyLiveDevices(t *testing.T) {
+func TestPhoneCardCountsOnlyConnectedDevices(t *testing.T) {
 	m := fixtureApp(t)
 	spec := panelSpec{"phones", "PHONES"}
 	m.data.Panels.Phones = []item{
-		{ID: "serial-one", Title: "Pixel 8", Status: "locked", Live: true},
-		{ID: "serial-two", Title: "Galaxy S22", Status: "connected", Live: true},
+		{ID: "serial-one", Title: "Pixel 8", Status: "locked", ADB: "device"},
+		{ID: "serial-two", Title: "serial-two", Status: "unauthorized", ADB: "unauthorized", Alert: true},
 		{Title: "Cache only", Status: "ready", Detail: "manual"},
 	}
 	card := m.renderCompact(spec, 60)
-	if !strings.Contains(card, "2 connected") || !strings.Contains(card, "1 cached") {
-		t.Fatalf("phone card did not separate attached devices from cache rows: %q", card)
+	if !strings.Contains(card, "1 connected") || !strings.Contains(card, "1 cached") {
+		t.Fatalf("phone card counted an unauthorized device or a cache row as connected: %q", card)
 	}
 	m.data.Panels.Phones = m.data.Panels.Phones[:2]
-	if card := m.renderCompact(spec, 60); !strings.Contains(card, "2 connected") || strings.Contains(card, "cached") {
-		t.Fatalf("phone card with only attached devices reads: %q", card)
+	if card := m.renderCompact(spec, 60); !strings.Contains(card, "1 connected") || strings.Contains(card, "cached") {
+		t.Fatalf("phone card with one attached device reads: %q", card)
 	}
 }
 
@@ -627,6 +626,23 @@ func TestQuestionReplyAndFullDetail(t *testing.T) {
 	if err != nil || !strings.Contains(string(message), "Reply [UIX]: UIX. Prototype or design UI.") ||
 		!strings.Contains(string(message), "Answer: Use the prototype") {
 		t.Fatalf("reply lost its question context: %q, %v", message, err)
+	}
+}
+
+func TestMouseIgnoresRowsPastThePanelWindow(t *testing.T) {
+	m := fixtureApp(t)
+	m.width, m.height = 120, 24
+	for index := range 20 {
+		m.data.Rows = append(m.data.Rows, worker{ID: fmt.Sprintf("w%d", index), Title: fmt.Sprintf("Worker %d", index)})
+	}
+	m.selected["workers"] = 0
+	_ = m.View()
+	rect := m.lastRects[0]
+	for _, y := range []int{rect.y + rect.height - 2, rect.y + rect.height - 1} {
+		m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: y})
+		if m.selected["workers"] != 0 {
+			t.Fatalf("click at y=%d selected row %d past the drawn window", y, m.selected["workers"])
+		}
 	}
 }
 

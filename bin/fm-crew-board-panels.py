@@ -228,8 +228,10 @@ def local_phones():
         serial, state = fields[:2]
         model = next((field.removeprefix("model:").replace("_", " ")
                       for field in fields[2:] if field.startswith("model:")), serial)
-        rows.append(item(model, serial, "connected" if state == "device" else state,
-                         alert=state != "device", item_id=serial))
+        row = item(model, serial, "connected" if state == "device" else state,
+                   alert=state != "device", item_id=serial)
+        row["adb"] = state
+        rows.append(row)
     return rows
 
 
@@ -247,8 +249,6 @@ def phone_entries(cache):
     cached = entries(cache, "phones")
     rows = local_phones()
     matched = [False] * len(rows)
-    for row in rows:
-        row["live"] = True
     for by_serial in (True, False):
         for index, row in enumerate(rows):
             if matched[index]:
@@ -421,9 +421,13 @@ def project(snapshot):
                                item_id=str(task.get("id", ""))))
     phones = phone_entries(cache)
     for phone in phones:
-        if phone["status"] in ("locked", "unavailable"):
-            alerts.append(item(f"Phone {phone['title']} {phone['status']}",
-                               phone["detail"], phone["status"], alert=True))
+        status = phone["status"]
+        if status not in ("locked", "unavailable", "unauthorized", "offline"):
+            continue
+        reason = phone["detail"]
+        if phone.get("adb") in ("unauthorized", "offline"):
+            reason = f"adb reports {status}, so the phone cannot take tests"
+        alerts.append(item(f"Phone {phone['title']} {status}", reason, status, alert=True))
     ready = entries(cache, "ready")
     for task in rows:
         if not isinstance(task, dict) or (task.get("phase") or {}).get("name") != "ready-to-merge":

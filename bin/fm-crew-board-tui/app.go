@@ -434,13 +434,14 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				innerWidth := max(1, rect.width-4)
+				innerHeight := max(1, rect.height-5)
 				if msg.Y == rect.y+1 {
 					if m.focusSubTab(m.subTabAt(msg.X-rect.x-1, innerWidth)) {
 						return m, motionTick()
 					}
 					return m, nil
 				}
-				if msg.Y >= rect.y+3 && !m.collapsed[rect.id] {
+				if msg.Y >= rect.y+3 && msg.Y < rect.y+3+innerHeight && !m.collapsed[rect.id] {
 					_, owners := m.panelLines(panelSpec{id: rect.id}, innerWidth)
 					line := msg.Y - rect.y - 3 + m.panelOffset(panelSpec{id: rect.id}, innerWidth, rect.height, owners)
 					if line >= 0 && line < len(owners) && owners[line] >= 0 {
