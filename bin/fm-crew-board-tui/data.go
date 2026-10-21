@@ -44,18 +44,20 @@ type backlog struct {
 }
 
 type panels struct {
-	Alerts    []item  `json:"alerts"`
-	Questions []item  `json:"questions"`
-	Ready     []item  `json:"ready"`
-	Phones    []item  `json:"phones"`
-	TestQueue []item  `json:"test_queue"`
-	Landings  []item  `json:"landings"`
-	Builds    []item  `json:"builds"`
-	Routines  []item  `json:"routines"`
-	Bugs      []item  `json:"bugs"`
-	Backlog   backlog `json:"backlog"`
-	Allowance []item  `json:"allowance"`
-	CachedAt  string  `json:"cached_at"`
+	Alerts        []item  `json:"alerts"`
+	Questions     []item  `json:"questions"`
+	FullQuestions []item  `json:"full_questions"`
+	FullBacklog   []item  `json:"full_backlog"`
+	Ready         []item  `json:"ready"`
+	Phones        []item  `json:"phones"`
+	TestQueue     []item  `json:"test_queue"`
+	Landings      []item  `json:"landings"`
+	Builds        []item  `json:"builds"`
+	Routines      []item  `json:"routines"`
+	Bugs          []item  `json:"bugs"`
+	Backlog       backlog `json:"backlog"`
+	Allowance     []item  `json:"allowance"`
+	CachedAt      string  `json:"cached_at"`
 }
 
 type board struct {
@@ -183,6 +185,15 @@ func (p paths) peek(id string) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
+func (p paths) focusWorker(id string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(p.Code, "bin", "fm-crew-board-focus.sh"), id)
+	cmd.Env = p.env()
+	output, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(ansiEscape.ReplaceAll(output, nil))), err
+}
+
 func readFeed(state string) ([]item, error) {
 	matches, err := filepath.Glob(filepath.Join(state, "*.status"))
 	if err != nil {
@@ -235,5 +246,28 @@ func readFeed(state string) ([]item, error) {
 		value.Status = event.timestamp.Format("15:04:05")
 		rows = append(rows, value)
 	}
+	if ack := latestInboxAcknowledgement(state); ack != nil {
+		rows = append([]item{*ack}, rows...)
+	}
 	return rows, nil
+}
+
+func latestInboxAcknowledgement(state string) *item {
+	files, err := filepath.Glob(filepath.Join(state, "inbox", "handled", "*.note"))
+	if err != nil {
+		return nil
+	}
+	var newest os.FileInfo
+	var name string
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err == nil && info.Mode().IsRegular() && (newest == nil || info.ModTime().After(newest.ModTime())) {
+			newest, name = info, filepath.Base(file)
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	return &item{ID: strings.TrimSuffix(name, ".note"), Title: "Firstmate acknowledged your message",
+		Detail: "Acknowledged " + newest.ModTime().Format("2006-01-02 15:04"), Status: "acknowledged"}
 }

@@ -171,7 +171,11 @@ func (m *app) detail(id string, row item, width int) string {
 	}
 	var display []string
 	for _, line := range strings.Split(strings.Join(lines, "\n"), "\n") {
-		display = append(display, lipgloss.NewStyle().Foreground(muted).Render("    "+ansi.Truncate(line, max(1, width-5), "…")))
+		if id == "full_questions" || id == "full_backlog" {
+			display = append(display, lipgloss.NewStyle().Foreground(muted).Render("    "+line))
+		} else {
+			display = append(display, lipgloss.NewStyle().Foreground(muted).Render("    "+ansi.Truncate(line, max(1, width-5), "…")))
+		}
 	}
 	return strings.Join(display, "\n")
 }
@@ -194,7 +198,7 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 	view.SoftWrap = true
 	view.SetContent(strings.Join(lines, "\n"))
 	if selected, ok := m.selected[spec.id]; ok {
-		view.SetYOffset(max(0, selected-innerHeight/2))
+		view.SetYOffset(max(0, selected-innerHeight/2+m.scrollOffset[spec.id]))
 	}
 	title := lipgloss.NewStyle().Foreground(yellow).Bold(true).Render(spec.title)
 	if spec.id == "workers" {
@@ -216,13 +220,13 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 
 func (m *app) helpOverlay(width, height int) string {
 	lines := []string{
-		"VIM KEYS", "j/k rows  h/l panels  gg/G ends",
-		"Ctrl-d/u page  Enter/o expand",
+		"VIM KEYS", "j/k rows + vertical panels  h/l spatial",
+		"Tab cycles  Ctrl-d/u rows",
+		"Enter/o expand  O focus selected worker pane",
 		"za/Space collapse  Alt-1..9 select",
-		"1/2/3 pages  / filter",
-		"i/: note  Esc leave input",
+		"1/2/3/4 pages  / filter",
+		"4: Ctrl-f/b scroll  i/: message firstmate",
 		"q/:q quit  ? close help",
-		"Worker screen: fm-peek.sh (read only)",
 	}
 	text := strings.Join(lines, "\n")
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cyan).
@@ -251,10 +255,35 @@ func (m *app) View() tea.View {
 	} else if m.filterActive {
 		body = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cyan).
 			Width(m.width - 2).Height(bodyHeight - 2).Render("FILTER " + focus.title + "\n" + m.filterInput.View() + "\nEnter apply  ·  Esc cancel")
+	} else if m.page == 3 {
+		for index, spec := range list {
+			panelWidth, panelHeight, x, y := m.width, bodyHeight/2, 0, 4+index*(bodyHeight/2)
+			if m.width >= 100 {
+				panelWidth, panelHeight, x, y = m.width/2, bodyHeight, index*(m.width/2), 4
+			}
+			m.lastRects = append(m.lastRects, panelRect{spec.id, x, y, panelWidth, panelHeight})
+			panel := m.renderFocused(spec, panelWidth, panelHeight)
+			if index == 0 {
+				body = panel
+			} else if m.width >= 100 {
+				body = lipgloss.JoinHorizontal(lipgloss.Top, body, panel)
+			} else {
+				body = lipgloss.JoinVertical(lipgloss.Left, body, panel)
+			}
+		}
 	} else if m.width >= 100 {
 		focusWidth := max(50, min(m.width-28, int(math.Round(float64(m.width)*m.focusSize))))
-		rightWidth := m.width - focusWidth
-		m.lastRects = append(m.lastRects, panelRect{focus.id, 0, 4, focusWidth, bodyHeight})
+		summaryWidth := m.width - focusWidth
+		anchor := list[0].id
+		if m.page == 0 {
+			anchor = "workers"
+		}
+		focusOnLeft := focus.id == anchor
+		focusX, summaryX := 0, focusWidth
+		if !focusOnLeft {
+			focusX, summaryX = summaryWidth, 0
+		}
+		m.lastRects = append(m.lastRects, panelRect{focus.id, focusX, 4, focusWidth, bodyHeight})
 		left := m.renderFocused(focus, focusWidth, bodyHeight)
 		var summaries []string
 		y := 4
@@ -262,13 +291,17 @@ func (m *app) View() tea.View {
 			if spec.id == focus.id {
 				continue
 			}
-			summary := m.renderCompact(spec, rightWidth)
+			summary := m.renderCompact(spec, summaryWidth)
 			summaries = append(summaries, summary)
-			m.lastRects = append(m.lastRects, panelRect{spec.id, focusWidth, y, rightWidth, collapsedHeight(m.panelCount(spec))})
+			m.lastRects = append(m.lastRects, panelRect{spec.id, summaryX, y, summaryWidth, collapsedHeight(m.panelCount(spec))})
 			y += collapsedHeight(m.panelCount(spec))
 		}
 		right := lipgloss.JoinVertical(lipgloss.Left, summaries...)
-		body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+		if focusOnLeft {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+		} else {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, right, left)
+		}
 	} else {
 		summaryHeight := 0
 		for _, spec := range list {
@@ -309,13 +342,13 @@ func (m *app) View() tea.View {
 	if row := m.focusedItem(); row != nil {
 		selected = row.ID
 	}
-	label := "NOTE [" + selected + "]  "
-	m.input.SetWidth(max(8, m.width-4-lipgloss.Width(label)))
+	label := "NOTE [" + selected + "] i: message firstmate  "
+	m.input.SetWidth(max(8, m.width-8-lipgloss.Width(label)))
 	note := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cyan).
 		Width(m.width - 2).Height(1).Render(label + m.input.View())
 	footer := m.notice
 	if footer == "" {
-		footer = "j/k rows · h/l panels · Enter expand · / filter · i note · 1/2/3 pages · ? help · q quit"
+		footer = "4 full questions · j/k rows · h/l spatial panels · Enter expand · / filter · i message · ? help · q quit"
 	}
 	footer = lipgloss.NewStyle().Foreground(muted).Render(ansi.Truncate(footer, m.width-2, "…"))
 	content := m.header() + "\n" + body + "\n" + note + "\n" + footer
