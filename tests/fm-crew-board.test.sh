@@ -368,7 +368,7 @@ test_quota_unknown_headroom_and_exhaustion() {
   mkdir -p "$stub"
   source="$home/quota.json"
   cat > "$source" <<'EOF'
-{"providers":[{"provider":"codex","state":{"status":"fresh"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","runway":{"status":"exhausted_now"}}]}},{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}},{"provider":"mistral","quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","runway":{"status":"through_reset"}}]}}]}
+{"providers":[{"provider":"codex","state":{"status":"fresh"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","runway":{"status":"exhausted_now"}}]}},{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}},{"provider":"mistral","quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","runway":{"status":"through_reset"}}]}},{"provider":"qwen","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":70,"runway":{"status":"through_reset"}},{"scope":"model:fable","status":"unknown","runway":{"status":"exhausted_now"}}]}}]}
 EOF
   cat > "$stub/quota-axi" <<'EOF'
 #!/usr/bin/env bash
@@ -378,14 +378,40 @@ EOF
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_OUTPUT="$source" PATH="$stub:/usr/bin:/bin" \
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota snapshot failed"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
-  assert_equals 3 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "every provider keeps a row"
+  assert_equals 5 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "every provider keeps a row"
   assert_equals 'exhausted now' "$(jq -r '.panels.allowance[] | select(.title == "codex") | .status' "$home/state/crew-board.json")" "unknown headroom that is exhausted now"
   assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "codex") | .alert' "$home/state/crew-board.json")" "exhausted unknown headroom alerts"
   assert_equals 'headroom unknown' "$(jq -r '.panels.allowance[] | select(.title == "mistral") | .status' "$home/state/crew-board.json")" "unknown headroom row"
   assert_equals false "$(jq -r '.panels.allowance[] | select(.title == "mistral") | .alert' "$home/state/crew-board.json")" "unknown headroom alone is not an alert"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .status' "$home/state/crew-board.json")" '0% left' "exhausted scope kept its percent"
   assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "claude") | .alert' "$home/state/crew-board.json")" "exhausted now alerts"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "qwen") | .status' "$home/state/crew-board.json")" '70% left' "scoped sibling kept its percent"
+  assert_equals false "$(jq -r '.panels.allowance[] | select(.title == "qwen") | .alert' "$home/state/crew-board.json")" "healthy sibling is not an alert"
+  assert_equals 'exhausted now' "$(jq -r '.panels.allowance[] | select(.title == "qwen / model:fable") | .status' "$home/state/crew-board.json")" "exhausted scope beside a scoped sibling"
+  assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "qwen / model:fable") | .alert' "$home/state/crew-board.json")" "exhausted scope beside a scoped sibling alerts"
   pass "unknown headroom and exhausted_now runways stay visible and alert"
+}
+
+test_quota_unresolved_limiting_window() {
+  local home stub source
+  home=$(make_home quota_window)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  source="$home/quota.json"
+  cat > "$source" <<'EOF'
+{"providers":[{"provider":"claude","windows":[{"id":"weekly","label":"week","resetsAt":"Friday"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":40,"limitingWindowIds":["weekly","model:fable:7d"],"runway":{"status":"through_reset"}}]}}]}
+EOF
+  cat > "$stub/quota-axi" <<'EOF'
+#!/usr/bin/env bash
+cat "$QUOTA_OUTPUT"
+EOF
+  chmod +x "$stub/quota-axi"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_OUTPUT="$source" PATH="$stub:/usr/bin:/bin" \
+    python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota snapshot failed"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
+  assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'limit: week, unknown' "unresolved limiting window"
+  assert_not_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'None' "unresolved window rendered as None"
+  pass "an unresolved limiting window reads unknown instead of None"
 }
 
 test_full_questions_and_backlog() {
@@ -466,5 +492,6 @@ test_bold_question_paragraphs
 test_questions_without_headings
 test_quota_allowance_snapshot
 test_quota_unknown_headroom_and_exhaustion
+test_quota_unresolved_limiting_window
 test_playbot_lane_projection
 test_full_questions_and_backlog

@@ -325,32 +325,33 @@ def quota_entries():
         scopes = semantics.get("effectiveAvailability") if isinstance(semantics, dict) else []
         scopes = scopes if isinstance(scopes, list) else []
         scoped = 0
-        exhausted = False
         for scope in scopes:
             if not isinstance(scope, dict):
                 continue
             runway_info = scope.get("runway")
             runway = runway_info.get("status") if isinstance(runway_info, dict) else "unknown"
             runway = runway or "unknown"
+            title = name if scope.get("scope") == "all_models" else f"{name} / {scope.get('scope')}"
             percent = scope.get("effectivePercentRemaining")
             if not isinstance(percent, (int, float)):
-                exhausted = exhausted or runway == "exhausted_now"
+                if runway == "exhausted_now":
+                    rows.append(item(title, f"limit: unknown; reset: unknown; runway: {runway}; observed: {age_label}",
+                                     "exhausted now", alert=True))
+                    scoped += 1
                 continue
             window_ids = scope.get("limitingWindowIds")
             limits = [windows.get(key, {}) for key in window_ids] if isinstance(window_ids, list) else []
-            limit = ", ".join(str(window.get("label") or window.get("id")) for window in limits) or "unknown"
+            limit = ", ".join(str(window.get("label") or window.get("id") or "unknown") for window in limits) or "unknown"
             reset = ", ".join(str(window.get("resetsAt") or window.get("resetText") or "unknown")
                               for window in limits) or "unknown"
-            title = name if scope.get("scope") == "all_models" else f"{name} / {scope.get('scope')}"
             detail = f"limit: {limit}; reset: {reset}; runway: {runway}; observed: {age_label}"
             rows.append(item(title, detail, f"{percent:g}% left · {age_label}",
                              alert=runway in ("projected_exhaustion", "exhausted_now")))
             scoped += 1
         if scopes:
             if not scoped:
-                runway = "exhausted_now" if exhausted else "unknown"
-                rows.append(item(name, f"limit: unknown; reset: unknown; runway: {runway}; observed: {age_label}",
-                                 "exhausted now" if exhausted else "headroom unknown", alert=exhausted))
+                rows.append(item(name, f"limit: unknown; reset: unknown; runway: unknown; observed: {age_label}",
+                                 "headroom unknown"))
             continue
         credits = provider.get("credits")
         credits = credits if isinstance(credits, dict) else {}
