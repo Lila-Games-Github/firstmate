@@ -119,15 +119,20 @@ func (m *app) focusCmd(id string) tea.Cmd {
 	return func() tea.Msg { text, err := p.focusWorker(id); return focusMsg{text, err} }
 }
 
-// readableBacklog returns the full backlog rows only when they carry a task:
-// group headings alone, or the single row a failed read leaves behind, mean the
-// panel falls back to the next queued tasks.
-func readableBacklog(rows []item) []item {
-	tasks := withoutSections(rows)
-	if len(tasks) == 0 || tasks[0].Status == "error" {
-		return nil
+// backlogRows shows the full backlog when it carries a task, else the failed
+// read's own reason above the next queued tasks.
+func backlogRows(full, next []item) []item {
+	tasks := withoutSections(full)
+	if len(tasks) > 0 && tasks[0].Status != "error" {
+		return full
 	}
-	return rows
+	reason := []item{}
+	for _, row := range full {
+		if row.Status != "section" {
+			reason = append(reason, row)
+		}
+	}
+	return append(reason, next...)
 }
 
 func (m *app) rawItems(id string) []item {
@@ -164,10 +169,7 @@ func (m *app) rawItems(id string) []item {
 		}
 		rows := []item{{ID: "counts", Title: fmt.Sprintf("In flight %s  /  Queued %s", count(back.InFlight), count(back.Queued)),
 			Status: "section"}}
-		if readableBacklog(m.data.Panels.FullBacklog) != nil {
-			return append(rows, m.data.Panels.FullBacklog...)
-		}
-		return append(rows, back.Next...)
+		return append(rows, backlogRows(m.data.Panels.FullBacklog, back.Next)...)
 	case "workers":
 		workers := m.data.liveWorkers()
 		order := map[string]int{}

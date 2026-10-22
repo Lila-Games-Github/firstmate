@@ -196,13 +196,18 @@ func TestPlanningBacklogCarriesTheFullBacklog(t *testing.T) {
 		t.Fatal("backlog lost its next-up fallback when the full list is unavailable")
 	}
 	m.data.Panels.FullBacklog = []item{{Title: "In flight", Status: "section"}, {Title: "Queued", Status: "section"}}
-	if !strings.Contains(m.View().Content, "Short next row") {
-		t.Fatal("backlog did not fall back to the next-up list when the full list carries no task")
+	rows := m.items("backlog")
+	if len(rows) != 2 || rows[1].Title != "Short next row" {
+		t.Fatalf("headings-only backlog = %#v, want the next-up list", rows)
 	}
 	m.data.Panels.FullBacklog = []item{{Title: "Backlog unavailable", Detail: "Could not read bin/fm-tasks-axi.sh", Status: "error"}}
+	rows = m.items("backlog")
+	if len(rows) != 3 || rows[1].Title != "Backlog unavailable" || rows[2].Title != "Short next row" {
+		t.Fatalf("failed full-list read = %#v, want its reason above the next-up list", rows)
+	}
 	view = m.View().Content
-	if !strings.Contains(view, "Short next row") || strings.Contains(view, "Backlog unavailable") {
-		t.Fatal("backlog showed the failed full-list read instead of the next-up list")
+	if !strings.Contains(view, "Could not read bin/fm-tasks-axi.sh") {
+		t.Fatal("backlog hid the failed full-list read")
 	}
 }
 

@@ -111,9 +111,14 @@ def tasks_axi_list(state):
     in_rows = False
     for line in run.stdout.splitlines():
         if line.startswith("count: "):
-            try:
-                count = int(line.split(":", 1)[1].strip())
-            except ValueError:
+            value = line.split(":", 1)[1].strip()
+            total = re.search(r"of (\d+) total$", value)
+            shown = re.match(r"\d+", value)
+            if total:
+                count = int(total.group(1))
+            elif shown:
+                count = int(shown.group(0))
+            else:
                 return None
         elif re.match(r"^tasks\[\d+\]\{id,state,kind,repo,title\}:$", line):
             in_rows = True
@@ -910,7 +915,8 @@ def quota_entries():
             state = state or "unavailable"
             unavailable.append(f"{name}: {state}")
     if unavailable:
-        rows.append(item(f"{len(unavailable)} providers unavailable",
+        noun = "provider" if len(unavailable) == 1 else "providers"
+        rows.append(item(f"{len(unavailable)} {noun} unavailable",
                          "\n".join(unavailable) + f"\nobserved: {age_label}", "unavailable"))
     return rows
 

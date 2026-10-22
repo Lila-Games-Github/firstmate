@@ -56,6 +56,15 @@ sleeper_in() { (cd "$1" && exec sleep 60) >/dev/null 2>&1 & printf '%s\n' "$!"; 
 row_field() { jq -r --arg id "$2" --arg f "$3" '.rows[] | select(.id == $id) | .[$f]' "$1/state/crew-board.json"; }
 set_mtime() { perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"; }
 
+# /proc/locks lists a held lock with the pid in field 5 and a blocked request
+# with a leading arrow and the pid in field 6; the board reads the same table.
+lock_holds() {  # <pid>
+  [ -r /proc/locks ] && awk -v pid="$1" '$2 != "->" && $3 == "FLOCK" && $5 == pid { found = 1 } END { exit !found }' /proc/locks
+}
+lock_waits() {  # <pid>
+  [ -r /proc/locks ] && awk -v pid="$1" '$2 == "->" && $3 == "FLOCK" && $6 == pid { found = 1 } END { exit !found }' /proc/locks
+}
+
 test_rows_and_phase_time() {
   local home out
   home=$(make_home rows)
@@ -385,6 +394,8 @@ EOF
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .status' "$home/state/crew-board.json")" '27.3 usd' "credit balance"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .detail' "$home/state/crew-board.json")" 'runway: unknown' "credit runway"
   assert_contains "$(jq -r '.panels.allowance[] | select(.status == "unavailable") | .detail' "$home/state/crew-board.json")" 'cursor: auth_required' "unavailable provider"
+  assert_equals '1 provider unavailable' \
+    "$(jq -r '.panels.allowance[] | select(.status == "unavailable") | .title' "$home/state/crew-board.json")" "single unavailable provider title"
   cat > "$home/data/crew-board-cache.json" <<'EOF'
 {"schema":"fm-crew-board-cache.v1","allowance":[{"title":"Claude","status":"45% remaining","detail":"hand written"},{"title":"Mistral","status":"12% remaining"}]}
 EOF
@@ -625,10 +636,11 @@ EOF
     : > "$home/locks/frogpile-suite.lock"
     flock "$home/locks/frogpile-suite.lock" sleep 60 >/dev/null 2>&1 &
     blocker=$!
-    sleep 0.3
+    for _ in 1 2 3 4 5 6 7 8 9 10; do lock_holds "$blocker" && break; sleep 0.1; done
     (cd "$home/wt-alpha" && exec flock "$home/locks/frogpile-suite.lock" true) >/dev/null 2>&1 &
     suite_waiter=$!
-    sleep 0.3
+    for _ in 1 2 3 4 5 6 7 8 9 10; do lock_waits "$suite_waiter" && break; sleep 0.1; done
+    lock_waits "$suite_waiter" || suite_waiter=''
   fi
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'test queue refresh failed'
   assert_equals testing "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'held phone is testing'
@@ -840,6 +852,43 @@ EOF
   pass 'full questions and backlog parsers retain grouped entries, hold reasons, and notes'
 }
 
+test_backlog_counts_from_a_capped_listing() {
+  local home stub snapshot
+  home=$(make_home backlog_capped)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+state=queued
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --state) state=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$state" = in_flight ]; then
+  printf 'count: 2\n'
+  printf 'tasks[2]{id,state,kind,repo,title}:\n'
+  printf '  fm-live,in_flight,ship,firstmate,In-flight task\n'
+  exit 0
+fi
+printf 'count: 8 of 67 total\n'
+printf 'tasks[8]{id,state,kind,repo,title}:\n'
+printf '  fm-one,queued,ship,firstmate,First queued task\n'
+printf '  fm-two,queued,ship,firstmate,Second queued task\n'
+EOF
+  chmod +x "$stub/tasks-axi"
+  snapshot="$home/snapshot.json"
+  printf '{"schema": "fm-fleet-snapshot.v1", "tasks": []}\n' > "$snapshot"
+  PATH="$stub:$PATH" run_panels "$home" "$snapshot" > "$home/panels.json" || fail 'capped backlog projection failed'
+  assert_equals 67 "$(jq '.backlog.queued' "$home/panels.json")" 'capped queued listing reports its total'
+  assert_equals 2 "$(jq '.backlog.in_flight' "$home/panels.json")" 'uncapped in-flight listing reports its count'
+  assert_equals 'fm-tasks-axi.sh' "$(jq -r '.backlog.source' "$home/panels.json")" 'capped listing keeps its source'
+  assert_equals 'First queued task|Second queued task' \
+    "$(jq -r '[.backlog.next[].title] | join("|")' "$home/panels.json")" 'next queued tasks survive a capped listing'
+  pass 'a capped tasks-axi listing still yields the backlog counts and next tasks'
+}
+
 test_rows_and_phase_time
 test_refresh_and_gone
 test_tui_render_and_note
@@ -859,6 +908,7 @@ test_allowance_sampler_stops_with_its_board
 test_quota_unresolved_limiting_window
 test_playbot_lane_projection
 test_full_questions_and_backlog
+test_backlog_counts_from_a_capped_listing
 test_phone_testing_and_test_queue
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
