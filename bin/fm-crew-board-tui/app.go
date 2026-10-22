@@ -303,7 +303,12 @@ func (m *app) selectReadable() {
 // selectableFrom returns the first non-heading row from index in direction
 // step, or -1 when none remains.
 func (m *app) selectableFrom(index, step int) int {
-	rows := m.items(m.focus)
+	return m.selectableIn(m.focus, index, step)
+}
+
+// selectableIn is selectableFrom for any panel.
+func (m *app) selectableIn(id string, index, step int) int {
+	rows := m.items(id)
 	for ; index >= 0 && index < len(rows); index += step {
 		if rows[index].Status != "section" {
 			return index
@@ -425,8 +430,18 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.data, m.feed = msg.data, msg.feed
 			for _, specs := range pages {
 				for _, spec := range specs {
-					if index, ok := m.selected[spec.id]; ok && index >= len(m.items(spec.id)) {
+					index, ok := m.selected[spec.id]
+					if !ok {
+						continue
+					}
+					near := m.selectableIn(spec.id, index, 1)
+					if near < 0 {
+						near = m.selectableIn(spec.id, min(index, len(m.items(spec.id))-1), -1)
+					}
+					if near < 0 {
 						delete(m.selected, spec.id)
+					} else {
+						m.selected[spec.id] = near
 					}
 				}
 			}

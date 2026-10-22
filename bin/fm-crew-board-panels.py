@@ -87,6 +87,9 @@ def question_entries(path):
             entry.append(line.strip())
             continue
         if line.startswith("- ") or line.startswith("* "):
+            if entry and re.match(r"^\*\*(.+?)\*\*", entry[0]):
+                entry.append(line.strip())
+                continue
             flush()
             entry.append(line[2:].strip())
         elif entry:

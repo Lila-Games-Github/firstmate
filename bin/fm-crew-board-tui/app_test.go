@@ -1201,3 +1201,61 @@ func TestSelectedRowTagStaysReadableOnTheHighlight(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshMovesASelectionOffAHeading(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.FullQuestions = []item{
+		{Title: "Your decisions", Status: "section"},
+		{ID: "question-0", Title: "Pick the UI", Detail: "Prototype or design"},
+		{Title: "For Tarun", Status: "section"},
+		{ID: "question-1", Title: "Which device?", Detail: "Use the staging device"},
+	}
+	press(m, key('4'))
+	m.selected["full_questions"] = 1
+	m.data.Panels.TestQueue = []item{{Title: "Full suite", Status: "section"}, {Title: "RUNNING: Build widget", Status: "running 8m"}}
+	m.selected["test_queue"] = 1
+	data := m.data
+	data.Panels.FullQuestions = []item{
+		{Title: "Your decisions", Status: "section"},
+		{Title: "For Tarun", Status: "section"},
+		{ID: "question-1", Title: "Which device?", Detail: "Use the staging device"},
+	}
+	data.Panels.TestQueue = []item{{Title: "Full suite", Status: "section"}, {Title: "Phones", Status: "section"}}
+	m.Update(refreshedMsg{data: data, feed: m.feed})
+	if m.selected["full_questions"] != 2 || m.selectedQuestion() == nil || m.selectedQuestion().ID != "question-1" {
+		t.Fatalf("answered question left the cursor on a heading: %#v", m.selected)
+	}
+	if !strings.Contains(m.View().Content, "Use the staging device") {
+		t.Fatal("the next question's full text did not show after a refresh")
+	}
+	if _, ok := m.selected["test_queue"]; ok {
+		t.Fatalf("a panel left with only headings kept a selection: %#v", m.selected)
+	}
+	data.Panels.FullQuestions = []item{
+		{ID: "question-0", Title: "Pick the UI"},
+		{Title: "Your decisions", Status: "section"},
+		{Title: "For Tarun", Status: "section"},
+	}
+	m.Update(refreshedMsg{data: data, feed: m.feed})
+	if m.selected["full_questions"] != 0 {
+		t.Fatalf("cursor did not fall back to the question above the headings: %#v", m.selected)
+	}
+}
+
+func TestSelectedYellowPhaseTagIsADarkChip(t *testing.T) {
+	m := fixtureApp(t)
+	for _, phase := range []string{"testing", "validating"} {
+		m.data.Panels.TestQueue = []item{{Title: "Phone run", Status: phase}}
+		m.selected["test_queue"] = 0
+		selected := m.rowLine("test_queue", m.items("test_queue")[0], 0, 80)
+		inverted := lipgloss.NewStyle().Foreground(yellow).Background(background).Bold(true).Render(phase)
+		if !strings.Contains(selected, inverted) {
+			t.Fatalf("%s tag on the yellow bar is not a dark chip in its colour: %q", phase, selected)
+		}
+	}
+	m.data.Panels.TestQueue = []item{{Title: "Build", Status: "running 8m"}}
+	selected := m.rowLine("test_queue", m.items("test_queue")[0], 0, 80)
+	if !strings.Contains(selected, lipgloss.NewStyle().Foreground(background).Background(cyan).Bold(true).Render("running 8m")) {
+		t.Fatalf("non-yellow selected tag lost its coloured chip: %q", selected)
+	}
+}

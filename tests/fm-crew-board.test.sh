@@ -529,8 +529,6 @@ test_playbot_lane_projection() {
     echo "skip: no Node $FM_TEST_NODE_MIN or newer for the Playbot lane projection"
     return
   fi
-  PATH="$(dirname "$node"):$PATH"
-  export PATH
   home=$(make_home playbot_lanes)
   mkdir -p "$home/playbot"
   python3 - "$home" <<'PY'
@@ -563,8 +561,8 @@ for task, thread, armed, delivery in [('lane-undelivered', 'thread-parked', True
         (home / 'state' / f'{task}.check.sh').write_bytes(check)
         (home / 'state' / f'{task}.check-trust').write_text('fm-custom-check-v1\n' + hashlib.sha256(check).hexdigest() + '\n')
 PY
-  PLAYBOT_DESKTOP_DIR="$home/playbot" run_board "$home" refresh >/dev/null || fail "Playbot lane refresh failed"
-  PLAYBOT_DESKTOP_DIR="$home/playbot" run_board "$home" refresh >/dev/null || fail "second Playbot lane refresh failed"
+  PATH="$(dirname "$node"):$PATH" PLAYBOT_DESKTOP_DIR="$home/playbot" run_board "$home" refresh >/dev/null || fail "Playbot lane refresh failed"
+  PATH="$(dirname "$node"):$PATH" PLAYBOT_DESKTOP_DIR="$home/playbot" run_board "$home" refresh >/dev/null || fail "second Playbot lane refresh failed"
   assert_equals 3 "$(jq '[.rows[] | select(.kind == "playbot" and (.gone | not))] | length' "$home/state/crew-board.json")" "live Playbot lane count"
   assert_equals 'rocketboard|[Playbot] Implement launch|working' \
     "$(jq -r '.rows[] | select(.id == "lane-live") | .project + "|" + .title + "|" + .phase' "$home/state/crew-board.json")" "Playbot project, marker, and working phase"
@@ -637,6 +635,28 @@ EOF
   assert_not_contains "$(jq -r '[.panels.full_questions[].detail] | join(" ")' "$home/state/crew-board.json")" 'This preamble' "preamble leaked"
   assert_equals 2 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "heading-less registers add no section rows"
   pass "questions count before the first heading and preamble prose is ignored"
+}
+
+test_bold_question_keeps_its_options() {
+  local home
+  home=$(make_home bold_options)
+  cat > "$home/data/captain-questions.md" <<'EOF'
+## Your decisions
+**UIX. Pick the UI: four calls.**
+- Prototype in code first
+- Claude Design mockups first
+
+**OPS. Release timing.** Choose the window.
+---
+- Which release should ship?
+- Which device runs the smoke test?
+EOF
+  run_board "$home" refresh >/dev/null || fail "bold option question refresh failed"
+  assert_equals 'UIX. Pick the UI: four calls.|OPS. Release timing.|Which release should ship?|Which device runs the smoke test?' \
+    "$(jq -r '[.panels.full_questions[] | select(.status != "section") | .title] | join("|")' "$home/state/crew-board.json")" \
+    "bold question options stay inside their question"
+  assert_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" 'Claude Design mockups first' "bold question detail keeps its options"
+  pass "column-0 option bullets under a bold question stay part of that question"
 }
 
 test_quota_unknown_headroom_and_exhaustion() {
@@ -1024,6 +1044,7 @@ test_phone_adb_fallbacks
 test_phone_check_unavailable
 test_bold_question_paragraphs
 test_questions_without_headings
+test_bold_question_keeps_its_options
 test_quota_allowance_snapshot
 test_quota_unknown_headroom_and_exhaustion
 test_quota_check_unavailable

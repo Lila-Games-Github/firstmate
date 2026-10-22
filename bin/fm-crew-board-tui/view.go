@@ -60,9 +60,14 @@ func phaseColor(phase string) lipgloss.Style {
 }
 
 // phaseChip keeps a selected row's tag readable on the highlight bar: dark
-// text on its phase colour instead of that colour on the bar.
+// text on its phase colour instead of that colour on the bar, or that colour
+// on a dark chip when the phase colour is the bar's own.
 func phaseChip(phase string) lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(background).Background(phaseColor(phase).GetForeground()).Bold(true)
+	color := phaseColor(phase).GetForeground()
+	if color == yellow {
+		return lipgloss.NewStyle().Foreground(yellow).Background(background).Bold(true)
+	}
+	return lipgloss.NewStyle().Foreground(background).Background(color).Bold(true)
 }
 
 func activePhase(phase string) bool {
@@ -451,7 +456,7 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 		case "alerts":
 			message = "Nothing needs your attention. ALERTS shows only monitoring outages, blocked or failed workers, decisions not yet raised with you, and unavailable phones."
 		case "ready":
-			message = "Nothing is waiting on you. READY FOR YOU shows green PRs to merge, finished local branches to land, unread investigation reports, and previews you asked to see."
+			message = "Nothing is waiting on you. READY FOR YOU shows green PRs to merge, finished local branches to land, finished investigation reports, and previews you asked to see."
 		case "test_queue":
 			message = "No full suite or phone test is running or waiting"
 		case "routines":
