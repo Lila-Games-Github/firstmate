@@ -12,11 +12,12 @@
 # bin/firstmate is the one-word launcher; bin/fm-install-firstmate-cli.sh adds
 # that launcher to PATH without replacing an unrelated executable.
 # In the TUI, 1/2/3/4 switch NOW/TESTING/PLANNING/QUESTIONS, j/k move
-# rows and at row edges move vertically between panels, h/l move spatially,
+# rows only within the focused panel, skipping section headings, h/l step
+# through every page's sub-tabs, including empty panels,
 # Tab/Shift-Tab cycle panels, gg/G and Ctrl-u/Ctrl-d jump within a panel, Enter/o expands a row,
 # O focuses the selected worker's recorded pane (or prints an attach command),
 # za/Space collapses a panel, Alt-1..9 selects a row, / filters,
-# i or : focuses the note line,
+# r replies to a selected question, i or : focuses the note line,
 # Esc leaves input, ? shows help, and q or :q quits.
 #
 # Each task metadata record is one live row. The phase and note come from the
@@ -24,6 +25,9 @@
 # as a gone row for FM_CREW_BOARD_GONE_SECS (default 43200). TUI refreshes every
 # 2 seconds; it reads the same payload as show. Optional local panel records
 # come from bin/fm-crew-board-panels.py. The TUI sends notes through fm-inbox.sh.
+# A background quota sampler runs every five minutes while the TUI is open unless
+# FM_CREW_BOARD_ALLOWANCE_DISABLE=1; refresh reads its last good
+# state/crew-board-quota.json without calling quota-axi.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,8 +86,10 @@ compose_payload() {
             left_at: null
           } ] as $live
     | ([$live[].id]) as $live_ids
+    | ([$panel[0].playbot_workers[]? | select(.id as $id | $live_ids | index($id) | not)] | sort_by(.id)) as $lanes
+    | ([$lanes[].id]) as $lane_ids
     | [ $p.rows[]?
-        | select(.id as $id | $live_ids | index($id) | not)
+        | select(.id as $id | ($live_ids + $lane_ids) | index($id) | not)
         | if .gone then . else . + {gone: true, left_at: $now} end
         | select(($now - .left_at) < $keep) ] as $gone
     | {
@@ -91,7 +97,7 @@ compose_payload() {
         home: $home,
         generated: ($now | todate),
         generated_epoch: $now,
-        rows: (($live | sort_by(.id)) + ($gone | sort_by(.id))),
+        rows: (($live | sort_by(.id)) + $lanes + ($gone | sort_by(.id))),
         panels: $panel[0]
       }'
 }
@@ -142,6 +148,7 @@ command_refresh() {
   else
     printf 'unchanged\n'
   fi
+  rm -rf -- "$work"
 }
 
 command_show() {
@@ -175,10 +182,25 @@ build_tui_if_needed() {
   mv -f -- "$tmp" "$GO_BIN"
 }
 
+stop_allowance_sampler() {
+  local pid="${FM_CREW_BOARD_ALLOWANCE_PID:-}" cmdline
+  [ -n "$pid" ] || return 0
+  cmdline=$(ps -p "$pid" -o command= 2>/dev/null) || return 0
+  case "$cmdline" in *"fm-crew-board-panels.py --allowance-loop"*) ;; *) return 0 ;; esac
+  kill "$pid" 2>/dev/null || :
+  wait "$pid" 2>/dev/null || :
+}
+
 command_tui() {
   [ -t 0 ] && [ -t 1 ] || fail "tui requires an interactive terminal"
   command_refresh >/dev/null
   build_tui_if_needed
+  if [ "${FM_CREW_BOARD_ALLOWANCE_DISABLE:-0}" != 1 ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      python3 "$SCRIPT_DIR/fm-crew-board-panels.py" --allowance-loop >/dev/null 2>&1 &
+    FM_CREW_BOARD_ALLOWANCE_PID=$!
+    trap stop_allowance_sampler EXIT
+  fi
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_CODE_ROOT="$FM_ROOT" "$GO_BIN" run
 }

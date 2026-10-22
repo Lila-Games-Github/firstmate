@@ -17,6 +17,7 @@ import (
 
 type worker struct {
 	ID         string `json:"id"`
+	Kind       string `json:"kind"`
 	Project    string `json:"project"`
 	Title      string `json:"title"`
 	Phase      string `json:"phase"`
@@ -28,12 +29,16 @@ type worker struct {
 }
 
 type item struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Detail string `json:"detail"`
-	Status string `json:"status"`
-	Link   string `json:"link"`
-	Alert  bool   `json:"alert"`
+	ID        string `json:"id"`
+	Group     string `json:"-"`
+	Title     string `json:"title"`
+	Detail    string `json:"detail"`
+	Status    string `json:"status"`
+	Link      string `json:"link"`
+	Alert     bool   `json:"alert"`
+	ADB       string `json:"adb"`
+	Quota     string `json:"quota"`
+	Providers int    `json:"providers"`
 }
 
 type backlog struct {
@@ -44,20 +49,20 @@ type backlog struct {
 }
 
 type panels struct {
-	Alerts        []item  `json:"alerts"`
-	Questions     []item  `json:"questions"`
-	FullQuestions []item  `json:"full_questions"`
-	FullBacklog   []item  `json:"full_backlog"`
-	Ready         []item  `json:"ready"`
-	Phones        []item  `json:"phones"`
-	TestQueue     []item  `json:"test_queue"`
-	Landings      []item  `json:"landings"`
-	Builds        []item  `json:"builds"`
-	Routines      []item  `json:"routines"`
-	Bugs          []item  `json:"bugs"`
-	Backlog       backlog `json:"backlog"`
-	Allowance     []item  `json:"allowance"`
-	CachedAt      string  `json:"cached_at"`
+	Alerts        []item            `json:"alerts"`
+	FullQuestions []item            `json:"full_questions"`
+	FullBacklog   []item            `json:"full_backlog"`
+	Ready         []item            `json:"ready"`
+	Phones        []item            `json:"phones"`
+	TestQueue     []item            `json:"test_queue"`
+	Landings      []item            `json:"landings"`
+	Builds        []item            `json:"builds"`
+	Routines      []item            `json:"routines"`
+	Bugs          []item            `json:"bugs"`
+	Backlog       backlog           `json:"backlog"`
+	Allowance     []item            `json:"allowance"`
+	WorkerTags    map[string]string `json:"worker_tags"`
+	CachedAt      string            `json:"cached_at"`
 }
 
 type board struct {
@@ -206,6 +211,10 @@ func readFeed(state string) ([]item, error) {
 	}
 	var events []event
 	for _, path := range matches {
+		id := strings.TrimSuffix(filepath.Base(path), ".status")
+		if strings.HasPrefix(id, ".") {
+			continue
+		}
 		info, err := os.Stat(path)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
@@ -221,14 +230,23 @@ func readFeed(state string) ([]item, error) {
 			}
 		}
 		lines := strings.Split(string(data), "\n")
-		id := strings.TrimSuffix(filepath.Base(path), ".status")
+		latest := -1
+		for index, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				latest = index
+			}
+		}
 		for index, line := range lines {
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}
+			status := ""
+			if index == latest {
+				status = info.ModTime().Format("15:04:05")
+			}
 			events = append(events, event{info.ModTime(), index,
-				item{ID: id, Title: id + ": " + line, Detail: line, Status: "event"}})
+				item{ID: id, Title: id + ": " + line, Detail: line, Status: status}})
 		}
 	}
 	sort.SliceStable(events, func(i, j int) bool {
@@ -242,9 +260,7 @@ func readFeed(state string) ([]item, error) {
 	}
 	rows := make([]item, 0, len(events))
 	for _, event := range events {
-		value := event.value
-		value.Status = event.timestamp.Format("15:04:05")
-		rows = append(rows, value)
+		rows = append(rows, event.value)
 	}
 	if ack := latestInboxAcknowledgement(state); ack != nil {
 		rows = append([]item{*ack}, rows...)

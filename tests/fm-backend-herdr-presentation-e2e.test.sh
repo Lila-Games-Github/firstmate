@@ -431,6 +431,22 @@ finish_concurrent_expected_abort() {  # <id> <status> <stdout> <stderr>
   fi
 }
 
+# Two homes recovering at once share one session-scoped presentation lock, and
+# a recovery deliberately refuses rather than falling back flat while that lock
+# is contended (docs/herdr-backend.md "Presentation spaces"). Both wave members
+# therefore have exactly two documented outcomes - the reclaim, or that refusal.
+# A refused member is rerun only once both members have exited, so its retry
+# contends with nothing and must then reclaim its own exact husk exactly as an
+# uncontended recovery does.
+finish_concurrent_recovery() {  # <id> <home> <status> <stdout> <stderr>
+  local id=$1 home=$2 status=$3 out=$4 err=$5
+  [ "$status" -ne 0 ] || return 0
+  grep -F "herdr presentation recovery could not acquire its session lock" "$err" >/dev/null 2>&1 \
+    || fail "concurrent cross-home recovery $id failed unexpectedly: $(cat "$err")"
+  spawn_task "$id" "$home" "$RECOVERY_PROJECT_DIR" > "$out" 2> "$err" \
+    || fail "concurrent cross-home recovery $id retry failed after the presentation lock cleared: $(cat "$err")"
+}
+
 spawn_secondmate_task() {
   local id=$1 home=$2
   FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
@@ -1322,8 +1338,14 @@ spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/p
 PRIMARY_WAVE_PID=$!
 spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
-wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
-wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+# Both members are waited out before either outcome is judged, so a retry can
+# never race the still-running member for the same session lock.
+if wait "$PRIMARY_WAVE_PID"; then PRIMARY_WAVE_STATUS=0; else PRIMARY_WAVE_STATUS=$?; fi
+if wait "$BRAVO_WAVE_PID"; then BRAVO_WAVE_STATUS=0; else BRAVO_WAVE_STATUS=$?; fi
+finish_concurrent_recovery "$PRIMARY_WAVE_ID" "$HOME_DIR" "$PRIMARY_WAVE_STATUS" \
+  "$TMP_ROOT/primary-wave-resume.out" "$TMP_ROOT/primary-wave-resume.err"
+finish_concurrent_recovery "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$BRAVO_WAVE_STATUS" \
+  "$TMP_ROOT/bravo-wave-resume.out" "$TMP_ROOT/bravo-wave-resume.err"
 PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
 BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
 PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)

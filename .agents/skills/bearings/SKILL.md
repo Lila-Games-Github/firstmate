@@ -156,6 +156,7 @@ Opening it writes only the payload and terminal process record; it changes no ta
 
 The dashboard sends notes through `bin/fm-inbox.sh note`, which produces the ordinary `check: captain inbox note` wake.
 When that note names a selected worker, check its current state with `bin/fm-crew-state.sh <task-id>`, act on any instruction in the note under the normal authority rules, and answer the captain in chat.
+A reply the captain typed with `r` on a selected captain question arrives the same way and is that question's answer, so handle it under `AGENTS.md` section 9's captain-questions contract rather than as an instruction about a worker.
 Selecting a worker is attention, never a decision answer, merge word, or dispatch.
 
 ## Chat-response contract

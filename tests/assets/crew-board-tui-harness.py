@@ -24,7 +24,7 @@ fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
 proc = subprocess.Popen(
     [board, "tui"], stdin=slave, stdout=slave, stderr=slave,
     env={**os.environ, "TERM": "xterm-256color", "FM_HOME": home,
-         "FM_STATE_OVERRIDE": str(state)}, start_new_session=True,
+         "FM_STATE_OVERRIDE": str(state), "FM_CREW_BOARD_ALLOWANCE_DISABLE": "1"}, start_new_session=True,
 )
 os.close(slave)
 output = bytearray()
@@ -61,6 +61,17 @@ try:
     except subprocess.TimeoutExpired:
         os.killpg(proc.pid, signal.SIGTERM)
         proc.wait(timeout=5)
+    while True:
+        ready, _, _ = select.select([master], [], [], 0)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master, 65536)
+            if not chunk:
+                break
+            output += chunk
+        except OSError:
+            break
     ansi = re.sub(rb"\x1b\[[0-9;?]*[ -/]*[@-~]", b"", bytes(output))
     rendered = ansi.decode("utf-8", "replace")
     print(json.dumps({
@@ -75,6 +86,7 @@ try:
         "wake": (state / ".wake-queue").read_text() if (state / ".wake-queue").exists() else "",
         "stop": stopped.stdout.strip(),
         "pid_removed": not (state / ".crew-board-tui.pid").exists(),
+        "errors": re.findall(r"(?:crew board:|fm-crew-board:|Traceback|Error:)[^\n]*", rendered),
     }))
 finally:
     if proc.poll() is None:
