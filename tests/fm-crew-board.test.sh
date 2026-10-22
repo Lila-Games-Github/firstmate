@@ -904,6 +904,8 @@ test_worker_tags_name_the_state() {
      backlog: {state: "in_flight", hold_kind: "captain", hold_reason: "WA. five calls", hold_bucket: "live"}},
     {id: "answered", phase: {name: "building", note: ""},
      backlog: {state: "done", hold_kind: "captain", hold_reason: "WA. five calls", hold_bucket: null}},
+    {id: "later", phase: {name: "building", note: ""},
+     backlog: {state: "in_flight", hold_kind: "captain", hold_reason: "WA. five calls", hold_bucket: "dated"}},
     {id: "named", phase: {name: "building", note: "art-requirements.html - final review"},
      hints: {open_decisions: [{key: "wave-advance-rulings", verb: "needs-decision", summary: "x"}]}, backlog: {}},
     {id: "files", phase: {name: "testing", note: "./tests/a.sh 5 awaiting product-owner"}},
@@ -917,6 +919,7 @@ test_worker_tags_name_the_state() {
   assert_equals 'WAITING ON YOU · WA · BUILDING' "$(tag wave)" 'open decision names the question label, never the count'
   assert_equals 'WAITING ON YOU · WA · BUILDING' "$(tag named)" 'label found from the captain-questions entry naming the decision key'
   assert_equals 'BUILDING' "$(tag answered)" 'a closed task keeping its old captain hold no longer waits on the captain'
+  assert_equals 'BUILDING' "$(tag later)" 'a dated captain hold is parked, not waiting on the captain'
   assert_equals 'TESTING' "$(tag files)" 'keys, paths, numbers, and product-owner never become the tag'
   assert_equals 'BLOCKED · NO DEVICE' "$(tag stuck)" 'blocked reads BLOCKED'
   assert_equals 'WAITING FOR PHONE · TESTING' "$(tag phone)" 'a pause names its plain cause'
