@@ -86,7 +86,7 @@ compose_payload() {
             left_at: null
           } ] as $live
     | ([$live[].id]) as $live_ids
-    | ([$panel[0].playbot_workers[]? | select(.id as $id | $live_ids | index($id) | not)]) as $lanes
+    | ([$panel[0].playbot_workers[]? | select(.id as $id | $live_ids | index($id) | not)] | sort_by(.id)) as $lanes
     | ([$lanes[].id]) as $lane_ids
     | [ $p.rows[]?
         | select(.id as $id | ($live_ids + $lane_ids) | index($id) | not)

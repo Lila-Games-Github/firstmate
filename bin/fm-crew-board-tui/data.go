@@ -49,7 +49,6 @@ type backlog struct {
 
 type panels struct {
 	Alerts        []item            `json:"alerts"`
-	Questions     []item            `json:"questions"`
 	FullQuestions []item            `json:"full_questions"`
 	FullBacklog   []item            `json:"full_backlog"`
 	Ready         []item            `json:"ready"`

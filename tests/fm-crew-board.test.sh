@@ -59,7 +59,7 @@ set_mtime() { perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2";
 # /proc/locks lists a held lock with the pid in field 5 and a blocked request
 # with a leading arrow and the pid in field 6; the board reads the same table.
 lock_holds() {  # <pid>
-  [ -r /proc/locks ] && awk -v pid="$1" '$2 != "->" && $3 == "FLOCK" && $5 == pid { found = 1 } END { exit !found }' /proc/locks
+  [ -r /proc/locks ] && awk -v pid="$1" '$2 == "FLOCK" && $5 == pid { found = 1 } END { exit !found }' /proc/locks
 }
 lock_waits() {  # <pid>
   [ -r /proc/locks ] && awk -v pid="$1" '$2 == "->" && $3 == "FLOCK" && $6 == pid { found = 1 } END { exit !found }' /proc/locks
@@ -165,8 +165,8 @@ EOF
 {"schema":"fm-crew-board-cache.v1","observed_at":"2026-10-21T06:00:00Z","phones":[{"title":"S22","status":"locked","detail":"held by alpha"}],"bugs":[{"title":"Rocketboard login bug","status":"in progress"}],"allowance":[{"title":"Claude","status":"45% remaining"}],"routines":[{"title":"Tip health","status":"green"}]}
 EOF
   PATH="$stub:$PATH" run_board "$home" refresh >/dev/null || fail "panel refresh failed"
-  assert_equals 1 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" "question count"
-  assert_contains "$(jq -r '.panels.questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "question blocker"
+  assert_equals 1 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "question count"
+  assert_contains "$(jq -r '.panels.full_questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "question blocker"
   assert_equals 1 "$(jq '[.panels.phones[] | select(.title == "S22")] | length' "$home/state/crew-board.json")" "phone cache"
   assert_equals 2 "$(jq '.panels.backlog.in_flight' "$home/state/crew-board.json")" "in-flight count from tasks-axi"
   assert_equals 'Rocketboard login bug' "$(jq -r '.panels.bugs[0].title' "$home/state/crew-board.json")" "bug cache"
@@ -239,6 +239,9 @@ EOF
   assert_equals 'recovery' "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .adb' "$home/state/crew-board.json")" "unknown adb state is kept"
   assert_equals true "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .alert' "$home/state/crew-board.json")" "unknown state row is an alert"
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized phone alert"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-three no permissions")] | length' "$home/state/crew-board.json")" "no permissions phone alert"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-four recovery")] | length' "$home/state/crew-board.json")" "recovery phone alert"
+  assert_equals 3 "$(jq '[.panels.alerts[] | select(.title | startswith("Phone "))] | length' "$home/state/crew-board.json")" "every flagged phone state explains itself in ALERTS"
   assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Phone serial-two unauthorized") | .detail' "$home/state/crew-board.json")" 'adb reports unauthorized' "unauthorized alert reason"
   cat > "$home/data/crew-board-cache.json" <<'EOF'
 {"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-two","title":"Galaxy S22","status":"locked","detail":"held by worker"}]}
@@ -360,11 +363,13 @@ The full decision needs a longer explanation on its own line.
   Production stays locked.
 EOF
   run_board "$home" refresh >/dev/null || fail "bold question refresh failed"
-  assert_equals 3 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" "bold and bullet questions"
-  assert_equals 'UIX. Prototype vs Claude Design UI: four calls.' "$(jq -r '.panels.questions[0].title' "$home/state/crew-board.json")" "bold label title"
-  assert_contains "$(jq -r '.panels.questions[0].detail' "$home/state/crew-board.json")" 'The full decision needs a longer explanation' "full question paragraph"
+  assert_equals 3 "$(jq '[.panels.full_questions[] | select(.status != "section")] | length' "$home/state/crew-board.json")" "bold and bullet questions"
+  assert_equals 'UIX. Prototype vs Claude Design UI: four calls.' \
+    "$(jq -r '[.panels.full_questions[] | select(.status != "section")][0].title' "$home/state/crew-board.json")" "bold label title"
+  assert_contains "$(jq -r '[.panels.full_questions[] | select(.status != "section")][0].detail' "$home/state/crew-board.json")" \
+    'The full decision needs a longer explanation' "full question paragraph"
   assert_equals 5 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "section rows and questions"
-  assert_not_contains "$(jq -r '[.panels.questions[].detail] | join(" ")' "$home/state/crew-board.json")" 'This preamble' "preamble leaked"
+  assert_not_contains "$(jq -r '[.panels.full_questions[].detail] | join(" ")' "$home/state/crew-board.json")" 'This preamble' "preamble leaked"
   pass "bold-led question paragraphs and bullet questions are readable"
 }
 
@@ -522,11 +527,11 @@ INSERT INTO workspace_threads VALUES ('thread-parked', 'Choosing a launch window
 """)
 db.commit()
 db.close()
-for task, thread, armed, delivery in [('lane-live', 'thread-live', True, 'delivered'),
-                                      ('lane-stale', 'thread-stale', True, 'delivered'),
-                                      ('lane-orphan', 'thread-live', False, 'delivered'),
+for task, thread, armed, delivery in [('lane-undelivered', 'thread-parked', True, 'queued'),
                                       ('lane-parked', 'thread-parked', True, 'delivered'),
-                                      ('lane-undelivered', 'thread-parked', True, 'queued')]:
+                                      ('lane-stale', 'thread-stale', True, 'delivered'),
+                                      ('lane-live', 'thread-live', True, 'delivered'),
+                                      ('lane-orphan', 'thread-live', False, 'delivered')]:
     key = 'sha256:' + hashlib.sha256(thread.encode()).hexdigest()
     (home / 'state' / f'{task}.lane-poll').write_text(f'fm-playbot-lane-poll-v8\nworking\n2026-10-21T09:00:00Z\n{delivery}\n' + 'a'*32 + f'\nnone\nnone\n{key}\n')
     if armed:
@@ -544,6 +549,9 @@ PY
     "parked lane links to the chat holding its card"
   assert_contains "$(row_field "$home" lane-parked note)" 'Waiting on you' "parked lane says what it waits for"
   assert_equals 'queued' "$(row_field "$home" lane-undelivered phase)" "an undelivered task is not a parked lane"
+  assert_equals 'lane-live|lane-parked|lane-undelivered' \
+    "$(jq -r '[.rows[] | select(.id | startswith("lane-")) | .id] | join("|")' "$home/state/crew-board.json")" \
+    "lane rows keep one id order however the state directory lists them"
   pass "armed live Playbot lanes join ordinary workers, and a parked one waits on the captain instead of vanishing"
 }
 
@@ -561,12 +569,12 @@ This preamble is not a question.
 The window needs one more line.
 EOF
   run_board "$home" refresh >/dev/null || fail "heading-less question refresh failed"
-  assert_equals 2 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" "question count before any heading"
-  assert_equals 'Which release should ship?' "$(jq -r '.panels.questions[0].title' "$home/state/crew-board.json")" "bullet before any heading"
-  assert_equals 'OPS. Release timing.' "$(jq -r '.panels.questions[1].title' "$home/state/crew-board.json")" "bold paragraph before any heading"
-  assert_contains "$(jq -r '.panels.questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "bullet detail before any heading"
-  assert_contains "$(jq -r '.panels.questions[1].detail' "$home/state/crew-board.json")" 'The window needs one more line' "bold detail before any heading"
-  assert_not_contains "$(jq -r '[.panels.questions[].detail] | join(" ")' "$home/state/crew-board.json")" 'This preamble' "preamble leaked"
+  assert_equals 2 "$(jq '[.panels.full_questions[] | select(.status != "section")] | length' "$home/state/crew-board.json")" "question count before any heading"
+  assert_equals 'Which release should ship?' "$(jq -r '.panels.full_questions[0].title' "$home/state/crew-board.json")" "bullet before any heading"
+  assert_equals 'OPS. Release timing.' "$(jq -r '.panels.full_questions[1].title' "$home/state/crew-board.json")" "bold paragraph before any heading"
+  assert_contains "$(jq -r '.panels.full_questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "bullet detail before any heading"
+  assert_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" 'The window needs one more line' "bold detail before any heading"
+  assert_not_contains "$(jq -r '[.panels.full_questions[].detail] | join(" ")' "$home/state/crew-board.json")" 'This preamble' "preamble leaked"
   assert_equals 2 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "heading-less registers add no section rows"
   pass "questions count before the first heading and preamble prose is ignored"
 }
@@ -694,6 +702,23 @@ EOF
   assert_equals 0 "$(jq '.panels.test_queue | length' "$home/state/crew-board.json")" 'stale suite heartbeat or dead holders kept'
   assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'dead holder kept the phone busy'
   pass 'phones show their tester and the test queue lists running and waiting suites and phone reservations'
+}
+
+test_suite_lock_probe() {
+  local home pid
+  home=$(make_home lock_probe)
+  command -v flock >/dev/null 2>&1 || { echo "skip: flock unavailable for the suite lock probe"; return; }
+  [ -r /proc/locks ] || { echo "skip: /proc/locks unavailable for the suite lock probe"; return; }
+  mkdir -p "$home/locks"
+  : > "$home/locks/frogpile-suite.lock"
+  flock "$home/locks/frogpile-suite.lock" sleep 5 >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do lock_holds "$pid" && break; sleep 0.1; done
+  lock_holds "$pid" || fail 'the process holding the suite lock was not read as its holder'
+  if lock_holds "$$"; then fail 'a process holding no lock was read as the holder'; fi
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  pass 'the suite lock probe reads a held FLOCK as the holder and nothing else'
 }
 
 test_daily_routines_from_checks() {
@@ -863,7 +888,7 @@ EOF
     "$(jq -r '.panels.full_questions[0].title' "$home/state/crew-board.json")" 'question section heading'
   assert_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" \
     'The Android build is waiting.' 'full question text'
-  assert_equals 4 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" 'Now page summary count'
+  assert_equals 4 "$(jq '[.panels.full_questions[] | select(.status != "section")] | length' "$home/state/crew-board.json")" 'question rows beside their section headings'
   assert_equals 8 "$(jq '.panels.full_backlog | length' "$home/state/crew-board.json")" 'backlog groups and items'
   assert_equals 'Held for the captain' \
     "$(jq -r '.panels.full_backlog[2].title' "$home/state/crew-board.json")" 'captain hold section'
@@ -942,6 +967,7 @@ test_playbot_lane_projection
 test_full_questions_and_backlog
 test_backlog_counts_from_a_capped_listing
 test_phone_testing_and_test_queue
+test_suite_lock_probe
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
 test_worker_tags_from_live_evidence

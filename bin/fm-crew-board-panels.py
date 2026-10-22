@@ -92,10 +92,6 @@ def question_entries(path):
     return rows
 
 
-def questions(path):
-    return [row for row in question_entries(path) if row["status"] != "section"]
-
-
 def tasks_axi_list(state):
     try:
         run = subprocess.run(
@@ -783,7 +779,7 @@ def alert_entries(snapshot, cache, phones, allowance):
         if adb == "unavailable":
             alerts.append(item(phone["title"], phone["detail"], phone["status"], alert=True))
             continue
-        if adb in ("unauthorized", "offline"):
+        if adb not in (None, "device"):
             alerts.append(item(f"Phone {phone['title']} {adb}",
                                f"adb reports {adb}, so the phone cannot take tests",
                                adb, alert=True))
@@ -994,7 +990,6 @@ def project(snapshot):
     }
     return {
         "alerts": alert_entries(snapshot, cache, phones, allowance),
-        "questions": questions(DATA / "captain-questions.md"),
         "full_questions": question_entries(DATA / "captain-questions.md"),
         "full_backlog": full_backlog(),
         "ready": ready_entries(snapshot) + entries(cache, "ready"),
