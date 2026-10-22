@@ -62,8 +62,11 @@ def question_entries(path):
         return []
     rows = []
     entry = []
+    options_open = False
 
     def flush():
+        nonlocal options_open
+        options_open = False
         if not entry:
             return
         title = re.sub(r"^\[[ xX]\]\s*", "", entry[0]).strip()
@@ -85,14 +88,17 @@ def question_entries(path):
         if bold:
             flush()
             entry.append(line.strip())
+            options_open = True
             continue
         if line.startswith("- ") or line.startswith("* "):
-            if entry and re.match(r"^\*\*(.+?)\*\*", entry[0]):
+            if options_open and not re.match(r"^\*\*(.+?)\*\*", line[2:].strip()):
                 entry.append(line.strip())
                 continue
             flush()
             entry.append(line[2:].strip())
         elif entry:
+            if not line.strip():
+                options_open = False
             entry.append(line.strip())
     flush()
     return rows

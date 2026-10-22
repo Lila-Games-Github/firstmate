@@ -656,6 +656,26 @@ EOF
     "$(jq -r '[.panels.full_questions[] | select(.status != "section") | .title] | join("|")' "$home/state/crew-board.json")" \
     "bold question options stay inside their question"
   assert_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" 'Claude Design mockups first' "bold question detail keeps its options"
+  cat > "$home/data/captain-questions.md" <<'EOF'
+## Your decisions
+- **UIX. Pick the UI.** Prototype or design.
+- **OPS. Release timing.** Choose the window.
+
+**DEV. Pick a device.** Choose the test phone.
+- Use the S22
+- **REL. Ship it?** Ready to release.
+
+**QA. Smoke test scope.** Choose the scope.
+
+- Can we use the staging phone?
+EOF
+  run_board "$home" refresh >/dev/null || fail "bold-led bullet question refresh failed"
+  assert_equals 'UIX. Pick the UI.|OPS. Release timing.|DEV. Pick a device.|REL. Ship it?|QA. Smoke test scope.|Can we use the staging phone?' \
+    "$(jq -r '[.panels.full_questions[] | select(.status != "section") | .title] | join("|")' "$home/state/crew-board.json")" \
+    "bold-led bullets and bullets after a blank line start their own questions"
+  assert_contains "$(jq -r '.panels.full_questions[3].detail' "$home/state/crew-board.json")" 'Use the S22' "plain bullet joins the bold question it follows"
+  assert_not_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" 'OPS' "bold-led bullet question swallowed the next one"
+  assert_not_contains "$(jq -r '.panels.full_questions[5].detail' "$home/state/crew-board.json")" 'staging phone' "plain bullet after a blank line joined the bold question"
   pass "column-0 option bullets under a bold question stay part of that question"
 }
 
