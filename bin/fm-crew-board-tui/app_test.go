@@ -202,7 +202,7 @@ func TestPlanningBacklogCarriesTheFullBacklog(t *testing.T) {
 	}
 	m.data.Panels.FullBacklog = []item{{Title: "Backlog unavailable", Detail: "Could not read bin/fm-tasks-axi.sh", Status: "error"}}
 	rows = m.items("backlog")
-	if len(rows) != 3 || rows[1].Title != "Backlog unavailable" || rows[2].Title != "Short next row" {
+	if len(rows) != 3 || !strings.HasPrefix(rows[1].Title, "Backlog unavailable") || rows[2].Title != "Short next row" {
 		t.Fatalf("failed full-list read = %#v, want its reason above the next-up list", rows)
 	}
 	view = m.View().Content

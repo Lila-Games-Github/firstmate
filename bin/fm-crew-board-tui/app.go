@@ -128,9 +128,13 @@ func backlogRows(full, next []item) []item {
 	}
 	reason := []item{}
 	for _, row := range full {
-		if row.Status != "section" {
-			reason = append(reason, row)
+		if row.Status == "section" {
+			continue
 		}
+		if row.Detail != "" && !strings.Contains(row.Title, row.Detail) {
+			row.Title += ": " + row.Detail
+		}
+		reason = append(reason, row)
 	}
 	return append(reason, next...)
 }
