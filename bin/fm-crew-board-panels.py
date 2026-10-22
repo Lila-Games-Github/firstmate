@@ -240,7 +240,7 @@ def entries(cache, key):
 def open_bugs(cache):
     """Rocketboard bugs still needing work; cards the QA team owns are left out."""
     return [row for row in entries(cache, "bugs")
-            if not re.search(r"\bQA\b", row.get("status", ""), re.I)]
+            if not re.match(r"\s*(with|in)\s+QA\b", row.get("status", ""), re.I)]
 
 
 def homebrew_binary(name):

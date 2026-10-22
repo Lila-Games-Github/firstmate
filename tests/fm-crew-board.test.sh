@@ -178,7 +178,7 @@ EOF
   Blocks the Android build.
 EOF
   cat > "$home/data/crew-board-cache.json" <<'EOF'
-{"schema":"fm-crew-board-cache.v1","observed_at":"2026-10-21T06:00:00Z","phones":[{"title":"S22","status":"locked","detail":"held by alpha"}],"bugs":[{"title":"Rocketboard login bug","status":"in progress"},{"title":"Combat round visuals","status":"with QA"},{"title":"Pond upgrade","status":"QA"}],"allowance":[{"title":"Claude","status":"45% remaining"}],"routines":[{"title":"Tip health","status":"green"}]}
+{"schema":"fm-crew-board-cache.v1","observed_at":"2026-10-21T06:00:00Z","phones":[{"title":"S22","status":"locked","detail":"held by alpha"}],"bugs":[{"title":"Rocketboard login bug","status":"in progress"},{"title":"Combat round visuals","status":"with QA"},{"title":"Pond upgrade","status":"In QA"},{"title":"Lobby crash","status":"QA failed"},{"title":"Shop prices","status":"failed QA"},{"title":"Map seam","status":"back from QA - reopened"}],"allowance":[{"title":"Claude","status":"45% remaining"}],"routines":[{"title":"Tip health","status":"green"}]}
 EOF
   PATH="$stub:$PATH" run_board "$home" refresh >/dev/null || fail "panel refresh failed"
   assert_equals 1 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "question count"
@@ -186,7 +186,7 @@ EOF
   assert_equals 1 "$(jq '[.panels.phones[] | select(.title == "S22")] | length' "$home/state/crew-board.json")" "phone cache"
   assert_equals 2 "$(jq '.panels.backlog.in_flight' "$home/state/crew-board.json")" "in-flight count from tasks-axi"
   assert_equals 'Rocketboard login bug' "$(jq -r '.panels.bugs[0].title' "$home/state/crew-board.json")" "bug cache"
-  assert_equals 1 "$(jq '.panels.bugs | length' "$home/state/crew-board.json")" "bugs with QA are left out"
+  assert_equals 'Rocketboard login bug|Lobby crash|Shop prices|Map seam' "$(jq -r '[.panels.bugs[].title] | join("|")' "$home/state/crew-board.json")" "only bugs with or in QA are left out"
   install_dir="$home/local-bin"
   "$ROOT/bin/fm-install-firstmate-cli.sh" "$install_dir" >/dev/null || fail "launcher install failed"
   assert_equals "$(cd "$ROOT/bin" && pwd -P)/firstmate" "$(readlink "$install_dir/firstmate")" "launcher target"
