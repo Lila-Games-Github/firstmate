@@ -123,11 +123,38 @@ func panelSummary(spec panelSpec, rows []item, width int) string {
 			}
 		}
 		if spec.id == "allowance" {
+			named := map[string]bool{}
+			aggregated, unavailable := 0, false
 			for _, row := range rows {
 				if row.Quota == "unavailable" {
-					count = "unavailable"
-					break
+					unavailable = true
+					continue
 				}
+				if row.Quota == "summary" {
+					aggregated += row.Providers
+					continue
+				}
+				name, _, _ := strings.Cut(row.Title, " / ")
+				named[strings.ToLower(strings.TrimSpace(name))] = true
+			}
+			if unavailable {
+				count = "unavailable"
+			} else {
+				count = fmt.Sprintf("%d %s", len(named)+aggregated, nouns[spec.id])
+			}
+		}
+		if spec.id == "test_queue" {
+			queued, running := 0, 0
+			for _, row := range rows {
+				if strings.HasPrefix(row.Status, "running") {
+					running++
+					continue
+				}
+				queued++
+			}
+			count = fmt.Sprintf("%d %s", queued, nouns[spec.id])
+			if running > 0 {
+				count += fmt.Sprintf(" (%d running)", running)
 			}
 		}
 		latest = "latest: " + rows[len(rows)-1].Title

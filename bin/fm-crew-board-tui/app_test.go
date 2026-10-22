@@ -762,6 +762,35 @@ func TestAllowanceCardReadsUnavailableWithoutASnapshot(t *testing.T) {
 	}
 }
 
+func TestSummaryCardsCountWhatTheyName(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Allowance = []item{
+		{Title: "claude", Status: "70% left · 2m ago"},
+		{Title: "qwen", Status: "40% left · 2m ago"},
+		{Title: "qwen / model:fable", Status: "exhausted now", Alert: true},
+		{Title: "2 providers unavailable", Status: "unavailable", Quota: "summary", Providers: 2},
+	}
+	card := m.renderCompact(panelSpec{"allowance", "AI ALLOWANCE"}, 60)
+	if !strings.Contains(card, "AI ALLOWANCE  4 providers") {
+		t.Fatalf("allowance card counted rows instead of providers: %q", card)
+	}
+	m.data.Panels.Allowance = []item{
+		{Title: "4 providers unavailable", Status: "unavailable", Quota: "summary", Providers: 4},
+	}
+	if card := m.renderCompact(panelSpec{"allowance", "AI ALLOWANCE"}, 60); !strings.Contains(card, "AI ALLOWANCE  4 providers") {
+		t.Fatalf("allowance card of only aggregate rows reads: %q", card)
+	}
+	m.data.Panels.TestQueue = []item{
+		{Title: "RUNNING: Make the widget spin", Status: "running 8m"},
+		{Title: "NEXT: Fix the gadget", Status: "next"},
+		{Title: "#2: Investigate crash", Status: "waiting"},
+	}
+	card = m.renderCompact(panelSpec{"test_queue", "TEST QUEUE"}, 60)
+	if !strings.Contains(card, "TEST QUEUE  2 queued (1 running)") {
+		t.Fatalf("test queue card counted a running suite as queued: %q", card)
+	}
+}
+
 func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Rows = append(m.data.Rows, worker{ID: "gamma", Kind: "playbot", Project: "widget",

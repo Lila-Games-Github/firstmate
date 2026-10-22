@@ -13,13 +13,15 @@ defaults tests/run_suite.sh uses; waiters on the suite lock come from
 /proc/locks. Daily routines come from this home's state/*-daily.check.sh
 scripts and their state/.<name>-last markers. Ready-for-you rows come from the
 fleet snapshot: a PR whose recorded run reports green checks, a finished
-local-only branch, an unrelayed scout report, or a captain hold whose reason
-names a preview. Each worker's tag names what it is doing: a phone or full
-suite it holds or waits on, else its live no-mistakes run's active step from a
-bounded local axi status read, else its own phase note shortened. Playbot lane
-rows come from local persisted state. AI
-allowance uses a separately scheduled quota-axi snapshot, never the fast board
-refresh. The optional data/crew-board-cache.json supplies phone observations
+local-only branch, a scout whose current state is done and whose report file
+exists, or a captain hold whose reason names a preview. Each worker's tag names
+what it is doing: a phone or full suite it holds or waits on, else its live
+no-mistakes run's active step from a bounded local axi status read, else its
+own phase note shortened. Playbot lane rows come from local persisted state.
+AI allowance uses a separately scheduled quota-axi snapshot, never the fast
+board refresh, and a failed attempt records what it reported in
+state/.crew-board-quota-error for the panel to repeat. The optional
+data/crew-board-cache.json supplies phone observations
 such as locks and panels without a cheap local source (builds and Rocketboard
 bugs), plus optional overlays for the other panels. The fast projection never
 queries a network service; the separately launched allowance sampler may ask
@@ -830,7 +832,7 @@ def ready_entries(snapshot):
             rows.append(item(title, f"Checks are green; review and merge the PR\n{pr}", "merge?", pr, item_id=task_id))
         elif task.get("mode") == "local-only" and done:
             rows.append(item(title, "The local branch is finished; approve landing it", "land?", item_id=task_id))
-        elif task.get("kind") == "scout" and hints.get("scout_report_present"):
+        elif task.get("kind") == "scout" and done and hints.get("scout_report_present"):
             report = str(((task.get("paths") or {}).get("report") or {}).get("path") or "")
             rows.append(item(title, f"Investigation finished; read the report\n{report}".strip(), "read",
                              report, item_id=task_id))
@@ -906,32 +908,55 @@ def board_pid_state(started):
     return "live"
 
 
+def record_quota_error(reason):
+    """Record what the last quota-axi attempt reported beside its failure marker."""
+    temp = QUOTA_ERROR.with_name(f".{QUOTA_ERROR.name}.{os.getpid()}.tmp")
+    try:
+        temp.write_text(" ".join(reason.split())[:300] + "\n", encoding="utf-8")
+        os.replace(temp, QUOTA_ERROR)
+    except OSError:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def refresh_allowance():
     temp = None
     try:
         binary = quota_binary()
         if binary is None:
             raise ValueError("quota-axi was not found on PATH or in Linuxbrew")
-        run = subprocess.run([binary, "--json", "--no-credential-refresh"],
-                             capture_output=True, text=True, timeout=15, check=False)
+        try:
+            run = subprocess.run([binary, "--json", "--no-credential-refresh"],
+                                 capture_output=True, text=True, timeout=15, check=False)
+        except subprocess.TimeoutExpired:
+            raise ValueError(f"{binary} did not answer within 15s")
+        except OSError as error:
+            raise ValueError(f"{binary} could not run: {error}")
         if run.returncode:
-            raise ValueError("quota-axi failed")
-        payload = json.loads(run.stdout)
+            detail = (run.stderr or run.stdout).strip().splitlines()
+            raise ValueError(f"{binary} exited {run.returncode}"
+                             + (f": {detail[-1].strip()}" if detail else ""))
+        try:
+            payload = json.loads(run.stdout)
+        except ValueError:
+            raise ValueError(f"{binary} printed no JSON answer")
         if not isinstance(payload, dict) or not isinstance(payload.get("providers"), list):
-            raise ValueError("quota-axi returned no providers")
+            raise ValueError(f"{binary} returned no providers")
         data = json.dumps({"observed_at": time.time(), "payload": payload})
         temp = QUOTA.with_name(f".{QUOTA.name}.{os.getpid()}.tmp")
         with os.fdopen(os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
             output.write(data)
         os.replace(temp, QUOTA)
         QUOTA_ERROR.unlink(missing_ok=True)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        try:
-            if temp is not None:
+    except (OSError, ValueError) as failure:
+        if temp is not None:
+            try:
                 temp.unlink(missing_ok=True)
-            QUOTA_ERROR.touch()
-        except OSError:
-            pass
+            except OSError:
+                pass
+        record_quota_error(str(failure))
 
 
 def quota_entries():
@@ -1010,8 +1035,11 @@ def quota_entries():
         if not bucket:
             continue
         noun = "provider" if len(bucket) == 1 else "providers"
-        rows.append(item(f"{len(bucket)} {noun} {wording}",
-                         "\n".join(bucket) + f"\nobserved: {age_label}", status))
+        bucket_row = item(f"{len(bucket)} {noun} {wording}",
+                          "\n".join(bucket) + f"\nobserved: {age_label}", status)
+        bucket_row["quota"] = "summary"
+        bucket_row["providers"] = len(bucket)
+        rows.append(bucket_row)
     return rows
 
 
@@ -1020,8 +1048,13 @@ def allowance_failure():
         age = max(0, int(time.time() - QUOTA_ERROR.stat().st_mtime))
     except OSError:
         return ""
+    try:
+        reason = " ".join(QUOTA_ERROR.read_text(encoding="utf-8").split())[:300]
+    except OSError:
+        reason = ""
     unrecorded = "no quota snapshot is recorded; " if not QUOTA.is_file() else ""
-    return f"{unrecorded}the last quota-axi attempt failed {age // 60}m ago"
+    return (f"{unrecorded}the last quota-axi attempt failed {age // 60}m ago"
+            + (f" ({reason})" if reason else ""))
 
 
 def allowance_entries(cache):

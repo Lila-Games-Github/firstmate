@@ -412,6 +412,10 @@ EOF
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
   assert_equals 1 "$(wc -l < "$home/quota-calls")" "fast refresh did not spend a quota-axi call"
   assert_equals 5 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "allowance provider rows"
+  assert_equals 2 "$(jq '[.panels.allowance[] | select(.quota == "summary")] | length' "$home/state/crew-board.json")" \
+    "the rows aggregating broken and unmeasured providers are marked as summaries, not providers"
+  assert_equals 1 "$(jq '.panels.allowance[] | select(.title == "1 provider unavailable") | .providers' "$home/state/crew-board.json")" \
+    "an aggregate row names how many providers it accounts for"
   assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "codex") | .alert' "$home/state/crew-board.json")" "projected exhaustion alert"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: tomorrow' "quota reset"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .status' "$home/state/crew-board.json")" '27.3 usd' "credit balance"
@@ -455,7 +459,7 @@ test_quota_check_unavailable() {
   assert_equals 'unavailable' "$(jq -r '.panels.allowance[0].status' "$home/state/crew-board.json")" "allowance check state"
   assert_equals 'unavailable' "$(jq -r '.panels.allowance[0].quota' "$home/state/crew-board.json")" "allowance check marker"
   assert_equals true "$(jq -r '.panels.allowance[0].alert' "$home/state/crew-board.json")" "allowance check alerts"
-  assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'quota-axi' "allowance check reason"
+  assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'quota-axi was not found' "allowance check repeats what the attempt reported"
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Allowance check")] | length' "$home/state/crew-board.json")" "allowance check reaches ALERTS"
   cat > "$home/empty.json" <<'EOF'
 {"providers":[]}
@@ -476,6 +480,8 @@ EOF
   assert_equals 1 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "one row for a snapshot without providers"
   assert_not_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'no quota snapshot' "reason claimed no snapshot while one exists"
   assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'quota-axi attempt failed' "failure age reason"
+  assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'quota-axi exited 1' "non-zero exit reason"
+  assert_contains "$(cat "$home/state/.crew-board-quota-error")" 'exited 1' "the failed attempt's own report is recorded"
   pass "a sampler that never succeeded is visible instead of an empty allowance panel"
 }
 
@@ -825,7 +831,11 @@ test_alerts_and_ready_from_real_state() {
   "current_state":{"state":"working","source":"run-step","detail":"review running"}},
  {"id":"landing","mode":"local-only","backlog":{"title":"Local tidy"},"current_state":{"state":"done","source":"status-log"}},
  {"id":"probe","kind":"scout","backlog":{"title":"Investigate crash"},"hints":{"scout_report_present":true},
-  "paths":{"report":{"path":"/reports/probe.md"}}}],
+  "current_state":{"state":"working","source":"run-step","detail":"review round 2 running"},
+  "paths":{"report":{"path":"/reports/probe.md"}}},
+ {"id":"finished","kind":"scout","backlog":{"title":"Finished investigation"},"hints":{"scout_report_present":true},
+  "current_state":{"state":"done","source":"run-step","detail":"checks green"},
+  "paths":{"report":{"path":"/reports/finished.md"}}}],
  "backlog":{"records":[
   {"id":"board","state":"in_flight","title":"New board","hold_kind":"captain","hold_reason":"captain preview before merge"},
   {"id":"other","state":"in_flight","title":"Other call","hold_kind":"captain","hold_reason":"choose A or B"}]}}
@@ -834,11 +844,13 @@ EOF
   assert_equals 'stuck: blocked|broken: failed|asking: decision not yet raised with you' \
     "$(jq -r '[.alerts[] | select(.id != "") | .title] | join("|")' "$home/panels.json")" 'alert workers'
   assert_contains "$(jq -r '.alerts[] | select(.id == "stuck") | .detail' "$home/panels.json")" 'needs a credential' 'alert reason'
-  assert_equals 'Green fix|Local tidy|Investigate crash|New board' \
+  assert_equals 'Green fix|Local tidy|Finished investigation|New board' \
     "$(jq -r '[.ready[].title] | join("|")' "$home/panels.json")" 'ready rows from real state'
   assert_equals 'https://example.test/pr/1' "$(jq -r '.ready[0].link' "$home/panels.json")" 'ready PR link'
-  assert_equals '/reports/probe.md' "$(jq -r '.ready[2].link' "$home/panels.json")" 'ready report link'
-  pass 'alerts drop paused workers and ready rows come from green PRs, landings, reports, and preview holds'
+  assert_equals '/reports/finished.md' "$(jq -r '.ready[2].link' "$home/panels.json")" 'ready report link'
+  assert_equals 0 "$(jq '[.ready[] | select(.id == "probe")] | length' "$home/panels.json")" \
+    'a scout sent back for another round keeps its old report out of ready'
+  pass 'alerts drop paused workers and ready rows come from green PRs, landings, finished scouts, and preview holds'
 }
 
 test_worker_tags_from_live_evidence() {

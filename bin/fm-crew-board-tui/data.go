@@ -29,15 +29,16 @@ type worker struct {
 }
 
 type item struct {
-	ID     string `json:"id"`
-	Group  string `json:"-"`
-	Title  string `json:"title"`
-	Detail string `json:"detail"`
-	Status string `json:"status"`
-	Link   string `json:"link"`
-	Alert  bool   `json:"alert"`
-	ADB    string `json:"adb"`
-	Quota  string `json:"quota"`
+	ID        string `json:"id"`
+	Group     string `json:"-"`
+	Title     string `json:"title"`
+	Detail    string `json:"detail"`
+	Status    string `json:"status"`
+	Link      string `json:"link"`
+	Alert     bool   `json:"alert"`
+	ADB       string `json:"adb"`
+	Quota     string `json:"quota"`
+	Providers int    `json:"providers"`
 }
 
 type backlog struct {
