@@ -16,13 +16,13 @@ type panelSpec struct{ id, title string }
 
 var pages = [][]panelSpec{
 	{{"alerts", "ALERTS"}, {"workers", "WORKERS"}, {"ready", "READY FOR YOU"}, {"feed", "FEED"}},
-	{{"phones", "PHONES"}, {"test_queue", "TEST QUEUE"}, {"landings", "TODAY'S LANDINGS"},
-		{"builds", "BUILDS"}, {"routines", "DAILY ROUTINES"}},
 	{{"bugs", "ROCKETBOARD BUGS"}, {"backlog", "BACKLOG"}, {"allowance", "AI ALLOWANCE"}},
 	{{"full_questions", "CAPTAIN QUESTIONS"}},
+	{{"phones", "PHONES"}, {"test_queue", "TEST QUEUE"}, {"landings", "TODAY'S LANDINGS"},
+		{"builds", "BUILDS"}, {"routines", "DAILY ROUTINES"}},
 }
 
-var pageNames = []string{"NOW", "TESTING", "PLANNING", "QUESTIONS"}
+var pageNames = []string{"NOW", "PLANNING", "QUESTIONS", "TESTING"}
 var questionLabelPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+)\.`)
 
 type tickMsg time.Time

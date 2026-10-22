@@ -199,7 +199,7 @@ Bearings invocation examples:
 - `/bearings file` replaces today's `data/status-report-<YYYY-MM-DD>.md` from scratch and links it from the four-section chat digest.
 - `/bearings file include PRs` combines the dated report with live PR enrichment.
 - Install the one-word crew board launcher with `bin/fm-install-firstmate-cli.sh`, then run `firstmate` in a terminal to open the live dashboard.
-- The board shows worker phases and local fleet context across NOW, TESTING, and PLANNING pages; its note input sends a selected item and note to firstmate's captain inbox, and [`docs/configuration.md`](docs/configuration.md) owns its setup and local cache fields.
+- The board shows worker phases and local fleet context across NOW, PLANNING, QUESTIONS, and TESTING pages; its note input sends a selected item and note to firstmate's captain inbox, and [`docs/configuration.md`](docs/configuration.md) owns its setup and local cache fields.
 
 Agent-only reference skills live under `.agents/skills/` and are loaded by firstmate at the trigger points named in [`AGENTS.md`](AGENTS.md).
 

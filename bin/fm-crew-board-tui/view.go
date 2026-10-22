@@ -192,7 +192,7 @@ func (m *app) header() string {
 			tab += " " + lipgloss.NewStyle().Foreground(background).Background(red).Bold(true).
 				Render(fmt.Sprintf(" %d ", count))
 		}
-		if count := len(withoutSections(m.data.Panels.FullQuestions)); index == 3 && count > 0 {
+		if count := len(withoutSections(m.data.Panels.FullQuestions)); index == 2 && count > 0 {
 			tab += " " + lipgloss.NewStyle().Foreground(background).Background(cyan).Bold(true).
 				Render(fmt.Sprintf(" %d ", count))
 		}
@@ -541,7 +541,7 @@ func (m *app) View() tea.View {
 			Width(m.width - 2).Height(bodyHeight - 2).Render("FILTER " + focus.title + "\n" + m.filterInput.View() + "\nEnter apply  ·  Esc cancel")
 	} else if m.width >= 100 {
 		focusWidth := max(50, min(m.width-28, m.width*68/100))
-		if m.page == 3 {
+		if m.page == 2 {
 			focusWidth = m.width
 		}
 		summaryWidth := m.width - focusWidth
@@ -550,7 +550,7 @@ func (m *app) View() tea.View {
 		var summaries []string
 		y := 4
 		for _, spec := range list {
-			if m.page == 3 || y+summaryCardHeight > 4+bodyHeight {
+			if m.page == 2 || y+summaryCardHeight > 4+bodyHeight {
 				break
 			}
 			summary := m.renderCompact(spec, summaryWidth)
@@ -562,13 +562,13 @@ func (m *app) View() tea.View {
 		}
 		right := lipgloss.JoinVertical(lipgloss.Left, summaries...)
 		body = left
-		if m.page != 3 {
+		if m.page != 2 {
 			body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 		}
 	} else {
 		summaryHeight := 0
 		for range list {
-			if m.page != 3 {
+			if m.page != 2 {
 				summaryHeight += summaryCardHeight
 			}
 		}
@@ -582,7 +582,7 @@ func (m *app) View() tea.View {
 		blocks = append(blocks, m.renderFocused(focus, m.width, focusHeight))
 		y := 4 + focusHeight
 		for _, spec := range list {
-			if m.page == 3 || minimal {
+			if m.page == 2 || minimal {
 				break
 			}
 			panelHeight := summaryCardHeight
@@ -612,7 +612,7 @@ func (m *app) View() tea.View {
 		Width(m.width - 2).Height(1).Render(label + m.input.View())
 	footer := m.notice
 	if footer == "" {
-		footer = "4 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit"
+		footer = "3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit"
 	}
 	footer = lipgloss.NewStyle().Foreground(muted).Render(ansi.Truncate(footer, m.width-2, "…"))
 	content := m.header() + "\n" + body + "\n" + note + "\n" + footer
