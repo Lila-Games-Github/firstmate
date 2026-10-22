@@ -204,7 +204,11 @@ func (m *app) rawItems(id string) []item {
 			}
 			detail := worker.Note
 			if worker.PRURL != "" {
-				detail += "\nPR: " + worker.PRURL
+				label := "PR: "
+				if worker.Kind == "playbot" {
+					label = "Chat: "
+				}
+				detail += "\n" + label + worker.PRURL
 			}
 			rows = append(rows, item{ID: worker.ID, Group: project, Title: project + " / " + worker.Title,
 				Detail: strings.TrimSpace(detail), Status: worker.Phase, Link: worker.PRURL})

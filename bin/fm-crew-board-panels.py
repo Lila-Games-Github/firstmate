@@ -46,6 +46,7 @@ STATE = Path(os.environ.get("FM_STATE_OVERRIDE", HOME / "state"))
 SOURCE = DATA / "crew-board-cache.json"
 QUOTA = STATE / "crew-board-quota.json"
 QUOTA_ERROR = STATE / ".crew-board-quota-error"
+QUOTA_BROKEN_STATES = frozenset({"auth_required", "error", "unavailable", "expired", "failed", "revoked", "missing"})
 
 
 def item(title, detail="", status="", link="", alert=False, item_id=""):
@@ -703,6 +704,8 @@ def daily_routines(now):
             continue
         hour = re.search(r'\[\s*"\$hour"\s*-lt\s*(\d+)\s*\]', text)
         hour = int(hour.group(1)) if hour else 0
+        if not 0 <= hour <= 23:
+            hour = 0
         marker = STATE / f".{name}-last"
         try:
             last = marker.read_text(encoding="utf-8").strip()
@@ -858,6 +861,7 @@ def quota_entries():
     age_label = f"{age // 60}m ago" + (" (stale)" if stale else "")
     rows = []
     unavailable = []
+    unmeasured = []
     for provider in providers:
         if not isinstance(provider, dict):
             continue
@@ -913,11 +917,14 @@ def quota_entries():
             state_info = provider.get("state")
             state = state_info.get("status") if isinstance(state_info, dict) else "unavailable"
             state = state or "unavailable"
-            unavailable.append(f"{name}: {state}")
-    if unavailable:
-        noun = "provider" if len(unavailable) == 1 else "providers"
-        rows.append(item(f"{len(unavailable)} {noun} unavailable",
-                         "\n".join(unavailable) + f"\nobserved: {age_label}", "unavailable"))
+            (unavailable if state in QUOTA_BROKEN_STATES else unmeasured).append(f"{name}: {state}")
+    for bucket, wording, status in ((unavailable, "unavailable", "unavailable"),
+                                    (unmeasured, "unmeasured", "headroom unknown")):
+        if not bucket:
+            continue
+        noun = "provider" if len(bucket) == 1 else "providers"
+        rows.append(item(f"{len(bucket)} {noun} {wording}",
+                         "\n".join(bucket) + f"\nobserved: {age_label}", status))
     return rows
 
 

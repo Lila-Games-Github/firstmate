@@ -5144,7 +5144,11 @@ function supervisionReadSidecar(state, taskId) {
 
 // A bounded, read-only projection for the crew board. An armed check and its
 // observed-state sidecar identify a dispatched lane; Playbot's current thread
-// row decides whether that lane is still live.
+// row decides whether that lane is still live. A lane whose task was delivered
+// and whose chat now waits for input is still live work: it is parked on the
+// captain, so it is reported as a parked lane linked to the chat holding the
+// card to answer. A lane whose task never arrived keeps its delivery state
+// instead, because nothing is waiting on the captain.
 function boardLanes(state) {
   let threads;
   try { threads = threadRows(); } catch { return []; }
@@ -5170,13 +5174,18 @@ function boardLanes(state) {
     const delivery = record.deliveryState;
     const status = String(thread.agent_status ?? "unknown");
     if (["failed", "recalled"].includes(delivery)) continue;
-    if (status !== "working" && !["queued", "sending", "recall-pending", "unconfirmed"].includes(delivery)) continue;
+    const undelivered = ["queued", "sending", "recall-pending", "unconfirmed"].includes(delivery);
+    const parked = status === "pending_input" && !undelivered;
+    if (status !== "working" && !parked && !undelivered) continue;
     const since = Date.parse(thread.updated_at ?? "");
+    const chat = `playbot://workspace/${thread.workspace_id}/thread/${thread.thread_id}`;
     rows.push({
       id: taskId, kind: "playbot", project: thread.project_name || "unknown project",
-      title: `[Playbot] ${thread.title || taskId}`, phase: status === "working" ? "working" : delivery,
+      title: `[Playbot] ${thread.title || taskId}`,
+      phase: status === "working" ? "working" : parked ? "parked" : delivery,
       phase_since: Number.isFinite(since) ? Math.floor(since / 1000) : Math.floor(Date.now() / 1000),
-      note: `Playbot lane ${delivery}`, pr_url: null, endpoint: "playbot", gone: false, left_at: null,
+      note: parked ? "Waiting on you: answer the card in this Playbot chat" : `Playbot lane ${delivery}`,
+      pr_url: parked ? chat : null, endpoint: "playbot", gone: false, left_at: null,
     });
   }
   return rows;

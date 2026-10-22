@@ -39,6 +39,8 @@ func phaseColor(phase string) lipgloss.Style {
 		color = green
 	case "paused", "blocked", "needs-decision", "failed", "unauthorized", "offline", "locked":
 		color = red
+	case "parked":
+		color = yellow
 	case "unavailable", "auth_required", "idle", "not yet today":
 		color = muted
 	case "due now":

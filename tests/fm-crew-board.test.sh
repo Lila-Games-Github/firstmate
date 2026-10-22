@@ -375,7 +375,7 @@ test_quota_allowance_snapshot() {
   mkdir -p "$stub"
   source="$home/quota.json"
   cat > "$source" <<'EOF'
-{"providers":[{"provider":"claude","windows":[{"id":"seven_day","label":"week","resetsAt":"tomorrow"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":70,"limitingWindowIds":["seven_day"],"runway":{"status":"through_reset"}}]}},{"provider":"codex","windows":[{"id":"weekly","label":"week","resetsAt":"Friday"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":17,"limitingWindowIds":["weekly"],"runway":{"status":"projected_exhaustion"}}]}},{"provider":"openrouter","credits":{"remaining":27.3,"unit":"usd"},"quotaSemantics":{"effectiveAvailability":[]}},{"provider":"cursor","state":{"status":"auth_required"},"quotaSemantics":{"effectiveAvailability":[]}}]}
+{"providers":[{"provider":"claude","windows":[{"id":"seven_day","label":"week","resetsAt":"tomorrow"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":70,"limitingWindowIds":["seven_day"],"runway":{"status":"through_reset"}}]}},{"provider":"codex","windows":[{"id":"weekly","label":"week","resetsAt":"Friday"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":17,"limitingWindowIds":["weekly"],"runway":{"status":"projected_exhaustion"}}]}},{"provider":"openrouter","credits":{"remaining":27.3,"unit":"usd"},"quotaSemantics":{"effectiveAvailability":[]}},{"provider":"cursor","state":{"status":"auth_required"},"quotaSemantics":{"effectiveAvailability":[]}},{"provider":"copilot","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[]}}]}
 EOF
   cat > "$stub/quota-axi" <<'EOF'
 #!/usr/bin/env bash
@@ -387,8 +387,8 @@ EOF
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_OUTPUT="$source" PATH="$stub:/usr/bin:/bin" \
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota snapshot failed"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
-  assert_equals 1 "$(wc -l < "$home/quota-calls")" "fast refresh called quota"
-  assert_equals 4 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "allowance provider rows"
+  assert_equals 1 "$(wc -l < "$home/quota-calls")" "fast refresh did not spend a quota-axi call"
+  assert_equals 5 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "allowance provider rows"
   assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "codex") | .alert' "$home/state/crew-board.json")" "projected exhaustion alert"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: tomorrow' "quota reset"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .status' "$home/state/crew-board.json")" '27.3 usd' "credit balance"
@@ -396,11 +396,15 @@ EOF
   assert_contains "$(jq -r '.panels.allowance[] | select(.status == "unavailable") | .detail' "$home/state/crew-board.json")" 'cursor: auth_required' "unavailable provider"
   assert_equals '1 provider unavailable' \
     "$(jq -r '.panels.allowance[] | select(.status == "unavailable") | .title' "$home/state/crew-board.json")" "single unavailable provider title"
+  assert_equals '1 provider unmeasured' \
+    "$(jq -r '.panels.allowance[] | select(.status == "headroom unknown") | .title' "$home/state/crew-board.json")" "a fresh provider with no measured headroom is not called unavailable"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.status == "headroom unknown") | .detail' "$home/state/crew-board.json")" \
+    'copilot: fresh' "unmeasured provider keeps its reported state"
   cat > "$home/data/crew-board-cache.json" <<'EOF'
 {"schema":"fm-crew-board-cache.v1","allowance":[{"title":"Claude","status":"45% remaining","detail":"hand written"},{"title":"Mistral","status":"12% remaining"}]}
 EOF
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "allowance overlay refresh failed"
-  assert_equals 5 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "allowance counted each provider once"
+  assert_equals 6 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "allowance counted each provider once"
   assert_equals 0 "$(jq '[.panels.allowance[] | select(.title == "Claude")] | length' "$home/state/crew-board.json")" "cached provider duplicate survived"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: tomorrow' "live quota row lost to cache"
   assert_equals '12% remaining' "$(jq -r '.panels.allowance[] | select(.title == "Mistral") | .status' "$home/state/crew-board.json")" "supplementary cache row kept"
@@ -408,7 +412,7 @@ EOF
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota failure crashed"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "stale quota refresh failed"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'stale' "last good quota not marked stale"
-  assert_equals 5 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "last good rows and the cache row kept after a failed attempt"
+  assert_equals 6 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "last good rows and the cache row kept after a failed attempt"
   assert_equals 0 "$(jq '[.panels.allowance[] | select(.title == "Allowance check")] | length' "$home/state/crew-board.json")" "no check row while a snapshot exists"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .status' "$home/state/crew-board.json")" 'ago (stale)' "stale age on the last good rows"
   pass "quota allowance uses a slow structured snapshot and keeps the last good result"
@@ -486,8 +490,18 @@ EOF
 }
 
 test_playbot_lane_projection() {
-  local home
-  command -v node >/dev/null 2>&1 || { echo "skip: node unavailable for Playbot lane projection"; return; }
+  local home node
+  if [ -n "${FM_TEST_NODE:-}" ]; then
+    node=$FM_TEST_NODE
+  else
+    node=$(fm_test_find_node)
+  fi
+  if [ -z "$node" ] || ! fm_test_node_usable "$node"; then
+    echo "skip: no Node $FM_TEST_NODE_MIN or newer for the Playbot lane projection"
+    return
+  fi
+  PATH="$(dirname "$node"):$PATH"
+  export PATH
   home=$(make_home playbot_lanes)
   mkdir -p "$home/playbot"
   python3 - "$home" <<'PY'
@@ -504,12 +518,17 @@ INSERT INTO projects VALUES ('project-live', 'rocketboard');
 INSERT INTO workspaces VALUES ('space-live', 'project-live', 'Workspace', 'normal', 0, 'active');
 INSERT INTO workspace_threads VALUES ('thread-live', 'Implement launch', 'space-live', '', 'working', '[]', 0, 1, 0, '', '', '', '', '2026-10-21T09:00:00Z', 0);
 INSERT INTO workspace_threads VALUES ('thread-stale', 'Finished work', 'space-live', '', 'ready', '[]', 0, 1, 0, '', '', '', '', '2026-10-21T09:00:00Z', 1);
+INSERT INTO workspace_threads VALUES ('thread-parked', 'Choosing a launch window', 'space-live', '', 'pending_input', '[]', 0, 1, 0, '', '', '', '', '2026-10-21T09:30:00Z', 2);
 """)
 db.commit()
 db.close()
-for task, thread, armed in [('lane-live', 'thread-live', True), ('lane-stale', 'thread-stale', True), ('lane-orphan', 'thread-live', False)]:
+for task, thread, armed, delivery in [('lane-live', 'thread-live', True, 'delivered'),
+                                      ('lane-stale', 'thread-stale', True, 'delivered'),
+                                      ('lane-orphan', 'thread-live', False, 'delivered'),
+                                      ('lane-parked', 'thread-parked', True, 'delivered'),
+                                      ('lane-undelivered', 'thread-parked', True, 'queued')]:
     key = 'sha256:' + hashlib.sha256(thread.encode()).hexdigest()
-    (home / 'state' / f'{task}.lane-poll').write_text(f'fm-playbot-lane-poll-v8\nworking\n2026-10-21T09:00:00Z\ndelivered\n' + 'a'*32 + f'\nnone\nnone\n{key}\n')
+    (home / 'state' / f'{task}.lane-poll').write_text(f'fm-playbot-lane-poll-v8\nworking\n2026-10-21T09:00:00Z\n{delivery}\n' + 'a'*32 + f'\nnone\nnone\n{key}\n')
     if armed:
         check = b'#!/usr/bin/env bash\n# fm-playbot-lane-supervision-poll v1\n'
         (home / 'state' / f'{task}.check.sh').write_bytes(check)
@@ -517,10 +536,15 @@ for task, thread, armed in [('lane-live', 'thread-live', True), ('lane-stale', '
 PY
   PLAYBOT_DESKTOP_DIR="$home/playbot" run_board "$home" refresh >/dev/null || fail "Playbot lane refresh failed"
   PLAYBOT_DESKTOP_DIR="$home/playbot" run_board "$home" refresh >/dev/null || fail "second Playbot lane refresh failed"
-  assert_equals 1 "$(jq '[.rows[] | select(.kind == "playbot" and (.gone | not))] | length' "$home/state/crew-board.json")" "live Playbot lane count"
-  assert_equals 'rocketboard' "$(jq -r '.rows[] | select(.kind == "playbot" and (.gone | not)) | .project' "$home/state/crew-board.json")" "Playbot project"
-  assert_contains "$(jq -r '.rows[] | select(.kind == "playbot" and (.gone | not)) | .title' "$home/state/crew-board.json")" '[Playbot]' "Playbot marker"
-  pass "armed live Playbot lane joins ordinary workers without stale sidecars"
+  assert_equals 3 "$(jq '[.rows[] | select(.kind == "playbot" and (.gone | not))] | length' "$home/state/crew-board.json")" "live Playbot lane count"
+  assert_equals 'rocketboard|[Playbot] Implement launch|working' \
+    "$(jq -r '.rows[] | select(.id == "lane-live") | .project + "|" + .title + "|" + .phase' "$home/state/crew-board.json")" "Playbot project, marker, and working phase"
+  assert_equals 'parked' "$(row_field "$home" lane-parked phase)" "parked lane stays live with its own phase"
+  assert_equals 'playbot://workspace/space-live/thread/thread-parked' "$(row_field "$home" lane-parked pr_url)" \
+    "parked lane links to the chat holding its card"
+  assert_contains "$(row_field "$home" lane-parked note)" 'Waiting on you' "parked lane says what it waits for"
+  assert_equals 'queued' "$(row_field "$home" lane-undelivered phase)" "an undelivered task is not a parked lane"
+  pass "armed live Playbot lanes join ordinary workers, and a parked one waits on the captain instead of vanishing"
 }
 
 test_questions_without_headings() {
@@ -661,7 +685,8 @@ EOF
   assert_equals 'Pixel 8|RUNNING: Make the widget spin|NEXT: Fix the gadget' \
     "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-busy-one")) | .title] | join("|")' "$home/state/crew-board.json")" \
     'phone group lists holder then waiters'
-  assert_equals 0 "$(jq '[.panels.test_queue[] | select(.id | startswith("phone-idle-two"))] | length' "$home/state/crew-board.json")" 'idle phone heading shown'
+  assert_equals 0 "$(jq '[.panels.test_queue[] | select(.id | startswith("phone-idle-two"))] | length' "$home/state/crew-board.json")" \
+    'idle phone with an empty queue adds no test queue rows'
   kill "$holder" "$waiter" "$suite_pid" ${blocker:+"$blocker"} ${suite_waiter:+"$suite_waiter"} 2>/dev/null
   wait 2>/dev/null
   printf 'pid=1\ncwd=/\nstarted=1\nheartbeat=1\n' > "$home/locks/suite.holder"
@@ -685,14 +710,21 @@ EOF
 today=$(date +%F); hour=$(date +%H)
 [ "$hour" -lt 0 ] && exit 0
 EOF
+  cat > "$home/state/gamma-daily.check.sh" <<'EOF'
+#!/usr/bin/env bash
+hour=$(date +%H)
+[ "$hour" -lt 24 ] && exit 0
+EOF
   date +%F > "$home/state/.alpha-daily-last"
   tomorrow=$(python3 -c 'import datetime as d; print(d.date.today() + d.timedelta(days=1))')
   run_board "$home" refresh >/dev/null || fail 'routine refresh failed'
-  assert_equals 2 "$(jq '.panels.routines | length' "$home/state/crew-board.json")" 'one row per daily check'
+  assert_equals 3 "$(jq '.panels.routines | length' "$home/state/crew-board.json")" 'one row per daily check'
   assert_equals 'alpha-daily|done today' "$(jq -r '.panels.routines[0] | .title + "|" + .status' "$home/state/crew-board.json")" "today's run"
   assert_contains "$(jq -r '.panels.routines[0].detail' "$home/state/crew-board.json")" "Next due: $tomorrow 10:00" 'next due tomorrow'
   assert_equals 'beta-daily|due now' "$(jq -r '.panels.routines[1] | .title + "|" + .status' "$home/state/crew-board.json")" 'missed run is due'
   assert_contains "$(jq -r '.panels.routines[1].detail' "$home/state/crew-board.json")" 'Last run: never' 'never-run routine'
+  assert_equals 'gamma-daily|due now' "$(jq -r '.panels.routines[2] | .title + "|" + .status' "$home/state/crew-board.json")" 'routine gating on an hour outside the day'
+  assert_contains "$(jq -r '.panels.routines[2].detail' "$home/state/crew-board.json")" 'Runs once a day after 00:00' 'unbounded gate reads as due from midnight'
   pass 'daily routines come from registered checks and their last-run markers'
 }
 

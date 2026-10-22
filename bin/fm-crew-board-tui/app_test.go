@@ -785,6 +785,38 @@ func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
 	}
 }
 
+func TestParkedPlaybotLaneWaitsOnTheCaptain(t *testing.T) {
+	m := fixtureApp(t)
+	chat := "playbot://workspace/space-live/thread/thread-parked"
+	m.data.Rows = append(m.data.Rows, worker{ID: "lane-parked", Kind: "playbot", Project: "widget",
+		Title: "[Playbot] Choosing a launch window", Phase: "parked", PhaseSince: time.Now().Unix() - 30,
+		Note: "Waiting on you: answer the card in this Playbot chat", PRURL: chat})
+	rows := m.items("workers")
+	index := -1
+	for position := range rows {
+		if rows[position].ID == "lane-parked" {
+			index = position
+		}
+	}
+	if index < 0 {
+		t.Fatal("a parked Playbot lane is missing from WORKERS")
+	}
+	parked := rows[index]
+	if parked.Status != "parked" || parked.Link != chat {
+		t.Fatalf("parked lane row reads status %q link %q", parked.Status, parked.Link)
+	}
+	detail := m.detail("workers", parked, 80)
+	if !strings.Contains(detail, "Waiting on you") || !strings.Contains(detail, "Chat: "+chat) {
+		t.Fatalf("parked lane detail reads: %q", detail)
+	}
+	if line := m.rowLine("workers", parked, index, 100); !strings.Contains(line, "PARKED") {
+		t.Fatalf("parked lane row reads: %q", line)
+	}
+	if phaseColor("parked").GetForeground() == muted || activePhase("parked") {
+		t.Fatal("a parked lane is drawn as an idle or running worker")
+	}
+}
+
 func TestQuestionReplyAndFullDetail(t *testing.T) {
 	m := fixtureApp(t)
 	m.page, m.focus = 3, "full_questions"
