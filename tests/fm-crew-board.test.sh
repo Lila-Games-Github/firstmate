@@ -894,7 +894,7 @@ EOF
 }
 
 test_worker_tags_name_the_state() {
-  local home snapshot tag
+  local home snapshot
   home=$(make_home worker_tag_state)
   printf '# Open\n\n---\n\n**WA. Expedition march: five calls.** The frogs march (wave-advance-rulings).\n' > "$home/data/captain-questions.md"
   snapshot="$home/snapshot.json"
