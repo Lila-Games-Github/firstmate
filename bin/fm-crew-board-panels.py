@@ -759,33 +759,110 @@ def pipeline_step(worktree, deadline):
     return name
 
 
+PHASE_WORDS = ("investigating", "building", "fixing", "testing", "validating", "ready-to-merge")
+FILLER_WORDS = {"a", "an", "the", "and", "or", "for", "on", "to", "of", "in", "with", "awaiting", "waiting"}
+PAUSE_CAUSES = (("PHONE", ("phone", "device", "adb")), ("SUITE", ("suite",)),
+                ("ART", ("art", "artist")), ("REVIEW", ("review", "reviewer")))
+
+
+def plain_note(note):
+    """A note without its leading status verb or bracketed keys."""
+    note = re.sub(r"^\s*(?:needs-decision|blocked|paused|working|done|failed)\s*:", " ", note)
+    return re.sub(r"\[[^\]]*\]", " ", note).strip()
+
+
+def meaningful_words(note):
+    """Words of a note fit for a tag: no bracketed keys, paths, file names, bare numbers, or owner jargon."""
+    words = []
+    for word in note.split():
+        bare = word.strip(".,;:()\"'")
+        if not bare or "/" in bare or re.search(r"\.[A-Za-z0-9]{1,5}$", bare) or re.fullmatch(r"[\d.,:#x]+", bare):
+            continue
+        if "product-owner" in bare.casefold() or "=" in bare:
+            continue
+        words.append(bare)
+    while words and words[-1].casefold() in FILLER_WORDS:
+        words.pop()
+    while words and words[0].casefold() in FILLER_WORDS:
+        words.pop(0)
+    return words
+
+
 def short_note(note, limit=24):
-    clause = re.split(r"\s*(?:;|\s-\s|:|,|\()\s*", note.strip(), maxsplit=1)[0]
-    words = clause.upper().split()
+    clause = re.split(r"\s*(?:;|\s-\s|:|,|\()\s*", plain_note(note), maxsplit=1)[0]
     text = ""
-    for word in words[:4]:
+    for word in meaningful_words(clause)[:4]:
+        word = word.upper()
         if len(text) + len(word) + (1 if text else 0) > limit:
             break
         text = f"{text} {word}".strip()
     return text
 
 
+def question_label(task, questions):
+    """The captain-questions label for a task: its hold reason's leading label, else an entry naming it."""
+    reason = str((task.get("backlog") or {}).get("hold_reason") or "")
+    match = re.match(r"^\W*([A-Z][A-Z0-9]{0,3})\s*[.:)]", reason)
+    if match:
+        return match.group(1)
+    names = [str(task.get("id", ""))] + [str(d.get("key", "")) for d in (task.get("hints") or {}).get("open_decisions") or []
+                                         if isinstance(d, dict)]
+    names = [name for name in names if name]
+    for row in questions:
+        label = re.match(r"^([A-Z][A-Z0-9]{0,3})\.\s", row.get("title", ""))
+        if label and any(name in row.get("detail", "") for name in names):
+            return label.group(1)
+    return ""
+
+
+def state_tag(task, questions):
+    """Lead tag word naming what the worker is doing about a person: WAITING ON YOU, BLOCKED or WAITING."""
+    hints = task.get("hints") or {}
+    verbs = {str(d.get("verb", "")) for d in hints.get("open_decisions") or [] if isinstance(d, dict)}
+    phase = (task.get("phase") or {}).get("name", "")
+    held = (task.get("backlog") or {}).get("hold_bucket") == "live"
+    current = task.get("current_state") or {}
+    if "needs-decision" in verbs or phase == "needs-decision" or held:
+        label = question_label(task, questions)
+        return f"WAITING ON YOU \u00b7 {label}" if label else "WAITING ON YOU"
+    if "blocked" in verbs or phase == "blocked" or current.get("state") == "blocked":
+        return "BLOCKED"
+    if current.get("state") == "paused" or phase == "paused":
+        text = " ".join(str(value or "") for value in (current.get("detail"), hints.get("last_event_text"),
+                                                       (task.get("phase") or {}).get("note"))).casefold()
+        words = set(re.findall(r"[a-z]+", text))
+        for cause, keys in PAUSE_CAUSES:
+            if words & set(keys):
+                return f"WAITING FOR {cause}"
+        return "WAITING"
+    return ""
+
+
+def phase_tag(task):
+    phase = task.get("phase") or {}
+    return short_note(str(phase.get("note") or "")) or (
+        str(phase.get("name")).upper() if phase.get("name") in PHASE_WORDS else "")
+
+
 def worker_tags(snapshot, resources):
-    """Pick each worker's tag: a test resource, then its live run step, then its phase note."""
+    """Pick each worker's tag: its state, then a test resource, its live run step, or its phase text."""
     tags = {}
     deadline = time.monotonic() + 2.0
+    questions = question_entries(DATA / "captain-questions.md")
     for task in snapshot.get("tasks", []):
         if not isinstance(task, dict) or not task.get("id"):
             continue
         task_id = str(task["id"])
-        if task_id in resources:
-            tags[task_id] = resources[task_id][1]
-            continue
+        state = state_tag(task, questions)
         tag = ""
-        tree = ((task.get("paths") or {}).get("worktree") or {}).get("path")
-        if task.get("mode") == "no-mistakes" and isinstance(tree, str) and tree:
-            tag = pipeline_step(tree, deadline)
-        tag = tag or short_note(str((task.get("phase") or {}).get("note") or ""))
+        if task_id in resources:
+            tag = resources[task_id][1]
+        else:
+            tree = ((task.get("paths") or {}).get("worktree") or {}).get("path")
+            if task.get("mode") == "no-mistakes" and isinstance(tree, str) and tree:
+                tag = pipeline_step(tree, deadline)
+            tag = tag or phase_tag(task)
+        tag = " \u00b7 ".join(part for part in (state, tag) if part)
         if tag:
             tags[task_id] = tag
     return tags

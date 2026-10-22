@@ -893,6 +893,42 @@ EOF
   pass 'alerts drop paused workers and ready rows come from green PRs, landings, finished scouts, and preview holds'
 }
 
+test_worker_tags_name_the_state() {
+  local home snapshot
+  home=$(make_home worker_tag_state)
+  printf '# Open\n\n---\n\n**WA. Expedition march: five calls.** The frogs march (wave-advance-rulings).\n' > "$home/data/captain-questions.md"
+  snapshot="$home/snapshot.json"
+  jq -n '{schema: "fm-fleet-snapshot.v1", tasks: [
+    {id: "wave", phase: {name: "building", note: "needs-decision: [key=wave-advance-rulings] 5 prototype-vs-recorded-Godot conflicts"},
+     hints: {open_decisions: [{key: "wave-advance-rulings", verb: "needs-decision", summary: "5 conflicts"}]},
+     backlog: {state: "in_flight", hold_kind: "captain", hold_reason: "WA. five calls", hold_bucket: "live"}},
+    {id: "answered", phase: {name: "building", note: ""},
+     backlog: {state: "done", hold_kind: "captain", hold_reason: "WA. five calls", hold_bucket: null}},
+    {id: "later", phase: {name: "building", note: ""},
+     backlog: {state: "in_flight", hold_kind: "captain", hold_reason: "WA. five calls", hold_bucket: "dated"}},
+    {id: "named", phase: {name: "building", note: "art-requirements.html - final review"},
+     hints: {open_decisions: [{key: "wave-advance-rulings", verb: "needs-decision", summary: "x"}]}, backlog: {}},
+    {id: "files", phase: {name: "testing", note: "./tests/a.sh 5 awaiting product-owner"}},
+    {id: "stuck", phase: {name: "blocked", note: "blocked: no device"}, current_state: {state: "blocked"}},
+    {id: "phone", phase: {name: "testing", note: ""}, current_state: {state: "paused", detail: "waiting for the phone to free up"}},
+    {id: "plain", phase: {name: "testing", note: ""}, current_state: {state: "paused", detail: "upstream release"}},
+    {id: "junk", phase: {name: "fixing", note: "[key=x] 5 ART-REQUIREMENTS.HTML product-owner"}},
+    {id: "phaseonly", phase: {name: "validating", note: ""}}]}' > "$snapshot"
+  run_panels "$home" "$snapshot" > "$home/panels.json" || fail 'worker tag state projection failed'
+  tag() { jq -r --arg id "$1" '.worker_tags[$id]' "$home/panels.json"; }
+  assert_equals 'WAITING ON YOU · WA · BUILDING' "$(tag wave)" 'open decision names the question label, never the count'
+  assert_equals 'WAITING ON YOU · WA · BUILDING' "$(tag named)" 'label found from the captain-questions entry naming the decision key'
+  assert_equals 'BUILDING' "$(tag answered)" 'a closed task keeping its old captain hold no longer waits on the captain'
+  assert_equals 'BUILDING' "$(tag later)" 'a dated captain hold is parked, not waiting on the captain'
+  assert_equals 'TESTING' "$(tag files)" 'keys, paths, numbers, and product-owner never become the tag'
+  assert_equals 'BLOCKED · NO DEVICE' "$(tag stuck)" 'blocked reads BLOCKED'
+  assert_equals 'WAITING FOR PHONE · TESTING' "$(tag phone)" 'a pause names its plain cause'
+  assert_equals 'WAITING · TESTING' "$(tag plain)" 'a pause with no derivable cause reads WAITING'
+  assert_equals 'FIXING' "$(tag junk)" 'a junk note falls back to the phase word'
+  assert_equals 'VALIDATING' "$(tag phaseonly)" 'a phase-only worker shows its phase word'
+  pass 'worker tags name the worker state in plain words'
+}
+
 test_worker_tags_from_live_evidence() {
   local home snapshot stub held waiter
   home=$(make_home worker_tags)
@@ -945,7 +981,7 @@ EOF
   assert_equals 'FIXING TESTS' "$(jq -r '.worker_tags.stepfix' "$home/panels.json")" 'a fixing run tag from its step row'
   assert_equals 'CI GATE' "$(jq -r '.worker_tags.parked' "$home/panels.json")" 'a parked run tag from its run status'
   assert_equals 'BUILDING AN1' "$(jq -r '.worker_tags.note' "$home/panels.json")" 'finished run falls back to the phase note'
-  assert_equals null "$(jq -r '.worker_tags.bare' "$home/panels.json")" 'no evidence leaves the phase word to the board'
+  assert_equals INVESTIGATING "$(jq -r '.worker_tags.bare' "$home/panels.json")" 'no evidence falls back to the phase word'
   pass 'worker tags come from held or awaited test resources, the live run step, then the phase note'
 }
 
@@ -1079,3 +1115,4 @@ test_suite_lock_probe
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
 test_worker_tags_from_live_evidence
+test_worker_tags_name_the_state
