@@ -1,0 +1,2 @@
+ok - local panel cache, captain questions, tasks-axi backlog, and one-word launcher
+ok - full questions and backlog parsers retain grouped entries, hold reasons, and notes

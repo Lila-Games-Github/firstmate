@@ -1,0 +1,2 @@
+not ok - only bugs with or in QA are left out (expected 'Rocketboard login bug|Lobby crash|Shop prices|Map seam', got 'Rocketboard login bug|Combat round visuals|Pond upgrade|Lobby crash|Shop prices|Map seam')
+not ok - other hold section (expected 'Waiting on others', got 'Held (other)')
