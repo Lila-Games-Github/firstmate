@@ -820,7 +820,7 @@ def state_tag(task, questions):
     hints = task.get("hints") or {}
     verbs = {str(d.get("verb", "")) for d in hints.get("open_decisions") or [] if isinstance(d, dict)}
     phase = (task.get("phase") or {}).get("name", "")
-    held = (task.get("backlog") or {}).get("hold_kind") == "captain"
+    held = (task.get("backlog") or {}).get("hold_bucket") is not None
     current = task.get("current_state") or {}
     if "needs-decision" in verbs or phase == "needs-decision" or held:
         label = question_label(task, questions)
