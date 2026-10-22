@@ -195,6 +195,15 @@ func TestPlanningBacklogCarriesTheFullBacklog(t *testing.T) {
 	if !strings.Contains(m.View().Content, "Short next row") {
 		t.Fatal("backlog lost its next-up fallback when the full list is unavailable")
 	}
+	m.data.Panels.FullBacklog = []item{{Title: "In flight", Status: "section"}, {Title: "Queued", Status: "section"}}
+	if !strings.Contains(m.View().Content, "Short next row") {
+		t.Fatal("backlog did not fall back to the next-up list when the full list carries no task")
+	}
+	m.data.Panels.FullBacklog = []item{{Title: "Backlog unavailable", Detail: "Could not read bin/fm-tasks-axi.sh", Status: "error"}}
+	view = m.View().Content
+	if !strings.Contains(view, "Short next row") || strings.Contains(view, "Backlog unavailable") {
+		t.Fatal("backlog showed the failed full-list read instead of the next-up list")
+	}
 }
 
 func TestPlanningFocusCueFollowsPanel(t *testing.T) {

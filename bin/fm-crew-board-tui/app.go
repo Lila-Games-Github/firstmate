@@ -119,6 +119,17 @@ func (m *app) focusCmd(id string) tea.Cmd {
 	return func() tea.Msg { text, err := p.focusWorker(id); return focusMsg{text, err} }
 }
 
+// readableBacklog returns the full backlog rows only when they carry a task:
+// group headings alone, or the single row a failed read leaves behind, mean the
+// panel falls back to the next queued tasks.
+func readableBacklog(rows []item) []item {
+	tasks := withoutSections(rows)
+	if len(tasks) == 0 || tasks[0].Status == "error" {
+		return nil
+	}
+	return rows
+}
+
 func (m *app) rawItems(id string) []item {
 	switch id {
 	case "alerts":
@@ -153,7 +164,7 @@ func (m *app) rawItems(id string) []item {
 		}
 		rows := []item{{ID: "counts", Title: fmt.Sprintf("In flight %s  /  Queued %s", count(back.InFlight), count(back.Queued)),
 			Status: "section"}}
-		if len(m.data.Panels.FullBacklog) > 0 {
+		if readableBacklog(m.data.Panels.FullBacklog) != nil {
 			return append(rows, m.data.Panels.FullBacklog...)
 		}
 		return append(rows, back.Next...)

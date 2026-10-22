@@ -595,6 +595,26 @@ def test_queue(snapshot, phones, now, tags=None):
 
 
 STEP_NAMES = {"test": "TESTS", "document": "DOCS", "ci": "CI"}
+LIVE_RUN_STATUSES = ("pending", "running", "fixing", "ci", "awaiting_approval", "fix_review")
+GATE_STATUSES = ("awaiting_approval", "fix_review")
+
+
+def step_table(lines, table):
+    """One dict per row of the first `table[N]{column,...}` report block."""
+    header, start = [], 0
+    for index, line in enumerate(lines):
+        match = re.match(r"^\s*" + table + r"\[\d+\]\{(.*?)\}\s*:?\s*$", line)
+        if match:
+            header, start = match.group(1).split(","), index
+            break
+    if "step" not in header:
+        return []
+    rows = []
+    for line in lines[start + 1:]:
+        if not line.startswith("    "):
+            break
+        rows.append(dict(zip(header, next(csv.reader([line.strip()])))))
+    return rows
 
 
 def pipeline_step(worktree, deadline):
@@ -610,27 +630,25 @@ def pipeline_step(worktree, deadline):
     if run.returncode:
         return ""
     lines = run.stdout.splitlines()
-    if not any(line.strip() == "status: running" for line in lines[:8]):
-        return ""
-    rows = []
-    for index, line in enumerate(lines):
-        if re.match(r"^\s*active_steps\[\d+\]\{step,status,", line):
-            header = line.split("{", 1)[1].split("}", 1)[0].split(",")
-            for row in lines[index + 1:]:
-                if not row.startswith("    "):
-                    break
-                fields = next(csv.reader([row.strip()]))
-                rows.append(dict(zip(header, fields)))
+    run_status = ""
+    for line in lines[:8]:
+        match = re.match(r'^\s*status:\s*"?(.+?)"?\s*$', line)
+        if match and match.group(1) in LIVE_RUN_STATUSES:
+            run_status = match.group(1)
             break
-    if not rows:
+    if not run_status:
         return ""
-    step = rows[0]
+    active = step_table(lines, "active_steps")
+    step = active[0] if active else next(
+        (row for row in step_table(lines, "steps") if row.get("status") in GATE_STATUSES), {})
+    statuses = {run_status, str(step.get("status") or "")}
     name = STEP_NAMES.get(step.get("step", ""), step.get("step", "").upper())
-    status = step.get("status", "")
-    if status == "fixing":
+    if statuses & set(GATE_STATUSES):
+        return f"{name} GATE" if name else "GATE"
+    if not active and not name:
+        return ""
+    if "fixing" in statuses:
         return f"FIXING {name}"
-    if status in ("awaiting_approval", "fix_review"):
-        return f"{name} GATE"
     round_number = step.get("round", "")
     if round_number.isdigit() and int(round_number) > 1:
         return f"{name} ROUND {round_number}"
@@ -768,6 +786,29 @@ def alert_entries(snapshot, cache, phones, allowance):
         if row.get("quota") == "unavailable":
             alerts.append(item(row["title"], row["detail"], row["status"], alert=True))
     return alerts
+
+
+def board_pid_state(started):
+    """`live`, `gone`, or `unknown` for this session's board pid record."""
+    record = STATE / ".crew-board-tui.pid"
+    try:
+        if record.stat().st_mtime < started:
+            return "unknown"
+    except OSError:
+        return "unknown"
+    try:
+        pid = int(record.read_text(encoding="utf-8").strip())
+    except FileNotFoundError:
+        return "gone"
+    except (OSError, ValueError):
+        return "unknown"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "gone"
+    except OSError:
+        return "unknown"
+    return "live"
 
 
 def refresh_allowance():
@@ -963,8 +1004,12 @@ def main():
         refresh_allowance()
         return
     if len(sys.argv) == 2 and sys.argv[1] == "--allowance-loop":
+        started, parent = time.time(), os.getppid()
         while True:
             refresh_allowance()
+            state = board_pid_state(started)
+            if state == "gone" or (os.getppid() != parent and state != "live"):
+                return
             time.sleep(300)
     if len(sys.argv) != 2:
         raise SystemExit("usage: fm-crew-board-panels.py <fleet-snapshot.json>")

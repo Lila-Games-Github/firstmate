@@ -137,8 +137,15 @@ test_note_without_selection_and_point_without_text() {
 }
 
 test_panel_projection_and_launcher() {
-  local home install_dir result
+  local home install_dir result stub
   home=$(make_home panels)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\n'
+EOF
+  chmod +x "$stub/adb"
   cat > "$home/data/captain-questions.md" <<'EOF'
 # Open questions
 
@@ -148,7 +155,7 @@ EOF
   cat > "$home/data/crew-board-cache.json" <<'EOF'
 {"schema":"fm-crew-board-cache.v1","observed_at":"2026-10-21T06:00:00Z","phones":[{"title":"S22","status":"locked","detail":"held by alpha"}],"bugs":[{"title":"Rocketboard login bug","status":"in progress"}],"allowance":[{"title":"Claude","status":"45% remaining"}],"routines":[{"title":"Tip health","status":"green"}]}
 EOF
-  run_board "$home" refresh >/dev/null || fail "panel refresh failed"
+  PATH="$stub:$PATH" run_board "$home" refresh >/dev/null || fail "panel refresh failed"
   assert_equals 1 "$(jq '.panels.questions | length' "$home/state/crew-board.json")" "question count"
   assert_contains "$(jq -r '.panels.questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "question blocker"
   assert_equals 1 "$(jq '[.panels.phones[] | select(.title == "S22")] | length' "$home/state/crew-board.json")" "phone cache"
@@ -434,6 +441,39 @@ EOF
   pass "a sampler that never succeeded is visible instead of an empty allowance panel"
 }
 
+test_allowance_sampler_stops_with_its_board() {
+  local home stub ticks status dead
+  home=$(make_home allowance_sampler)
+  stub="$home/stub-bin"
+  mkdir -p "$stub" "$home/nohome"
+  ticks="$home/ticks"
+  cat > "$stub/quota-axi" <<'EOF'
+#!/usr/bin/env bash
+printf 'tick\n' >> "$QUOTA_TICKS"
+printf '{"providers":[]}\n'
+EOF
+  chmod +x "$stub/quota-axi"
+  sampler() {
+    timeout "$1" env PATH="$stub:$PATH" HOMEBREW_PREFIX="$home/nohome" QUOTA_TICKS="$ticks" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      python3 "$ROOT/bin/fm-crew-board-panels.py" --allowance-loop
+  }
+  printf '%s\n' "$$" > "$home/state/.crew-board-tui.pid"
+  set_mtime "$(( $(date +%s) + 60 ))" "$home/state/.crew-board-tui.pid"
+  sampler 3
+  status=$?
+  assert_equals 124 "$status" 'sampler kept running while its board was live'
+  assert_equals 1 "$(wc -l < "$ticks" | tr -d ' ')" 'sampler asked for one snapshot before waiting'
+  # a board record naming a process that has already exited
+  true & dead=$!
+  wait "$dead" 2>/dev/null
+  printf '%s\n' "$dead" > "$home/state/.crew-board-tui.pid"
+  set_mtime "$(( $(date +%s) + 60 ))" "$home/state/.crew-board-tui.pid"
+  sampler 20 || fail 'sampler outlived its board'
+  assert_equals 2 "$(wc -l < "$ticks" | tr -d ' ')" 'sampler stopped once its board had exited'
+  pass "the allowance sampler follows its board instead of outliving it"
+}
+
 test_playbot_lane_projection() {
   local home
   command -v node >/dev/null 2>&1 || { echo "skip: node unavailable for Playbot lane projection"; return; }
@@ -682,18 +722,24 @@ test_worker_tags_from_live_evidence() {
   local home snapshot stub held waiter
   home=$(make_home worker_tags)
   stub="$home/stub-bin"
-  mkdir -p "$stub" "$home/wt-held" "$home/wt-wait" "$home/wt-review" "$home/wt-fix" "$home/wt-note" "$home/wt-bare" \
-    "$home/locks/frogpile-phone-S22.queue/tickets"
+  mkdir -p "$stub" "$home/wt-held" "$home/wt-wait" "$home/wt-review" "$home/wt-fix" "$home/wt-stepfix" "$home/wt-note" "$home/wt-bare" \
+    "$home/wt-parked" "$home/locks/frogpile-phone-S22.queue/tickets"
   cat > "$stub/no-mistakes" <<'EOF'
 #!/usr/bin/env bash
+run=running
+step=''
+parked=''
 case "${PWD##*/}" in
   wt-review) step='review,running,3m,1s ago,42,4' ;;
-  wt-fix) step='test,fixing,1m,1s ago,42,1' ;;
+  wt-fix) run=fixing; step='test,running,1m,1s ago,42,1' ;;
+  wt-stepfix) step='test,fixing,1m,1s ago,42,1' ;;
   wt-held) step='ci,running,1m,1s ago,42,starting' ;;
+  wt-parked) run=awaiting_approval; parked='ci,awaiting_approval,0,3' ;;
   *) printf 'run:\n  status: completed\n'; exit 0 ;;
 esac
-printf 'run:\n  id: "r1"\n  status: running\n  steps[1]{step,status,findings,duration_ms}:\n    review,running,0,0\n'
-printf '  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    %s\n' "$step"
+printf 'run:\n  id: "r1"\n  status: %s\n' "$run"
+if [ -n "$parked" ]; then printf '  steps[1]{step,status,findings,duration_ms}:\n    %s\n' "$parked"; fi
+if [ -n "$step" ]; then printf '  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    %s\n' "$step"; fi
 EOF
   chmod +x "$stub/no-mistakes"
   held=$(sleeper_in "$home/wt-held")
@@ -708,6 +754,8 @@ EOF
     {id: "wait", mode: "direct-PR", paths: {worktree: {path: ($h + "/wt-wait")}}, phase: {name: "testing", note: "x"}},
     {id: "review", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-review")}}, phase: {name: "validating", note: "x"}},
     {id: "fix", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-fix")}}, phase: {name: "validating", note: "x"}},
+    {id: "stepfix", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-stepfix")}}, phase: {name: "validating", note: "x"}},
+    {id: "parked", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-parked")}}, phase: {name: "validating", note: "x"}},
     {id: "note", mode: "no-mistakes", paths: {worktree: {path: ($h + "/wt-note")}},
      phase: {name: "building", note: "building AN1 - wiring the merge animation; then tests"}},
     {id: "bare", mode: "direct-PR", paths: {worktree: {path: ($h + "/wt-bare")}}, phase: {name: "investigating", note: ""}}]}' \
@@ -718,7 +766,9 @@ EOF
   assert_equals 'S22 TEST <1m' "$(jq -r '.worker_tags.held' "$home/panels.json")" 'held phone beats the run step'
   assert_equals 'WAITING FOR S22 #1' "$(jq -r '.worker_tags.wait' "$home/panels.json")" 'awaited phone'
   assert_equals 'REVIEW ROUND 4' "$(jq -r '.worker_tags.review' "$home/panels.json")" 'review round from the live run'
-  assert_equals 'FIXING TESTS' "$(jq -r '.worker_tags.fix' "$home/panels.json")" 'fixing step from the live run'
+  assert_equals 'FIXING TESTS' "$(jq -r '.worker_tags.fix' "$home/panels.json")" 'a fixing run tag from its run status'
+  assert_equals 'FIXING TESTS' "$(jq -r '.worker_tags.stepfix' "$home/panels.json")" 'a fixing run tag from its step row'
+  assert_equals 'CI GATE' "$(jq -r '.worker_tags.parked' "$home/panels.json")" 'a parked run tag from its run status'
   assert_equals 'BUILDING AN1' "$(jq -r '.worker_tags.note' "$home/panels.json")" 'finished run falls back to the phase note'
   assert_equals null "$(jq -r '.worker_tags.bare' "$home/panels.json")" 'no evidence leaves the phase word to the board'
   pass 'worker tags come from held or awaited test resources, the live run step, then the phase note'
@@ -805,6 +855,7 @@ test_questions_without_headings
 test_quota_allowance_snapshot
 test_quota_unknown_headroom_and_exhaustion
 test_quota_check_unavailable
+test_allowance_sampler_stops_with_its_board
 test_quota_unresolved_limiting_window
 test_playbot_lane_projection
 test_full_questions_and_backlog
