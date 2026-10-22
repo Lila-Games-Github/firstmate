@@ -1,0 +1,2 @@
+ok - worker tags come from held or awaited test resources, the live run step, then the phase note
+ok - worker tags name the worker state in plain words

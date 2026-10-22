@@ -1,19 +1,14 @@
-$ # BEFORE (base 6df16a0): worker_tags for the reported scenario
+## BEFORE (base 6df16a0)
 {
   "expedition-wave-advance": "NEEDS-DECISION",
   "art-doc": "ART-REQUIREMENTS.HTML",
   "suite-wait": "SUITE",
   "po-wait": "AWAITING PRODUCT-OWNER"
 }
-
-$ # AFTER (5c60291): same snapshot
+## AFTER (2c051ea)
 {
   "expedition-wave-advance": "WAITING ON YOU · WA · BUILDING",
   "art-doc": "BUILDING",
   "suite-wait": "WAITING FOR SUITE · SUITE",
-  "po-wait": "WAITING · VALIDATING"
+  "po-wait": "SIGN-OFF"
 }
-
-$ # Phase note without verb prefix: "[key=wave-advance-rulings] 5 prototype-vs-recorded-Godot conflicts"
-BEFORE: null
-AFTER:  "WAITING ON YOU · WA · BUILDING"
