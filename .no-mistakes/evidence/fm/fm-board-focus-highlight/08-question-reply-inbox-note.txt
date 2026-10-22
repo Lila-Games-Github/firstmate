@@ -1,0 +1,8 @@
+$ cat /tmp/fmcb-demo/firstmate/state/inbox/1792656246-sHcmy1.note
+id=1792656246-sHcmy1
+at=2026-10-22T08:04:06Z
+source=text
+--
+Crew board item: question-1 | UIX. Pick the UI: four calls.
+Note: Reply [UIX]: UIX. Pick the UI: four calls.
+Answer: Go with the prototype
