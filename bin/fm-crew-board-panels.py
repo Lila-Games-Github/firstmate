@@ -29,6 +29,7 @@ fm-crew-board.sh refresh.
 
 import csv
 import datetime as dt
+import glob
 import io
 import json
 import os
@@ -334,17 +335,107 @@ def phone_entries(cache):
     return rows + cached
 
 
-def playbot_workers():
+NODE_MIN = (22, 5)
+NODE_MIN_TEXT = ".".join(str(part) for part in NODE_MIN)
+
+
+def version_text(version):
+    return ".".join(str(part) for part in version)
+
+
+def node_probe(binary, timeout=2):
+    """Return (version, reason) for one candidate lane runtime."""
     try:
-        run = subprocess.run(["node", "--no-warnings", str(SCRIPT_DIR / "fm-playbot-lanes.mjs"),
+        run = subprocess.run([binary, "-p", "process.versions.node"], capture_output=True,
+                             text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return None, f"{binary} did not answer within {timeout}s"
+    except OSError as error:
+        return None, f"{binary} could not run: {error}"
+    version = run.stdout.strip()
+    if run.returncode or not re.fullmatch(r"\d+(\.\d+)+", version):
+        return None, f"{binary} did not report a Node version"
+    return tuple(int(part) for part in version.split(".")), ""
+
+
+def node_candidates():
+    """PATH first, then the fixed and version-managed install roots the suite
+    searches, newest managed version first."""
+    candidates = []
+    found = shutil.which("node")
+    if found:
+        candidates.append(found)
+    home = Path.home()
+    prefix = os.environ.get("HOMEBREW_PREFIX") or ""
+    if prefix:
+        candidates.append(str(Path(prefix) / "bin" / "node"))
+    candidates += [f"{root}/bin/node" for root in
+                   ("/opt/homebrew", "/home/linuxbrew/.linuxbrew", "/var/home/linuxbrew/.linuxbrew",
+                    "/usr/local", "/usr")]
+    candidates += [str(home / ".local" / "bin" / "node"), str(home / ".volta" / "bin" / "node")]
+    managed = []
+    for pattern in ("/home/linuxbrew/.linuxbrew/Cellar/node/*/bin/node",
+                    "/var/home/linuxbrew/.linuxbrew/Cellar/node/*/bin/node",
+                    str(home / ".nvm" / "versions" / "node" / "*" / "bin" / "node"),
+                    str(home / ".fnm" / "node-versions" / "*" / "installation" / "bin" / "node"),
+                    str(home / ".local" / "share" / "fnm" / "node-versions" / "*" / "installation" / "bin" / "node")):
+        managed += glob.glob(pattern)
+    return candidates + sorted(managed, key=managed_version, reverse=True)
+
+
+def managed_version(path):
+    match = re.search(r"(\d+(?:\.\d+)+)", path)
+    return tuple(int(part) for part in match.group(1).split(".")) if match else ()
+
+
+def resolve_node():
+    """Return (binary, reason) for a runtime that can run the lane reader.
+
+    FM_CREW_BOARD_NODE names one explicitly, exactly like FM_TEST_NODE does for
+    the suite; it is probed once and never falls back to a different runtime.
+    """
+    override = os.environ.get("FM_CREW_BOARD_NODE", "").strip()
+    candidates = [override] if override else node_candidates()
+    reason = ""
+    for candidate in candidates:
+        if not override and not os.access(candidate, os.X_OK):
+            continue
+        version, error = node_probe(candidate)
+        if version is None:
+            reason = reason or error
+            continue
+        if version[:2] >= NODE_MIN:
+            return candidate, ""
+        reason = reason or (f"{candidate} reports Node {version_text(version)}, "
+                            f"older than {NODE_MIN_TEXT}")
+    if override:
+        return None, reason or f"{override} could not be probed"
+    return None, reason or (f"no Node {NODE_MIN_TEXT} or newer was found on PATH or in any known "
+                            "install root")
+
+
+def playbot_workers():
+    """Return (lane rows, reason the lane read could not answer)."""
+    binary, reason = resolve_node()
+    if binary is None:
+        return [], reason
+    try:
+        run = subprocess.run([binary, "--no-warnings", str(SCRIPT_DIR / "fm-playbot-lanes.mjs"),
                               "board-lanes", str(STATE)], capture_output=True, text=True,
                              timeout=1.5, check=False)
-        if run.returncode == 0:
-            rows = json.loads(run.stdout)
-            return rows if isinstance(rows, list) else []
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        pass
-    return []
+    except subprocess.TimeoutExpired:
+        return [], f"{binary} board-lanes did not answer within 1.5s"
+    except OSError as error:
+        return [], f"{binary} board-lanes could not run: {error}"
+    if run.returncode:
+        return [], f"{binary} board-lanes exited {run.returncode}"
+    try:
+        rows = json.loads(run.stdout)
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        return [], f"{binary} board-lanes printed no lane list"
+    return rows, ""
 
 
 def phone_queue_root():
@@ -976,6 +1067,7 @@ def project(snapshot):
     cache = source_cache()
     now = time.time()
     phones = phone_entries(cache)
+    lanes, playbot_failure = playbot_workers()
     phone_activity(phones, task_worktrees(snapshot), now, task_titles(snapshot))
     allowance = allowance_entries(cache)
     resources = {}
@@ -988,13 +1080,16 @@ def project(snapshot):
         "next": queued["items"] if queued else [],
         "source": "fm-tasks-axi.sh" if queued and in_flight else "unavailable",
     }
+    alerts = alert_entries(snapshot, cache, phones, allowance)
+    if playbot_failure:
+        alerts.append(item("Playbot check unavailable", playbot_failure, "unavailable", alert=True))
     return {
-        "alerts": alert_entries(snapshot, cache, phones, allowance),
+        "alerts": alerts,
         "full_questions": question_entries(DATA / "captain-questions.md"),
         "full_backlog": full_backlog(),
         "ready": ready_entries(snapshot) + entries(cache, "ready"),
         "phones": phones,
-        "playbot_workers": playbot_workers(),
+        "playbot_workers": lanes,
         "test_queue": tests,
         "worker_tags": worker_tags(snapshot, resources),
         "landings": landed_today(snapshot) + entries(cache, "landings"),

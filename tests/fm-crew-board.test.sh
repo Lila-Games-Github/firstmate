@@ -37,9 +37,9 @@ EOF
 run_board() {
   local home=$1
   shift
-  FM_CREW_BOARD_PHONE_QUEUE_ROOT="${FM_CREW_BOARD_PHONE_QUEUE_ROOT:-$home/locks}" \
-    FROGPILE_SUITE_LOCK="${FROGPILE_SUITE_LOCK:-$home/locks/frogpile-suite.lock}" \
-    FROGPILE_SUITE_LOCK_HOLDER="${FROGPILE_SUITE_LOCK_HOLDER:-$home/locks/suite.holder}" \
+  FM_CREW_BOARD_PHONE_QUEUE_ROOT="$home/locks" \
+    FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" \
+    FROGPILE_SUITE_LOCK_HOLDER="$home/locks/suite.holder" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$BOARD" "$@"
 }
 
@@ -52,6 +52,22 @@ run_panels() {
 
 # Starts a sleeping process whose working directory is $1 and prints its pid.
 sleeper_in() { (cd "$1" && exec sleep 60) >/dev/null 2>&1 & printf '%s\n' "$!"; }
+
+# A PATH holding the tools the board needs and provably no adb, so binary
+# resolution is controlled rather than ambient.
+tool_path() {  # <dir>
+  local dir=$1 tool resolved
+  mkdir -p "$dir"
+  for tool in awk bash basename cat chmod cp cut date dirname env expr find grep head id jq \
+    kill ln mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sleep sort stat tail \
+    timeout touch tr uname wc xargs
+  do
+    resolved=$(command -v "$tool" 2>/dev/null) || continue
+    case "$resolved" in /*) ;; *) continue ;; esac
+    ln -sfn "$resolved" "$dir/$tool"
+  done
+  printf '%s\n' "$dir"
+}
 
 row_field() { jq -r --arg id "$2" --arg f "$3" '.rows[] | select(.id == $id) | .[$f]' "$1/state/crew-board.json"; }
 set_mtime() { perl -e 'utime($ARGV[0], $ARGV[0], $ARGV[1]) or exit 1' "$1" "$2"; }
@@ -275,9 +291,10 @@ EOF
 }
 
 test_phone_adb_fallbacks() {
-  local home stub
+  local home stub tools
   home=$(make_home phone_fallbacks)
   stub="$home/stub-bin"
+  tools=$(tool_path "$home/tools-bin")
   mkdir -p "$stub" "$home/nohome" "$home/sdk/platform-tools" "$home/sdkroot/platform-tools" \
     "$home/sdkhome/Android/Sdk/platform-tools" "$home/brew/bin"
   write_adb() {
@@ -289,19 +306,19 @@ test_phone_adb_fallbacks() {
   write_adb "$home/sdkroot/platform-tools/adb" serial-android-sdk-root
   write_adb "$home/sdkhome/Android/Sdk/platform-tools/adb" serial-home-sdk
   write_adb "$home/brew/bin/adb" serial-brew
-  PATH="$stub:/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
+  PATH="$stub:$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
     run_board "$home" refresh >/dev/null || fail "PATH adb refresh failed"
   assert_equals 'serial-path' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb on PATH"
-  PATH="/usr/bin:/bin" ANDROID_HOME="$home/sdk" ANDROID_SDK_ROOT="$home/sdkroot" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
+  PATH="$tools" ANDROID_HOME="$home/sdk" ANDROID_SDK_ROOT="$home/sdkroot" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
     run_board "$home" refresh >/dev/null || fail "ANDROID_HOME adb refresh failed"
   assert_equals 'serial-android-home' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under ANDROID_HOME"
-  PATH="/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/sdkroot" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
+  PATH="$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/sdkroot" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
     run_board "$home" refresh >/dev/null || fail "ANDROID_SDK_ROOT adb refresh failed"
   assert_equals 'serial-android-sdk-root' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under ANDROID_SDK_ROOT"
-  PATH="/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/sdkhome" HOMEBREW_PREFIX="$home/nohome" \
+  PATH="$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/sdkhome" HOMEBREW_PREFIX="$home/nohome" \
     run_board "$home" refresh >/dev/null || fail "HOME SDK adb refresh failed"
   assert_equals 'serial-home-sdk' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under the home Android SDK"
-  PATH="/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/brew" \
+  PATH="$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/brew" \
     run_board "$home" refresh >/dev/null || fail "Linuxbrew adb refresh failed"
   assert_equals 'serial-brew' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb in Linuxbrew"
   assert_equals 'device' "$(jq -r '.panels.phones[0].adb' "$home/state/crew-board.json")" "fallback adb reports a device"
@@ -309,11 +326,12 @@ test_phone_adb_fallbacks() {
 }
 
 test_phone_check_unavailable() {
-  local home stub
+  local home stub tools
   home=$(make_home phone_unavailable)
   stub="$home/stub-bin"
+  tools=$(tool_path "$home/tools-bin")
   mkdir -p "$stub" "$home/nohome"
-  PATH="/usr/bin:/bin" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
+  PATH="$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
     run_board "$home" refresh >/dev/null || fail "unresolvable adb refresh failed"
   assert_equals 1 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "one row when adb cannot be found"
   assert_equals 'Phone check' "$(jq -r '.panels.phones[0].title' "$home/state/crew-board.json")" "unanswered check row"
@@ -324,19 +342,19 @@ test_phone_check_unavailable() {
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone check")] | length' "$home/state/crew-board.json")" "unanswered check reaches ALERTS"
   printf '#!/usr/bin/env bash\nexit 3\n' > "$stub/adb"
   chmod +x "$stub/adb"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "failing adb refresh failed"
+  PATH="$stub:$tools" run_board "$home" refresh >/dev/null || fail "failing adb refresh failed"
   assert_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'exited 3' "failed adb reason"
   assert_equals 'unavailable' "$(jq -r '.panels.phones[0].adb' "$home/state/crew-board.json")" "failed adb row"
   printf '#!/usr/bin/env bash\nsleep 6\n' > "$stub/adb"
   chmod +x "$stub/adb"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "hanging adb refresh failed"
+  PATH="$stub:$tools" run_board "$home" refresh >/dev/null || fail "hanging adb refresh failed"
   assert_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'did not answer within 2s' "timed-out adb reason"
   cat > "$stub/adb" <<'EOF'
 #!/usr/bin/env bash
 printf 'List of devices attached\n'
 EOF
   chmod +x "$stub/adb"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "empty adb refresh failed"
+  PATH="$stub:$tools" run_board "$home" refresh >/dev/null || fail "empty adb refresh failed"
   assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "adb that answers with no devices"
   pass "an unanswered phone check alerts with its reason instead of claiming no phones"
 }
@@ -553,6 +571,42 @@ PY
     "$(jq -r '[.rows[] | select(.id | startswith("lane-")) | .id] | join("|")' "$home/state/crew-board.json")" \
     "lane rows keep one id order however the state directory lists them"
   pass "armed live Playbot lanes join ordinary workers, and a parked one waits on the captain instead of vanishing"
+}
+
+test_playbot_check_unavailable() {
+  local home stub
+  home=$(make_home playbot_unavailable)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/node-old" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = '-p' ]; then printf '20.11.0\n'; exit 0; fi
+exit 0
+EOF
+  cat > "$stub/node-hanging" <<'EOF'
+#!/usr/bin/env bash
+sleep 6
+EOF
+  cat > "$stub/node-broken" <<'EOF'
+#!/usr/bin/env bash
+exit 4
+EOF
+  chmod +x "$stub/node-old" "$stub/node-hanging" "$stub/node-broken"
+  FM_CREW_BOARD_NODE="$stub/node-old" run_board "$home" refresh >/dev/null || fail "old node refresh failed"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Playbot check unavailable")] | length' "$home/state/crew-board.json")" \
+    "an old lane runtime alerts exactly once"
+  assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Playbot check unavailable") | .detail' "$home/state/crew-board.json")" \
+    'older than 22.5' "old lane runtime reason"
+  assert_equals 'unavailable' "$(jq -r '.panels.alerts[] | select(.title == "Playbot check unavailable") | .status' "$home/state/crew-board.json")" \
+    "unanswered lane read state"
+  assert_equals 0 "$(jq '.panels.playbot_workers | length' "$home/state/crew-board.json")" "an old lane runtime lists no lanes"
+  FM_CREW_BOARD_NODE="$stub/node-broken" run_board "$home" refresh >/dev/null || fail "broken node refresh failed"
+  assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Playbot check unavailable") | .detail' "$home/state/crew-board.json")" \
+    'did not report a Node version' "broken lane runtime reason"
+  FM_CREW_BOARD_NODE="$stub/node-hanging" run_board "$home" refresh >/dev/null || fail "hanging node refresh failed"
+  assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Playbot check unavailable") | .detail' "$home/state/crew-board.json")" \
+    'did not answer within 2s' "unanswered lane runtime reason"
+  pass "an unusable Playbot lane runtime alerts with its reason instead of listing no lanes"
 }
 
 test_questions_without_headings() {
@@ -964,6 +1018,7 @@ test_quota_check_unavailable
 test_allowance_sampler_stops_with_its_board
 test_quota_unresolved_limiting_window
 test_playbot_lane_projection
+test_playbot_check_unavailable
 test_full_questions_and_backlog
 test_backlog_counts_from_a_capped_listing
 test_phone_testing_and_test_queue
