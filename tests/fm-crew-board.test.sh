@@ -904,7 +904,7 @@ test_worker_tags_name_the_state() {
      backlog: {hold_kind: "captain", hold_reason: "WA. five calls"}},
     {id: "named", phase: {name: "building", note: "art-requirements.html - final review"},
      hints: {open_decisions: [{key: "wave-advance-rulings", verb: "needs-decision", summary: "x"}]}, backlog: {}},
-    {id: "files", phase: {name: "testing", note: "SUITE ./tests/a.sh 5 awaiting product-owner"}},
+    {id: "files", phase: {name: "testing", note: "./tests/a.sh 5 awaiting product-owner"}},
     {id: "stuck", phase: {name: "blocked", note: "blocked: no device"}, current_state: {state: "blocked"}},
     {id: "phone", phase: {name: "testing", note: ""}, current_state: {state: "paused", detail: "waiting for the phone to free up"}},
     {id: "plain", phase: {name: "testing", note: ""}, current_state: {state: "paused", detail: "upstream release"}},
