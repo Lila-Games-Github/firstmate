@@ -178,7 +178,7 @@ EOF
   Blocks the Android build.
 EOF
   cat > "$home/data/crew-board-cache.json" <<'EOF'
-{"schema":"fm-crew-board-cache.v1","observed_at":"2026-10-21T06:00:00Z","phones":[{"title":"S22","status":"locked","detail":"held by alpha"}],"bugs":[{"title":"Rocketboard login bug","status":"in progress"}],"allowance":[{"title":"Claude","status":"45% remaining"}],"routines":[{"title":"Tip health","status":"green"}]}
+{"schema":"fm-crew-board-cache.v1","observed_at":"2026-10-21T06:00:00Z","phones":[{"title":"S22","status":"locked","detail":"held by alpha"}],"bugs":[{"title":"Rocketboard login bug","status":"in progress"},{"title":"Combat round visuals","status":"with QA"},{"title":"Pond upgrade","status":"In QA"},{"title":"Lobby crash","status":"QA failed"},{"title":"Shop prices","status":"failed QA"},{"title":"Map seam","status":"back from QA - reopened"}],"allowance":[{"title":"Claude","status":"45% remaining"}],"routines":[{"title":"Tip health","status":"green"}]}
 EOF
   PATH="$stub:$PATH" run_board "$home" refresh >/dev/null || fail "panel refresh failed"
   assert_equals 1 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "question count"
@@ -186,6 +186,7 @@ EOF
   assert_equals 1 "$(jq '[.panels.phones[] | select(.title == "S22")] | length' "$home/state/crew-board.json")" "phone cache"
   assert_equals 2 "$(jq '.panels.backlog.in_flight' "$home/state/crew-board.json")" "in-flight count from tasks-axi"
   assert_equals 'Rocketboard login bug' "$(jq -r '.panels.bugs[0].title' "$home/state/crew-board.json")" "bug cache"
+  assert_equals 'Rocketboard login bug|Lobby crash|Shop prices|Map seam' "$(jq -r '[.panels.bugs[].title] | join("|")' "$home/state/crew-board.json")" "only bugs with or in QA are left out"
   install_dir="$home/local-bin"
   "$ROOT/bin/fm-install-firstmate-cli.sh" "$install_dir" >/dev/null || fail "launcher install failed"
   assert_equals "$(cd "$ROOT/bin" && pwd -P)/firstmate" "$(readlink "$install_dir/firstmate")" "launcher target"
@@ -1017,6 +1018,9 @@ EOF
 - [ ] delta - Ship patch (repo: widget) (kind: ship) (since 2026-10-21) (hold: waiting on store review) (hold-kind: external) (hold-until: 2026-12-01)
   Store review usually takes two days.
 
+- [ ] eps - Wait for art (repo: widget) (kind: captain) (since 2026-10-21) (hold: waiting on the art drop) (hold-kind: external)
+  Art team delivers Friday.
+
 ## Queued
 
 - [ ] gamma - Write tests (repo: gadget) (kind: ship)
@@ -1031,7 +1035,7 @@ EOF
   assert_contains "$(jq -r '.panels.full_questions[1].detail' "$home/state/crew-board.json")" \
     'The Android build is waiting.' 'full question text'
   assert_equals 4 "$(jq '[.panels.full_questions[] | select(.status != "section")] | length' "$home/state/crew-board.json")" 'question rows beside their section headings'
-  assert_equals 8 "$(jq '.panels.full_backlog | length' "$home/state/crew-board.json")" 'backlog groups and items'
+  assert_equals 9 "$(jq '.panels.full_backlog | length' "$home/state/crew-board.json")" 'backlog groups and items'
   assert_equals 'Held for the captain' \
     "$(jq -r '.panels.full_backlog[2].title' "$home/state/crew-board.json")" 'captain hold section'
   assert_contains "$(jq -r '.panels.full_backlog[3].title' "$home/state/crew-board.json")" \
@@ -1040,14 +1044,18 @@ EOF
     'Release A is stable; B has the new screen.' 'full backlog note'
   assert_not_contains "$(jq -r '.panels.full_backlog[3].title' "$home/state/crew-board.json")" \
     'beta' 'backlog title leaked its task id'
-  assert_equals 'Held (other)' \
+  assert_equals 'Waiting on others' \
     "$(jq -r '.panels.full_backlog[4].title' "$home/state/crew-board.json")" 'other hold section'
+  assert_equals 'Wait for art [widget] - waiting on the art drop' \
+    "$(jq -r '.panels.full_backlog[] | select(.title | startswith("Wait for art")) | .title' "$home/state/crew-board.json")" 'hold kind, not task kind, picks the group'
+  assert_equals 'Waiting on others' \
+    "$(jq -r '[.panels.full_backlog[] | select(.status == "section" or (.title | startswith("Wait for art")))][2].title' "$home/state/crew-board.json")" 'external hold stays out of the captain group'
   assert_contains "$(jq -r '.panels.full_backlog[5].title' "$home/state/crew-board.json")" \
     'waiting on store review' 'visible non-captain hold reason'
   assert_contains "$(jq -r '.panels.full_backlog[5].detail' "$home/state/crew-board.json")" \
     'Held until: 2026-12-01' 'non-captain hold until-date'
   assert_equals 'Queued' \
-    "$(jq -r '.panels.full_backlog[6].title' "$home/state/crew-board.json")" 'queued section after holds'
+    "$(jq -r '.panels.full_backlog[7].title' "$home/state/crew-board.json")" 'queued section after holds'
   pass 'full questions and backlog parsers retain grouped entries, hold reasons, and notes'
 }
 

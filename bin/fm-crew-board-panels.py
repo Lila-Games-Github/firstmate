@@ -182,13 +182,14 @@ def full_backlog():
     queued = tasks_axi_full("queued")
     if in_flight is None or held is None or queued is None:
         return [item("Backlog unavailable", "Could not read bin/fm-tasks-axi.sh", "error")]
+    # "kind" here is the hold's own kind (hold_kind), not the task kind.
     captain_held = [task for task in held if task["kind"] == "captain"]
     other_held = [task for task in held if task["kind"] != "captain"]
     held_ids = {task["id"] for task in held}
     groups = [
         ("In flight", [task for task in in_flight if task["id"] not in held_ids]),
         ("Held for the captain", captain_held),
-        ("Held (other)", other_held),
+        ("Waiting on others", other_held),
         ("Queued", [task for task in queued if task["id"] not in held_ids]),
     ]
     rows = []
@@ -198,7 +199,7 @@ def full_backlog():
             title = f"{task['title']} [{task['repo']}]" if task["repo"] not in ("", "-") else task["title"]
             if heading == "Held for the captain" and task["reason"]:
                 title += f" - {task['reason']}"
-            elif heading == "Held (other)":
+            elif heading == "Waiting on others":
                 hold = task["reason"] or (f"until {task['until']}" if task["until"] else "")
                 if hold:
                     title += f" - {hold}"
@@ -234,6 +235,12 @@ def entries(cache, key):
                              str(entry.get("status", "")), str(entry.get("link", "")),
                              bool(entry.get("alert", False)), str(entry.get("id", ""))))
     return rows
+
+
+def open_bugs(cache):
+    """Rocketboard bugs still needing work; cards the QA team owns are left out."""
+    return [row for row in entries(cache, "bugs")
+            if not re.match(r"\s*(with|in)\s+QA\b", row.get("status", ""), re.I)]
 
 
 def homebrew_binary(name):
@@ -1214,7 +1221,7 @@ def project(snapshot):
         "landings": landed_today(snapshot) + entries(cache, "landings"),
         "builds": entries(cache, "builds"),
         "routines": daily_routines(now) + entries(cache, "routines"),
-        "bugs": entries(cache, "bugs"),
+        "bugs": open_bugs(cache),
         "backlog": backlog,
         "allowance": allowance,
         "cached_at": str(cache.get("observed_at", "")),
