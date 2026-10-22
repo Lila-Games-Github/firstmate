@@ -11,7 +11,7 @@
 # into this home's private state/ directory when sources change and runs it.
 # bin/firstmate is the one-word launcher; bin/fm-install-firstmate-cli.sh adds
 # that launcher to PATH without replacing an unrelated executable.
-# In the TUI, 1/2/3/4 switch NOW/TESTING/PLANNING/QUESTIONS, j/k move
+# In the TUI, 1/2/3/4 switch NOW/PLANNING/QUESTIONS/TESTING, j/k move
 # rows only within the focused panel, skipping section headings, h/l step
 # through every page's sub-tabs, including empty panels,
 # Tab/Shift-Tab cycle panels, gg/G and Ctrl-u/Ctrl-d jump within a panel, Enter/o expands a row,
