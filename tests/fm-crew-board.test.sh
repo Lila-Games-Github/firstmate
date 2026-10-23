@@ -854,6 +854,146 @@ EOF
   pass 'daily routines come from registered checks and their last-run markers'
 }
 
+test_alert_rows_for_real_issues() {
+  local home snapshot stub out waiter holder
+  home=$(make_home real_alerts)
+  mkdir -p "$home/locks" "$home/wt-alpha"
+  snapshot="$home/snapshot.json"
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  printf '#!/usr/bin/env bash\nprintf "List of devices attached\\nserial-a device model:Pixel_8\\n"\n' > "$stub/adb"
+  chmod +x "$stub/adb"
+  touch "$home/state/.last-watcher-beat"
+  # Pin the Claude auto-arm model, where a fresh beat is healthy, so the quiet
+  # baseline does not depend on which harness the suite itself runs under.
+  alerts() {
+    FM_SUPERVISION_MODEL=autoarm PATH="$stub:$PATH" run_panels "$home" "$snapshot" | jq -r "$1"
+  }
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
+  assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'no alerts when nothing is wrong'
+
+  printf 'window=default:w1:p1\n' >> "$home/state/alpha.meta"
+  printf 'window=default:w2:p2\n' >> "$home/state/beta.meta"
+  printf '2' > "$home/state/.wedge-escalations-default_w1_p1"
+  touch "$home/state/.dead-reported-default_w2_p2"
+  fm_touch_epoch "$(( $(date +%s) - 600 ))" "$home/state/alpha.status" "$home/state/.wedge-escalations-default_w1_p1"
+  cat > "$snapshot" <<'EOF'
+{"schema":"fm-fleet-snapshot.v1","tasks":[
+ {"id":"alpha","phase":{"name":"failed","note":"build crashed"}},
+ {"id":"beta","phase":{"name":"working","note":"fine"}},
+ {"id":"gamma","phase":{"name":"working"},"current_state":{"state":"working","detail":"API Error: 529 overloaded_error"}},
+ {"id":"delta","phase":{"name":"working"},"current_state":{"state":"done","detail":"API error fixed"}},
+ {"id":"epsilon","phase":{"name":"working"},"current_state":{"state":"working","detail":"Adding rate-limit middleware; handle connection error retries and network error toasts"}}]}
+EOF
+  out=$(alerts '[.alerts[] | .nid + " :: " + .title] | join("\n")')
+  assert_contains "$out" 'failed:alpha :: alpha: failed' 'failed worker row'
+  assert_contains "$out" 'stuck:alpha :: alpha: not responding' 'worker the watcher escalated as idle reads as stuck'
+  assert_contains "$out" 'stopped:beta :: beta: stopped' 'worker whose agent is gone reads as stopped'
+  assert_contains "$out" 'api-error:gamma :: gamma: API or network error' 'worker reporting an API error'
+  assert_not_contains "$out" 'delta' 'a finished worker is not an API error alert'
+  assert_not_contains "$out" 'epsilon' 'a task about networking topics is not an API error alert'
+  out=$(alerts '.alerts[] | select(.nid == "failed:alpha") | .detail')
+  assert_contains "$out" 'Since 10 minutes ago.' 'failed row says since when'
+  assert_contains "$out" 'stopped until it is dealt with' 'failed row says the consequence'
+  assert_contains "$out" 'Ask firstmate' 'failed row says the one action'
+  out=$(alerts '.alerts[] | select(.nid == "stuck:alpha") | .detail')
+  assert_contains "$out" 'Since 10 minutes ago.' 'stuck row says since when'
+  fm_touch_epoch "$(( $(date +%s) - 60 ))" "$home/state/.dead-reported-default_w2_p2"
+  touch "$home/state/beta.status"
+  assert_not_contains "$(alerts '[.alerts[].nid] | join("|")')" 'stopped:beta' 'a worker that reported after its dead marker is not stopped'
+
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
+  rm -f "$home/state/.wedge-escalations-default_w1_p1" "$home/state/.dead-reported-default_w2_p2"
+  printf '{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-b","title":"Galaxy S22"}]}\n' > "$home/data/crew-board-cache.json"
+  out=$(alerts '.alerts[] | select(.nid | startswith("phone-offline")) | .title + " :: " + .detail')
+  assert_contains "$out" 'Phone Galaxy S22 not connected :: adb does not list this registered phone.' 'registered phone that adb does not list'
+  assert_contains "$out" 'Plug it in' 'phone row says the action'
+  printf '{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-a","title":"Pixel 8"}]}\n' > "$home/data/crew-board-cache.json"
+  assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'a connected registered phone is no alert'
+  rm -f "$home/data/crew-board-cache.json"
+
+  printf '## Your decisions\n' > "$home/data/captain-questions.md"
+  assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'a register with only a heading is no alert'
+  printf '## For widget\n\n**A. Which release?** Pick one.\n\n## For gadget\n\n**B. Which store?** Pick one for the release.\n' > "$home/data/captain-questions.md"
+  out=$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .title + " :: " + .detail] | join("")')
+  assert_contains "$out" '2 decisions waiting on you :: 2 open questions are waiting for your answer.' 'one summary row for open decisions'
+  assert_contains "$out" 'Open the Questions page' 'decisions row says the action'
+  assert_equals 1 "$(alerts '[.alerts[] | select(.nid | startswith("decisions"))] | length')" 'decisions stay one row'
+  assert_not_contains "$out" 'Since' 'no since clause without a hold tied to a question'
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[],"backlog":{"records":[
+ {"id":"prev","state":"queued","hold_kind":"captain","hold_reason":"preview the new build","hold_set":"%s"},
+ {"id":"rel","state":"queued","hold_kind":"captain","hold_reason":"A. pick the release","hold_set":"%s"}]}}\n' \
+    "$(date -u -d '-3 days' +%Y-%m-%dT%H:%M:%S)" "$(date -u -d '-2 hours' +%Y-%m-%dT%H:%M:%S)" > "$snapshot"
+  out=$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .detail] | join("")')
+  assert_contains "$out" 'Since 2 hours ago.' 'since comes from the hold tied to a listed question, not an unrelated preview hold'
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[],"backlog":{"records":[
+ {"id":"rel","state":"queued","hold_kind":"captain","hold_reason":"pick it","hold_set":"%s"}]}}\n' \
+    "$(date -u -d '-3 days' +%Y-%m-%dT%H:%M:%S)" > "$snapshot"
+  assert_not_contains "$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .detail] | join("")')" 'Since' \
+    'a hold whose id only appears inside a word of a question is not tied to it'
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
+  rm -f "$home/data/captain-questions.md"
+
+  if command -v flock >/dev/null 2>&1 && [ -r /proc/locks ]; then
+    : > "$home/locks/frogpile-suite.lock"
+    flock "$home/locks/frogpile-suite.lock" sleep 30 >/dev/null 2>&1 &
+    holder=$!
+    sleep 0.3
+    (cd "$home/wt-alpha" && exec flock "$home/locks/frogpile-suite.lock" true) >/dev/null 2>&1 &
+    waiter=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do lock_waits "$waiter" && break; sleep 0.1; done
+    if lock_waits "$waiter"; then
+      assert_equals '' "$(FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" alerts '[.alerts[].title] | join("|")')" 'a suite wait under 30 minutes is no alert'
+      out=$(FM_CREW_BOARD_SUITE_WAIT_ALERT_SECS=0 FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" alerts '.alerts[] | select(.nid | startswith("suite-wait")) | .title + " :: " + .detail')
+      assert_contains "$out" 'waiting for the full test suite :: A full test run is queued behind another suite run.' 'suite wait over the limit'
+      assert_contains "$out" 'Ask firstmate to check whether the running suite is stuck.' 'suite row says the action'
+    fi
+    kill "$waiter" "$holder" 2>/dev/null
+  fi
+  pass 'real issues each get a plain-words alert row and a quiet board has none'
+}
+
+test_monitoring_alert_fires_only_when_down() {
+  local home snapshot out pid ident
+  home=$(make_home monitoring)
+  snapshot="$home/snapshot.json"
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
+  monitoring_alert() {
+    FM_SUPERVISION_MODEL=autoarm run_panels "$home" "$snapshot" \
+      | jq -r '[.alerts[] | select(.title | startswith("Monitoring")) | .title + " :: " + .detail] | join("|")'
+  }
+  fm_touch_epoch "$(( $(date +%s) - 100 ))" "$home/state/.last-watcher-beat"
+  assert_equals '' "$(monitoring_alert)" 'a beacon within the guard grace is not an alert'
+  fm_touch_epoch "$(( $(date +%s) - 400 ))" "$home/state/.last-watcher-beat"
+  pid=$(sleeper_in "$home")
+  ident=$(fm_test_pid_identity "$pid")
+  printf 'epoch=1 owner_pid=%s outcome=arming\n%s\n' "$pid" "$ident" > "$home/state/.claude-autoarm-epoch"
+  out=$(monitoring_alert)
+  kill "$pid" 2>/dev/null
+  assert_equals '' "$out" 'an open auto-arm claim during a turn is not an alert'
+  rm -f "$home/state/.claude-autoarm-epoch"
+  out=$(monitoring_alert)
+  assert_contains "$out" 'Monitoring down :: Monitoring has been down for 7 minutes.' 'down alert names how long'
+  assert_contains "$out" 'Workers keep running, but finished work, questions and failures will not be noticed until monitoring is back.' 'down alert names the consequence'
+  assert_contains "$out" 'Send any message to firstmate in its pane' 'down alert names the action'
+  assert_not_contains "$out" 'away mode' 'no away note outside away mode'
+  printf 'away\n' > "$home/state/.afk"
+  assert_contains "$(monitoring_alert)" 'away mode is on' 'away mode is named when relevant'
+  rm -f "$home/state/.afk" "$home/state/.last-watcher-beat"
+  out=$(monitoring_alert)
+  assert_contains "$out" 'Monitoring status unavailable :: No watcher heartbeat was found' 'unavailable case'
+  assert_contains "$out" 'Send any message to firstmate in its pane' 'unavailable case is actionable'
+  mkdir -p "$home/probe-less"
+  cp "$ROOT/bin/fm-crew-board-panels.py" "$home/probe-less/"
+  assert_equals 0 "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    python3 "$home/probe-less/fm-crew-board-panels.py" "$snapshot" \
+    | jq '[.alerts[] | select(.nid == "monitoring:status")] | length')" \
+    'a failed monitoring probe is not reported as a missing heartbeat'
+  rm -f "$home/state/alpha.meta" "$home/state/beta.meta"
+  assert_equals '' "$(monitoring_alert)" 'no alert when nothing needs supervision'
+  pass 'the monitoring alert fires only when monitoring is genuinely down and says what to do'
+}
+
 test_alerts_and_ready_from_real_state() {
   local home snapshot
   home=$(make_home alerts_ready)
@@ -1141,6 +1281,8 @@ test_phone_testing_and_test_queue
 test_suite_lock_probe
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
+test_alert_rows_for_real_issues
+test_monitoring_alert_fires_only_when_down
 test_worker_tags_from_live_evidence
 test_worker_tags_name_the_state
 test_worker_tags_flag_pr_waiting_for_merge

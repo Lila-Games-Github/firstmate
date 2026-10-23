@@ -70,6 +70,7 @@ type app struct {
 	replyTarget           *item
 	lastRects             []panelRect
 	slide, slideDirection int
+	seen                  map[string]string
 }
 
 func newApp(p paths, data board, feed []item) *app {
@@ -85,6 +86,7 @@ func newApp(p paths, data board, feed []item) *app {
 		paths: p, data: data, feed: feed, page: 0, focus: "workers",
 		selected: map[string]int{}, expanded: map[string]int{}, collapsed: map[string]bool{},
 		filters: map[string]string{}, peekText: map[string]string{}, scrollOffset: map[string]int{},
+		seen:  loadSeen(p.State),
 		input: input, filterInput: filter, spinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 	}
 }
@@ -281,7 +283,7 @@ func (m *app) alertCount(page int) int {
 	count := 0
 	for _, spec := range pages[page] {
 		for _, row := range m.rawItems(spec.id) {
-			if row.Alert {
+			if row.Alert && (spec.id != "alerts" || m.isNew(row)) {
 				count++
 			}
 		}
@@ -418,6 +420,15 @@ func (m *app) expandSelected() tea.Cmd {
 }
 
 func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	model, command := m.update(message)
+	switch message.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg:
+		m.markViewed()
+	}
+	return model, command
+}
+
+func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -444,6 +455,7 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = msg.err.Error()
 		} else {
 			m.data, m.feed = msg.data, msg.feed
+			m.pruneSeen()
 			for _, specs := range pages {
 				for _, spec := range specs {
 					index, ok := m.selected[spec.id]
