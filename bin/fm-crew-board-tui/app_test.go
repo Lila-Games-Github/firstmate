@@ -102,10 +102,13 @@ func TestAllPagesRenderLocalPanels(t *testing.T) {
 	}
 	press(m, key('2'))
 	view = m.View().Content
-	for _, value := range []string{"PLANNING", "ROCKETBOARD BUGS", "Rocketboard login", "AI ALLOWANCE", "Codex"} {
+	for _, value := range []string{"PLANNING", "BUGS", "Rocketboard login", "AI ALLOWANCE", "Codex"} {
 		if !strings.Contains(view, value) {
 			t.Errorf("PLANNING page missing %q", value)
 		}
+	}
+	if strings.Contains(view, "ROCKETBOARD BUGS") {
+		t.Fatal("PLANNING still shows the old bug sub-tab title")
 	}
 }
 

@@ -196,6 +196,38 @@ EOF
   pass "local panel cache, captain questions, tasks-axi backlog, and one-word launcher"
 }
 
+test_bugs_merge_and_empty_sources() {
+  local home snapshot panels
+  home=$(make_home bugs)
+  snapshot="$home/snapshot.json"
+  panels="$home/panels.json"
+  cat > "$home/data/crew-board-cache.json" <<'EOF'
+{"schema":"fm-crew-board-cache.v1","bugs":[{"id":"RB-7","title":"First card","status":"ready"},{"id":"RB-3","title":"QA card","status":"with QA"},{"id":"RB-2","title":"Second card","status":"QA failed"}]}
+EOF
+  cat > "$snapshot" <<'EOF'
+{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"owner-active"}],"backlog":{"records":[{"id":"owner-active","title":"Bug: rocks cover enemies","state":"in_flight","structured":true},{"id":"owner-queued","title":"bUg: eggs too small","state":"queued","structured":true},{"id":"owner-done","title":"Bug: frogs hit rocks","state":"done","structured":true},{"id":"feature","title":"Improve collision","state":"queued","structured":true},{"id":"unstructured","title":"Bug: ignored","state":"queued","structured":false}]}}
+EOF
+  run_panels "$home" "$snapshot" > "$panels" || fail 'merged bug projection failed'
+  assert_equals 'First card|Second card|Bug: rocks cover enemies|bUg: eggs too small|Bug: frogs hit rocks' \
+    "$(jq -r '[.bugs[].title] | join("|")' "$panels")" 'Rocketboard before owner bugs in source order'
+  assert_equals 'Rocketboard #RB-7 · ready|Rocketboard #RB-2 · QA failed|in progress · owner-active|queued|done recently' \
+    "$(jq -r '[.bugs[].status] | join("|")' "$panels")" 'source tag, card id, worker, and backlog state'
+  assert_equals 'owner-active|owner-queued|owner-done' \
+    "$(jq -r '.bugs[2:] | map(.id) | join("|")' "$panels")" 'owner backlog ids'
+  rm "$home/data/crew-board-cache.json"
+  run_panels "$home" "$snapshot" > "$panels" || fail 'owner-only bug projection failed'
+  assert_equals 3 "$(jq '.bugs | length' "$panels")" 'owner bugs without cache'
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[],"backlog":{"records":[]}}\n' > "$snapshot"
+  run_panels "$home" "$snapshot" > "$panels" || fail 'empty bug projection failed'
+  assert_equals 0 "$(jq '.bugs | length' "$panels")" 'no bugs from either source'
+  cat > "$home/data/crew-board-cache.json" <<'EOF'
+{"schema":"fm-crew-board-cache.v1","bugs":[{"id":"RB-9","title":"Only card"}]}
+EOF
+  run_panels "$home" "$snapshot" > "$panels" || fail 'cache-only bug projection failed'
+  assert_equals 'Rocketboard #RB-9' "$(jq -r '.bugs[0].status' "$panels")" 'cache only retains source tag'
+  pass 'bug panel merges sources, tags cards, preserves order, and handles empty sources'
+}
+
 test_local_phones_and_cache_overlay() {
   local home stub
   home=$(make_home phones)
@@ -399,7 +431,7 @@ test_quota_allowance_snapshot() {
   mkdir -p "$stub"
   source="$home/quota.json"
   cat > "$source" <<'EOF'
-{"providers":[{"provider":"claude","windows":[{"id":"seven_day","label":"week","resetsAt":"tomorrow"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":70,"limitingWindowIds":["seven_day"],"runway":{"status":"through_reset"}}]}},{"provider":"codex","windows":[{"id":"weekly","label":"week","resetsAt":"Friday"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":17,"limitingWindowIds":["weekly"],"runway":{"status":"projected_exhaustion"}}]}},{"provider":"openrouter","credits":{"remaining":27.3,"unit":"usd"},"quotaSemantics":{"effectiveAvailability":[]}},{"provider":"cursor","state":{"status":"auth_required"},"quotaSemantics":{"effectiveAvailability":[]}},{"provider":"copilot","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[]}}]}
+{"providers":[{"provider":"claude","windows":[{"id":"seven_day","label":"week","resetsAt":"2026-10-24T09:00:00Z"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":70,"limitingWindowIds":["seven_day"],"runway":{"status":"through_reset"}}]}},{"provider":"codex","windows":[{"id":"weekly","label":"week","resetsAt":"2026-10-25T00:30:00+02:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","effectivePercentRemaining":17,"limitingWindowIds":["weekly"],"runway":{"status":"projected_exhaustion"}}]}},{"provider":"openrouter","windows":[{"id":"credits","kind":"credits","resetsAt":"2026-10-26T20:00:00Z"}],"credits":{"remaining":27.3,"unit":"usd"},"quotaSemantics":{"effectiveAvailability":[]}},{"provider":"cursor","state":{"status":"auth_required"},"quotaSemantics":{"effectiveAvailability":[]}},{"provider":"copilot","state":{"status":"fresh"},"quotaSemantics":{"effectiveAvailability":[]}}]}
 EOF
   cat > "$stub/quota-axi" <<'EOF'
 #!/usr/bin/env bash
@@ -416,7 +448,9 @@ EOF
   assert_equals '2 hidden' "$(jq -r '.panels.allowance[] | select(.quota == "hidden") | .title' "$home/state/crew-board.json")" \
     "unused and unavailable providers share one quiet footnote"
   assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "codex") | .alert' "$home/state/crew-board.json")" "projected exhaustion alert"
-  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: tomorrow' "quota reset"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: 02:30:00 pm IST 24-10-26 (Sat)' "Claude reset in IST"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "codex") | .detail' "$home/state/crew-board.json")" 'reset: 04:00:00 am IST 25-10-26 (Sun)' "Codex reset in IST"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .detail' "$home/state/crew-board.json")" 'reset: 01:30:00 am IST 27-10-26 (Tue)' "OpenRouter reset in IST"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .status' "$home/state/crew-board.json")" '27.3 usd' "credit balance"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .detail' "$home/state/crew-board.json")" 'runway: unknown' "credit runway"
   assert_equals 0 "$(jq '[.panels.allowance[] | select(.title | test("cursor|copilot|Mistral"; "i"))] | length' "$home/state/crew-board.json")" \
@@ -427,7 +461,7 @@ EOF
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "allowance overlay refresh failed"
   assert_equals 4 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "cache did not restore unused providers"
   assert_equals 0 "$(jq '[.panels.allowance[] | select(.title == "Claude")] | length' "$home/state/crew-board.json")" "cached provider duplicate survived"
-  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: tomorrow' "live quota row lost to cache"
+  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: 02:30:00 pm IST 24-10-26 (Sat)' "live quota row lost to cache"
   assert_equals 0 "$(jq '[.panels.allowance[] | select(.title == "Mistral")] | length' "$home/state/crew-board.json")" "unused cache row hidden"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_FAIL=1 PATH="$stub:/usr/bin:/bin" \
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota failure crashed"
@@ -727,6 +761,7 @@ EOF
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota snapshot failed"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
   assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'limit: week, unknown' "unresolved limiting window"
+  assert_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'reset: unknown, unknown' "reset without timestamps remains unknown"
   assert_not_contains "$(jq -r '.panels.allowance[0].detail' "$home/state/crew-board.json")" 'None' "unresolved window rendered as None"
   pass "an unresolved limiting window reads unknown instead of None"
 }
@@ -1366,6 +1401,7 @@ test_tui_render_and_note
 test_narrow_terminal
 test_note_without_selection_and_point_without_text
 test_panel_projection_and_launcher
+test_bugs_merge_and_empty_sources
 test_local_phones_and_cache_overlay
 test_phone_connection_states
 test_phone_adb_fallbacks
