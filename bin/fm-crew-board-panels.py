@@ -969,9 +969,8 @@ def ready_entries(snapshot):
 
 SUITE_WAIT_ALERT_SECS = 1800
 API_ERROR = re.compile(
-    r"api error|overloaded|rate.?limit|econnreset|econnrefused|etimedout|enotfound|network error"
-    r"|unable to connect|connection (?:reset|refused|error|lost)|fetch failed|socket hang up",
-    re.IGNORECASE)
+    r"(?i:\bAPI Error:)|\b(?:overloaded|rate_limit|api|timeout)_error\b"
+    r"|\bE(?:CONNRESET|CONNREFUSED|TIMEDOUT|NOTFOUND)\b|\bsocket hang up\b")
 
 
 def alert_row(title, what, since, consequence, action, status="", item_id="", kind="", sig=""):
@@ -1022,9 +1021,11 @@ def stuck_worker_alert(task_id, now):
         return None
     dead = STATE / f".dead-reported-{key}"
     wedge = STATE / f".wedge-escalations-{key}"
-    if dead.exists():
+    dead_age = file_age(dead, now)
+    status_age = file_age(STATE / f"{task_id}.status", now)
+    if dead_age is not None and (status_age is None or status_age >= dead_age):
         return alert_row(f"{task_id}: stopped", "The worker's agent has exited or its pane is gone",
-                         file_age(dead, now), "Its work is not progressing.",
+                         dead_age, "Its work is not progressing.",
                          "Ask firstmate to recover the worker.", "stopped", task_id, "stopped", "dead")
     try:
         count = int(wedge.read_text(encoding="utf-8").strip() or "0")
@@ -1370,7 +1371,7 @@ def watcher_alert():
     verdict = watcher_verdict()
     state = verdict.get("state")
     afk = verdict.get("afk", "none")
-    if state == "unavailable" or not state:
+    if state == "unavailable":
         return item("Monitoring status unavailable",
                     "No watcher heartbeat was found, so it is unknown whether finished work, "
                     "questions and failures are being noticed. " + monitoring_action(afk), alert=True,

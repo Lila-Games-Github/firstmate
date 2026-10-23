@@ -880,7 +880,8 @@ test_alert_rows_for_real_issues() {
  {"id":"alpha","phase":{"name":"failed","note":"build crashed"}},
  {"id":"beta","phase":{"name":"working","note":"fine"}},
  {"id":"gamma","phase":{"name":"working"},"current_state":{"state":"working","detail":"API Error: 529 overloaded_error"}},
- {"id":"delta","phase":{"name":"working"},"current_state":{"state":"done","detail":"API error fixed"}}]}
+ {"id":"delta","phase":{"name":"working"},"current_state":{"state":"done","detail":"API error fixed"}},
+ {"id":"epsilon","phase":{"name":"working"},"current_state":{"state":"working","detail":"Adding rate-limit middleware; handle connection error retries and network error toasts"}}]}
 EOF
   out=$(alerts '[.alerts[] | .nid + " :: " + .title] | join("\n")')
   assert_contains "$out" 'failed:alpha :: alpha: failed' 'failed worker row'
@@ -888,12 +889,16 @@ EOF
   assert_contains "$out" 'stopped:beta :: beta: stopped' 'worker whose agent is gone reads as stopped'
   assert_contains "$out" 'api-error:gamma :: gamma: API or network error' 'worker reporting an API error'
   assert_not_contains "$out" 'delta' 'a finished worker is not an API error alert'
+  assert_not_contains "$out" 'epsilon' 'a task about networking topics is not an API error alert'
   out=$(alerts '.alerts[] | select(.nid == "failed:alpha") | .detail')
   assert_contains "$out" 'Since 10 minutes ago.' 'failed row says since when'
   assert_contains "$out" 'stopped until it is dealt with' 'failed row says the consequence'
   assert_contains "$out" 'Ask firstmate' 'failed row says the one action'
   out=$(alerts '.alerts[] | select(.nid == "stuck:alpha") | .detail')
   assert_contains "$out" 'Since 10 minutes ago.' 'stuck row says since when'
+  fm_touch_epoch "$(( $(date +%s) - 60 ))" "$home/state/.dead-reported-default_w2_p2"
+  touch "$home/state/beta.status"
+  assert_not_contains "$(alerts '[.alerts[].nid] | join("|")')" 'stopped:beta' 'a worker that reported after its dead marker is not stopped'
 
   printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
   rm -f "$home/state/.wedge-escalations-default_w1_p1" "$home/state/.dead-reported-default_w2_p2"
@@ -961,6 +966,12 @@ test_monitoring_alert_fires_only_when_down() {
   out=$(monitoring_alert)
   assert_contains "$out" 'Monitoring status unavailable :: No watcher heartbeat was found' 'unavailable case'
   assert_contains "$out" 'Send any message to firstmate in its pane' 'unavailable case is actionable'
+  mkdir -p "$home/probe-less"
+  cp "$ROOT/bin/fm-crew-board-panels.py" "$home/probe-less/"
+  assert_equals 0 "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    python3 "$home/probe-less/fm-crew-board-panels.py" "$snapshot" \
+    | jq '[.alerts[] | select(.nid == "monitoring:status")] | length')" \
+    'a failed monitoring probe is not reported as a missing heartbeat'
   rm -f "$home/state/alpha.meta" "$home/state/beta.meta"
   assert_equals '' "$(monitoring_alert)" 'no alert when nothing needs supervision'
   pass 'the monitoring alert fires only when monitoring is genuinely down and says what to do'
