@@ -1655,12 +1655,36 @@ test_open_question_check_ignores_lines_outside_section() {
   pass "fm_oq_brief_check reads only the dependency section"
 }
 
+test_frogpile_ship_receipt_guidance() {
+  local home id brief receipt out status
+  home="$TMP_ROOT/frogpile-receipt-home"
+  id=frogpile-receipt
+  mkdir -p "$home/data"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" frogpile --mode local-only --green-final-head 2>&1); status=$?
+  expect_code 0 "$status" "FrogPile ship brief failed: $out"
+  brief="$home/data/$id/brief.md"
+  receipt="$home/data/$id/suite.receipt"
+  python3 - "$brief" "$receipt" <<'PY'
+from pathlib import Path
+import sys
+brief = Path(sys.argv[1]).read_text()
+receipt = sys.argv[2]
+assert f"--receipt '{receipt}'" in brief
+assert f"automatically writes `{receipt}`" in brief
+assert "schema=fm-full-suite.v1\nsha=<full tested SHA>\nfailures=0\n" in brief
+assert "--device-gate any" in brief
+assert "full-suite.receipt" not in brief
+PY
+  pass "fm-brief.sh: FrogPile ship guidance names the automatic exact-SHA suite receipt"
+}
+
 
 test_recorded_direct_pr_base
 test_recorded_no_mistakes_target
 test_open_question_dependencies_gate_dispatch
 test_registry_declared_register_scaffolds_section
 test_open_question_check_ignores_lines_outside_section
+test_frogpile_ship_receipt_guidance
 test_no_mistakes_target_metacharacter_branch
 test_worker_role_scope
 test_phase_protocol_reaches_ship_and_scout_briefs

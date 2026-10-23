@@ -27,10 +27,12 @@ The M31 remains explicitly addressable for performance requests.
 The example is configuration, not a second copy of the suite or phone queue.
 
 A worker can submit the exact committed head, wait for its result, and hand the success record to `fm-merge-local.sh --receipt`:
+For a dispatched FrogPile ship task, use the exact `data/<task-id>/suite.receipt` path printed in its brief; the service creates that receipt on success.
 
 ```sh
+task_id=frogpile-example
 sha=$(git rev-parse HEAD)
-request=$(bin/fm-test-service.py submit frogpile "$PWD" "$sha" --suite --device-gate any --receipt "$PWD/full-suite.receipt")
+request=$(bin/fm-test-service.py submit frogpile "$PWD" "$sha" --suite --device-gate any --receipt "$FM_HOME/data/$task_id/suite.receipt")
 bin/fm-test-service.py wait "$request"
 ```
 
