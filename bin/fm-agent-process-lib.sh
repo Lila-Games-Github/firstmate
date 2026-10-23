@@ -109,3 +109,83 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     printf 'other'
   fi
 }
+
+# fm_agent_process_tree: <root-pid> and every process descended from it, read
+# from <ps-rows> (`ps -axo pid=,ppid=,comm=` output), as "<pid>\t<comm>" lines
+# in breadth-first order - the root first when the table holds it, then its
+# children, then theirs. The comm field is kept whole, so an executable path
+# with spaces in it (the macOS `/Library/Application Support/...` shape) is
+# never split. Breadth-first order is what lets a caller take the SHALLOWEST
+# harness process as the agent itself, ahead of anything that agent spawned.
+fm_agent_process_tree() {  # <root-pid> <ps-rows>
+  printf '%s\n' "$2" | awk -v root="$1" '
+  {
+    pid[NR] = $1; ppid[NR] = $2
+    line = $0
+    sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
+    comm[NR] = line
+    if ($1 == root) { root_comm = line; root_seen = 1 }
+  }
+  END {
+    if (root_seen) printf "%s\t%s\n", root, root_comm
+    depth_of[root] = 0
+    depth = 0
+    grew = 1
+    while (grew) {
+      grew = 0
+      for (n = 1; n <= NR; n++) {
+        if ((ppid[n] in depth_of) && depth_of[ppid[n]] == depth && !(pid[n] in depth_of)) {
+          depth_of[pid[n]] = depth + 1
+          grew = 1
+          printf "%s\t%s\n", pid[n], comm[n]
+        }
+      }
+      depth++
+    }
+  }'
+}
+
+# fm_agent_process_tree_agent_pid: the pid of the shallowest verified-harness
+# process in <root-pid>'s process tree, classified through
+# fm_agent_process_classify from every identity surface the process table
+# offers. A pane's root is its shell, and the harness sits somewhere under it -
+# directly, or beneath the subshell `treehouse get` opens - so the walk is what
+# finds the agent rather than the shell that launched it. Fails when the
+# table is unreadable or the tree holds no harness at all.
+fm_agent_process_tree_agent_pid() {  # <root-pid>
+  local root=$1 rows pid name args argv0
+  case "$root" in ''|*[!0-9]*) return 1 ;; esac
+  rows=$(LC_ALL=C ps -axo pid=,ppid=,comm= 2>/dev/null) || return 1
+  while IFS=$'\t' read -r pid name; do
+    [ -n "$pid" ] || continue
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+    args=${args#"${args%%[![:space:]]*}"}
+    argv0=${args%%[[:space:]]*}
+    if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done <<TREE
+$(fm_agent_process_tree "$root" "$rows")
+TREE
+  return 1
+}
+
+# fm_agent_process_cwd: the current working directory of <pid>, read from the
+# kernel - /proc on Linux, `lsof -d cwd` where there is no /proc (macOS). This
+# is the process's own directory, not a pane's or a shell's, which is what
+# tells a resumed agent apart from the shell it was restored under. Fails
+# rather than guessing when the directory cannot be read or no longer exists.
+fm_agent_process_cwd() {  # <pid>
+  local pid=$1 cwd
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ -d "/proc/$pid" ]; then
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || return 1
+  elif command -v lsof >/dev/null 2>&1; then
+    cwd=$(LC_ALL=C lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+  else
+    return 1
+  fi
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 1
+  printf '%s\n' "$cwd"
+}

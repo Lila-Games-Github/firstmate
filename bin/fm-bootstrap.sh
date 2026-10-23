@@ -19,6 +19,8 @@
 #                 "TANGLE: <remediation>",
 #                 "SLOT_RECONCILE: task <id>'s local copy <path> reads free to
 #                 Treehouse ...",
+#                 "CREW_CWD: task <id>'s agent ... <dir> ... recorded local copy
+#                 <path>; <relaunch started in the background | relaunch remedy>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -73,6 +75,26 @@
 #          bin/fm-spawn.sh and bin/fm-home-seed.sh refuse such a slot on the same
 #          evidence, so the line is a warning that a record needs reconciling,
 #          never a report that work was lost.
+#          A CREW_CWD line means a live ship or scout's agent process is
+#          working somewhere other than the local copy its record names - after
+#          a host restart, typically the project's primary checkout, where the
+#          backend resumed it. The agent process's own directory is read from
+#          the recorded endpoint (crew_cwd_reconcile owns the reading). A
+#          locked session hands every worker found in the primary checkout to
+#          one detached background worker that relaunches each one still in
+#          the primary checkout when its turn comes into its recorded copy
+#          through bin/fm-control.sh relaunch with a progress note, off the
+#          bounded session-start path (crew_cwd_relaunch_worker owns the
+#          per-home serialization and re-check); the line says the
+#          relaunch started, and each outcome (relaunched, or failed with
+#          fm-control's first output line and the relaunch command) arrives
+#          later as a check wake; a failure is not queued when the agent is
+#          by then inside its copy. A task whose control lock another
+#          lifecycle action already holds gets no second relaunch, and its line
+#          says so. A worker found anywhere else and every read-only session
+#          get the relaunch command instead. A live worker inside its copy whose
+#          Treehouse slot nonetheless reads free has the slot re-claimed in a
+#          locked session, reported as one BOOTSTRAP_INFO fact.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING_MANUAL when its installed version is older than
@@ -126,18 +148,19 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
-#          (backlog_record_reconcile, secondmate_sync,
-#          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync) while still
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          (backlog_record_reconcile, crew_cwd_reconcile's relaunch and slot
+#          re-claim, secondmate_sync, secondmate_liveness_sweep,
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
 #          printing every read-only detect line
-#          above; the TANGLE line switches to advisory-only wording with no
-#          checkout command. Used by
+#          above; the TANGLE and CREW_CWD lines switch to advisory-only wording
+#          with no checkout or relaunch command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes and receiver wakes,
-#          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          X-mode artifacts, project clones, crew workers, or repair
+#          instructions.
+#          Unset/0 (the default) runs all seven sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -171,8 +194,9 @@
 #          because THIS session already ran them while holding the fleet lock,
 #          rather than because it has no lock at all. The two cases differ in
 #          exactly one place: repair ownership. A locked session is told to
-#          restore a tangled primary checkout itself, while an unlocked one is
-#          told to leave that work to the lock holder. Unset/0 (the default)
+#          restore a tangled primary checkout or relaunch a misplaced worker
+#          itself, while an unlocked one is told to leave that work to the lock
+#          holder. Unset/0 (the default)
 #          keeps detect-only meaning unlocked, exactly as before.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
@@ -1634,6 +1658,256 @@ detect_recorded_slot_drift() {
   done
 }
 
+# Working-directory check for every live ship or scout. A host restart can bring
+# a worker back in the wrong place: Herdr restores the pane and resumes the
+# agent from the directory the pane was CREATED in, which is the project's
+# primary checkout - spawn moves into the task's copy only afterwards, through
+# the `treehouse get` subshell the restart destroyed. The resumed agent then
+# works with the primary checkout as its working directory, where any relative
+# command writes, while its record still names the copy (observed after the
+# host restarts of 2026-10-22 and 2026-10-23, two and then three workers).
+#
+# The verdict comes from the agent PROCESS's own working directory, read by
+# bin/fm-backend.sh's fm_backend_agent_process, never from a pane's recorded or
+# rendered path, which belongs to the shell the agent was restored under.
+# Every reading that cannot be completed - no endpoint, no harness process in
+# it, an unreadable directory, a recorded copy or project that no longer
+# exists, a backend with no process view - says nothing, because "cannot
+# tell" is not evidence of a misplaced worker; the endpoint-liveness owners
+# report those states on their own.
+#
+# A worker inside its recorded copy is correct. One inside the primary
+# checkout is urgent: a locked session collects every such worker during the
+# sweep and hands them all to one detached relaunch worker
+# (crew_cwd_relaunch_detached), which moves each into its copy through
+# bin/fm-control.sh, the lifecycle owner: same copy, and the harness, model,
+# and effort its record already names, with a progress note because the
+# replacement inherits the copy but none of the conversation. The sweep itself
+# only reports that the relaunch started. Nothing in the copy is edited. A worker anywhere else is reported for
+# firstmate to relaunch, since an unexpected directory is not proof of where
+# the work belongs. A read-only session only reports.
+crew_cwd_reconcile() {
+  local meta id kind backend target worktree project wt_canon proj_canon line pid cwd
+  local relaunch=()
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" != secondmate ] || continue
+    worktree=$(fm_meta_get "$meta" worktree)
+    project=$(fm_meta_get "$meta" project)
+    [ -n "$worktree" ] && [ -n "$project" ] || continue
+    wt_canon=$(fm_slot_canonical_dir "$worktree") || continue
+    proj_canon=$(fm_slot_canonical_dir "$project") || continue
+    [ "$wt_canon" != "$proj_canon" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    [ -n "$target" ] || continue
+    line=$(fm_backend_agent_process "$backend" "$target") || continue
+    pid=${line%%$'\t'*}
+    cwd=$(fm_slot_canonical_dir "${line#*$'\t'}") || continue
+    case "$cwd" in
+      "$wt_canon"|"$wt_canon"/*)
+        crew_slot_hold "$id" "$wt_canon" "$project" "$pid"
+        continue
+        ;;
+    esac
+    case "$cwd" in
+      "$proj_canon"|"$proj_canon"/*)
+        if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
+          echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; $(crew_cwd_remedy "$id") before it writes there"
+        else
+          crew_cwd_relaunch_busy "$id" "$cwd" "$worktree" \
+            || relaunch+=("$id" "$meta" "$cwd" "$worktree" "$wt_canon" "$proj_canon")
+        fi
+        ;;
+      *) echo "CREW_CWD: task $id's agent is running in $cwd, not its recorded local copy $worktree; $(crew_cwd_remedy "$id")" ;;
+    esac
+  done
+  [ "${#relaunch[@]}" -gt 0 ] || return 0
+  crew_cwd_relaunch_detached "${relaunch[@]}"
+}
+
+# The relaunch instruction for a misplaced worker, worded for who may run it: a
+# read-only session holds no mutation authority and leaves it to the lock
+# holder.
+crew_cwd_remedy() {  # <id>
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && [ "${FM_BOOTSTRAP_LOCKED:-0}" != 1 ]; then
+    echo "read-only session must leave the relaunch to the session holding the fleet lock"
+  else
+    echo "relaunch it into that copy with FM_HOME=$FM_HOME bin/fm-control.sh $1 relaunch --note '<progress note>'"
+  fi
+}
+
+# A worker whose task already has a lifecycle action holding bin/fm-control.sh's
+# per-task control lock gets no second relaunch, which that lock would only
+# refuse: the line names the relaunch already under way when the task's
+# relaunch journal shows one in flight, and otherwise the action to wait for.
+crew_cwd_relaunch_busy() {  # <id> <cwd> <worktree>
+  local id=$1 cwd=$2 worktree=$3 lock phase
+  lock="$STATE/.control-$id.lock"
+  command -v fm_lock_try_acquire >/dev/null 2>&1 || {
+    # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+  }
+  if fm_lock_try_acquire "$lock"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  phase=$(sed -n 's/^phase=//p' "$STATE/$id.control-relaunch" 2>/dev/null | head -1)
+  case "$phase" in
+    checkpoint|noted|stopping|exited|launching)
+      echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; a relaunch into that copy is already under way, so no second one was started - confirm the replacement is working through its instructions once it finishes"
+      ;;
+    *)
+      echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; another lifecycle action holds this task's control lock, so no relaunch was started - once it finishes, if the agent is still there, $(crew_cwd_remedy "$id") before it writes there"
+      ;;
+  esac
+  return 0
+}
+
+# Runs a detached process in its own session - setsid where it exists, else
+# perl's POSIX setsid, and only nohup when neither is present - so neither the
+# end of this session start nor the bounded digest's process-group kill can take
+# it down.
+crew_exec_detached() {  # <command> [arg...]
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid -f "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    exec perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exec @ARGV or exit 127' "$@"
+  fi
+  exec nohup "$@"
+}
+
+# One detached worker relaunches every worker found in the primary checkout, in
+# order, through bin/fm-control.sh, the lifecycle owner, off the bounded
+# session-start path: a relaunch can outlast the whole digest budget, and a
+# bound that killed it mid-transaction would skip fm-control's own rollback.
+# The worker runs in its own session (crew_exec_detached) with every stream
+# detached so the digest never waits on it, and reports each outcome as one
+# check wake through bin/fm-wake-lib.sh. Its messages are worded here, so the
+# worker itself only runs and reports.
+crew_cwd_relaunch_detached() {  # (<id> <meta> <cwd> <worktree> <worktree-canon> <project-canon>)...
+  local id meta cwd worktree wt_canon proj_canon work=() worker
+  while [ "$#" -ge 6 ]; do
+    id=$1 meta=$2 cwd=$3 worktree=$4 wt_canon=$5 proj_canon=$6
+    shift 6
+    work+=("$id" "$meta" "$wt_canon" "$proj_canon"
+      "Session start found this worker's agent running in $cwd, the project's primary checkout, instead of its recorded local copy $worktree - a host restart resumed the session there - so it relaunched the worker into $worktree. None of the previous conversation carries over: re-read these instructions, act on any waiting steering message, inspect this copy's branch, commits, and uncommitted changes for the work already done, and continue from where the work stands. Run nothing in $cwd."
+      "check: crew-cwd: task $id's agent was running in the primary checkout $cwd instead of its recorded local copy $worktree; relaunched it into that copy with a progress note - confirm the replacement is working through its instructions"
+      "check: crew-cwd: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree, and the automatic relaunch failed: "
+      "; $(crew_cwd_remedy "$id") before it writes there")
+    echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; started relaunching it into that copy with a progress note in the background - its outcome arrives as a check wake"
+  done
+  worker="$(declare -f crew_cwd_relaunch_worker)
+crew_cwd_relaunch_worker \"\$@\""
+  (
+    FM_HOME="$FM_HOME" STATE="$STATE" crew_exec_detached bash -c "$worker" fm-crew-cwd-relaunch \
+      "$SCRIPT_DIR" "$FM_ROOT/bin/fm-control.sh" "${work[@]}"
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+# The detached worker's body. Workers of one home take turns under one lock, so
+# a worker started by a later session start waits for an earlier one and then
+# re-checks rather than racing it; one that cannot get the lock in time
+# relaunches nothing and reports nothing. Right before each relaunch the
+# record's endpoint is read again, and a task whose agent is no longer readable
+# as being in the primary checkout - already moved into its copy by another
+# relaunch, or no longer visible - is left alone. A failed relaunch whose agent
+# the endpoint now shows inside its copy was moved by a concurrent relaunch,
+# which reports for itself, so it queues nothing.
+# shellcheck disable=SC2329 # invoked by the detached worker through declare -f.
+crew_cwd_relaunch_worker() {  # <bin-dir> <control> (<id> <meta> <worktree-canon> <project-canon> <note> <ok> <fail-prefix> <fail-suffix>)...
+  local bin=$1 control=$2 id meta wt proj note ok fail_pre fail_post out payload line cwd lock
+  shift 2
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$bin/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-slot-record-lib.sh disable=SC1091
+  . "$bin/fm-slot-record-lib.sh"
+  # shellcheck source=bin/fm-backend.sh disable=SC1091
+  . "$bin/fm-backend.sh"
+  lock="$STATE/.crew-cwd-relaunch.lock"
+  fm_lock_acquire_wait_bounded "$lock" "${FM_CREW_CWD_RELAUNCH_LOCK_WAIT:-900}" || return 0
+  # shellcheck disable=SC2064 # the lock path is fixed for this worker.
+  trap "fm_lock_release '$lock'" EXIT
+  while [ "$#" -ge 8 ]; do
+    id=$1 meta=$2 wt=$3 proj=$4 note=$5 ok=$6 fail_pre=$7 fail_post=$8
+    shift 8
+    line=$(fm_backend_agent_process "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")") || continue
+    cwd=$(fm_slot_canonical_dir "${line#*$'\t'}") || continue
+    case "$cwd" in "$wt"|"$wt"/*) continue ;; esac
+    case "$cwd" in "$proj"|"$proj"/*) ;; *) continue ;; esac
+    if out=$(FM_SPAWN_NO_GUARD=1 "$control" "$id" relaunch --note "$note" </dev/null 2>&1); then
+      payload=$ok
+    else
+      if line=$(fm_backend_agent_process "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")") \
+        && cwd=$(fm_slot_canonical_dir "${line#*$'\t'}"); then
+        case "$cwd" in "$wt"|"$wt"/*) continue ;; esac
+      fi
+      payload="$fail_pre$(printf '%s\n' "$out" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')$fail_post"
+    fi
+    fm_wake_append check "crew-cwd:$id" "$payload" || true
+  done
+}
+
+# A correctly placed worker whose pool slot nonetheless reads free to Treehouse
+# would be handed to the next spawn (bin/fm-slot-record-lib.sh owns why the
+# pool and the records can disagree). Treehouse counts a slot in use while any
+# process is working inside it (docs/verification/runtime-backends.md
+# "Treehouse slot status is a live-process reading"), and has no way to
+# reserve one named slot, so the claim is re-established the way that lease was
+# held in the first place: a process kept inside the slot, here one that lives
+# exactly as long as the worker's agent. Teardown reaps it with every other
+# process in the copy.
+#
+# The claim is kept only when Treehouse then reads the slot as taken; a holder
+# that changed nothing is stopped again, so repeated session starts never
+# accumulate them, and the SLOT_RECONCILE report below stays the fallback. A
+# read-only session takes no claim.
+crew_slot_hold() {  # <id> <slot> <project> <agent-pid>
+  local id=$1 slot=$2 project=$3 agent=$4 json holder tries hold_loop pidfile
+  [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] || return 0
+  command -v treehouse >/dev/null 2>&1 || return 0
+  fm_treehouse_pool_slot "$project" "$slot" || return 0
+  json=$(fm_slot_treehouse_pool_json "$project") || return 0
+  fm_slot_treehouse_entry "$slot" "$json" || return 0
+  [ "$FM_SLOT_TREEHOUSE_STATUS" = available ] || return 0
+  # The holder waits on its sleep rather than running it in the foreground, so
+  # a TERM - this function's own, or teardown's reap - stops the sleep with it
+  # and leaves nothing behind in the copy. It runs in its own session where
+  # it can be (crew_exec_detached), so the end of this session start cannot take
+  # it down, and it reports its own pid because a forking launcher hides it from
+  # `$!`.
+  pidfile=$(mktemp "${TMPDIR:-/tmp}/fm-slot-hold.XXXXXX") || return 0
+  # shellcheck disable=SC2016 # expanded by the holder shell, not here.
+  hold_loop='printf "%s\n" "$$" > "$2"; trap "kill \$! 2>/dev/null; exit 0" TERM; while kill -0 "$1" 2>/dev/null; do if c=$(readlink "/proc/$1/cwd" 2>/dev/null); then case "$c" in "$3"|"$3"/*) ;; *) exit 0 ;; esac; fi; sleep 60 & wait "$!"; done'
+  (
+    CDPATH='' cd -- "$slot" || exit 0
+    crew_exec_detached sh -c "$hold_loop" fm-slot-hold "$agent" "$pidfile" "$slot"
+  ) </dev/null >/dev/null 2>&1 &
+  holder=
+  tries=0
+  while [ "$tries" -lt 20 ]; do
+    [ -n "$holder" ] || holder=$(cat "$pidfile" 2>/dev/null)
+    case "$holder" in
+      ''|*[!0-9]*) holder= ;;
+      *) [ "$(fm_agent_process_cwd "$holder" 2>/dev/null)" != "$slot" ] || break ;;
+    esac
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  rm -f "$pidfile"
+  [ -n "$holder" ] || return 0
+  if json=$(fm_slot_treehouse_pool_json "$project") \
+    && fm_slot_treehouse_entry "$slot" "$json" \
+    && [ "$FM_SLOT_TREEHOUSE_STATUS" != available ]; then
+    echo "BOOTSTRAP_INFO: task $id's local copy $slot read free to Treehouse while its agent works there; re-claimed it with a process held in that copy for as long as the agent runs"
+    return 0
+  fi
+  kill "$holder" 2>/dev/null || true
+}
+
 # Shadow-backlog check. When this home's data directory is not the code root's,
 # a code-root data/backlog.md or data/done-archive.md that is not this home's
 # own file is a queue a cwd-relative tasks-axi write has already forked; a link
@@ -1714,6 +1988,7 @@ detect_home_summary_publication() {
 # The stamp variable is named for the library rather than `start` on purpose:
 # fleet_sync and others assign plain names like `start` without `local`, and
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
+local_phase && crew_cwd_reconcile
 local_phase && detect_local_tools
 if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
