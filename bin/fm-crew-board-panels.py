@@ -833,7 +833,7 @@ def suite_progress(path):
     except OSError:
         return ""
     for line in reversed(tail_lines(path)):
-        match = re.search(r"\b(\d+)\s*(?:/|of)\s*(\d+)\s*(?:tests?)?\b", line, re.IGNORECASE)
+        match = re.search(r"\b(\d+)\s*(?:/|of)\s*(\d+)\s+tests?\b", line, re.IGNORECASE)
         if match and 0 <= int(match[1]) <= int(match[2]) and int(match[2]) > 0:
             return f"{match[1]}/{match[2]} tests"
     return ""
@@ -848,8 +848,8 @@ def suite_processes(trees, now):
             argv = [part.decode(errors="replace") for part in (proc / "cmdline").read_bytes().split(b"\0") if part]
             if not any(arg.lstrip("./").endswith("tests/run_tests.gd") for arg in argv):
                 continue
-            if any(arg in ("--filter", "--focus", "--test", "--case", "--class", "--method")
-                   or arg.startswith(("--filter=", "--focus=", "--test=", "--case=")) for arg in argv):
+            if any(arg in ("--filter", "--focus", "--focused", "--lock-check-only", "--test", "--case", "--class", "--method")
+                   or arg.startswith(("--filter=", "--focus=", "--focused=", "--test=", "--case=")) for arg in argv):
                 continue
             cwd = os.readlink(proc / "cwd")
             stat = (proc / "stat").read_text().rpartition(")")[2].split()
@@ -880,30 +880,35 @@ def service_suite_rows(trees, now):
     if not isinstance(status, dict) or status.get("schema") != "fm-test-service.v1":
         return [], []
     running, waiting = [], []
-    for request in status.get("requests", []):
+    requests = status.get("requests")
+    for request in requests if isinstance(requests, list) else []:
         if not isinstance(request, dict) or not isinstance(request.get("options"), dict) or not request["options"].get("suite"):
             continue
+        steps = request.get("steps")
+        steps = [step for step in steps if isinstance(step, dict)] if isinstance(steps, list) else []
         rid = str(request.get("id", ""))
         if not rid or "/" in rid or ".." in rid:
             continue
         source = str(request.get("source") or "")
         task, _, _ = process_owner("", trees, source)
         state = request.get("state")
-        if state == "running" and any(step.get("name") == "suite" and step.get("state") == "running"
-                                      for step in request.get("steps", []) if isinstance(step, dict)):
+        if state == "running" and any(step.get("name") == "suite" and step.get("state") == "running" for step in steps):
             cwd = str(root / "runs" / rid)
-            started = next((step.get("started") for step in request["steps"] if step.get("name") == "suite"), None)
+            started = next((step.get("started") for step in steps if step.get("name") == "suite"), None)
             try:
                 ran = duration(now - float(started))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, OverflowError):
                 ran = "unknown time"
             log = root / "logs" / f"{rid}-{request.get('generation', 0)}-suite.log"
             running.append({"pid": None, "task": task, "cwd": cwd, "for": ran,
                             "version": str(request.get("sha") or "unknown")[:7], "progress": suite_progress(log),
                             "detail": f"test service request {rid} in {cwd}"})
         elif state in ("queued", "preparing"):
-            waiting.append({"pid": f"service-{rid}", "task": task, "cwd": source,
-                            "for": duration(request.get("wait_seconds") or 0),
+            try:
+                waited = duration(float(request.get("wait_seconds") or 0))
+            except (ValueError, TypeError, OverflowError):
+                waited = "unknown time"
+            waiting.append({"pid": f"service-{rid}", "task": task, "cwd": source, "for": waited,
                             "detail": f"test service request {rid} for {str(request.get('sha') or '')[:7]}"})
     return running, waiting
 
@@ -969,23 +974,18 @@ def test_queue(snapshot, phones, now, tags=None):
         running = {"task": task, "for": ran, "detail": f"pid {holder.get('pid', '?')} in {cwd}"}
         if task in task_ids:
             resource_tag(tags, task, 0, f"FULL SUITE {ran}")
-    suite_queue = []
-    for position, entry in enumerate(queued_suite_waiters(lock, trees, now), 1):
-        task, pid = entry["task"], entry["pid"]
-        suite_queue.append(entry)
-        if task in task_ids:
-            resource_tag(tags, task, 1, f"WAITING FOR FULL SUITE #{position}")
+    suite_queue = list(queued_suite_waiters(lock, trees, now))
     service_running, service_waiting = service_suite_rows(trees, now)
     suite_running = suite_processes(trees, now)
     waiting_cwds = {os.path.realpath(entry.get("cwd", "")) for entry in suite_queue}
-    by_cwd = {os.path.realpath(entry["cwd"]): entry for entry in suite_running}
+    process_cwds = [(os.path.realpath(entry["cwd"]), entry) for entry in suite_running]
     for entry in service_running:
         cwd = os.path.realpath(entry["cwd"])
-        if cwd in by_cwd:
-            by_cwd[cwd]["task"] = entry["task"]
-        elif cwd not in waiting_cwds:
+        matched = [process for real, process in process_cwds if real == cwd or real.startswith(cwd + os.sep)]
+        for process in matched:
+            process["task"] = entry["task"]
+        if not matched and cwd not in waiting_cwds:
             suite_running.append(entry)
-            by_cwd[cwd] = entry
     if running and not suite_running:
         running.update({"pid": holder.get("pid"), "cwd": holder.get("cwd", ""),
                         "version": suite_version(holder.get("cwd", "")), "progress": ""})

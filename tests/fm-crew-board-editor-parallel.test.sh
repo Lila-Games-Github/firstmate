@@ -69,14 +69,32 @@ spawn(900005, trees[4])
 rows = read()
 assert rows[0]["title"] == "EDITOR: 5 running, 0 waiting" and "wt-5" in rows[-1]["title"], rows
 spawn(900006, trees[0], "tests/run_focused.gd")
-spawn(900008, trees[0], extra=("--filter=one-test",))
+spawn(900008, trees[0], extra=("--", "--focused=SomeTest"))
+spawn(900009, trees[0], extra=("--", "--focused", "SomeTest"))
+spawn(900010, trees[0], extra=("--", "--lock-check-only"))
+assert read()[0]["title"] == "EDITOR: 5 running, 0 waiting"
+spawn(900011, trees[3], progress="Loaded 3 of 12 scenes\n2026/10/23 build")
+rows = read()
+assert rows[0]["title"] == "EDITOR: 6 running, 0 waiting", rows
+assert not any("tests" in row["title"] for row in rows if row["id"] == "suite-running-900011"), rows
+shutil.rmtree(proc / "900011")
+
+(service / "status.json").write_text(json.dumps({"schema": "fm-test-service.v1", "requests": [
+    {"id": "bad1", "state": "running", "options": {"suite": True}, "steps": None},
+    {"id": "bad2", "state": "running", "options": {"suite": True}, "steps": ["x", {"name": "suite", "state": "running", "started": "-inf"}]},
+    {"id": "bad3", "state": "queued", "source": str(trees[2]), "options": {"suite": True}, "wait_seconds": "soon", "steps": 7}]}))
+rows = read()
+assert rows[0]["title"] == "EDITOR: 6 running, 1 waiting", rows
+assert any(row["id"] == "suite-wait-service-bad3" and row["status"] == "waiting unknown time" for row in rows), rows
+(service / "status.json").write_text(json.dumps({"schema": "fm-test-service.v1", "requests": 5}))
 assert read()[0]["title"] == "EDITOR: 5 running, 0 waiting"
 
 # A service suite running from its private copy is the same process, not a sixth run.
 run_copy = service / "runs/r1"
 run_copy.parent.mkdir(parents=True)
 subprocess.run(["git", "clone", "--quiet", str(trees[0]), str(run_copy)], check=True)
-spawn(900007, run_copy)
+(run_copy / "prototype-game").mkdir()
+spawn(900007, run_copy / "prototype-game")
 (service / "status.json").write_text(json.dumps({"schema": "fm-test-service.v1", "requests": [
     {"id": "r1", "state": "running", "source": str(trees[0]), "sha": "abc1234", "generation": 0,
      "options": {"suite": True}, "steps": [{"name": "suite", "state": "running", "started": now - 60}]},
