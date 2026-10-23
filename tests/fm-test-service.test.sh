@@ -267,6 +267,37 @@ assert len(starts)==len(ends)==5
 assert len({path for _,path in starts})==5
 assert starts[3][0] < ends[0] < starts[4][0]
 PY
+# A restart requeues every in-flight parallel request from its pinned copy.
+before_parallel=$(rg -c '^parallel-start:' "$EVENTS")
+parallel_restart=()
+for n in 1 2 3 4; do
+  parallel_restart+=("$($svc submit fake "$PWD" "$sha1" --task "restart-parallel-$n" --suite)")
+done
+for i in $(seq 1 300); do
+  count=$(python3 - "$FM_TEST_SERVICE_STATE/status.json" <<'PY'
+import json,sys
+status=json.load(open(sys.argv[1]))
+print(sum(r['task'].startswith('restart-parallel-') for r in status['running_requests']))
+PY
+)
+  [ "$count" -eq 4 ] && break
+  sleep .05
+done
+[ "$count" -eq 4 ]
+for i in $(seq 1 300); do
+  started=$(rg -c '^parallel-start:' "$EVENTS")
+  [ "$started" -ge "$((before_parallel + 4))" ] && break
+  sleep .05
+done
+[ "$started" -ge "$((before_parallel + 4))" ]
+kill -TERM "$server" 2>/dev/null || true
+wait "$server" 2>/dev/null || true
+server=
+"$svc" serve > "$tmp/server3.log" 2>&1 & server=$!
+for id in "${parallel_restart[@]}"; do
+  $svc wait "$id" | grep -q "^passed $sha1"
+done
+[ "$(rg -c '^parallel-start:' "$EVENTS")" -ge "$((before_parallel + 8))" ]
 # A zero-exit engine script error still fails the parallel suite and writes a failure record.
 cat > suite.sh <<'SCRIPT_ERROR'
 #!/usr/bin/env bash

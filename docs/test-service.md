@@ -13,6 +13,11 @@ The service keeps a private copy of each submitted commit so removing a worker's
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
 The file names the suite and device executable argv arrays relative to the tested checkout, the ordered phone serials, named scenario argument arrays, and the landing branch.
 `max_concurrent` limits active requests for that project; it defaults to four for FrogPile and one for other projects, and may be set from one to sixteen.
+An optional `parallel_suite` argv replaces `suite` when the service owns a project's concurrency limit; projects without it continue through their configured suite entry point.
+`parallel_suite_env` supplies that command's environment, with `{user_data}` expanded to a private directory for the request and tested SHA generation.
+`parallel_suite_error_pattern` fails an otherwise successful command when its log matches the regular expression.
+`parallel_suite_verdict` names a Python script in the tested checkout that receives the suite log path and must exit zero for a pass.
+`parallel_suite_watchdog_seconds` sets its no-output timeout, defaulting to 300 seconds.
 An optional `prepare` argv runs once in the clean detached copy before either suite or phone step; it must leave the tracked tree clean.
 Retests read the submitting worktree's common Git storage by default, so a disposable linked worktree can disappear after submission.
 An optional `landing_repo` absolute path, with `{fm_home}` expansion, selects a different durable local clone.
