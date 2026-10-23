@@ -1544,3 +1544,37 @@ func TestNewAlertRowKeepsItsFullStatusWithinTheRowWidth(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerRowShowsRuntimeAndDetailShowsModel(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.WorkerRuntimes = map[string]runtime{
+		"alpha": {Runtime: "Claude", Model: "Opus 5.5", Effort: "high"},
+		"beta":  {Runtime: "Codex"},
+	}
+	rows := m.items("workers")
+	for index, row := range rows {
+		line := m.rowLine("workers", row, index, 100)
+		switch row.ID {
+		case "alpha":
+			if !strings.Contains(line, "Claude") || strings.Contains(line, "Opus") {
+				t.Fatalf("row should carry only the short runtime label: %q", line)
+			}
+			if !strings.Contains(row.Detail, "Runtime: Claude (Opus 5.5), effort high") {
+				t.Fatalf("detail lost the full runtime: %q", row.Detail)
+			}
+		case "beta":
+			if !strings.Contains(line, "Codex") || !strings.HasPrefix(row.Detail, "Runtime: Codex") {
+				t.Fatalf("runtime without a model should read alone: %q / %q", line, row.Detail)
+			}
+		}
+		if lipgloss.Width(line) > 100 {
+			t.Fatalf("row overflows: %q", line)
+		}
+	}
+	m.data.Panels.WorkerRuntimes = nil
+	for _, row := range m.items("workers") {
+		if strings.Contains(row.Detail, "Runtime:") {
+			t.Fatalf("a worker with no runtime record must show none: %q", row.Detail)
+		}
+	}
+}
