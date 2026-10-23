@@ -965,7 +965,133 @@ def ready_entries(snapshot):
     return rows
 
 
+SUITE_WAIT_ALERT_SECS = 1800
+API_ERROR = re.compile(
+    r"api error|overloaded|rate.?limit|econnreset|econnrefused|etimedout|enotfound|network error"
+    r"|unable to connect|connection (?:reset|refused|error|lost)|fetch failed|socket hang up",
+    re.IGNORECASE)
+
+
+def alert_row(title, what, since, consequence, action, status="", item_id=""):
+    """One plain-words alert: what is wrong, since when, the consequence, the one action."""
+    parts = [what.rstrip(".") + "."]
+    if since is not None:
+        parts.append(f"Since {duration_words(max(0, int(since)))} ago.")
+    parts += [consequence, action]
+    return item(title, " ".join(parts), status, alert=True, item_id=item_id)
+
+
+def file_age(path, now):
+    try:
+        return now - path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def meta_window_key(task_id):
+    """The watcher's per-window marker key for this task's recorded endpoint."""
+    try:
+        for line in (STATE / f"{task_id}.meta").read_text(encoding="utf-8").splitlines():
+            if line.startswith("window="):
+                return re.sub(r"[:/.]", "_", line[len("window="):].strip())
+    except OSError:
+        pass
+    return ""
+
+
+def process_age(pid, now):
+    """Seconds since a process started, from /proc, or None."""
+    ticks = start_ticks(pid)
+    try:
+        boot = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                    if line.startswith("btime "))
+        return now - (boot + int(ticks) / os.sysconf("SC_CLK_TCK"))
+    except (OSError, StopIteration, TypeError, ValueError):
+        return None
+
+
+def stuck_worker_alert(task_id, now):
+    """A worker the watcher's stale classification has escalated or found gone."""
+    key = meta_window_key(task_id)
+    if not key:
+        return None
+    dead = STATE / f".dead-reported-{key}"
+    wedge = STATE / f".wedge-escalations-{key}"
+    if dead.exists():
+        return alert_row(f"{task_id}: stopped", "The worker's agent has exited or its pane is gone",
+                         file_age(dead, now), "Its work is not progressing.",
+                         "Ask firstmate to recover the worker.", "stopped", task_id)
+    try:
+        count = int(wedge.read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        count = 0
+    if count > 0:
+        return alert_row(f"{task_id}: not responding", "The worker has been idle long past the watcher's limit",
+                         file_age(wedge, now), "Its work is not progressing.",
+                         "Ask firstmate to inspect the worker.", "stuck", task_id)
+    return None
+
+
+def api_error_alert(task, now):
+    state = (task.get("current_state") or {}).get("state")
+    if state in ("done",):
+        return None
+    task_id = str(task.get("id", "worker"))
+    texts = [str((task.get("current_state") or {}).get("detail") or ""),
+             str((task.get("hints") or {}).get("last_event_text") or "")]
+    hit = next((API_ERROR.search(text) for text in texts if API_ERROR.search(text)), None)
+    if not hit:
+        return None
+    return alert_row(f"{task_id}: API or network error", f"The worker reported an error ({hit.group(0)})",
+                     file_age(STATE / f"{task_id}.status", now), "It may be waiting on a connection that is not coming back.",
+                     "Ask firstmate to check on the worker and resend its last instruction if needed.",
+                     "error", task_id)
+
+
+def suite_wait_alerts(snapshot, now):
+    """Full test runs queued behind the suite lock for longer than the limit."""
+    try:
+        limit = int(os.environ.get("FM_CREW_BOARD_SUITE_WAIT_ALERT_SECS", SUITE_WAIT_ALERT_SECS))
+    except ValueError:
+        limit = SUITE_WAIT_ALERT_SECS
+    lock, _ = suite_lock_paths()
+    titles = task_titles(snapshot)
+    trees = task_worktrees(snapshot)
+    rows = []
+    for pid in suite_waiters(lock):
+        waited = process_age(pid, now)
+        if waited is None or waited <= limit:
+            continue
+        task, _, _ = process_owner(pid, trees)
+        rows.append(alert_row(f"{titles.get(task, task)}: waiting for the full test suite",
+                              "A full test run is queued behind another suite run", waited,
+                              "The worker cannot finish validating until the suite frees up.",
+                              "Ask firstmate to check whether the running suite is stuck.",
+                              "waiting", f"suite-wait-{pid}"))
+    return rows
+
+
+def decisions_summary(snapshot, now):
+    questions = question_entries(DATA / "captain-questions.md")
+    if not questions:
+        return None
+    held = [record.get("hold_set") for record in snapshot.get("backlog", {}).get("records", [])
+            if isinstance(record, dict) and record.get("hold_kind") == "captain" and record.get("hold_set")]
+    since = None
+    try:
+        oldest = min(dt.datetime.fromisoformat(str(value)).replace(tzinfo=dt.timezone.utc) for value in held)
+        since = now - oldest.timestamp()
+    except (ValueError, TypeError):
+        pass
+    count = len(questions)
+    return alert_row(f"{count} decision{'s' if count != 1 else ''} waiting on you",
+                     f"{count} open question{'s are' if count != 1 else ' is'} waiting for your answer", since,
+                     "The work behind them stays on hold.",
+                     "Open the Questions page and answer them.", "decisions", "decisions-summary")
+
+
 def alert_entries(snapshot, cache, phones, allowance):
+    now = time.time()
     alerts = entries(cache, "alerts")
     warning = watcher_alert()
     if warning:
@@ -979,14 +1105,30 @@ def alert_entries(snapshot, cache, phones, allowance):
         note = str(phase.get("note", ""))
         held = ((task.get("backlog") or {}).get("hold_kind")) == "captain"
         if name in ("blocked", "failed"):
-            alerts.append(item(f"{task_id}: {name}", note or f"The worker reported {name}",
-                               name, alert=True, item_id=task_id))
+            alerts.append(alert_row(f"{task_id}: {name}", note or f"The worker reported {name}",
+                                    file_age(STATE / f"{task_id}.status", now),
+                                    "That work is stopped until it is dealt with.",
+                                    "Ask firstmate what happened and how to proceed.",
+                                    name, task_id))
         elif (name == "needs-decision" or (task.get("hints") or {}).get("open_decisions")) and not held:
             alerts.append(item(f"{task_id}: decision not yet raised with you",
                                note or "The worker is waiting on a decision firstmate has not escalated",
                                "needs-decision", alert=True, item_id=task_id))
+        for found in (stuck_worker_alert(task_id, now), api_error_alert(task, now)):
+            if found:
+                alerts.append(found)
+    alerts += suite_wait_alerts(snapshot, now)
+    summary = decisions_summary(snapshot, now)
+    if summary:
+        alerts.append(summary)
     for phone in phones:
         adb = phone.get("adb")
+        if adb is None and phone.get("title"):
+            alerts.append(alert_row(f"Phone {phone['title']} not connected",
+                                    "adb does not list this registered phone", None,
+                                    "Tests that need it cannot run.",
+                                    "Plug it in and unlock it, or ask firstmate to stop using it.",
+                                    "not connected", phone.get("id", "")))
         if adb == "unavailable":
             alerts.append(item(phone["title"], phone["detail"], phone["status"], alert=True))
             continue
