@@ -1,0 +1,3 @@
+not ok - a locked session did not report the background relaunch it started (missing: 'CREW_CWD: task cwd-primary-task's agent is running in the primary checkout /tmp/fm-bootstrap-tests.uRTsr6/crew-cwd-primary/project instead of its recorded local copy /tmp/fm-bootstrap-tests.uRTsr6/crew-cwd-primary/pool/1/repo; started relaunching it into that copy with a progress note in the background')
+--- output ---
+

@@ -1,0 +1,21 @@
+== state/power-restart-task.meta ==
+window=firstmate:fm-power-restart-task
+endpoint_task_id=power-restart-task
+worktree=$TMP/demo/pool/1/repo
+project=$TMP/demo/project
+harness=claude
+kind=ship
+== agent pid 1301412 cwd after simulated restart: $TMP/demo/project
+== bootstrap output (locked session) ==
+CREW_CWD: task power-restart-task's agent is running in the primary checkout $TMP/demo/project instead of its recorded local copy $TMP/demo/pool/1/repo; started relaunching it into that copy with a progress note in the background - its outcome arrives as a check wake
+== fm-control.sh stub invocation log (background worker) ==
+FM_HOME=$TMP/demo/home
+FM_SPAWN_NO_GUARD=1
+arg=power-restart-task
+arg=relaunch
+arg=--note
+arg=Session start found this worker's agent running in $TMP/demo/project, the project's primary checkout, instead of its recorded local copy $TMP/demo/pool/1/repo - a host restart resumed the session there - so it relaunched the worker into $TMP/demo/pool/1/repo. None of the previous conversation carries over: re-read these instructions, act on any waiting steering message, inspect this copy's branch, commits, and uncommitted changes for the work already done, and continue from where the work stands. Run nothing in $TMP/demo/project.
+== state/.wake-queue ==
+1792738629	1	check	crew-cwd:power-restart-task	check: crew-cwd: task power-restart-task's agent was running in the primary checkout $TMP/demo/project instead of its recorded local copy $TMP/demo/pool/1/repo; relaunched it into that copy with a progress note - confirm the replacement is working through its instructions
+== bootstrap output (read-only session, FM_BOOTSTRAP_DETECT_ONLY=1) ==
+CREW_CWD: task power-restart-task's agent is running in the primary checkout $TMP/demo/project instead of its recorded local copy $TMP/demo/pool/1/repo; read-only session must leave the relaunch to the session holding the fleet lock before it writes there
