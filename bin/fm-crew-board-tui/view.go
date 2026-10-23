@@ -106,7 +106,7 @@ func (m *app) pageTabs() ([]string, int) {
 			tab += " " + lipgloss.NewStyle().Foreground(background).Background(red).Bold(true).
 				Render(fmt.Sprintf(" %d ", count))
 		}
-		if count := len(withoutSections(m.data.Panels.FullQuestions)); index == 2 && count > 0 {
+		if count := decisionCount(m.data.Panels.FullQuestions); index == 2 && count > 0 {
 			tab += " " + lipgloss.NewStyle().Foreground(background).Background(cyan).Bold(true).
 				Render(fmt.Sprintf(" %d ", count))
 		}
@@ -117,6 +117,16 @@ func (m *app) pageTabs() ([]string, int) {
 		start = m.page
 	}
 	return tabs, start
+}
+
+func decisionCount(rows []item) int {
+	count := 0
+	for _, row := range rows {
+		if row.Status == "decision" {
+			count++
+		}
+	}
+	return count
 }
 
 // pageTabAt returns the page under column x of the header tab row, or -1.

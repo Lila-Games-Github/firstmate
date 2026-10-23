@@ -565,9 +565,9 @@ func TestHighlightedQuestionShowsFullTextWithoutEnter(t *testing.T) {
 func TestQuestionsLiveOnlyOnTheirPageWithACountBadge(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.FullQuestions = []item{
-		{Title: "Decisions", Status: "section"},
-		{Title: "UIX. Pick the UI."},
-		{Title: "OPS. Release timing."},
+		{Title: "Your decisions", Status: "section"},
+		{Title: "UIX. Pick the UI.", Status: "decision"},
+		{Title: "OPS. Release timing.", Status: "decision"},
 	}
 	for _, spec := range pages[0] {
 		if spec.id == "questions" || spec.title == "WAITING ON YOU" {
@@ -581,6 +581,17 @@ func TestQuestionsLiveOnlyOnTheirPageWithACountBadge(t *testing.T) {
 	m.data.Panels.FullQuestions = nil
 	if strings.Contains(m.header(), badge) {
 		t.Fatal("questions badge stayed with no open questions")
+	}
+	m.data.Panels.FullQuestions = []item{{Title: "For UI", Status: "section"}}
+	for i := 0; i < 8; i++ {
+		m.data.Panels.FullQuestions = append(m.data.Panels.FullQuestions,
+			item{Title: "Team follow-up", Status: "waiting on UI (follow-up)"})
+	}
+	if count := decisionCount(m.data.Panels.FullQuestions); count != 0 {
+		t.Fatalf("team follow-ups counted as decisions: %d", count)
+	}
+	if strings.Contains(m.header(), badge) {
+		t.Fatal("team follow-ups produced a decision badge")
 	}
 }
 

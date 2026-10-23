@@ -9,6 +9,7 @@ set -u
 BOARD="$ROOT/bin/fm-crew-board.sh"
 HARNESS="$ROOT/tests/assets/crew-board-tui-harness.py"
 TMP_ROOT=$(fm_test_tmproot fm-crew-board)
+export FM_CREW_BOARD_PROC_ROOT="$TMP_ROOT/empty-proc" FM_TEST_SERVICE_STATE="$TMP_ROOT/empty-service"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
@@ -37,7 +38,8 @@ EOF
 run_board() {
   local home=$1
   shift
-  FM_CREW_BOARD_PHONE_QUEUE_ROOT="$home/locks" \
+  FM_CREW_BOARD_PROC_ROOT="$home/proc" FM_TEST_SERVICE_STATE="$home/test-service" \
+    FM_CREW_BOARD_PHONE_QUEUE_ROOT="$home/locks" \
     FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/locks/suite.holder" \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$BOARD" "$@"
@@ -45,7 +47,8 @@ run_board() {
 
 run_panels() {
   local home=$1
-  FM_CREW_BOARD_PHONE_QUEUE_ROOT="$home/locks" FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" \
+  FM_CREW_BOARD_PROC_ROOT="$home/proc" FM_TEST_SERVICE_STATE="$home/test-service" \
+    FM_CREW_BOARD_PHONE_QUEUE_ROOT="$home/locks" FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/locks/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" python3 "$ROOT/bin/fm-crew-board-panels.py" "$2"
 }
@@ -816,8 +819,8 @@ EOF
   assert_equals 'Galaxy S22|Galaxy M31' \
     "$(jq -r '[.panels.phones[] | select(.id == "idle-two" or .id == "third") | .title] | join("|")' "$home/state/crew-board.json")" \
     'adb models map to friendly phone names'
-  assert_equals 'EDITOR|section' "$(jq -r '.panels.test_queue[0] | .title + "|" + .status' "$home/state/crew-board.json")" 'editor heading'
-  assert_equals 'RUNNING: Fix the gadget|running 10m' \
+  assert_contains "$(jq -r '.panels.test_queue[0] | .title + "|" + .status' "$home/state/crew-board.json")" 'EDITOR: 1 running,' 'editor heading'
+  assert_equals 'RUNNING: Fix the gadget · unknown|running 10m' \
     "$(jq -r '.panels.test_queue[1] | .title + "|" + .status' "$home/state/crew-board.json")" 'running suite by task title'
   assert_contains "$(jq -r '.panels.test_queue[1].detail' "$home/state/crew-board.json")" 'Task: beta' 'task id kept in detail'
   if [ -n "$suite_waiter" ]; then
@@ -888,7 +891,7 @@ EOF
     'an unreadable keyguard keeps the phone state'
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.title | test("S21 FE|RZCX224VH4T"))] | length' "$home/state/crew-board.json")" \
     'an unreadable keyguard raises no notification'
-  assert_equals 'EDITOR|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE' \
+  assert_equals 'EDITOR: 1 running, 1 waiting|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE' \
     "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'fixed resource sections and any-phone queue'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \
     'waiting 4m' 'suite ticket wait duration'
@@ -1022,6 +1025,15 @@ EOF
   printf '## Your decisions\n' > "$home/data/captain-questions.md"
   assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'a register with only a heading is no alert'
   printf '## For widget\n\n**A. Which release?** Pick one.\n\n## For gadget\n\n**B. Which store?** Pick one for the release.\n' > "$home/data/captain-questions.md"
+  assert_equals '' "$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .title] | join("")')" \
+    'questions for other teams create no decisions notification'
+  printf '## For UI\n' > "$home/data/captain-questions.md"
+  for i in 1 2 3 4 5 6 7 8; do printf '\n**UI%s. Follow-up?** Ask UI.\n' "$i" >> "$home/data/captain-questions.md"; done
+  assert_equals '' "$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .title] | join("")')" \
+    'eight team follow-ups with zero own decisions create no decision alert'
+  assert_equals 8 "$(alerts '[.full_questions[] | select(.status == "waiting on UI (follow-up)")] | length')" \
+    'team questions stay visible as follow-up rows'
+  printf '## Your decisions\n\n**A. Which release?** Pick one.\n\n**B. Which store?** Pick one for the release.\n\n## For UI\n\n**C. Which layout?** UI will decide.\n' > "$home/data/captain-questions.md"
   out=$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .title + " :: " + .detail] | join("")')
   assert_contains "$out" '2 decisions waiting on you :: 2 open questions are waiting for your answer.' 'one summary row for open decisions'
   assert_contains "$out" 'Open the Questions page' 'decisions row says the action'
