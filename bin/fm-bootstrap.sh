@@ -86,8 +86,11 @@
 #          note, off the bounded session-start path; the line says the
 #          relaunch started, and each outcome (relaunched, or failed with
 #          fm-control's first output line and the relaunch command) arrives
-#          later as a check wake. A worker found anywhere else and every
-#          read-only session get the relaunch command instead. A live worker inside its copy whose
+#          later as a check wake; a failure is not queued when the agent is
+#          by then inside its copy. A task whose control lock another
+#          lifecycle action already holds gets no second relaunch, and its line
+#          says so. A worker found anywhere else and every read-only session
+#          get the relaunch command instead. A live worker inside its copy whose
 #          Treehouse slot nonetheless reads free has the slot re-claimed in a
 #          locked session, reported as one BOOTSTRAP_INFO fact.
 #          treehouse is also MISSING when its installed version lacks
@@ -1713,7 +1716,8 @@ crew_cwd_reconcile() {
         if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ]; then
           echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; $(crew_cwd_remedy "$id") before it writes there"
         else
-          relaunch+=("$id" "$cwd" "$worktree")
+          crew_cwd_relaunch_busy "$id" "$cwd" "$worktree" \
+            || relaunch+=("$id" "$meta" "$cwd" "$worktree" "$wt_canon")
         fi
         ;;
       *) echo "CREW_CWD: task $id's agent is running in $cwd, not its recorded local copy $worktree; $(crew_cwd_remedy "$id")" ;;
@@ -1734,42 +1738,101 @@ crew_cwd_remedy() {  # <id>
   fi
 }
 
+# A worker whose task already has a lifecycle action holding bin/fm-control.sh's
+# per-task control lock gets no second relaunch, which that lock would only
+# refuse: the line names the relaunch already under way when the task's
+# relaunch journal shows one in flight, and otherwise the action to wait for.
+crew_cwd_relaunch_busy() {  # <id> <cwd> <worktree>
+  local id=$1 cwd=$2 worktree=$3 lock phase
+  lock="$STATE/.control-$id.lock"
+  command -v fm_lock_try_acquire >/dev/null 2>&1 || {
+    # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
+  }
+  if fm_lock_try_acquire "$lock"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  phase=$(sed -n 's/^phase=//p' "$STATE/$id.control-relaunch" 2>/dev/null | head -1)
+  case "$phase" in
+    checkpoint|noted|stopping|exited|launching)
+      echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; a relaunch into that copy is already under way, so no second one was started - confirm the replacement is working through its instructions once it finishes"
+      ;;
+    *)
+      echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; another lifecycle action holds this task's control lock, so no relaunch was started - once it finishes, if the agent is still there, $(crew_cwd_remedy "$id") before it writes there"
+      ;;
+  esac
+  return 0
+}
+
+# Runs a detached process in its own session - setsid where it exists, else
+# perl's POSIX setsid, and only nohup when neither is present - so neither the
+# end of this session start nor the bounded digest's process-group kill can take
+# it down.
+crew_exec_detached() {  # <command> [arg...]
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid -f "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    exec perl -MPOSIX -e 'exit 0 if fork; POSIX::setsid(); exec @ARGV or exit 127' "$@"
+  fi
+  exec nohup "$@"
+}
+
 # One detached worker relaunches every worker found in the primary checkout, in
 # order, through bin/fm-control.sh, the lifecycle owner, off the bounded
 # session-start path: a relaunch can outlast the whole digest budget, and a
 # bound that killed it mid-transaction would skip fm-control's own rollback.
-# The worker runs in its own session where setsid exists, with every stream
+# The worker runs in its own session (crew_exec_detached) with every stream
 # detached so the digest never waits on it, and reports each outcome as one
 # check wake through bin/fm-wake-lib.sh. Its messages are worded here, so the
 # worker itself only runs and reports.
-crew_cwd_relaunch_detached() {  # (<id> <cwd> <worktree>)...
-  local id cwd worktree work=() worker
-  while [ "$#" -ge 3 ]; do
-    id=$1 cwd=$2 worktree=$3
-    shift 3
-    work+=("$id"
+crew_cwd_relaunch_detached() {  # (<id> <meta> <cwd> <worktree> <worktree-canon>)...
+  local id meta cwd worktree wt_canon work=() worker
+  while [ "$#" -ge 5 ]; do
+    id=$1 meta=$2 cwd=$3 worktree=$4 wt_canon=$5
+    shift 5
+    work+=("$id" "$meta" "$wt_canon"
       "Session start found this worker's agent running in $cwd, the project's primary checkout, instead of its recorded local copy $worktree - a host restart resumed the session there - so it relaunched the worker into $worktree. None of the previous conversation carries over: re-read these instructions, act on any waiting steering message, inspect this copy's branch, commits, and uncommitted changes for the work already done, and continue from where the work stands. Run nothing in $cwd."
       "check: crew-cwd: task $id's agent was running in the primary checkout $cwd instead of its recorded local copy $worktree; relaunched it into that copy with a progress note - confirm the replacement is working through its instructions"
       "check: crew-cwd: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree, and the automatic relaunch failed: "
       "; $(crew_cwd_remedy "$id") before it writes there")
     echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; started relaunching it into that copy with a progress note in the background - its outcome arrives as a check wake"
   done
-  # shellcheck disable=SC2016 # expanded by the worker shell, not here.
-  worker='. "$1/fm-wake-lib.sh"; control=$2; shift 2
-while [ "$#" -ge 5 ]; do
-  if out=$(FM_SPAWN_NO_GUARD=1 "$control" "$1" relaunch --note "$2" </dev/null 2>&1); then
-    payload=$3
-  else
-    payload="$4$(printf "%s\n" "$out" | sed -n "1s/[[:space:]]\{1,\}/ /g;1p")$5"
-  fi
-  fm_wake_append check "crew-cwd:$1" "$payload" || true
-  shift 5
-done'
+  worker="$(declare -f crew_cwd_relaunch_worker)
+crew_cwd_relaunch_worker \"\$@\""
   (
-    if command -v setsid >/dev/null 2>&1; then set -- setsid -f; else set -- nohup; fi
-    FM_HOME="$FM_HOME" STATE="$STATE" exec "$@" bash -c "$worker" fm-crew-cwd-relaunch \
+    FM_HOME="$FM_HOME" STATE="$STATE" crew_exec_detached bash -c "$worker" fm-crew-cwd-relaunch \
       "$SCRIPT_DIR" "$FM_ROOT/bin/fm-control.sh" "${work[@]}"
   ) </dev/null >/dev/null 2>&1 &
+}
+
+# The detached worker's body. A failed relaunch whose agent the record's
+# endpoint now shows inside its copy was moved by a concurrent relaunch, which
+# reports for itself, so it queues nothing.
+# shellcheck disable=SC2329 # invoked by the detached worker through declare -f.
+crew_cwd_relaunch_worker() {  # <bin-dir> <control> (<id> <meta> <worktree-canon> <note> <ok> <fail-prefix> <fail-suffix>)...
+  local bin=$1 control=$2 id meta wt note ok fail_pre fail_post out payload line cwd
+  shift 2
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$bin/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-slot-record-lib.sh disable=SC1091
+  . "$bin/fm-slot-record-lib.sh"
+  # shellcheck source=bin/fm-backend.sh disable=SC1091
+  . "$bin/fm-backend.sh"
+  while [ "$#" -ge 7 ]; do
+    id=$1 meta=$2 wt=$3 note=$4 ok=$5 fail_pre=$6 fail_post=$7
+    shift 7
+    if out=$(FM_SPAWN_NO_GUARD=1 "$control" "$id" relaunch --note "$note" </dev/null 2>&1); then
+      payload=$ok
+    else
+      if line=$(fm_backend_agent_process "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")") \
+        && cwd=$(fm_slot_canonical_dir "${line#*$'\t'}"); then
+        case "$cwd" in "$wt"|"$wt"/*) continue ;; esac
+      fi
+      payload="$fail_pre$(printf '%s\n' "$out" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p')$fail_post"
+    fi
+    fm_wake_append check "crew-cwd:$id" "$payload" || true
+  done
 }
 
 # A correctly placed worker whose pool slot nonetheless reads free to Treehouse
@@ -1797,15 +1860,15 @@ crew_slot_hold() {  # <id> <slot> <project> <agent-pid>
   # The holder waits on its sleep rather than running it in the foreground, so
   # a TERM - this function's own, or teardown's reap - stops the sleep with it
   # and leaves nothing behind in the copy. It runs in its own session where
-  # setsid exists, so the end of this session start cannot take it down, and it
-  # reports its own pid because a forking setsid hides it from `$!`.
+  # it can be (crew_exec_detached), so the end of this session start cannot take
+  # it down, and it reports its own pid because a forking launcher hides it from
+  # `$!`.
   pidfile=$(mktemp "${TMPDIR:-/tmp}/fm-slot-hold.XXXXXX") || return 0
   # shellcheck disable=SC2016 # expanded by the holder shell, not here.
   hold_loop='printf "%s\n" "$$" > "$2"; trap "kill \$! 2>/dev/null; exit 0" TERM; while kill -0 "$1" 2>/dev/null; do if c=$(readlink "/proc/$1/cwd" 2>/dev/null); then case "$c" in "$3"|"$3"/*) ;; *) exit 0 ;; esac; fi; sleep 60 & wait "$!"; done'
   (
     CDPATH='' cd -- "$slot" || exit 0
-    if command -v setsid >/dev/null 2>&1; then set -- setsid -f; else set -- nohup; fi
-    exec "$@" sh -c "$hold_loop" fm-slot-hold "$agent" "$pidfile" "$slot"
+    crew_exec_detached sh -c "$hold_loop" fm-slot-hold "$agent" "$pidfile" "$slot"
   ) </dev/null >/dev/null 2>&1 &
   holder=
   tries=0

@@ -1627,7 +1627,12 @@ case "${1:-}" in
   list-windows) printf '%s\n' "${FM_TEST_TMUX_WINDOWS:-}"; exit 0 ;;
   display-message)
     for a in "$@"; do
-      case "$a" in *pane_pid*) printf '%s\n' "${FM_TEST_PANE_PID:-}"; exit 0 ;; esac
+      case "$a" in
+        *pane_pid*)
+          if [ -s "${FM_TEST_PANE_PID_FILE:-}" ]; then cat "$FM_TEST_PANE_PID_FILE"; else printf '%s\n' "${FM_TEST_PANE_PID:-}"; fi
+          exit 0
+          ;;
+      esac
     done
     ;;
 esac
@@ -1661,6 +1666,9 @@ SH
   printf 'FM_SPAWN_NO_GUARD=%s\n' "${FM_SPAWN_NO_GUARD:-}"
   printf 'arg=%s\n' "$@"
 } >> "${FM_TEST_CONTROL_LOG:?}"
+if [ -n "${FM_TEST_CONTROL_MOVE_TO:-}" ]; then
+  printf '%s\n' "$FM_TEST_CONTROL_MOVE_TO" > "${FM_TEST_PANE_PID_FILE:?}"
+fi
 if [ "${FM_TEST_CONTROL_FAIL:-0}" = 1 ]; then
   echo "error: endpoint state is ambiguous; refusing to relaunch" >&2
   exit 1
@@ -1791,6 +1799,86 @@ EOF
   pass "crew working directory: an agent in the primary checkout is relaunched in the background by a locked session and only reported by a read-only one"
 }
 
+wait_crew_cwd_worker_gone() {  # <home>: the detached relaunch worker for <home> has exited
+  local tries=0
+  while pgrep -f "fm-crew-cwd-relaunch .*$1/bin/fm-control.sh" >/dev/null 2>&1; do
+    [ "$tries" -lt 100 ] || fail "the background relaunch worker never exited"
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+}
+
+test_crew_cwd_failed_relaunch_of_a_moved_agent_queues_no_failure() {
+  local rec case_dir home proj wt fakebin out id=cwd-moved-task log tree root agent moved_root moved_agent pidfile
+
+  rec=$(make_crew_cwd_case crew-cwd-moved)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  write_crew_cwd_meta "$home" "$id" "$wt" "$proj"
+  log="$case_dir/control.log"; : > "$log"
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$proj")
+  read -r root agent <<EOF
+$tree
+EOF
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$wt")
+  read -r moved_root moved_agent <<EOF
+$tree
+EOF
+  pidfile="$case_dir/pane-pid"
+  printf '%s\n' "$root" > "$pidfile"
+
+  # A concurrent relaunch moves the agent into its copy while this one is
+  # refused: the refusal is not a misplaced worker, so no failure is queued.
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" \
+    FM_TEST_PANE_PID_FILE="$pidfile" FM_TEST_CONTROL_MOVE_TO="$moved_root" FM_TEST_CONTROL_FAIL=1)
+  assert_contains "$out" "started relaunching it into that copy with a progress note in the background" \
+    "a locked session did not report the background relaunch it started"
+  wait_crew_cwd_worker_gone "$home"
+  assert_grep "arg=relaunch" "$log" "the relaunch was never attempted"
+  ! grep -qF "crew-cwd:$id" "$home/state/.wake-queue" 2>/dev/null \
+    || fail "a refused relaunch of an agent already inside its copy queued a wake: $(cat "$home/state/.wake-queue")"
+  stop_crew_cwd_tree "$root" "$agent"
+  stop_crew_cwd_tree "$moved_root" "$moved_agent"
+  pass "crew working directory: a refused relaunch of an agent already moved into its copy queues no failure"
+}
+
+test_crew_cwd_relaunch_under_way_is_not_repeated() {
+  local rec case_dir home proj wt fakebin out id=cwd-busy-task log tree root agent holder tries=0
+
+  rec=$(make_crew_cwd_case crew-cwd-busy)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  write_crew_cwd_meta "$home" "$id" "$wt" "$proj"
+  log="$case_dir/control.log"; : > "$log"
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$proj")
+  read -r root agent <<EOF
+$tree
+EOF
+  printf 'v1\ntask=%s\nphase=launching\n' "$id" > "$home/state/$id.control-relaunch"
+  # shellcheck disable=SC2016 # expanded by the holder shell.
+  FM_HOME="$home" STATE="$home/state" bash -c '. "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$STATE/.control-$2.lock" || exit 1
+    : > "$3"; sleep 30' sh "$ROOT" "$id" "$case_dir/held" </dev/null >/dev/null 2>&1 &
+  holder=$!
+  while [ ! -e "$case_dir/held" ]; do
+    [ "$tries" -lt 100 ] || fail "the control lock holder never took the lock"
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log")
+  pkill -P "$holder" 2>/dev/null || true
+  kill "$holder" 2>/dev/null || true
+  stop_crew_cwd_tree "$root" "$agent"
+  assert_contains "$out" "CREW_CWD: task $id's agent is running in the primary checkout $proj instead of its recorded local copy $wt; a relaunch into that copy is already under way, so no second one was started" \
+    "a relaunch already under way was not reported"
+  assert_not_contains "$out" "started relaunching" "a second background relaunch was started"
+  [ ! -s "$log" ] || fail "a task whose relaunch was under way was relaunched again: $(cat "$log")"
+  pass "crew working directory: a relaunch already under way is reported, never started twice"
+}
+
 test_crew_cwd_elsewhere_is_reported_not_relaunched() {
   local rec case_dir home proj wt fakebin out id=cwd-elsewhere-task log tree root agent
 
@@ -1917,6 +2005,8 @@ test_secondmate_home_with_foreign_lease_is_reported
 test_slot_drift_survives_a_grep_without_bre_alternation
 test_crew_cwd_inside_recorded_copy_is_silent
 test_crew_cwd_in_primary_checkout_is_relaunched
+test_crew_cwd_failed_relaunch_of_a_moved_agent_queues_no_failure
+test_crew_cwd_relaunch_under_way_is_not_repeated
 test_crew_cwd_elsewhere_is_reported_not_relaunched
 test_crew_cwd_free_slot_is_reclaimed
 
