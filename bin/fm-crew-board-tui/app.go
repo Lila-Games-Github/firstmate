@@ -478,6 +478,13 @@ func (m *app) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseClickMsg:
+		if msg.Y == 2 {
+			if page := m.pageTabAt(msg.X - 1); page >= 0 && page != m.page {
+				m.setPage(page)
+				return m, motionTick()
+			}
+			return m, nil
+		}
 		for _, rect := range m.lastRects {
 			if msg.X >= rect.x && msg.X < rect.x+rect.width && msg.Y >= rect.y && msg.Y < rect.y+rect.height {
 				if rect.id != m.focus {

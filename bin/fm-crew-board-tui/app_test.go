@@ -1277,3 +1277,93 @@ func TestPageOrderAndNumberKeys(t *testing.T) {
 		}
 	}
 }
+
+// pageTabX returns the screen column of the first cell of a page tab, derived
+// from the same layout code the header renders with.
+func pageTabX(m *app, page int) int {
+	tabs, start := m.pageTabs()
+	x := 1
+	for index := start; index < page; index++ {
+		x += lipgloss.Width(tabs[index]) + 2
+	}
+	return x
+}
+
+func TestMouseClickSwitchesPageTabs(t *testing.T) {
+	for _, width := range []int{120, 60} {
+		m := fixtureApp(t)
+		m.width, m.height = width, 30
+		for _, page := range []int{2, 1, 3, 0} {
+			_ = m.View()
+			command := func() tea.Cmd {
+				_, c := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: pageTabX(m, page) + 1, Y: 2})
+				return c
+			}()
+			if m.page != page {
+				t.Fatalf("width %d: click on page tab %d left page %d", width, page, m.page)
+			}
+			if command == nil {
+				t.Fatalf("width %d: page click did not animate", width)
+			}
+			if m.focus != pages[page][0].id && !(page == 0 && m.focus == "workers") {
+				t.Fatalf("width %d: page %d focus %s", width, page, m.focus)
+			}
+		}
+		before := m.page
+		m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.width - 3, Y: 2})
+		if m.page != before {
+			t.Fatalf("width %d: click past the tabs changed the page", width)
+		}
+	}
+}
+
+func TestMouseClickSwitchesSubTabs(t *testing.T) {
+	for _, size := range [][2]int{{120, 30}, {70, 30}, {50, 30}} {
+		m := fixtureApp(t)
+		m.width, m.height = size[0], size[1]
+		for page := range pages {
+			m.page, m.focus = page, pages[page][0].id
+			for _, target := range pages[page] {
+				for _, from := range pages[page] {
+					m.focus = from.id
+					_ = m.View()
+					rect := m.lastRects[0]
+					innerWidth := max(1, rect.width-4)
+					x := 0
+					start := m.subTabStart(innerWidth)
+					found := false
+					for _, spec := range pages[page][start:] {
+						width := lipgloss.Width(m.subTab(spec))
+						if spec.id == target.id && x < innerWidth {
+							m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: rect.x + 1 + x, Y: rect.y + 1})
+							found = true
+							break
+						}
+						x += width + 1
+					}
+					if found && m.focus != target.id {
+						t.Fatalf("%v page %d: click on sub-tab %s from %s focused %s (start %d)", size, page, target.id, from.id, m.focus, start)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestMouseClickSubTabWhenRowIsScrolled(t *testing.T) {
+	m := fixtureApp(t)
+	m.width, m.height = 50, 30
+	m.page, m.focus = 3, pages[3][len(pages[3])-1].id
+	_ = m.View()
+	rect := m.lastRects[0]
+	innerWidth := max(1, rect.width-4)
+	start := m.subTabStart(innerWidth)
+	if start == 0 {
+		t.Fatal("sub-tab row did not scroll at this size")
+	}
+	first := pages[3][start]
+	m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: rect.x + 2, Y: rect.y + 1})
+	if m.focus != first.id {
+		t.Fatalf("click on the first visible sub-tab focused %s, want %s", m.focus, first.id)
+	}
+}

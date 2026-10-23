@@ -178,8 +178,9 @@ func withoutSections(rows []item) []item {
 	return kept
 }
 
-func (m *app) header() string {
-	workers := len(m.data.liveWorkers())
+// pageTabs renders the page tabs in order and returns the index of the first
+// one still visible once the row is scrolled to keep the active page in view.
+func (m *app) pageTabs() ([]string, int) {
 	var tabs []string
 	for index, name := range pageNames {
 		label := fmt.Sprintf("%d %s", index+1, name)
@@ -198,6 +199,32 @@ func (m *app) header() string {
 		}
 		tabs = append(tabs, tab)
 	}
+	start := 0
+	if lipgloss.Width(strings.Join(tabs[:m.page+1], "  ")) > max(1, m.width-4) {
+		start = m.page
+	}
+	return tabs, start
+}
+
+// pageTabAt returns the page under column x of the header tab row, or -1.
+func (m *app) pageTabAt(x int) int {
+	tabs, start := m.pageTabs()
+	if x < 0 || x >= max(1, m.width-4) {
+		return -1
+	}
+	position := 0
+	for index := start; index < len(tabs); index++ {
+		end := position + lipgloss.Width(tabs[index])
+		if x >= position && x < end {
+			return index
+		}
+		position = end + 2
+	}
+	return -1
+}
+
+func (m *app) header() string {
+	workers := len(m.data.liveWorkers())
 	brand := "FIRSTMATE"
 	if home := strings.TrimSpace(m.data.Home); home != "" && !strings.EqualFold(home, brand) {
 		brand += "  //  " + home
@@ -207,10 +234,8 @@ func (m *app) header() string {
 	line := left + "   " + clock + "   WORKERS " + fmt.Sprint(workers)
 	line = ansi.Truncate(line, max(1, m.width-4), "…")
 	tabWidth := max(1, m.width-4)
-	prefix := strings.Join(tabs[:m.page+1], "  ")
-	if lipgloss.Width(prefix) > tabWidth {
-		tabs = tabs[m.page:]
-	}
+	tabs, start := m.pageTabs()
+	tabs = tabs[start:]
 	content := line + "\n" + ansi.Truncate(strings.Join(tabs, "  "), tabWidth, "…")
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(green).
 		Width(max(1, m.width-2)).Height(2).Render(content)
