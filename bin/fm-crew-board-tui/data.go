@@ -34,11 +34,15 @@ type runtime struct {
 	Effort  string `json:"effort"`
 }
 
-func (r runtime) full() string {
-	text := r.Runtime
-	if r.Model != "" {
-		text += " (" + r.Model + ")"
+func (r runtime) label() string {
+	if r.Model == "" {
+		return r.Runtime
 	}
+	return r.Runtime + " (" + r.Model + ")"
+}
+
+func (r runtime) full() string {
+	text := r.label()
 	if r.Effort != "" {
 		text += ", effort " + r.Effort
 	}

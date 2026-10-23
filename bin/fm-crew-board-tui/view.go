@@ -352,7 +352,7 @@ func (m *app) rowLine(id string, row item, index, width int) string {
 				}
 				status = elapsed(worker.PhaseSince, time.Now()) + "  " + tag
 				if rt, ok := m.data.Panels.WorkerRuntimes[row.ID]; ok {
-					status = rt.Runtime + "  " + status
+					status = rt.label() + "  " + status
 				}
 				status = ansi.Truncate(status, max(8, width/2), "…")
 				break
