@@ -640,7 +640,7 @@ The right-hand information rail stays the same on every page and shows notificat
 Clicking a rail row opens its full detail and marks a notification seen; Esc returns to the board, and `s` opens the rail at full width, including on narrow terminals where the main panel otherwise takes the full width.
 The main area keeps WORKERS, FEED, READY FOR YOU, BUGS, BACKLOG, CAPTAIN QUESTIONS, and TODAY'S LANDINGS as sub-tabs on their existing pages.
 The test queue has Editor, Galaxy S22, Galaxy M31, and Galaxy S21 FE sections, plus an Any phone section while an any-phone ticket waits.
-Editor shows the count and each live full-suite Godot process with its worker task, checkout version, elapsed time, and log progress when available; it also reads the test service's published `status.json` and keeps the FrogPile ticket waiters.
+Editor shows the count and each live full-suite Godot run with its worker task, checkout version, elapsed time, and completed tests out of the runner's registered or shard-selected total when its log shows them; the shards of one `SUITE_SHARDS` run count as one run; it also reads the test service's published `status.json` and keeps the FrogPile ticket waiters.
 Phone sections show their live holder, time since acquisition, ordered waiters, and their wait times, using the ticket files under `FROGPILE_QUEUE_ROOT` (default `~/.frogpile-queues`).
 The legacy suite holder sidecar remains a fallback when no full-suite process is visible.
 An attached phone shows `busy` while held, `locked` when its keyguard is showing, and `idle` when free; a keyguard state that cannot be read keeps that status and only notes it in the detail, and a missing registered phone shows `disconnected` in the queue.

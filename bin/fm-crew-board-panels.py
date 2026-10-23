@@ -824,24 +824,83 @@ def suite_version(cwd):
     return run.stdout.strip() if run.returncode == 0 else "unknown"
 
 
-def suite_progress(path):
+SUITE_REGISTERED = re.compile(r'\["(res://tests/test_\w+\.gd)",\s*(?:true|false)')
+SUITE_DONE = re.compile(r"^TEST res://tests/test_\w+\.gd done in \d+ms\s*$")
+SUITE_SELECTION = re.compile(r"^SHARD SELECTION: (\d+) of \d+ registered tests\s*$")
+SHARD_STARTED = re.compile(r"^\[sharded_suite\] shard (\d+): (\d+) tests pid=")
+SHARD_COMPLETED = re.compile(r"^\[sharded_suite\] \d+s: completed \[([\d, ]*)\]")
+
+
+def registered_suite_tests(project):
+    """The runner's own registry is the full-suite total."""
+    if not project:
+        return 0
+    try:
+        return len(set(SUITE_REGISTERED.findall((Path(project) / "tests/run_tests.gd").read_text(errors="replace"))))
+    except OSError:
+        return 0
+
+
+def suite_counts(path, project=""):
+    """Completed and total tests from the runner's own log lines, or None."""
     if not path:
-        return ""
+        return None
     try:
         if not stat.S_ISREG(os.stat(path).st_mode):
-            return ""
-    except OSError:
-        return ""
-    for line in reversed(tail_lines(path)):
-        match = re.search(r"\b(\d+)\s*(?:/|of)\s*(\d+)\s+tests?\b", line, re.IGNORECASE)
-        if match and 0 <= int(match[1]) <= int(match[2]) and int(match[2]) > 0:
-            return f"{match[1]}/{match[2]} tests"
-    return ""
+            return None
+        done, selected, shards, completed = 0, 0, {}, []
+        with open(path, errors="replace") as stream:
+            for line in stream:
+                if SUITE_DONE.match(line):
+                    done += 1
+                elif match := SUITE_SELECTION.match(line):
+                    selected = int(match[1])
+                elif match := SHARD_STARTED.match(line):
+                    shards[int(match[1])] = int(match[2])
+                elif match := SHARD_COMPLETED.match(line):
+                    completed = [int(part) for part in match[1].replace(",", " ").split()]
+    except (OSError, ValueError):
+        return None
+    if shards:
+        done, total = sum(completed), sum(shards.values())
+    else:
+        total = selected or registered_suite_tests(project)
+    return (done, total) if total and 0 <= done <= total else None
+
+
+def suite_progress(counts):
+    return f"{counts[0]}/{counts[1]} tests" if counts else ""
+
+
+def suite_project(argv, cwd):
+    """Godot's --path names the project whose registry the runner loads."""
+    for index, arg in enumerate(argv):
+        if arg == "--path" and index + 1 < len(argv):
+            return os.path.join(cwd, argv[index + 1])
+        if arg.startswith("--path="):
+            return os.path.join(cwd, arg[len("--path="):])
+    return cwd
+
+
+def suite_parent(root, pid):
+    """The run_sharded_suite.py ancestor of a shard, as (pid, cwd), or (None, "")."""
+    seen = set()
+    while pid and pid not in seen:
+        seen.add(pid)
+        try:
+            pid = int((root / str(pid) / "stat").read_text().rpartition(")")[2].split()[1])
+            argv = (root / str(pid) / "cmdline").read_bytes().split(b"\0")
+            if any(arg.decode(errors="replace").endswith("run_sharded_suite.py") for arg in argv):
+                return pid, os.readlink(root / str(pid) / "cwd")
+        except (OSError, ValueError, IndexError):
+            return None, ""
+    return None, ""
 
 
 def suite_processes(trees, now):
-    """The command line is the full-run discriminator; a holder is optional."""
-    result = []
+    """The command line is the full-run discriminator; a holder is optional.
+    Shards of one sharded suite are one run."""
+    result, shards = [], {}
     root = suite_process_root()
     for proc in root.glob("[0-9]*"):
         try:
@@ -862,12 +921,35 @@ def suite_processes(trees, now):
                 elapsed = max(0, now - float((proc / "started").read_text()))
             log = proc / "fd/1"
             log_path = os.readlink(log) if log.exists() else ""
+            counts = suite_counts(log_path, suite_project(argv, cwd))
+            if "--selection-file" in argv or any(arg.startswith("--selection-file=") for arg in argv):
+                parent, parent_cwd = suite_parent(root, pid)
+                key = parent or os.path.dirname(os.path.realpath(cwd))
+                group = shards.setdefault(key, {"parent": parent, "cwd": parent_cwd or os.path.dirname(cwd),
+                                                "pids": [], "elapsed": [], "counts": [], "shard_cwd": cwd})
+                group["pids"].append(pid)
+                group["elapsed"].append(elapsed)
+                group["counts"].append(counts)
+                continue
             task, _, _ = process_owner(pid, trees, cwd) if root == Path("/proc") else process_owner("", trees, cwd)
             result.append({"pid": pid, "task": task, "cwd": cwd, "for": duration(elapsed) if elapsed is not None else "unknown time",
-                           "version": suite_version(cwd), "progress": suite_progress(log_path),
+                           "version": suite_version(cwd), "progress": suite_progress(counts),
                            "detail": f"pid {pid} in {cwd}"})
         except (OSError, ValueError, IndexError):
             continue
+    for group in shards.values():
+        task = next((owner for owner, _, _ in (process_owner("", trees, path) for path in (group["cwd"], group["shard_cwd"]))
+                     if any(owner == known for _, known in trees)),
+                    process_owner("", trees, group["cwd"])[0])
+        known = [value for value in group["elapsed"] if value is not None]
+        counts = group["counts"]
+        progress = (suite_progress((sum(done for done, _ in counts), sum(total for _, total in counts)))
+                    if all(counts) else "")
+        pids = sorted(group["pids"])
+        result.append({"pid": group["parent"] or pids[0], "task": task, "cwd": group["cwd"],
+                       "for": duration(max(known)) if known else "unknown time",
+                       "version": suite_version(group["shard_cwd"]), "progress": progress,
+                       "detail": f"{len(pids)} shards (pids {', '.join(map(str, pids))}) in {group['cwd']}"})
     return sorted(result, key=lambda row: row["pid"])
 
 
@@ -901,14 +983,15 @@ def service_suite_rows(trees, now):
                 ran = "unknown time"
             log = root / "logs" / f"{rid}-{request.get('generation', 0)}-suite.log"
             running.append({"pid": None, "task": task, "cwd": cwd, "for": ran,
-                            "version": str(request.get("sha") or "unknown")[:7], "progress": suite_progress(log),
+                            "version": str(request.get("sha") or "unknown")[:7], "progress": suite_progress(suite_counts(
+                                log, os.path.join(cwd, "prototype-game") if os.path.isdir(os.path.join(cwd, "prototype-game")) else cwd)),
                             "detail": f"test service request {rid} in {cwd}"})
         elif state in ("queued", "preparing"):
             try:
                 waited = duration(float(request.get("wait_seconds") or 0))
             except (ValueError, TypeError, OverflowError):
                 waited = "unknown time"
-            waiting.append({"pid": f"service-{rid}", "task": task, "cwd": source, "for": waited,
+            waiting.append({"pid": f"service-{rid}", "task": task, "cwd": source, "run_cwd": str(root / "runs" / rid), "for": waited,
                             "detail": f"test service request {rid} for {str(request.get('sha') or '')[:7]}"})
     return running, waiting
 
@@ -991,9 +1074,9 @@ def test_queue(snapshot, phones, now, tags=None):
                         "version": suite_version(holder.get("cwd", "")), "progress": ""})
         suite_running.append(running)
     for entry in service_waiting:
-        if os.path.realpath(entry["cwd"]) not in waiting_cwds:
+        run_cwd = os.path.realpath(entry["run_cwd"])
+        if not any(cwd == run_cwd or cwd.startswith(run_cwd + os.sep) for cwd in waiting_cwds):
             suite_queue.append(entry)
-            waiting_cwds.add(os.path.realpath(entry["cwd"]))
     rows.append(item(f"EDITOR: {len(suite_running)} running, {len(suite_queue)} waiting",
                      status="section", item_id="suite-heading"))
     if not suite_running and not suite_queue:
