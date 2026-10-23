@@ -30,12 +30,16 @@ chmod +x "$tmp/bin/adb"
 $svc install-unit > "$tmp/unit-path"
 rg -q '^ExecStart=".*/bin/fm-test-service.py" serve$' "$(cat "$tmp/unit-path")"
 cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
-{"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"any_device":["phone.sh","--serial","any"],"phones":["S22","S21"],"any_phones":["S22","S21"],"landing_branch":"main","scenarios":{"smoke":["--smoke"]}}
+{"prepare":["prepare.sh"],"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"any_device":["phone.sh","--serial","any"],"phones":["S22","S21"],"any_phones":["S22","S21"],"landing_branch":"main","scenarios":{"smoke":["--smoke"]}}
 JSON
 cd "$tmp/project"
 git init -q -b main
 git config user.name Test
 git config user.email test@example.com
+cat > prepare.sh <<'PREPARE'
+#!/usr/bin/env bash
+echo "prepare-v1" >> "$EVENTS"
+PREPARE
 cat > suite.sh <<'SUITE'
 #!/usr/bin/env bash
 echo "suite-start-v1" >> "$EVENTS"
@@ -54,15 +58,16 @@ cat > benchmark.sh <<'BENCH'
 #!/usr/bin/env bash
 echo "benchmark-v1" >> "$EVENTS"
 BENCH
-chmod +x suite.sh phone.sh benchmark.sh
+chmod +x prepare.sh suite.sh phone.sh benchmark.sh
 git add . && git commit -qm v1
 sha1=$(git rev-parse HEAD)
 printf '\necho dirty-live-tree >&2; exit 1\n' >> suite.sh
 "$svc" serve > "$tmp/server.log" 2>&1 & server=$!
 request=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22 --scenario smoke --harness benchmark.sh --receipt "$tmp/pass.receipt" --retest-on-move)
 $svc wait "$request" | grep -q "^passed $sha1"
-# The suite is still running when the phone begins.
-[ "$(sed -n '1p' "$EVENTS")" = suite-start-v1 ] || [ "$(sed -n '1p' "$EVENTS")" = phone-start-v1:S22:--smoke ]
+# Preparation finishes before the suite and phone enter their queues.
+[ "$(sed -n '1p' "$EVENTS")" = prepare-v1 ]
+[ "$(sed -n '2p' "$EVENTS")" = suite-start-v1 ] || [ "$(sed -n '2p' "$EVENTS")" = phone-start-v1:S22:--smoke ]
 [ "$(rg -n 'suite-end' "$EVENTS" | cut -d: -f1)" -gt "$(rg -n 'phone-start' "$EVENTS" | cut -d: -f1)" ]
 [ "$(tail -1 "$EVENTS")" = benchmark-v1 ]
 [ "$(cat "$tmp/pass.receipt")" = "$(printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0' "$sha1")" ]
@@ -74,7 +79,7 @@ s=json.load(open(sys.argv[1]))
 assert s['schema']=='fm-test-service.v1'
 row=next(r for r in s['requests'] if r['id']==sys.argv[2])
 assert row['state']=='passed'
-assert {step['name'] for step in row['steps']}=={'suite','device','phone-prep','harness:benchmark.sh'}
+assert {step['name'] for step in row['steps']}=={'prepare','suite','device','phone-prep','harness:benchmark.sh'}
 assert all(step['state']=='passed' for step in row['steps'])
 PY
 git checkout -q -- suite.sh

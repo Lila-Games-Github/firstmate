@@ -1,4 +1,12 @@
 {
+  "prepare": [
+    "scripts/godot-automation.sh",
+    "--headless",
+    "--editor",
+    "--path",
+    "prototype-game",
+    "--quit"
+  ],
   "suite": [
     "prototype-game/tests/run_suite.sh"
   ],

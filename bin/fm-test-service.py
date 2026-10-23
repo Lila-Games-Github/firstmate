@@ -50,7 +50,7 @@ def config(project):
         raise ValueError("any_device requires any_phones and argv arrays")
     if "landing_repo" in data:
         data["landing_repo"] = data["landing_repo"].replace("{fm_home}", str(HOME))
-    for name in ("suite", "device", "any_device"):
+    for name in ("prepare", "suite", "device", "any_device"):
         if name in data and (not data[name] or Path(data[name][0]).is_absolute() or ".." in Path(data[name][0]).parts):
             raise ValueError(name + " executable must be relative to the tested checkout")
     return data
@@ -253,7 +253,7 @@ def execute(db, row):
     if work.exists():
         shutil.rmtree(work)
     work.parent.mkdir(parents=True, exist_ok=True)
-    clone = run(["git", "clone", "--no-local", "--quiet", str(repo), str(work)])
+    clone = run(["git", "clone", "--local", "--quiet", str(repo), str(work)])
     if clone.returncode:
         return "failed", "cannot make clean detached test copy", None
     run(["git", "-C", str(work), "fetch", "--quiet", str(repo), row["sha"]])
@@ -261,29 +261,6 @@ def execute(db, row):
         return "failed", "cannot make clean detached test copy", None
     if run(["git", "-C", str(work), "status", "--porcelain"]).stdout.strip():
         return "failed", "test copy is not clean", None
-    serial = opts["device_gate"]
-    any_serials = cfg.get("any_phones", cfg["phones"][:1])
-    if serial == "any" and "any_device" not in cfg:
-        serial = any_serials[0] if any_serials else None
-    if opts["device_gate"] and not serial:
-        return "failed", "no configured phone", None
-    if serial:
-        step_state(db, rid, row["generation"], "phone-prep", "running")
-        try:
-            for target in any_serials if serial == "any" else [serial]:
-                prepare_phone(target)
-        except (RuntimeError, OSError) as exc:
-            step_state(db, rid, row["generation"], "phone-prep", "failed", 1)
-            return "failed", str(exc), work
-        step_state(db, rid, row["generation"], "phone-prep", "passed", 0)
-    steps = []
-    if opts["suite"]:
-        steps.append(("suite", expand(cfg["suite"])))
-    if opts["device_gate"]:
-        command = expand(cfg["any_device"] if serial == "any" else cfg["device"], serial)
-        for scenario in opts["scenarios"]:
-            command += cfg.get("scenarios", {})[scenario]
-        steps.append(("device", command))
     processes = []
     def step(name, argv):
         watch_db = connection()
@@ -318,6 +295,39 @@ def execute(db, row):
         watch_db.close()
         return name, proc.returncode, log_path.read_text(errors="replace")
     try:
+        if cfg.get("prepare"):
+            _name, code, log = step("prepare", expand(cfg["prepare"]))
+            if code:
+                return "failed", first_error(log, code, "prepare"), work
+            if run(["git", "-C", str(work), "status", "--porcelain"]).stdout.strip():
+                return "failed", "prepare changed the tracked test copy", work
+        if STOP:
+            return "interrupted", "service stopping", work
+        if db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+            return "cancelled", "cancelled", work
+        serial = opts["device_gate"]
+        any_serials = cfg.get("any_phones", cfg["phones"][:1])
+        if serial == "any" and "any_device" not in cfg:
+            serial = any_serials[0] if any_serials else None
+        if opts["device_gate"] and not serial:
+            return "failed", "no configured phone", work
+        if serial:
+            step_state(db, rid, row["generation"], "phone-prep", "running")
+            try:
+                for target in any_serials if serial == "any" else [serial]:
+                    prepare_phone(target)
+            except (RuntimeError, OSError) as exc:
+                step_state(db, rid, row["generation"], "phone-prep", "failed", 1)
+                return "failed", str(exc), work
+            step_state(db, rid, row["generation"], "phone-prep", "passed", 0)
+        steps = []
+        if opts["suite"]:
+            steps.append(("suite", expand(cfg["suite"])))
+        if opts["device_gate"]:
+            command = expand(cfg["any_device"] if serial == "any" else cfg["device"], serial)
+            for scenario in opts["scenarios"]:
+                command += cfg.get("scenarios", {})[scenario]
+            steps.append(("device", command))
         # Each request's suite and device commands enter their project-owned shared queues concurrently.
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(steps))) as pool:
             futures = [pool.submit(step, name, argv) for name, argv in steps]

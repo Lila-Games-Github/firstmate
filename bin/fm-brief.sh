@@ -882,7 +882,7 @@ case "$REPO" in
   frogpile|FrogPile|ProjectWhite)
     TEST_SERVICE_GUIDANCE="# FrogPile test gate
 When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit and wait through the Firstmate test service.
-Use \`$FM_ROOT/bin/fm-test-service.py submit frogpile \"\$PWD\" \"\$(git rev-parse HEAD)\" --suite --device-gate R5CT32HRVNM --receipt \"\$PWD/full-suite.receipt\"\`, then \`$FM_ROOT/bin/fm-test-service.py wait <request-id>\`.
+Use \`$FM_ROOT/bin/fm-test-service.py submit frogpile \"\$PWD\" \"\$(git rev-parse HEAD)\" --suite --device-gate any --receipt \"\$PWD/full-suite.receipt\"\`, then \`$FM_ROOT/bin/fm-test-service.py wait <request-id>\`.
 Add \`--scenario <name>\` or \`--harness <committed-relative-path>\` for any scenario or benchmark you wrote.
 See \`$FM_ROOT/docs/test-service.md\` for the full contract.
 " ;;

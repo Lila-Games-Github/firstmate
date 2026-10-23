@@ -12,15 +12,17 @@ The service keeps a private copy of each submitted commit so removing a worker's
 
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
 The file names the suite and device executable argv arrays relative to the tested checkout, the ordered phone serials, named scenario argument arrays, and the landing branch.
+An optional `prepare` argv runs once in the clean detached copy before either suite or phone step; it must leave the tracked tree clean.
 Retests read the submitting worktree's common Git storage by default, so a disposable linked worktree can disappear after submission.
 An optional `landing_repo` absolute path, with `{fm_home}` expansion, selects a different durable local clone.
 Use `{serial}` in the device argv where the chosen serial belongs.
 The configured commands must be the project's existing shared queue entry points when it has them.
 The service invokes FrogPile's suite and phone scripts, which own their shared tickets and locks; it does not take a competing lock or stop the adb server.
-The service starts a request's suite and phone steps concurrently, then runs any committed harness scripts from that request.
+The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
 
 For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json`.
 `any_device` delegates an `any` request to the project queue entry point after preparing each serial in `any_phones`, ordered with the S22 first.
+The FrogPile preparation starts Godot's editor import so class discovery works in a fresh checkout.
 The M31 remains explicitly addressable for performance requests.
 The example is configuration, not a second copy of the suite or phone queue.
 
@@ -28,7 +30,7 @@ A worker can submit the exact committed head, wait for its result, and hand the 
 
 ```sh
 sha=$(git rev-parse HEAD)
-request=$(bin/fm-test-service.py submit frogpile "$PWD" "$sha" --suite --device-gate R5CT32HRVNM --receipt "$PWD/full-suite.receipt")
+request=$(bin/fm-test-service.py submit frogpile "$PWD" "$sha" --suite --device-gate any --receipt "$PWD/full-suite.receipt")
 bin/fm-test-service.py wait "$request"
 ```
 
