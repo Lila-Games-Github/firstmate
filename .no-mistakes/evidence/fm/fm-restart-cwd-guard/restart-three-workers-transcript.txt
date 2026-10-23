@@ -1,0 +1,30 @@
+### Before: agent working directories (as firstmate had to list by hand)
+pw-alpha agent pid 1590712 cwd=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project
+pw-beta agent pid 1590831 cwd=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project
+pw-gamma agent pid 1590926 cwd=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project
+
+### bin/fm-bootstrap.sh output (locked session)
+CREW_CWD: task pw-alpha's agent is running in the primary checkout /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/1/repo; started relaunching it into that copy with a progress note in the background - its outcome arrives as a check wake
+CREW_CWD: task pw-beta's agent is running in the primary checkout /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/2/repo; started relaunching it into that copy with a progress note in the background - its outcome arrives as a check wake
+CREW_CWD: task pw-gamma's agent is running in the primary checkout /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/3/repo; started relaunching it into that copy with a progress note in the background - its outcome arrives as a check wake
+
+### waiting for the detached relaunch worker
+
+### fm-control calls made by the background worker
+fm-control.sh pw-alpha relaunch --note Session start found this worker's agent running in /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project, the project's primary checkout, instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/1/repo - a host restart resumed the session there - so it relaunched the worker into /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/1/repo. None of the previous conversation carries over: re-read these instructions, act on any waiting steering message, inspect this copy's branch, commits, and uncommitted changes for the work already done, and continue from where the work stands. Run nothing in /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project. (FM_HOME=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/home FM_SPAWN_NO_GUARD=1)
+fm-control.sh pw-beta relaunch --note Session start found this worker's agent running in /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project, the project's primary checkout, instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/2/repo - a host restart resumed the session there - so it relaunched the worker into /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/2/repo. None of the previous conversation carries over: re-read these instructions, act on any waiting steering message, inspect this copy's branch, commits, and uncommitted changes for the work already done, and continue from where the work stands. Run nothing in /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project. (FM_HOME=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/home FM_SPAWN_NO_GUARD=1)
+fm-control.sh pw-gamma relaunch --note Session start found this worker's agent running in /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project, the project's primary checkout, instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/3/repo - a host restart resumed the session there - so it relaunched the worker into /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/3/repo. None of the previous conversation carries over: re-read these instructions, act on any waiting steering message, inspect this copy's branch, commits, and uncommitted changes for the work already done, and continue from where the work stands. Run nothing in /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project. (FM_HOME=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/home FM_SPAWN_NO_GUARD=1)
+
+### Outcome wakes queued (state/.wake-queue)
+1792733989	1	check	crew-cwd:pw-alpha	check: crew-cwd: task pw-alpha's agent was running in the primary checkout /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/1/repo; relaunched it into that copy with a progress note - confirm the replacement is working through its instructions
+1792733990	2	check	crew-cwd:pw-beta	check: crew-cwd: task pw-beta's agent was running in the primary checkout /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/2/repo; relaunched it into that copy with a progress note - confirm the replacement is working through its instructions
+1792733991	3	check	crew-cwd:pw-gamma	check: crew-cwd: task pw-gamma's agent was running in the primary checkout /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/project instead of its recorded local copy /tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/3/repo; relaunched it into that copy with a progress note - confirm the replacement is working through its instructions
+
+### After: agent working directories
+pw-alpha agent pid 1592856 cwd=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/1/repo
+pw-beta agent pid 1594878 cwd=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/2/repo
+pw-gamma agent pid 1598181 cwd=/tmp/fm-bootstrap-tests.wSmHM4/restart-demo/pool/3/repo
+
+### Second session start (rerun): no further relaunch
+CREW_CWD lines: 0
+fm-control calls: 0
