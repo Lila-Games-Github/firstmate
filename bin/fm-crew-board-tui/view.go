@@ -365,7 +365,9 @@ func (m *app) rowLine(id string, row item, index, width int) string {
 	}
 	line := prefix + name + spaces + tag
 	if id == "alerts" && m.isNew(row) && !selected {
-		line = lipgloss.NewStyle().Foreground(red).Bold(true).Render(prefix + "NEW " + ansi.Truncate(row.Title, max(1, available-4), "…") + spaces + status)
+		newName := "NEW " + ansi.Truncate(row.Title, max(1, available-4), "…")
+		newSpaces := strings.Repeat(" ", max(1, available-lipgloss.Width(newName)+1))
+		line = lipgloss.NewStyle().Foreground(red).Bold(true).Render(prefix + newName + newSpaces + status)
 	}
 	if selected {
 		line = lipgloss.NewStyle().Foreground(background).Background(yellow).Render(line)

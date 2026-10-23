@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func fixtureApp(t *testing.T) *app {
@@ -1522,5 +1523,24 @@ func TestClearedAlertIsForgottenSoARecurrenceIsNewAgain(t *testing.T) {
 	fresh := m.newAlerts()
 	if len(fresh) != 1 || fresh[0].Nid != "failed:alpha" {
 		t.Fatalf("a recurrence should be new, got %#v", fresh)
+	}
+}
+
+func TestNewAlertRowKeepsItsFullStatusWithinTheRowWidth(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = twoAlerts()
+	delete(m.selected, "alerts")
+	for index, row := range m.items("alerts") {
+		if !m.isNew(row) {
+			t.Fatalf("row %d should be unseen", index)
+		}
+		line := m.rowLine("alerts", row, index, 60)
+		plain := ansi.Strip(line)
+		if !strings.Contains(plain, "NEW ") || !strings.HasSuffix(plain, row.Status) {
+			t.Fatalf("NEW row lost its status: %q", plain)
+		}
+		if got := lipgloss.Width(line); got > 60 {
+			t.Fatalf("NEW row is %d wide, wider than the 60-column panel: %q", got, plain)
+		}
 	}
 }
