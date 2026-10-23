@@ -1,0 +1,40 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│FIRSTMATE  //  crewdemo.UQzQ   ▲ 4 NEW: Monitoring status unavailable   20:08:03   WORKERS 1                                                      │
+│ 1 NOW    2 PLANNING    3 QUESTIONS    4 TESTING                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│INFORMATION                                                                                                                                       │
+│NOTIFICATIONS                                                                                                                                     │
+│  NEW Monitoring status unavailable                                                                                                               │
+│    No watcher heartbeat was found, so it is unknown whether finished work, questions and failures are being noticed. Send any message to firstma…│
+│  NEW ProjectWhite: waiting for the full test suite                                                                                               │
+│    A full test run is queued behind another suite run. Since 1.7 hours ago. The worker cannot finish validating until the suite frees up. Ask fi…│
+│  NEW ProjectWhite: waiting for the full test suite                                                                                               │
+│    A full test run is queued behind another suite run. Since 63 minutes ago. The worker cannot finish validating until the suite frees up. Ask f…│
+│  NEW ProjectWhite: waiting for the full test suite                                                                                               │
+│    A full test run is queued behind another suite run. Since 60 minutes ago. The worker cannot finish validating until the suite frees up. Ask f…│
+│                                                                                                                                                  │
+│TEST QUEUE                                                                                                                                        │
+│  EDITOR                                                                                                                                          │
+│  RUNNING: 738a711fec644810 · running 4m                                                                                                          │
+│  NEXT: ProjectWhite · waiting 1h39m                                                                                                              │
+│  #2: ProjectWhite · waiting 1h2m                                                                                                                 │
+│  #3: ProjectWhite · waiting 1h0m                                                                                                                 │
+│  #4: ProjectWhite · waiting 27m                                                                                                                  │
+│  #5: ProjectWhite · waiting 7m                                                                                                  	                │
+│                                                                                                                                                  │
+│LATEST BUILDS                                                                                                                                     │
+│  none                                                                                                                                            │
+│                                                                                                                                                  │
+│DAILY ROUTINES                                                                                                                                    │
+│  none                                                                                                                                            │
+│                                                                                                                                                  │
+│AI ALLOWANCE                                                                                                                                      │
+│  claude · 70% left · 0m ago                                                                                                  	                   │
+│n next new · Ctrl-n/p scroll · s expand                                                                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│NOTE [all] i: message firstmate  > Type note; Enter sends                                                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit

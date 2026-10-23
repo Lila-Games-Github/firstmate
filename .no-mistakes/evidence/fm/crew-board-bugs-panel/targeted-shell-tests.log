@@ -1,0 +1,4 @@
+ok - bug panel merges sources, tags cards, preserves order, and handles empty sources
+ok - quota allowance uses a slow structured snapshot and keeps the last good result
+ok - an unresolved limiting window reads unknown instead of None
+ok - unknown headroom and exhausted_now runways stay visible and alert
