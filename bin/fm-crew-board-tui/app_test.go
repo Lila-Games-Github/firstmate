@@ -1367,3 +1367,30 @@ func TestMouseClickSubTabWhenRowIsScrolled(t *testing.T) {
 		t.Fatalf("click on the first visible sub-tab focused %s, want %s", m.focus, first.id)
 	}
 }
+
+func TestMouseClickPageTabIgnoredWhileModal(t *testing.T) {
+	for _, mode := range []rune{'?', '/', 'i'} {
+		m := fixtureApp(t)
+		m.width, m.height = 120, 30
+		_ = m.View()
+		press(m, key(mode))
+		if !m.help && !m.filterActive && !m.inputActive {
+			t.Fatalf("%c did not open a modal", mode)
+		}
+		if mode == '/' {
+			press(m, key('x'))
+		}
+		_ = m.View()
+		focus := m.focus
+		m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: pageTabX(m, 1) + 1, Y: 2})
+		if m.page != 0 || m.focus != focus {
+			t.Fatalf("%c: page tab click switched to page %d focus %s", mode, m.page, m.focus)
+		}
+		if mode == '/' {
+			press(m, special(tea.KeyEnter))
+			if m.filters[focus] != "x" {
+				t.Fatalf("filter landed on the wrong panel: %v", m.filters)
+			}
+		}
+	}
+}
