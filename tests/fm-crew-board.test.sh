@@ -854,6 +854,41 @@ EOF
   pass 'daily routines come from registered checks and their last-run markers'
 }
 
+test_monitoring_alert_fires_only_when_down() {
+  local home snapshot out pid ident
+  home=$(make_home monitoring)
+  snapshot="$home/snapshot.json"
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
+  monitoring_alert() {
+    FM_SUPERVISION_MODEL=autoarm run_panels "$home" "$snapshot" \
+      | jq -r '[.alerts[] | select(.title | startswith("Monitoring")) | .title + " :: " + .detail] | join("|")'
+  }
+  fm_touch_epoch "$(( $(date +%s) - 100 ))" "$home/state/.last-watcher-beat"
+  assert_equals '' "$(monitoring_alert)" 'a beacon within the guard grace is not an alert'
+  fm_touch_epoch "$(( $(date +%s) - 400 ))" "$home/state/.last-watcher-beat"
+  pid=$(sleeper_in "$home")
+  ident=$(fm_test_pid_identity "$pid")
+  printf 'epoch=1 owner_pid=%s outcome=arming\n%s\n' "$pid" "$ident" > "$home/state/.claude-autoarm-epoch"
+  out=$(monitoring_alert)
+  kill "$pid" 2>/dev/null
+  assert_equals '' "$out" 'an open auto-arm claim during a turn is not an alert'
+  rm -f "$home/state/.claude-autoarm-epoch"
+  out=$(monitoring_alert)
+  assert_contains "$out" 'Monitoring down :: Monitoring has been down for 7 minutes.' 'down alert names how long'
+  assert_contains "$out" 'Workers keep running, but finished work, questions and failures will not be noticed until monitoring is back.' 'down alert names the consequence'
+  assert_contains "$out" 'Send any message to firstmate in its pane' 'down alert names the action'
+  assert_not_contains "$out" 'away mode' 'no away note outside away mode'
+  printf 'away\n' > "$home/state/.afk"
+  assert_contains "$(monitoring_alert)" 'away mode is on' 'away mode is named when relevant'
+  rm -f "$home/state/.afk" "$home/state/.last-watcher-beat"
+  out=$(monitoring_alert)
+  assert_contains "$out" 'Monitoring status unavailable :: No watcher heartbeat was found' 'unavailable case'
+  assert_contains "$out" 'Send any message to firstmate in its pane' 'unavailable case is actionable'
+  rm -f "$home/state/alpha.meta" "$home/state/beta.meta"
+  assert_equals '' "$(monitoring_alert)" 'no alert when nothing needs supervision'
+  pass 'the monitoring alert fires only when monitoring is genuinely down and says what to do'
+}
+
 test_alerts_and_ready_from_real_state() {
   local home snapshot
   home=$(make_home alerts_ready)
@@ -1141,6 +1176,7 @@ test_phone_testing_and_test_queue
 test_suite_lock_probe
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
+test_monitoring_alert_fires_only_when_down
 test_worker_tags_from_live_evidence
 test_worker_tags_name_the_state
 test_worker_tags_flag_pr_waiting_for_merge

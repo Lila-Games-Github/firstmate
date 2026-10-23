@@ -1188,14 +1188,51 @@ def allowance_entries(cache):
                    if entry["title"].split(" / ", 1)[0].strip().casefold() not in live]
 
 
-def watcher_alert():
-    beat = STATE / ".last-watcher-beat"
+def watcher_verdict():
+    """Ask bin/fm-monitoring-verdict.sh, which applies the guards' own predicate."""
     try:
-        age = time.time() - beat.stat().st_mtime
-    except OSError:
-        return item("Monitoring status unavailable", "No watcher heartbeat was found.", alert=True)
-    if age > 45:
-        return item("Monitoring down", f"Last watcher heartbeat {int(age)}s ago.", alert=True)
+        run = subprocess.run([str(SCRIPT_DIR / "fm-monitoring-verdict.sh")], capture_output=True,
+                             text=True, timeout=5, env={**os.environ, "FM_STATE_OVERRIDE": str(STATE)})
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    return dict(line.split("=", 1) for line in run.stdout.splitlines() if "=" in line)
+
+
+def duration_words(seconds):
+    if seconds < 90:
+        return f"{seconds} seconds"
+    if seconds < 5400:
+        return f"{round(seconds / 60)} minutes"
+    return f"{round(seconds / 3600, 1):g} hours"
+
+
+MONITORING_CONSEQUENCE = ("Workers keep running, but finished work, questions and failures "
+                          "will not be noticed until monitoring is back.")
+
+
+def monitoring_action(afk):
+    if afk in ("away", "quiet"):
+        return (f"Send any message to firstmate in its pane to restore it; {afk} mode is on, "
+                "so also confirm it resumes its watch afterwards.")
+    return "Send any message to firstmate in its pane to restore it."
+
+
+def watcher_alert():
+    verdict = watcher_verdict()
+    state = verdict.get("state")
+    afk = verdict.get("afk", "none")
+    if state == "unavailable" or not state:
+        return item("Monitoring status unavailable",
+                    "No watcher heartbeat was found, so it is unknown whether finished work, "
+                    "questions and failures are being noticed. " + monitoring_action(afk), alert=True)
+    if state == "down":
+        try:
+            age = int(verdict.get("age", ""))
+        except ValueError:
+            age = 0
+        return item("Monitoring down",
+                    f"Monitoring has been down for {duration_words(age)}. "
+                    f"{MONITORING_CONSEQUENCE} {monitoring_action(afk)}", alert=True)
     return None
 
 
