@@ -1843,6 +1843,55 @@ EOF
   pass "crew working directory: a refused relaunch of an agent already moved into its copy queues no failure"
 }
 
+test_crew_cwd_worker_skips_an_agent_already_back_in_its_copy() {
+  local rec case_dir home proj wt fakebin out id=cwd-back-task log tree root agent moved_root moved_agent pidfile holder tries=0
+
+  rec=$(make_crew_cwd_case crew-cwd-back)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  write_crew_cwd_meta "$home" "$id" "$wt" "$proj"
+  log="$case_dir/control.log"; : > "$log"
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$proj")
+  read -r root agent <<EOF
+$tree
+EOF
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$wt")
+  read -r moved_root moved_agent <<EOF
+$tree
+EOF
+  pidfile="$case_dir/pane-pid"
+  printf '%s\n' "$root" > "$pidfile"
+  # An earlier relaunch worker of this home still holds the turn.
+  # shellcheck disable=SC2016 # expanded by the holder shell.
+  FM_HOME="$home" STATE="$home/state" bash -c '. "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$STATE/.crew-cwd-relaunch.lock" || exit 1
+    : > "$2/held"
+    while [ ! -e "$2/release" ]; do sleep 0.1; done
+    fm_lock_release "$STATE/.crew-cwd-relaunch.lock"' sh "$ROOT" "$case_dir" </dev/null >/dev/null 2>&1 &
+  holder=$!
+  while [ ! -e "$case_dir/held" ]; do
+    [ "$tries" -lt 100 ] || fail "the relaunch lock holder never took the lock"
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" FM_TEST_PANE_PID_FILE="$pidfile")
+  assert_contains "$out" "started relaunching it into that copy with a progress note in the background" \
+    "a locked session did not report the background relaunch it started"
+  # While this worker waits its turn, the earlier one moves the agent.
+  printf '%s\n' "$moved_root" > "$pidfile"
+  : > "$case_dir/release"
+  wait "$holder" 2>/dev/null || true
+  wait_crew_cwd_worker_gone "$home"
+  stop_crew_cwd_tree "$root" "$agent"
+  stop_crew_cwd_tree "$moved_root" "$moved_agent"
+  [ ! -s "$log" ] || fail "an agent already back in its copy was relaunched again: $(cat "$log")"
+  ! grep -qF "crew-cwd:$id" "$home/state/.wake-queue" 2>/dev/null \
+    || fail "a skipped relaunch queued a wake: $(cat "$home/state/.wake-queue")"
+  pass "crew working directory: a relaunch worker waits its turn and skips an agent already back in its copy"
+}
+
 test_crew_cwd_relaunch_under_way_is_not_repeated() {
   local rec case_dir home proj wt fakebin out id=cwd-busy-task log tree root agent holder tries=0
 
@@ -2006,6 +2055,7 @@ test_slot_drift_survives_a_grep_without_bre_alternation
 test_crew_cwd_inside_recorded_copy_is_silent
 test_crew_cwd_in_primary_checkout_is_relaunched
 test_crew_cwd_failed_relaunch_of_a_moved_agent_queues_no_failure
+test_crew_cwd_worker_skips_an_agent_already_back_in_its_copy
 test_crew_cwd_relaunch_under_way_is_not_repeated
 test_crew_cwd_elsewhere_is_reported_not_relaunched
 test_crew_cwd_free_slot_is_reclaimed

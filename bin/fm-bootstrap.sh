@@ -1717,7 +1717,7 @@ crew_cwd_reconcile() {
           echo "CREW_CWD: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree; $(crew_cwd_remedy "$id") before it writes there"
         else
           crew_cwd_relaunch_busy "$id" "$cwd" "$worktree" \
-            || relaunch+=("$id" "$meta" "$cwd" "$worktree" "$wt_canon")
+            || relaunch+=("$id" "$meta" "$cwd" "$worktree" "$wt_canon" "$proj_canon")
         fi
         ;;
       *) echo "CREW_CWD: task $id's agent is running in $cwd, not its recorded local copy $worktree; $(crew_cwd_remedy "$id")" ;;
@@ -1786,12 +1786,12 @@ crew_exec_detached() {  # <command> [arg...]
 # detached so the digest never waits on it, and reports each outcome as one
 # check wake through bin/fm-wake-lib.sh. Its messages are worded here, so the
 # worker itself only runs and reports.
-crew_cwd_relaunch_detached() {  # (<id> <meta> <cwd> <worktree> <worktree-canon>)...
-  local id meta cwd worktree wt_canon work=() worker
-  while [ "$#" -ge 5 ]; do
-    id=$1 meta=$2 cwd=$3 worktree=$4 wt_canon=$5
-    shift 5
-    work+=("$id" "$meta" "$wt_canon"
+crew_cwd_relaunch_detached() {  # (<id> <meta> <cwd> <worktree> <worktree-canon> <project-canon>)...
+  local id meta cwd worktree wt_canon proj_canon work=() worker
+  while [ "$#" -ge 6 ]; do
+    id=$1 meta=$2 cwd=$3 worktree=$4 wt_canon=$5 proj_canon=$6
+    shift 6
+    work+=("$id" "$meta" "$wt_canon" "$proj_canon"
       "Session start found this worker's agent running in $cwd, the project's primary checkout, instead of its recorded local copy $worktree - a host restart resumed the session there - so it relaunched the worker into $worktree. None of the previous conversation carries over: re-read these instructions, act on any waiting steering message, inspect this copy's branch, commits, and uncommitted changes for the work already done, and continue from where the work stands. Run nothing in $cwd."
       "check: crew-cwd: task $id's agent was running in the primary checkout $cwd instead of its recorded local copy $worktree; relaunched it into that copy with a progress note - confirm the replacement is working through its instructions"
       "check: crew-cwd: task $id's agent is running in the primary checkout $cwd instead of its recorded local copy $worktree, and the automatic relaunch failed: "
@@ -1806,12 +1806,18 @@ crew_cwd_relaunch_worker \"\$@\""
   ) </dev/null >/dev/null 2>&1 &
 }
 
-# The detached worker's body. A failed relaunch whose agent the record's
-# endpoint now shows inside its copy was moved by a concurrent relaunch, which
-# reports for itself, so it queues nothing.
+# The detached worker's body. Workers of one home take turns under one lock, so
+# a worker started by a later session start waits for an earlier one and then
+# re-checks rather than racing it; one that cannot get the lock in time
+# relaunches nothing and reports nothing. Right before each relaunch the
+# record's endpoint is read again, and a task whose agent is no longer readable
+# as being in the primary checkout - already moved into its copy by another
+# relaunch, or no longer visible - is left alone. A failed relaunch whose agent
+# the endpoint now shows inside its copy was moved by a concurrent relaunch,
+# which reports for itself, so it queues nothing.
 # shellcheck disable=SC2329 # invoked by the detached worker through declare -f.
-crew_cwd_relaunch_worker() {  # <bin-dir> <control> (<id> <meta> <worktree-canon> <note> <ok> <fail-prefix> <fail-suffix>)...
-  local bin=$1 control=$2 id meta wt note ok fail_pre fail_post out payload line cwd
+crew_cwd_relaunch_worker() {  # <bin-dir> <control> (<id> <meta> <worktree-canon> <project-canon> <note> <ok> <fail-prefix> <fail-suffix>)...
+  local bin=$1 control=$2 id meta wt proj note ok fail_pre fail_post out payload line cwd lock
   shift 2
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$bin/fm-wake-lib.sh"
@@ -1819,9 +1825,17 @@ crew_cwd_relaunch_worker() {  # <bin-dir> <control> (<id> <meta> <worktree-canon
   . "$bin/fm-slot-record-lib.sh"
   # shellcheck source=bin/fm-backend.sh disable=SC1091
   . "$bin/fm-backend.sh"
-  while [ "$#" -ge 7 ]; do
-    id=$1 meta=$2 wt=$3 note=$4 ok=$5 fail_pre=$6 fail_post=$7
-    shift 7
+  lock="$STATE/.crew-cwd-relaunch.lock"
+  fm_lock_acquire_wait_bounded "$lock" "${FM_CREW_CWD_RELAUNCH_LOCK_WAIT:-900}" || return 0
+  # shellcheck disable=SC2064 # the lock path is fixed for this worker.
+  trap "fm_lock_release '$lock'" EXIT
+  while [ "$#" -ge 8 ]; do
+    id=$1 meta=$2 wt=$3 proj=$4 note=$5 ok=$6 fail_pre=$7 fail_post=$8
+    shift 8
+    line=$(fm_backend_agent_process "$(fm_backend_of_meta "$meta")" "$(fm_backend_target_of_meta "$meta")") || continue
+    cwd=$(fm_slot_canonical_dir "${line#*$'\t'}") || continue
+    case "$cwd" in "$wt"|"$wt"/*) continue ;; esac
+    case "$cwd" in "$proj"|"$proj"/*) ;; *) continue ;; esac
     if out=$(FM_SPAWN_NO_GUARD=1 "$control" "$id" relaunch --note "$note" </dev/null 2>&1); then
       payload=$ok
     else
