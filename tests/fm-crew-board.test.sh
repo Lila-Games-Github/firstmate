@@ -864,8 +864,10 @@ test_alert_rows_for_real_issues() {
   printf '#!/usr/bin/env bash\nprintf "List of devices attached\\nserial-a device model:Pixel_8\\n"\n' > "$stub/adb"
   chmod +x "$stub/adb"
   touch "$home/state/.last-watcher-beat"
+  # Pin the Claude auto-arm model, where a fresh beat is healthy, so the quiet
+  # baseline does not depend on which harness the suite itself runs under.
   alerts() {
-    PATH="$stub:$PATH" run_panels "$home" "$snapshot" | jq -r "$1"
+    FM_SUPERVISION_MODEL=autoarm PATH="$stub:$PATH" run_panels "$home" "$snapshot" | jq -r "$1"
   }
   printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
   assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'no alerts when nothing is wrong'
