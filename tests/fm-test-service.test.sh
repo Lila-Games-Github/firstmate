@@ -6,6 +6,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-service.XXXXXX")
 server=
 cleanup() { if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; fi; if [ "${KEEP_TEST_TMP:-0}" = 1 ]; then echo "test tmp: $tmp"; else rm -rf "$tmp"; fi; }
 trap cleanup EXIT
+trap 'echo "failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 export HOME=$tmp/home FM_HOME=$tmp/fm FM_TEST_SERVICE_STATE=$tmp/state EVENTS=$tmp/events
 mkdir -p "$HOME/.config/firstmate" "$FM_HOME/config/test-service" "$tmp/bin" "$tmp/project"
 export PATH=$tmp/bin:$PATH
@@ -22,7 +23,7 @@ case "$*" in
     if [ -e "$HOME/unlocked-$serial" ] || [ ! -e "$HOME/locked-$serial" ]; then echo 'isKeyguardShowing=false'; else echo 'isKeyguardShowing=true'; fi ;;
   '')
     input=$(cat)
-    if [[ "$input" == *'input text 1234'* ]]; then touch "$HOME/unlocked-$serial"; fi ;;
+    if [[ "$input" == *$'KEYCODE_1\ninput keyevent KEYCODE_2\ninput keyevent KEYCODE_3\ninput keyevent KEYCODE_4'* ]]; then touch "$HOME/unlocked-$serial"; fi ;;
   *) exit 1 ;;
 esac
 ADB
@@ -92,7 +93,7 @@ FAIL
 chmod +x suite.sh
 git add suite.sh && git commit -qm v2
 sha2=$(git rev-parse HEAD)
-for i in $(seq 1 100); do
+for i in $(seq 1 300); do
   if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$request" "$sha2" 2>/dev/null <<'PY'
 import json,sys
 s=json.load(open(sys.argv[1]))
@@ -133,6 +134,9 @@ printf 'S22=1234\n' > "$HOME/.config/firstmate/test-device-pins"
 # Requests enter the one runner in submission order.
 first=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 second=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
+# Keep the cancellation behind two earlier requests, so it is still queued.
+queue=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
+$svc cancel "$queue"
 $svc wait "$first" | grep -q '^passed '
 $svc wait "$second" | grep -q '^passed '
 python3 - "$FM_TEST_SERVICE_STATE/status.json" "$first" "$second" <<'PY'
@@ -142,14 +146,12 @@ assert rows[sys.argv[2]]['seq'] < rows[sys.argv[3]]['seq']
 assert rows[sys.argv[2]]['finished'] <= rows[sys.argv[3]]['started']
 PY
 # A queued cancellation remains terminal.
-queue=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
-$svc cancel "$queue"
 $svc wait "$queue" > "$tmp/cancel.out" && exit 1 || true
 rg -q '^cancelled ' "$tmp/cancel.out"
 # A killed daemon leaves a running request to rerun on restart.
 before=$(rg -c 'suite-start-v1' "$EVENTS")
 restart=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
-for i in $(seq 1 100); do
+for i in $(seq 1 300); do
   count=$(rg -c 'suite-start-v1' "$EVENTS")
   [ "$count" -ge "$((before + 1))" ] && break
   sleep .05
@@ -160,7 +162,7 @@ wait "$server" 2>/dev/null || true
 server=
 export SUITE_SLEEP=5
 "$svc" serve > "$tmp/server2.log" 2>&1 & server=$!
-for i in $(seq 1 100); do
+for i in $(seq 1 300); do
   running=$(python3 - "$FM_TEST_SERVICE_STATE/status.json" "$restart" <<'PY'
 import json,sys
 print(next(r['state'] for r in json.load(open(sys.argv[1]))['requests'] if r['id']==sys.argv[2]))
@@ -199,7 +201,7 @@ conflicted=$($svc submit fake "$PWD" "$feature_sha" --suite --device-gate S22 --
 $svc wait "$conflicted" | grep -q '^passed '
 echo main > conflict.txt
 git add conflict.txt && git commit -qm main-change
-for i in $(seq 1 100); do
+for i in $(seq 1 300); do
   state=$(python3 - "$FM_TEST_SERVICE_STATE/status.json" "$conflicted" <<'PY'
 import json,sys
 print(next(r['state'] for r in json.load(open(sys.argv[1]))['requests'] if r['id']==sys.argv[2]))

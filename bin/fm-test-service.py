@@ -237,8 +237,9 @@ def prepare_phone(serial):
     pin = entries.get(serial)
     if pin is None:
         raise RuntimeError("phone-locked: add " + serial + " to " + str(pins))
-    # Feed shell commands over stdin: the secret never appears in a process argv.
-    unlock = subprocess.run(adb, input="input text " + pin + "\ninput keyevent KEYCODE_ENTER\nexit\n",
+    # Send individual key events over stdin; the complete PIN never enters a process argv.
+    keys = "".join("input keyevent KEYCODE_" + digit + "\n" for digit in pin)
+    unlock = subprocess.run(adb, input=keys + "input keyevent KEYCODE_ENTER\nexit\n",
                             text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if unlock.returncode or locked():
         raise RuntimeError("phone-locked: could not unlock " + serial)

@@ -48,7 +48,7 @@ The original commit copy remains available for later branch moves.
 Before every phone run, the service wakes the selected phone, sets `stay_on_while_plugged_in` to `2` if needed, and checks the keyguard.
 If locked, it reads `~/.config/firstmate/test-device-pins` only when the file is a regular non-symlink file with no group or other permissions.
 The file uses one `SERIAL=PIN` line per phone; use `chmod 600` and keep it outside repositories.
-The service sends the PIN to an adb shell through stdin and suppresses shell output.
+The service sends one digit key event at a time to an adb shell through stdin and suppresses shell output.
 A phone without a PIN line is treated as unlocked unless the keyguard is showing; then the service fails with `phone-locked` and names the serial and file to update.
 It checks the keyguard again and fails with `phone-locked` if unlock did not work.
 No PIN belongs in a request, status, receipt, log, brief, or PR.
