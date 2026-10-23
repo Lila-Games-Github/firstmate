@@ -1,0 +1,33 @@
+### Case 1: register with 4 "## For ..." headings over 4 bullet questions (layout from test_full_questions_and_backlog)
+# Open questions
+
+## Decisions for the product owner
+- Which release should ship?
+  The Android build is waiting.
+
+## For Tarun
+- Can we use the staging phone?
+
+## For Arshnoor
+- Which color should launch?
+
+## For Aleksandra
+- Is the copy approved?
+--- board alerts:
+[{"nid":"decisions:summary","title":"4 decisions waiting on you","detail":"4 open questions are waiting for your answer. The work behind them stays on hold. Open the Questions page and answer them."}]
+
+### Case 2: every question answered, only a heading left
+## Your decisions
+--- board alerts:
+[]
+
+### Case 3: two bold questions + captain holds (preview hold 3 days old, hold "A. pick the release" 2 hours old)
+## For widget
+
+**A. Which release?** Pick one.
+
+## For gadget
+
+**B. Which store?** Pick one for the release.
+--- board alerts:
+[{"nid":"decisions:summary","title":"2 decisions waiting on you","detail":"2 open questions are waiting for your answer. Since 2 hours ago. The work behind them stays on hold. Open the Questions page and answer them."}]
