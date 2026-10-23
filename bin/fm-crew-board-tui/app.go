@@ -15,12 +15,14 @@ import (
 type panelSpec struct{ id, title string }
 
 var pages = [][]panelSpec{
-	{{"alerts", "ALERTS"}, {"workers", "WORKERS"}, {"ready", "READY FOR YOU"}, {"feed", "FEED"}},
-	{{"bugs", "ROCKETBOARD BUGS"}, {"backlog", "BACKLOG"}, {"allowance", "AI ALLOWANCE"}},
+	{{"workers", "WORKERS"}, {"ready", "READY FOR YOU"}, {"feed", "FEED"}},
+	{{"bugs", "ROCKETBOARD BUGS"}, {"backlog", "BACKLOG"}},
 	{{"full_questions", "CAPTAIN QUESTIONS"}},
-	{{"phones", "PHONES"}, {"test_queue", "TEST QUEUE"}, {"landings", "TODAY'S LANDINGS"},
-		{"builds", "BUILDS"}, {"routines", "DAILY ROUTINES"}},
+	{{"landings", "TODAY'S LANDINGS"}},
 }
+
+var railPanels = []panelSpec{{"alerts", "NOTIFICATIONS"}, {"test_queue", "TEST QUEUE"},
+	{"builds", "LATEST BUILDS"}, {"routines", "DAILY ROUTINES"}, {"allowance", "AI ALLOWANCE"}}
 
 var pageNames = []string{"NOW", "PLANNING", "QUESTIONS", "TESTING"}
 var questionLabelPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+)\.`)
@@ -71,6 +73,11 @@ type app struct {
 	lastRects             []panelRect
 	slide, slideDirection int
 	seen                  map[string]string
+	railOpen              bool
+	railOffset            int
+	railHit               map[int]item
+	railDetail            *item
+	railDetailOffset      int
 }
 
 func newApp(p paths, data board, feed []item) *app {
@@ -264,8 +271,15 @@ func (m *app) focusedItem() *item {
 	return &selected
 }
 
+func (m *app) pointedItem() *item {
+	if m.railDetail != nil {
+		return m.railDetail
+	}
+	return m.focusedItem()
+}
+
 func (m *app) selectedQuestion() *item {
-	if m.focus != "full_questions" {
+	if m.railDetail != nil || m.focus != "full_questions" {
 		return nil
 	}
 	row := m.focusedItem()
@@ -299,6 +313,7 @@ func (m *app) setPage(page int) {
 		return
 	}
 	m.page = page
+	m.railDetail = nil
 	m.focus = pages[page][0].id
 	if page == 0 {
 		m.focus = "workers"
@@ -519,6 +534,14 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.help || m.filterActive || m.railDetail != nil {
+			return m, nil
+		}
+		if row, ok := m.railHit[msg.Y]; ok && !m.inputActive &&
+			(m.railOpen || m.width >= 100 && msg.X >= m.width-max(34, m.width/3)) {
+			m.openRailRow(row)
+			return m, nil
+		}
 		for _, rect := range m.lastRects {
 			if msg.X >= rect.x && msg.X < rect.x+rect.width && msg.Y >= rect.y && msg.Y < rect.y+rect.height {
 				if rect.id != m.focus {
@@ -589,7 +612,7 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 				if m.commandMode {
 					text = strings.TrimPrefix(text, ":")
 				}
-				selected := m.focusedItem()
+				selected := m.pointedItem()
 				if question := m.replyTarget; question != nil {
 					selected = question
 					if strings.TrimSpace(text) != "" {
@@ -624,6 +647,32 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch key {
+		case "s":
+			m.railDetail = nil
+			m.railOpen = !m.railOpen
+			return m, nil
+		case "n":
+			fresh := m.newAlerts()
+			if len(fresh) == 0 {
+				m.notice = "No new notifications"
+				return m, nil
+			}
+			m.openRailRow(fresh[0])
+			return m, nil
+		case "ctrl+n":
+			if m.railDetail != nil {
+				m.railDetailOffset += 3
+			} else {
+				m.railOffset += 3
+			}
+			return m, nil
+		case "ctrl+p":
+			if m.railDetail != nil {
+				m.railDetailOffset = max(0, m.railDetailOffset-3)
+			} else {
+				m.railOffset = max(0, m.railOffset-3)
+			}
+			return m, nil
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "1", "2", "3", "4":
@@ -728,6 +777,10 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.help = true
 			return m, nil
 		case "esc":
+			if m.railDetail != nil {
+				m.railDetail = nil
+				return m, nil
+			}
 			delete(m.selected, m.focus)
 		default:
 			if strings.HasPrefix(key, "alt+") && len(key) == 5 && key[4] >= '1' && key[4] <= '9' {

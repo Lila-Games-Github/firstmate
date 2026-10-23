@@ -38,7 +38,7 @@ func phaseColor(phase string) lipgloss.Style {
 		color = yellow
 	case "ready-to-merge", "done":
 		color = green
-	case "paused", "blocked", "needs-decision", "failed", "unauthorized", "offline", "locked":
+	case "paused", "blocked", "needs-decision", "failed", "unauthorized", "offline", "locked", "disconnected":
 		color = red
 	case "parked":
 		color = yellow
@@ -48,7 +48,7 @@ func phaseColor(phase string) lipgloss.Style {
 		color = muted
 	case "due now":
 		color = yellow
-	case "running":
+	case "running", "busy":
 		color = cyan
 	case "next", "waiting":
 		color = muted
@@ -56,7 +56,7 @@ func phaseColor(phase string) lipgloss.Style {
 	switch {
 	case strings.HasPrefix(phase, "running "):
 		color = cyan
-	case strings.HasPrefix(phase, "waiting #"):
+	case strings.HasPrefix(phase, "waiting "):
 		color = muted
 	}
 	return lipgloss.NewStyle().Foreground(color)
@@ -79,96 +79,6 @@ func activePhase(phase string) bool {
 		return true
 	}
 	return false
-}
-
-const summaryCardHeight = 4
-
-func panelSummary(spec panelSpec, rows []item, width int) string {
-	rows = withoutSections(rows)
-	nouns := map[string]string{
-		"alerts": "alerts", "workers": "workers", "ready": "ready",
-		"feed": "updates", "phones": "connected", "test_queue": "queued", "landings": "landed",
-		"builds": "builds", "routines": "routines", "bugs": "bugs", "backlog": "tasks",
-		"allowance": "providers", "full_questions": "questions",
-	}
-	count := "none"
-	latest := "latest: none"
-	if len(rows) > 0 {
-		count = fmt.Sprintf("%d %s", len(rows), nouns[spec.id])
-		if spec.id == "workers" {
-			groups := map[string]int{}
-			var order []string
-			for _, row := range rows {
-				if groups[row.Group] == 0 {
-					order = append(order, row.Group)
-				}
-				groups[row.Group]++
-			}
-			var parts []string
-			for _, group := range order {
-				parts = append(parts, fmt.Sprintf("%s %d", group, groups[group]))
-			}
-			count += " (" + strings.Join(parts, ", ") + ")"
-		}
-		if spec.id == "phones" {
-			connected, cached, unavailable := 0, 0, 0
-			for _, row := range rows {
-				switch row.ADB {
-				case "device":
-					connected++
-				case "unavailable":
-					unavailable++
-				case "":
-					cached++
-				}
-			}
-			count = fmt.Sprintf("%d %s", connected, nouns[spec.id])
-			if cached > 0 {
-				count += fmt.Sprintf(" (%d cached)", cached)
-			}
-			if unavailable > 0 {
-				count = "unavailable"
-			}
-		}
-		if spec.id == "allowance" {
-			named := map[string]bool{}
-			aggregated, unavailable := 0, false
-			for _, row := range rows {
-				if row.Quota == "unavailable" {
-					unavailable = true
-					continue
-				}
-				if row.Quota == "summary" {
-					aggregated += row.Providers
-					continue
-				}
-				name, _, _ := strings.Cut(row.Title, " / ")
-				named[strings.ToLower(strings.TrimSpace(name))] = true
-			}
-			if unavailable {
-				count = "unavailable"
-			} else {
-				count = fmt.Sprintf("%d %s", len(named)+aggregated, nouns[spec.id])
-			}
-		}
-		if spec.id == "test_queue" {
-			queued, running := 0, 0
-			for _, row := range rows {
-				if strings.HasPrefix(row.Status, "running") {
-					running++
-					continue
-				}
-				queued++
-			}
-			count = fmt.Sprintf("%d %s", queued, nouns[spec.id])
-			if running > 0 {
-				count += fmt.Sprintf(" (%d running)", running)
-			}
-		}
-		latest = "latest: " + rows[len(rows)-1].Title
-	}
-	first := ansi.Truncate(spec.title+"  "+count, max(1, width), "…")
-	return first + "\n" + ansi.Truncate(latest, max(1, width), "…")
 }
 
 func withoutSections(rows []item) []item {
@@ -302,26 +212,101 @@ func (m *app) subTabAt(x, width int) string {
 	return ""
 }
 
-func (m *app) renderCompact(spec panelSpec, width int) string {
-	rows := m.items(spec.id)
-	border := green
-	if len(rows) == 0 {
-		border = muted
-	}
-	if spec.id == m.focus {
-		border = yellow
-	}
-	for _, row := range rows {
-		if row.Alert && (spec.id != "alerts" || m.isNew(row)) {
-			border = red
-			break
+func (m *app) renderInfoRail(width, height int) string {
+	inner := max(1, width-4)
+	var lines []string
+	var hits map[int]item = map[int]item{}
+	for _, spec := range railPanels {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, lipgloss.NewStyle().Foreground(cyan).Bold(true).Render(spec.title))
+		rows := m.rawItems(spec.id)
+		if len(rows) == 0 {
+			lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render("  none"))
+			continue
+		}
+		for _, row := range rows {
+			if row.Status == "section" {
+				lines = append(lines, lipgloss.NewStyle().Foreground(white).Bold(true).
+					Render("  "+ansi.Truncate(row.Title, max(1, inner-2), "…")))
+				continue
+			}
+			line := "  " + row.Title
+			if row.Status != "" && row.Status != "hidden" {
+				line += " · " + row.Status
+			}
+			style := lipgloss.NewStyle().Foreground(white)
+			if spec.id == "test_queue" {
+				style = phaseColor(row.Status)
+			}
+			if row.Status == "hidden" {
+				style = lipgloss.NewStyle().Foreground(muted)
+			}
+			if spec.id == "alerts" && m.isNew(row) {
+				style = lipgloss.NewStyle().Foreground(red).Bold(true)
+				line = "  NEW " + row.Title
+			}
+			index := len(lines)
+			lines = append(lines, style.Render(ansi.Truncate(line, inner, "…")))
+			hits[index] = row
+			if row.Detail != "" && spec.id != "test_queue" && row.Status != "hidden" {
+				first := strings.SplitN(row.Detail, "\n", 2)[0]
+				lines = append(lines, lipgloss.NewStyle().Foreground(muted).
+					Render(ansi.Truncate("    "+first, inner, "…")))
+			}
 		}
 	}
-	parts := strings.SplitN(panelSummary(spec, rows, width-4), "\n", 2)
-	content := lipgloss.NewStyle().Foreground(border).Bold(true).Render(parts[0]) + "\n" +
-		lipgloss.NewStyle().Foreground(muted).Render(parts[1])
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(border).
-		Width(max(1, width-2)).Height(2).Render(content)
+	visible := max(1, height-5)
+	m.railOffset = min(m.railOffset, max(0, len(lines)-visible))
+	end := min(len(lines), m.railOffset+visible)
+	view := make([]string, 0, visible+2)
+	view = append(view, lipgloss.NewStyle().Foreground(yellow).Bold(true).Render("INFORMATION"))
+	m.railHit = map[int]item{}
+	for index := m.railOffset; index < end; index++ {
+		view = append(view, lines[index])
+		if row, ok := hits[index]; ok {
+			m.railHit[6+index-m.railOffset] = row
+		}
+	}
+	for len(view) < visible+1 {
+		view = append(view, "")
+	}
+	view = append(view, lipgloss.NewStyle().Foreground(muted).Render(
+		ansi.Truncate("n next new · Ctrl-n/p scroll · s expand", inner, "…")))
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(green).
+		Width(max(1, width-2)).Height(max(1, height-2)).Render(strings.Join(view, "\n"))
+}
+
+func (m *app) renderRailDetail(width, height int) string {
+	row := m.railDetail
+	inner := max(1, width-4)
+	text := row.Detail
+	if row.Link != "" && !strings.Contains(text, row.Link) {
+		text += "\n" + row.Link
+	}
+	if text == "" {
+		text = "No further detail"
+	}
+	var lines []string
+	for _, source := range strings.Split(text, "\n") {
+		lines = append(lines, strings.Split(ansi.Wrap(source, inner, ""), "\n")...)
+	}
+	visible := max(1, height-6)
+	m.railDetailOffset = min(m.railDetailOffset, max(0, len(lines)-visible))
+	end := min(len(lines), m.railDetailOffset+visible)
+	content := []string{lipgloss.NewStyle().Foreground(yellow).Bold(true).
+		Render(ansi.Truncate(row.Title+"  "+row.Status, inner, "…"))}
+	for _, line := range lines[m.railDetailOffset:end] {
+		content = append(content, lipgloss.NewStyle().Foreground(white).Render(line))
+	}
+	for len(content) < visible+1 {
+		content = append(content, "")
+	}
+	content = append(content, lipgloss.NewStyle().Foreground(muted).
+		Render(ansi.Truncate("Esc back · Ctrl-n/p scroll · i note", inner, "…")))
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cyan).
+		Width(max(1, width-2)).Height(max(1, height-2)).Render(strings.Join(content, "\n"))
 }
 
 func (m *app) rowLine(id string, row item, index, width int) string {
@@ -545,10 +530,10 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 func (m *app) helpOverlay(width, height int) string {
 	lines := []string{
 		"VIM KEYS", "j/k rows within the panel  h/l sub-tabs",
-		"Tab cycles  Ctrl-d/u rows",
+		"Tab cycles  s info  Ctrl-n/p scroll",
 		"Enter/o expand  O focus selected worker pane",
 		"za/Space collapse  Alt-1..9 select",
-		"1/2/3/4 pages  / filter",
+		"1/2/3/4 pages  / filter  n next notification",
 		"Ctrl-f/b scroll detail  r reply to question  i/: note",
 		"q/:q quit  ? close help",
 	}
@@ -573,71 +558,35 @@ func (m *app) View() tea.View {
 		}
 	}
 	m.lastRects = nil
+	m.railHit = nil
 	var body string
 	if m.help {
 		body = m.helpOverlay(m.width, bodyHeight)
 	} else if m.filterActive {
 		body = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cyan).
 			Width(m.width - 2).Height(bodyHeight - 2).Render("FILTER " + focus.title + "\n" + m.filterInput.View() + "\nEnter apply  ·  Esc cancel")
+	} else if m.railDetail != nil {
+		body = m.renderRailDetail(m.width, bodyHeight)
+	} else if m.railOpen {
+		body = m.renderInfoRail(m.width, bodyHeight)
 	} else if m.width >= 100 {
-		focusWidth := max(50, min(m.width-28, m.width*68/100))
-		if m.page == 2 {
-			focusWidth = m.width
-		}
-		summaryWidth := m.width - focusWidth
+		summaryWidth := max(34, m.width/3)
+		focusWidth := m.width - summaryWidth
 		m.lastRects = append(m.lastRects, panelRect{focus.id, 0, 4, focusWidth, bodyHeight})
 		left := m.renderFocused(focus, focusWidth, bodyHeight)
-		var summaries []string
-		y := 4
-		for _, spec := range list {
-			if m.page == 2 || y+summaryCardHeight > 4+bodyHeight {
-				break
-			}
-			summary := m.renderCompact(spec, summaryWidth)
-			summaries = append(summaries, summary)
-			if spec.id != focus.id {
-				m.lastRects = append(m.lastRects, panelRect{spec.id, focusWidth, y, summaryWidth, summaryCardHeight})
-			}
-			y += summaryCardHeight
-		}
-		right := lipgloss.JoinVertical(lipgloss.Left, summaries...)
-		body = left
-		if m.page != 2 {
-			body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-		}
+		body = lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderInfoRail(summaryWidth, bodyHeight))
 	} else {
-		summaryHeight := 0
-		for range list {
-			if m.page != 2 {
-				summaryHeight += summaryCardHeight
-			}
-		}
-		minimal := bodyHeight < summaryHeight+5
-		if minimal {
-			summaryHeight = 0
-		}
-		focusHeight := max(3, bodyHeight-summaryHeight)
-		m.lastRects = append(m.lastRects, panelRect{focus.id, 0, 4, m.width, focusHeight})
-		var blocks []string
-		blocks = append(blocks, m.renderFocused(focus, m.width, focusHeight))
-		y := 4 + focusHeight
-		for _, spec := range list {
-			if m.page == 2 || minimal {
-				break
-			}
-			panelHeight := summaryCardHeight
-			blocks = append(blocks, m.renderCompact(spec, m.width))
-			if spec.id != focus.id {
-				m.lastRects = append(m.lastRects, panelRect{spec.id, 0, y, m.width, panelHeight})
-			}
-			y += panelHeight
-		}
-		body = lipgloss.JoinVertical(lipgloss.Left, blocks...)
+		m.lastRects = append(m.lastRects, panelRect{focus.id, 0, 4, m.width, bodyHeight})
+		body = m.renderFocused(focus, m.width, bodyHeight)
 	}
 	body = lipgloss.NewStyle().Height(bodyHeight).MaxHeight(bodyHeight).Render(body)
 	selected := "all"
-	if row := m.focusedItem(); row != nil {
+	if row := m.pointedItem(); row != nil {
 		selected = row.ID
+		if selected == "" {
+			selected = row.Title
+		}
+		selected = ansi.Truncate(selected, 18, "…")
 	}
 	reply := m.selectedQuestion()
 	if m.inputActive {
@@ -647,6 +596,7 @@ func (m *app) View() tea.View {
 	if reply != nil {
 		label = "REPLY [" + ansi.Truncate(questionLabel(reply.Title), 16, "…") + "] r/i: answer  "
 	}
+	label = ansi.Truncate(label, max(1, m.width-16), "…")
 	m.input.SetWidth(max(8, m.width-8-lipgloss.Width(label)))
 	note := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cyan).
 		Width(m.width - 2).Height(1).Render(label + m.input.View())

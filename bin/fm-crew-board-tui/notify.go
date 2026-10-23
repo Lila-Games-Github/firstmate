@@ -67,6 +67,16 @@ func (m *app) newAlerts() []item {
 	return rows
 }
 
+func (m *app) openRailRow(row item) {
+	m.railDetail = &row
+	m.railDetailOffset = 0
+	if row.Alert {
+		nid, sig := alertKey(row)
+		m.seen[nid] = sig
+		m.saveSeen()
+	}
+}
+
 // markViewed records the alert the product owner has selected or opened.
 func (m *app) markViewed() {
 	if m.page != 0 || m.focus != "alerts" {
