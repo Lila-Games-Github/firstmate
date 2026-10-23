@@ -877,6 +877,16 @@ fi
 
 WORKSPACE_KIND=crewmate
 [ "$LANE" -eq 0 ] || WORKSPACE_KIND=lane
+TEST_SERVICE_GUIDANCE=
+case "$REPO" in
+  frogpile|FrogPile|ProjectWhite)
+    TEST_SERVICE_GUIDANCE="# FrogPile test gate
+When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit and wait through the Firstmate test service.
+Use \`$FM_ROOT/bin/fm-test-service.py submit frogpile \"\$PWD\" \"\$(git rev-parse HEAD)\" --suite --device-gate R5CT32HRVNM --receipt \"\$PWD/full-suite.receipt\"\`, then \`$FM_ROOT/bin/fm-test-service.py wait <request-id>\`.
+Add \`--scenario <name>\` or \`--harness <committed-relative-path>\` for any scenario or benchmark you wrote.
+See \`$FM_ROOT/docs/test-service.md\` for the full contract.
+" ;;
+esac
 HEALTH_MARKER=
 [ "$GREEN_FINAL_HEAD" -eq 0 ] || HEALTH_MARKER='Final-head health: green'
 OPEN_QUESTIONS_SECTION=
@@ -894,6 +904,7 @@ Execution contract: workspace=$WORKSPACE_KIND
 $TASK_SECTION
 $HEALTH_MARKER
 $OPEN_QUESTIONS_SECTION
+$TEST_SERVICE_GUIDANCE
 
 $LANE_CONTRACT_BLOCK
 $HERDR_SECTION
