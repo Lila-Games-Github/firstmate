@@ -1658,6 +1658,7 @@ SH
 #!/usr/bin/env bash
 {
   printf 'FM_HOME=%s\n' "${FM_HOME:-}"
+  printf 'FM_SPAWN_NO_GUARD=%s\n' "${FM_SPAWN_NO_GUARD:-}"
   printf 'arg=%s\n' "$@"
 } >> "${FM_TEST_CONTROL_LOG:?}"
 if [ "${FM_TEST_CONTROL_FAIL:-0}" = 1 ]; then
@@ -1701,6 +1702,15 @@ run_crew_cwd_bootstrap() {  # <home> <fakebin> <id> <root-pid> <log> [VAR=value 
   shift 5
   run_slot_bootstrap "$home" "$fakebin" FM_TEST_TMUX_WINDOWS="fm-$id" \
     FM_TEST_PANE_PID="$root" FM_TEST_CONTROL_LOG="$log" "$@"
+}
+
+wait_crew_cwd_wake() {  # <home> <id>: the detached relaunch worker's outcome wake
+  local tries=0
+  while ! grep -qF "crew-cwd:$2" "$1/state/.wake-queue" 2>/dev/null; do
+    [ "$tries" -lt 100 ] || fail "the background relaunch of $2 never queued its outcome wake"
+    sleep 0.1
+    tries=$((tries + 1))
+  done
 }
 
 write_crew_cwd_meta() {  # <home> <id> <worktree> <project>
@@ -1751,18 +1761,26 @@ $tree
 EOF
 
   out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log")
-  assert_contains "$out" "CREW_CWD: task $id's agent was running in the primary checkout $proj instead of its recorded local copy $wt; relaunched it into that copy" \
-    "a locked session did not report the automatic relaunch"
+  assert_contains "$out" "CREW_CWD: task $id's agent is running in the primary checkout $proj instead of its recorded local copy $wt; started relaunching it into that copy with a progress note in the background" \
+    "a locked session did not report the background relaunch it started"
+  wait_crew_cwd_wake "$home" "$id"
   assert_grep "FM_HOME=$home" "$log" "the relaunch did not carry the explicit home"
   assert_grep "arg=$id" "$log" "the relaunch did not target the task id"
   assert_grep "arg=relaunch" "$log" "the lifecycle owner was not asked to relaunch"
   assert_grep "arg=--note" "$log" "the relaunch carried no progress note"
   assert_grep "instead of its recorded local copy $wt" "$log" "the progress note did not name the copy"
+  assert_grep "FM_SPAWN_NO_GUARD=1" "$log" "the relaunch did not bypass the spawn guard"
+  assert_grep "check: crew-cwd: task $id's agent was running in the primary checkout $proj instead of its recorded local copy $wt; relaunched it into that copy" \
+    "$home/state/.wake-queue" "the background relaunch did not queue its success as a check wake"
 
-  : > "$log"
+  : > "$log"; : > "$home/state/.wake-queue"
   out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" FM_TEST_CONTROL_FAIL=1)
-  assert_contains "$out" "the automatic relaunch failed: error: endpoint state is ambiguous; refusing to relaunch; relaunch it into that copy with FM_HOME=$home bin/fm-control.sh $id relaunch" \
-    "a failed relaunch was not reported with its refusal and the manual command"
+  assert_contains "$out" "started relaunching it into that copy with a progress note in the background" \
+    "a locked session did not report the background relaunch it started"
+  wait_crew_cwd_wake "$home" "$id"
+  assert_grep "arg=relaunch" "$log" "the failing relaunch was never attempted"
+  assert_grep "the automatic relaunch failed: error: endpoint state is ambiguous; refusing to relaunch; relaunch it into that copy with FM_HOME=$home bin/fm-control.sh $id relaunch" \
+    "$home/state/.wake-queue" "a failed relaunch was not queued with its refusal and the manual command"
 
   : > "$log"
   out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" FM_BOOTSTRAP_DETECT_ONLY=1)
@@ -1770,7 +1788,7 @@ EOF
   assert_contains "$out" "CREW_CWD: task $id's agent is running in the primary checkout $proj instead of its recorded local copy $wt; read-only session must leave the relaunch to the session holding the fleet lock" \
     "a read-only session did not report the misplaced worker as advisory"
   [ ! -s "$log" ] || fail "a read-only session relaunched a worker: $(cat "$log")"
-  pass "crew working directory: an agent in the primary checkout is relaunched by a locked session and only reported by a read-only one"
+  pass "crew working directory: an agent in the primary checkout is relaunched in the background by a locked session and only reported by a read-only one"
 }
 
 test_crew_cwd_elsewhere_is_reported_not_relaunched() {
