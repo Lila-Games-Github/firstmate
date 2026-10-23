@@ -52,9 +52,11 @@ QUOTA_ERROR = STATE / ".crew-board-quota-error"
 QUOTA_BROKEN_STATES = frozenset({"auth_required", "error", "unavailable", "expired", "failed", "revoked", "missing"})
 
 
-def item(title, detail="", status="", link="", alert=False, item_id=""):
+def item(title, detail="", status="", link="", alert=False, item_id="", nid="", sig=""):
+    """nid is an alert's stable notification id and sig the part of its source
+    record that, when it changes, makes a seen alert new again."""
     return {"id": item_id, "title": title, "detail": detail, "status": status,
-            "link": link, "alert": alert}
+            "link": link, "alert": alert, "nid": nid, "sig": sig}
 
 
 def question_entries(path):
@@ -972,13 +974,16 @@ API_ERROR = re.compile(
     re.IGNORECASE)
 
 
-def alert_row(title, what, since, consequence, action, status="", item_id=""):
-    """One plain-words alert: what is wrong, since when, the consequence, the one action."""
+def alert_row(title, what, since, consequence, action, status="", item_id="", kind="", sig=""):
+    """One plain-words alert: what is wrong, since when, the consequence, the one action.
+    Its notification id is the kind plus the source record's id; sig is the
+    source detail the age text must not disturb."""
     parts = [what.rstrip(".") + "."]
     if since is not None:
         parts.append(f"Since {duration_words(max(0, int(since)))} ago.")
     parts += [consequence, action]
-    return item(title, " ".join(parts), status, alert=True, item_id=item_id)
+    return item(title, " ".join(parts), status, alert=True, item_id=item_id,
+                nid=f"{kind or status}:{item_id or title}", sig=sig or what)
 
 
 def file_age(path, now):
@@ -1020,7 +1025,7 @@ def stuck_worker_alert(task_id, now):
     if dead.exists():
         return alert_row(f"{task_id}: stopped", "The worker's agent has exited or its pane is gone",
                          file_age(dead, now), "Its work is not progressing.",
-                         "Ask firstmate to recover the worker.", "stopped", task_id)
+                         "Ask firstmate to recover the worker.", "stopped", task_id, "stopped", "dead")
     try:
         count = int(wedge.read_text(encoding="utf-8").strip() or "0")
     except (OSError, ValueError):
@@ -1028,7 +1033,7 @@ def stuck_worker_alert(task_id, now):
     if count > 0:
         return alert_row(f"{task_id}: not responding", "The worker has been idle long past the watcher's limit",
                          file_age(wedge, now), "Its work is not progressing.",
-                         "Ask firstmate to inspect the worker.", "stuck", task_id)
+                         "Ask firstmate to inspect the worker.", "stuck", task_id, "stuck", str(count))
     return None
 
 
@@ -1045,7 +1050,7 @@ def api_error_alert(task, now):
     return alert_row(f"{task_id}: API or network error", f"The worker reported an error ({hit.group(0)})",
                      file_age(STATE / f"{task_id}.status", now), "It may be waiting on a connection that is not coming back.",
                      "Ask firstmate to check on the worker and resend its last instruction if needed.",
-                     "error", task_id)
+                     "error", task_id, "api-error", hit.group(0).lower() + "|" + " ".join(texts)[:200])
 
 
 def suite_wait_alerts(snapshot, now):
@@ -1067,7 +1072,7 @@ def suite_wait_alerts(snapshot, now):
                               "A full test run is queued behind another suite run", waited,
                               "The worker cannot finish validating until the suite frees up.",
                               "Ask firstmate to check whether the running suite is stuck.",
-                              "waiting", f"suite-wait-{pid}"))
+                              "waiting", f"{task}:{pid}", "suite-wait"))
     return rows
 
 
@@ -1087,7 +1092,8 @@ def decisions_summary(snapshot, now):
     return alert_row(f"{count} decision{'s' if count != 1 else ''} waiting on you",
                      f"{count} open question{'s are' if count != 1 else ' is'} waiting for your answer", since,
                      "The work behind them stays on hold.",
-                     "Open the Questions page and answer them.", "decisions", "decisions-summary")
+                     "Open the Questions page and answer them.", "decisions", "summary", "decisions",
+                     "\n".join(sorted(entry["title"] for entry in questions)))
 
 
 def alert_entries(snapshot, cache, phones, allowance):
@@ -1109,11 +1115,12 @@ def alert_entries(snapshot, cache, phones, allowance):
                                     file_age(STATE / f"{task_id}.status", now),
                                     "That work is stopped until it is dealt with.",
                                     "Ask firstmate what happened and how to proceed.",
-                                    name, task_id))
+                                    name, task_id, name, note))
         elif (name == "needs-decision" or (task.get("hints") or {}).get("open_decisions")) and not held:
             alerts.append(item(f"{task_id}: decision not yet raised with you",
                                note or "The worker is waiting on a decision firstmate has not escalated",
-                               "needs-decision", alert=True, item_id=task_id))
+                               "needs-decision", alert=True, item_id=task_id,
+                               nid=f"needs-decision:{task_id}", sig=note))
         for found in (stuck_worker_alert(task_id, now), api_error_alert(task, now)):
             if found:
                 alerts.append(found)
@@ -1128,7 +1135,7 @@ def alert_entries(snapshot, cache, phones, allowance):
                                     "adb does not list this registered phone", None,
                                     "Tests that need it cannot run.",
                                     "Plug it in and unlock it, or ask firstmate to stop using it.",
-                                    "not connected", phone.get("id", "")))
+                                    "not connected", phone.get("id", ""), "phone-offline", "offline"))
         if adb == "unavailable":
             alerts.append(item(phone["title"], phone["detail"], phone["status"], alert=True))
             continue
@@ -1366,7 +1373,8 @@ def watcher_alert():
     if state == "unavailable" or not state:
         return item("Monitoring status unavailable",
                     "No watcher heartbeat was found, so it is unknown whether finished work, "
-                    "questions and failures are being noticed. " + monitoring_action(afk), alert=True)
+                    "questions and failures are being noticed. " + monitoring_action(afk), alert=True,
+                    nid="monitoring:status", sig="unavailable")
     if state == "down":
         try:
             age = int(verdict.get("age", ""))
@@ -1374,7 +1382,8 @@ def watcher_alert():
             age = 0
         return item("Monitoring down",
                     f"Monitoring has been down for {duration_words(age)}. "
-                    f"{MONITORING_CONSEQUENCE} {monitoring_action(afk)}", alert=True)
+                    f"{MONITORING_CONSEQUENCE} {monitoring_action(afk)}", alert=True,
+                    nid="monitoring:status", sig="down")
     return None
 
 

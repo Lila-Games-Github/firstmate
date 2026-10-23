@@ -1433,3 +1433,94 @@ func TestMergeWaitingWorkerIsTaggedColouredAndSortedFirst(t *testing.T) {
 		}
 	}
 }
+
+func twoAlerts() []item {
+	return []item{
+		{Title: "alpha: failed", Detail: "Build crashed. Since 2 minutes ago.", Status: "failed", Alert: true, Nid: "failed:alpha", Sig: "build crashed"},
+		{Title: "3 decisions waiting on you", Status: "decisions", Alert: true, Nid: "decisions:summary", Sig: "a\nb\nc"},
+	}
+}
+
+func TestNewAlertsAppearAsCountedNotificationOnEveryPage(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = twoAlerts()
+	for page := 0; page < len(pages); page++ {
+		m.setPage(page)
+		header := m.header()
+		if !strings.Contains(header, "2 NEW: alpha: failed") {
+			t.Fatalf("page %d header lacks the counted notification: %q", page, header)
+		}
+	}
+	m.setPage(0)
+	m.focus = "alerts"
+	if !strings.Contains(m.View().Content, "NEW alpha: failed") {
+		t.Fatal("unseen alert row is not marked NEW")
+	}
+}
+
+func TestViewingAnAlertMarksItSeenAndItRecedes(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = twoAlerts()
+	m.focus = "alerts"
+	press(m, key('j'))
+	if got := len(m.newAlerts()); got != 1 {
+		t.Fatalf("selecting the first alert left %d new, want 1", got)
+	}
+	header := m.header()
+	if !strings.Contains(header, "1 NEW: 3 decisions waiting on you") {
+		t.Fatalf("header should count only the unseen alert: %q", header)
+	}
+	if m.alertCount(0) != 1 {
+		t.Fatalf("tab badge counts %d, want 1", m.alertCount(0))
+	}
+	if !strings.Contains(m.View().Content, "alpha: failed") {
+		t.Fatal("a seen alert must stay listed until its cause clears")
+	}
+	press(m, key('j'))
+	if len(m.newAlerts()) != 0 || strings.Contains(m.header(), "NEW") {
+		t.Fatal("viewing every alert should clear the notification")
+	}
+}
+
+func TestSeenAlertSurvivesRestartAndReturnsWhenItChanges(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = twoAlerts()
+	m.focus = "alerts"
+	press(m, key('j'))
+	press(m, key('j'))
+	again := newApp(m.paths, m.data, nil)
+	if len(again.newAlerts()) != 0 {
+		t.Fatal("seen state did not survive a board restart")
+	}
+	changed := twoAlerts()
+	changed[1].Sig = "a\nb\nc\nd"
+	again.data.Panels.Alerts = changed
+	fresh := again.newAlerts()
+	if len(fresh) != 1 || fresh[0].Nid != "decisions:summary" {
+		t.Fatalf("a changed issue should be new again, got %#v", fresh)
+	}
+}
+
+func TestClearedAlertIsForgottenSoARecurrenceIsNewAgain(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = twoAlerts()
+	m.focus = "alerts"
+	press(m, key('j'))
+	press(m, key('j'))
+	cleared := m.data
+	cleared.Panels.Alerts = twoAlerts()[1:]
+	m.Update(refreshedMsg{data: cleared})
+	if _, kept := m.seen["failed:alpha"]; kept {
+		t.Fatal("a cleared alert's seen record should be dropped")
+	}
+	if len(loadSeen(m.paths.State)) != 1 {
+		t.Fatal("the pruned seen state was not persisted")
+	}
+	back := m.data
+	back.Panels.Alerts = twoAlerts()
+	m.Update(refreshedMsg{data: back})
+	fresh := m.newAlerts()
+	if len(fresh) != 1 || fresh[0].Nid != "failed:alpha" {
+		t.Fatalf("a recurrence should be new, got %#v", fresh)
+	}
+}

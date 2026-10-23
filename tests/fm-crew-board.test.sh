@@ -854,6 +854,83 @@ EOF
   pass 'daily routines come from registered checks and their last-run markers'
 }
 
+test_alert_rows_for_real_issues() {
+  local home snapshot stub out waiter holder
+  home=$(make_home real_alerts)
+  mkdir -p "$home/locks" "$home/wt-alpha"
+  snapshot="$home/snapshot.json"
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  printf '#!/usr/bin/env bash\nprintf "List of devices attached\\nserial-a device model:Pixel_8\\n"\n' > "$stub/adb"
+  chmod +x "$stub/adb"
+  touch "$home/state/.last-watcher-beat"
+  alerts() {
+    PATH="$stub:$PATH" run_panels "$home" "$snapshot" | jq -r "$1"
+  }
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
+  assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'no alerts when nothing is wrong'
+
+  printf 'window=default:w1:p1\n' >> "$home/state/alpha.meta"
+  printf 'window=default:w2:p2\n' >> "$home/state/beta.meta"
+  printf '2' > "$home/state/.wedge-escalations-default_w1_p1"
+  touch "$home/state/.dead-reported-default_w2_p2"
+  fm_touch_epoch "$(( $(date +%s) - 600 ))" "$home/state/alpha.status" "$home/state/.wedge-escalations-default_w1_p1"
+  cat > "$snapshot" <<'EOF'
+{"schema":"fm-fleet-snapshot.v1","tasks":[
+ {"id":"alpha","phase":{"name":"failed","note":"build crashed"}},
+ {"id":"beta","phase":{"name":"working","note":"fine"}},
+ {"id":"gamma","phase":{"name":"working"},"current_state":{"state":"working","detail":"API Error: 529 overloaded_error"}},
+ {"id":"delta","phase":{"name":"working"},"current_state":{"state":"done","detail":"API error fixed"}}]}
+EOF
+  out=$(alerts '[.alerts[] | .nid + " :: " + .title] | join("\n")')
+  assert_contains "$out" 'failed:alpha :: alpha: failed' 'failed worker row'
+  assert_contains "$out" 'stuck:alpha :: alpha: not responding' 'worker the watcher escalated as idle reads as stuck'
+  assert_contains "$out" 'stopped:beta :: beta: stopped' 'worker whose agent is gone reads as stopped'
+  assert_contains "$out" 'api-error:gamma :: gamma: API or network error' 'worker reporting an API error'
+  assert_not_contains "$out" 'delta' 'a finished worker is not an API error alert'
+  out=$(alerts '.alerts[] | select(.nid == "failed:alpha") | .detail')
+  assert_contains "$out" 'Since 10 minutes ago.' 'failed row says since when'
+  assert_contains "$out" 'stopped until it is dealt with' 'failed row says the consequence'
+  assert_contains "$out" 'Ask firstmate' 'failed row says the one action'
+  out=$(alerts '.alerts[] | select(.nid == "stuck:alpha") | .detail')
+  assert_contains "$out" 'Since 10 minutes ago.' 'stuck row says since when'
+
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
+  rm -f "$home/state/.wedge-escalations-default_w1_p1" "$home/state/.dead-reported-default_w2_p2"
+  printf '{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-b","title":"Galaxy S22"}]}\n' > "$home/data/crew-board-cache.json"
+  out=$(alerts '.alerts[] | select(.nid | startswith("phone-offline")) | .title + " :: " + .detail')
+  assert_contains "$out" 'Phone Galaxy S22 not connected :: adb does not list this registered phone.' 'registered phone that adb does not list'
+  assert_contains "$out" 'Plug it in' 'phone row says the action'
+  printf '{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-a","title":"Pixel 8"}]}\n' > "$home/data/crew-board-cache.json"
+  assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'a connected registered phone is no alert'
+  rm -f "$home/data/crew-board-cache.json"
+
+  printf '## A. Which release?\nPick one.\n\n## B. Which store?\nPick one.\n' > "$home/data/captain-questions.md"
+  out=$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .title + " :: " + .detail] | join("")')
+  assert_contains "$out" '2 decisions waiting on you :: 2 open questions are waiting for your answer.' 'one summary row for open decisions'
+  assert_contains "$out" 'Open the Questions page' 'decisions row says the action'
+  assert_equals 1 "$(alerts '[.alerts[] | select(.nid | startswith("decisions"))] | length')" 'decisions stay one row'
+  rm -f "$home/data/captain-questions.md"
+
+  if command -v flock >/dev/null 2>&1 && [ -r /proc/locks ]; then
+    : > "$home/locks/frogpile-suite.lock"
+    flock "$home/locks/frogpile-suite.lock" sleep 30 >/dev/null 2>&1 &
+    holder=$!
+    sleep 0.3
+    (cd "$home/wt-alpha" && exec flock "$home/locks/frogpile-suite.lock" true) >/dev/null 2>&1 &
+    waiter=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do lock_waits "$waiter" && break; sleep 0.1; done
+    if lock_waits "$waiter"; then
+      assert_equals '' "$(FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" alerts '[.alerts[].title] | join("|")')" 'a suite wait under 30 minutes is no alert'
+      out=$(FM_CREW_BOARD_SUITE_WAIT_ALERT_SECS=0 FROGPILE_SUITE_LOCK="$home/locks/frogpile-suite.lock" alerts '.alerts[] | select(.nid | startswith("suite-wait")) | .title + " :: " + .detail')
+      assert_contains "$out" 'waiting for the full test suite :: A full test run is queued behind another suite run.' 'suite wait over the limit'
+      assert_contains "$out" 'Ask firstmate to check whether the running suite is stuck.' 'suite row says the action'
+    fi
+    kill "$waiter" "$holder" 2>/dev/null
+  fi
+  pass 'real issues each get a plain-words alert row and a quiet board has none'
+}
+
 test_monitoring_alert_fires_only_when_down() {
   local home snapshot out pid ident
   home=$(make_home monitoring)
@@ -1176,6 +1253,7 @@ test_phone_testing_and_test_queue
 test_suite_lock_probe
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
+test_alert_rows_for_real_issues
 test_monitoring_alert_fires_only_when_down
 test_worker_tags_from_live_evidence
 test_worker_tags_name_the_state

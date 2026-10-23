@@ -36,6 +36,8 @@ type item struct {
 	Status    string `json:"status"`
 	Link      string `json:"link"`
 	Alert     bool   `json:"alert"`
+	Nid       string `json:"nid"`
+	Sig       string `json:"sig"`
 	ADB       string `json:"adb"`
 	Quota     string `json:"quota"`
 	Providers int    `json:"providers"`

@@ -235,6 +235,10 @@ func (m *app) header() string {
 	left := lipgloss.NewStyle().Foreground(green).Bold(true).Render(brand)
 	clock := lipgloss.NewStyle().Foreground(muted).Render(time.Now().Format("15:04:05"))
 	line := left + "   " + clock + "   WORKERS " + fmt.Sprint(workers)
+	if fresh := m.newAlerts(); len(fresh) > 0 {
+		line = left + "  " + lipgloss.NewStyle().Foreground(background).Background(red).Bold(true).
+			Render(fmt.Sprintf(" ▲ %d NEW: %s ", len(fresh), fresh[0].Title)) + "  " + clock + "   WORKERS " + fmt.Sprint(workers)
+	}
 	line = ansi.Truncate(line, max(1, m.width-4), "…")
 	tabWidth := max(1, m.width-4)
 	tabs, start := m.pageTabs()
@@ -272,7 +276,7 @@ func (m *app) subTab(spec panelSpec) string {
 	tab := style.Render(" " + spec.title + " ")
 	count := 0
 	for _, row := range m.items(spec.id) {
-		if row.Alert {
+		if row.Alert && (spec.id != "alerts" || m.isNew(row)) {
 			count++
 		}
 	}
@@ -308,7 +312,7 @@ func (m *app) renderCompact(spec panelSpec, width int) string {
 		border = yellow
 	}
 	for _, row := range rows {
-		if row.Alert {
+		if row.Alert && (spec.id != "alerts" || m.isNew(row)) {
 			border = red
 			break
 		}
@@ -360,6 +364,9 @@ func (m *app) rowLine(id string, row item, index, width int) string {
 		tag = phaseChip(row.Status).Render(status)
 	}
 	line := prefix + name + spaces + tag
+	if id == "alerts" && m.isNew(row) && !selected {
+		line = lipgloss.NewStyle().Foreground(red).Bold(true).Render(prefix + "NEW " + ansi.Truncate(row.Title, max(1, available-4), "…") + spaces + status)
+	}
 	if selected {
 		line = lipgloss.NewStyle().Foreground(background).Background(yellow).Render(line)
 	}
@@ -482,7 +489,7 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 		case "full_questions":
 			message = "No captain questions"
 		case "alerts":
-			message = "Nothing needs your attention. ALERTS shows only monitoring outages, blocked or failed workers, decisions not yet raised with you, and unavailable phones."
+			message = "Nothing needs your attention. ALERTS shows only real issues: monitoring outages, blocked, failed, stopped or erroring workers, long suite waits, disconnected phones, and questions waiting on you."
 		case "ready":
 			message = "Nothing is waiting on you. READY FOR YOU shows green PRs to merge, finished local branches to land, finished investigation reports, and previews you asked to see."
 		case "test_queue":
