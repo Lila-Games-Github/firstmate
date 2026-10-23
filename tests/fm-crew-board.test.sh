@@ -912,7 +912,9 @@ EOF
   assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'a connected registered phone is no alert'
   rm -f "$home/data/crew-board-cache.json"
 
-  printf '## A. Which release?\nPick one.\n\n## B. Which store?\nPick one.\n' > "$home/data/captain-questions.md"
+  printf '## Your decisions\n' > "$home/data/captain-questions.md"
+  assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'a register with only a heading is no alert'
+  printf '## For widget\n\n**A. Which release?** Pick one.\n\n## For gadget\n\n**B. Which store?** Pick one for the release.\n' > "$home/data/captain-questions.md"
   out=$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .title + " :: " + .detail] | join("")')
   assert_contains "$out" '2 decisions waiting on you :: 2 open questions are waiting for your answer.' 'one summary row for open decisions'
   assert_contains "$out" 'Open the Questions page' 'decisions row says the action'
@@ -924,6 +926,11 @@ EOF
     "$(date -u -d '-3 days' +%Y-%m-%dT%H:%M:%S)" "$(date -u -d '-2 hours' +%Y-%m-%dT%H:%M:%S)" > "$snapshot"
   out=$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .detail] | join("")')
   assert_contains "$out" 'Since 2 hours ago.' 'since comes from the hold tied to a listed question, not an unrelated preview hold'
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[],"backlog":{"records":[
+ {"id":"rel","state":"queued","hold_kind":"captain","hold_reason":"pick it","hold_set":"%s"}]}}\n' \
+    "$(date -u -d '-3 days' +%Y-%m-%dT%H:%M:%S)" > "$snapshot"
+  assert_not_contains "$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .detail] | join("")')" 'Since' \
+    'a hold whose id only appears inside a word of a question is not tied to it'
   printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
   rm -f "$home/data/captain-questions.md"
 

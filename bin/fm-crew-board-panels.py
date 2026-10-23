@@ -808,19 +808,30 @@ def short_note(note, limit=24):
     return text
 
 
+def reason_label(reason):
+    """The captain-questions label a hold reason leads with, or ""."""
+    match = re.match(r"^\W*([A-Z][A-Z0-9]{0,3})\s*[.:)]", str(reason or ""))
+    return match.group(1) if match else ""
+
+
+def entry_label(row):
+    """The label a captain-questions entry's title leads with, or ""."""
+    match = re.match(r"^([A-Z][A-Z0-9]{0,3})\.\s", row.get("title", ""))
+    return match.group(1) if match else ""
+
+
 def question_label(task, questions):
     """The captain-questions label for a task: its hold reason's leading label, else an entry naming it."""
-    reason = str((task.get("backlog") or {}).get("hold_reason") or "")
-    match = re.match(r"^\W*([A-Z][A-Z0-9]{0,3})\s*[.:)]", reason)
-    if match:
-        return match.group(1)
+    label = reason_label((task.get("backlog") or {}).get("hold_reason"))
+    if label:
+        return label
     names = [str(task.get("id", ""))] + [str(d.get("key", "")) for d in (task.get("hints") or {}).get("open_decisions") or []
                                          if isinstance(d, dict)]
     names = [name for name in names if name]
     for row in questions:
-        label = re.match(r"^([A-Z][A-Z0-9]{0,3})\.\s", row.get("title", ""))
+        label = entry_label(row)
         if label and any(name in row.get("detail", "") for name in names):
-            return label.group(1)
+            return label
     return ""
 
 
@@ -1078,16 +1089,17 @@ def suite_wait_alerts(snapshot, now):
 
 
 def decisions_summary(snapshot, now):
-    questions = question_entries(DATA / "captain-questions.md")
+    questions = [entry for entry in question_entries(DATA / "captain-questions.md")
+                 if entry.get("status") != "section"]
     if not questions:
         return None
-    labels = {match.group(1) for match in (re.match(r"^([A-Z][A-Z0-9]{0,3})\.\s", entry.get("title", ""))
-                                           for entry in questions) if match}
+    labels = {entry_label(entry) for entry in questions} - {""}
     details = "\n".join(entry.get("detail", "") for entry in questions)
 
     def asks(record):
-        label = re.match(r"^\W*([A-Z][A-Z0-9]{0,3})\s*[.:)]", str(record.get("hold_reason") or ""))
-        return (label and label.group(1) in labels) or (record.get("id") and str(record["id"]) in details)
+        task_id = str(record.get("id") or "")
+        return (reason_label(record.get("hold_reason")) in labels
+                or bool(task_id and re.search(rf"(?<![\w-]){re.escape(task_id)}(?![\w-])", details)))
 
     held = [record.get("hold_set") for record in snapshot.get("backlog", {}).get("records", [])
             if isinstance(record, dict) and record.get("hold_kind") == "captain" and record.get("hold_set")
