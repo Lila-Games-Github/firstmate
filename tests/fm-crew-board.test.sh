@@ -917,6 +917,14 @@ EOF
   assert_contains "$out" '2 decisions waiting on you :: 2 open questions are waiting for your answer.' 'one summary row for open decisions'
   assert_contains "$out" 'Open the Questions page' 'decisions row says the action'
   assert_equals 1 "$(alerts '[.alerts[] | select(.nid | startswith("decisions"))] | length')" 'decisions stay one row'
+  assert_not_contains "$out" 'Since' 'no since clause without a hold tied to a question'
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[],"backlog":{"records":[
+ {"id":"prev","state":"queued","hold_kind":"captain","hold_reason":"preview the new build","hold_set":"%s"},
+ {"id":"rel","state":"queued","hold_kind":"captain","hold_reason":"A. pick the release","hold_set":"%s"}]}}\n' \
+    "$(date -u -d '-3 days' +%Y-%m-%dT%H:%M:%S)" "$(date -u -d '-2 hours' +%Y-%m-%dT%H:%M:%S)" > "$snapshot"
+  out=$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .detail] | join("")')
+  assert_contains "$out" 'Since 2 hours ago.' 'since comes from the hold tied to a listed question, not an unrelated preview hold'
+  printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
   rm -f "$home/data/captain-questions.md"
 
   if command -v flock >/dev/null 2>&1 && [ -r /proc/locks ]; then

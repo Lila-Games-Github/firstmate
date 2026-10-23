@@ -1081,8 +1081,17 @@ def decisions_summary(snapshot, now):
     questions = question_entries(DATA / "captain-questions.md")
     if not questions:
         return None
+    labels = {match.group(1) for match in (re.match(r"^([A-Z][A-Z0-9]{0,3})\.\s", entry.get("title", ""))
+                                           for entry in questions) if match}
+    details = "\n".join(entry.get("detail", "") for entry in questions)
+
+    def asks(record):
+        label = re.match(r"^\W*([A-Z][A-Z0-9]{0,3})\s*[.:)]", str(record.get("hold_reason") or ""))
+        return (label and label.group(1) in labels) or (record.get("id") and str(record["id"]) in details)
+
     held = [record.get("hold_set") for record in snapshot.get("backlog", {}).get("records", [])
-            if isinstance(record, dict) and record.get("hold_kind") == "captain" and record.get("hold_set")]
+            if isinstance(record, dict) and record.get("hold_kind") == "captain" and record.get("hold_set")
+            and asks(record)]
     since = None
     try:
         oldest = min(dt.datetime.fromisoformat(str(value)).replace(tzinfo=dt.timezone.utc) for value in held)
