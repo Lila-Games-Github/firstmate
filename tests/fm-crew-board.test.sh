@@ -266,7 +266,7 @@ EOF
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "unauthorized overlay refresh failed"
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two unauthorized" and .status == "unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized alert under a cache status"
   assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Phone serial-two unauthorized") | .detail' "$home/state/crew-board.json")" 'adb reports unauthorized' "unauthorized reason under a cache status"
-  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two locked" and .detail == "held by worker")] | length' "$home/state/crew-board.json")" "cache lock alert kept"
+  assert_equals 0 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two locked")] | length' "$home/state/crew-board.json")" "a locked phone without a waiting test is quiet"
   cat > "$stub/adb" <<'EOF'
 #!/usr/bin/env bash
 printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two offline\n'
@@ -412,37 +412,38 @@ EOF
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota snapshot failed"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
   assert_equals 1 "$(wc -l < "$home/quota-calls")" "fast refresh did not spend a quota-axi call"
-  assert_equals 5 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "allowance provider rows"
-  assert_equals 2 "$(jq '[.panels.allowance[] | select(.quota == "summary")] | length' "$home/state/crew-board.json")" \
-    "the rows aggregating broken and unmeasured providers are marked as summaries, not providers"
-  assert_equals 1 "$(jq '.panels.allowance[] | select(.title == "1 provider unavailable") | .providers' "$home/state/crew-board.json")" \
-    "an aggregate row names how many providers it accounts for"
+  assert_equals 4 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "three used providers and one quiet hidden count"
+  assert_equals '2 hidden' "$(jq -r '.panels.allowance[] | select(.quota == "hidden") | .title' "$home/state/crew-board.json")" \
+    "unused and unavailable providers share one quiet footnote"
   assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "codex") | .alert' "$home/state/crew-board.json")" "projected exhaustion alert"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: tomorrow' "quota reset"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .status' "$home/state/crew-board.json")" '27.3 usd' "credit balance"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "openrouter") | .detail' "$home/state/crew-board.json")" 'runway: unknown' "credit runway"
-  assert_contains "$(jq -r '.panels.allowance[] | select(.status == "unavailable") | .detail' "$home/state/crew-board.json")" 'cursor: auth_required' "unavailable provider"
-  assert_equals '1 provider unavailable' \
-    "$(jq -r '.panels.allowance[] | select(.status == "unavailable") | .title' "$home/state/crew-board.json")" "single unavailable provider title"
-  assert_equals '1 provider unmeasured' \
-    "$(jq -r '.panels.allowance[] | select(.status == "headroom unknown") | .title' "$home/state/crew-board.json")" "a fresh provider with no measured headroom is not called unavailable"
-  assert_contains "$(jq -r '.panels.allowance[] | select(.status == "headroom unknown") | .detail' "$home/state/crew-board.json")" \
-    'copilot: fresh' "unmeasured provider keeps its reported state"
+  assert_equals 0 "$(jq '[.panels.allowance[] | select(.title | test("cursor|copilot|Mistral"; "i"))] | length' "$home/state/crew-board.json")" \
+    "unused providers are absent"
   cat > "$home/data/crew-board-cache.json" <<'EOF'
 {"schema":"fm-crew-board-cache.v1","allowance":[{"title":"Claude","status":"45% remaining","detail":"hand written"},{"title":"Mistral","status":"12% remaining"}]}
 EOF
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "allowance overlay refresh failed"
-  assert_equals 6 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "allowance counted each provider once"
+  assert_equals 4 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "cache did not restore unused providers"
   assert_equals 0 "$(jq '[.panels.allowance[] | select(.title == "Claude")] | length' "$home/state/crew-board.json")" "cached provider duplicate survived"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'reset: tomorrow' "live quota row lost to cache"
-  assert_equals '12% remaining' "$(jq -r '.panels.allowance[] | select(.title == "Mistral") | .status' "$home/state/crew-board.json")" "supplementary cache row kept"
+  assert_equals 0 "$(jq '[.panels.allowance[] | select(.title == "Mistral")] | length' "$home/state/crew-board.json")" "unused cache row hidden"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_FAIL=1 PATH="$stub:/usr/bin:/bin" \
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota failure crashed"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "stale quota refresh failed"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .detail' "$home/state/crew-board.json")" 'stale' "last good quota not marked stale"
-  assert_equals 6 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "last good rows and the cache row kept after a failed attempt"
+  assert_equals 4 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "last good used rows stay after a failed attempt"
   assert_equals 0 "$(jq '[.panels.allowance[] | select(.title == "Allowance check")] | length' "$home/state/crew-board.json")" "no check row while a snapshot exists"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .status' "$home/state/crew-board.json")" 'ago (stale)' "stale age on the last good rows"
+  jq '.payload.providers |= map(if .provider == "openrouter" then .state = {status: "auth_required"} else . end)' \
+    "$home/state/crew-board-quota.json" > "$home/quota-updated.json"
+  mv "$home/quota-updated.json" "$home/state/crew-board-quota.json"
+  jq '.allowance += [{"title":"OpenRouter","status":"20 usd"}]' "$home/data/crew-board-cache.json" > "$home/cache-updated.json"
+  mv "$home/cache-updated.json" "$home/data/crew-board-cache.json"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "auth-required quota refresh failed"
+  assert_equals 0 "$(jq '[.panels.allowance[] | select(.title | ascii_downcase == "openrouter")] | length' "$home/state/crew-board.json")" \
+    "an auth-required used provider cannot reappear from cache"
   pass "quota allowance uses a slow structured snapshot and keeps the last good result"
 }
 
@@ -697,17 +698,12 @@ EOF
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" QUOTA_OUTPUT="$source" PATH="$stub:/usr/bin:/bin" \
     python3 "$ROOT/bin/fm-crew-board-panels.py" --refresh-allowance || fail "quota snapshot failed"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "quota board refresh failed"
-  assert_equals 5 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "every provider keeps a row"
+  assert_equals 3 "$(jq '.panels.allowance | length' "$home/state/crew-board.json")" "only used providers and a hidden count remain"
   assert_equals 'exhausted now' "$(jq -r '.panels.allowance[] | select(.title == "codex") | .status' "$home/state/crew-board.json")" "unknown headroom that is exhausted now"
   assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "codex") | .alert' "$home/state/crew-board.json")" "exhausted unknown headroom alerts"
-  assert_equals 'headroom unknown' "$(jq -r '.panels.allowance[] | select(.title == "mistral") | .status' "$home/state/crew-board.json")" "unknown headroom row"
-  assert_equals false "$(jq -r '.panels.allowance[] | select(.title == "mistral") | .alert' "$home/state/crew-board.json")" "unknown headroom alone is not an alert"
+  assert_equals '2 hidden' "$(jq -r '.panels.allowance[] | select(.quota == "hidden") | .title' "$home/state/crew-board.json")" "unused providers collapse to a count"
   assert_contains "$(jq -r '.panels.allowance[] | select(.title == "claude") | .status' "$home/state/crew-board.json")" '0% left' "exhausted scope kept its percent"
   assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "claude") | .alert' "$home/state/crew-board.json")" "exhausted now alerts"
-  assert_contains "$(jq -r '.panels.allowance[] | select(.title == "qwen") | .status' "$home/state/crew-board.json")" '70% left' "scoped sibling kept its percent"
-  assert_equals false "$(jq -r '.panels.allowance[] | select(.title == "qwen") | .alert' "$home/state/crew-board.json")" "healthy sibling is not an alert"
-  assert_equals 'exhausted now' "$(jq -r '.panels.allowance[] | select(.title == "qwen / model:fable") | .status' "$home/state/crew-board.json")" "exhausted scope beside a scoped sibling"
-  assert_equals true "$(jq -r '.panels.allowance[] | select(.title == "qwen / model:fable") | .alert' "$home/state/crew-board.json")" "exhausted scope beside a scoped sibling alerts"
   pass "unknown headroom and exhausted_now runways stay visible and alert"
 }
 
@@ -776,33 +772,101 @@ EOF
     lock_waits "$suite_waiter" || suite_waiter=''
   fi
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'test queue refresh failed'
-  assert_equals testing "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'held phone is testing'
+  assert_equals busy "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'held phone is busy'
   assert_contains "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .detail' "$home/state/crew-board.json")" \
     'Testing: Make the widget spin (sleep) for <1m; 1 waiting' 'phone holder task, held time, and queue length'
   assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "idle-two") | .status' "$home/state/crew-board.json")" 'free phone is idle'
   assert_equals 'Galaxy S22|Galaxy M31' \
     "$(jq -r '[.panels.phones[] | select(.id == "idle-two" or .id == "third") | .title] | join("|")' "$home/state/crew-board.json")" \
     'adb models map to friendly phone names'
-  assert_equals 'FULL TEST SUITE|section' "$(jq -r '.panels.test_queue[0] | .title + "|" + .status' "$home/state/crew-board.json")" 'suite heading'
+  assert_equals 'EDITOR|section' "$(jq -r '.panels.test_queue[0] | .title + "|" + .status' "$home/state/crew-board.json")" 'editor heading'
   assert_equals 'RUNNING: Fix the gadget|running 10m' \
     "$(jq -r '.panels.test_queue[1] | .title + "|" + .status' "$home/state/crew-board.json")" 'running suite by task title'
   assert_contains "$(jq -r '.panels.test_queue[1].detail' "$home/state/crew-board.json")" 'Task: beta' 'task id kept in detail'
   if [ -n "$suite_waiter" ]; then
-    assert_equals 'NEXT: Make the widget spin|next' \
-      "$(jq -r '.panels.test_queue[2] | .title + "|" + .status' "$home/state/crew-board.json")" 'suite waiter in order'
+    assert_contains "$(jq -r '.panels.test_queue[2] | .title + "|" + .status' "$home/state/crew-board.json")" \
+      'NEXT: Make the widget spin|waiting' 'suite waiter in order'
   fi
-  assert_equals 'Pixel 8|RUNNING: Make the widget spin|NEXT: Fix the gadget' \
+  assert_equals 'Pixel 8|RUNNING: Make the widget spin|Busy|NEXT: Fix the gadget' \
     "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-busy-one")) | .title] | join("|")' "$home/state/crew-board.json")" \
     'phone group lists holder then waiters'
-  assert_equals 0 "$(jq '[.panels.test_queue[] | select(.id | startswith("phone-idle-two"))] | length' "$home/state/crew-board.json")" \
-    'idle phone with an empty queue adds no test queue rows'
+  assert_equals 'Galaxy S22|Idle' "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-idle-two")) | .title] | join("|")' "$home/state/crew-board.json")" \
+    'idle phone keeps a compact resource state'
   kill "$holder" "$waiter" "$suite_pid" ${blocker:+"$blocker"} ${suite_waiter:+"$suite_waiter"} 2>/dev/null
   wait 2>/dev/null
   printf 'pid=1\ncwd=/\nstarted=1\nheartbeat=1\n' > "$home/locks/suite.holder"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'idle test queue refresh failed'
-  assert_equals 0 "$(jq '.panels.test_queue | length' "$home/state/crew-board.json")" 'stale suite heartbeat or dead holders kept'
+  assert_equals 0 "$(jq '[.panels.test_queue[] | select(.status | startswith("running") or startswith("waiting"))] | length' "$home/state/crew-board.json")" 'stale suite heartbeat or dead holders kept'
   assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'dead holder kept the phone busy'
   pass 'phones show their tester and the test queue lists running and waiting suites and phone reservations'
+}
+
+test_ticketed_queue_and_locked_phone() {
+  local home stub now held vip vip_two any suite_wait suite_hold boot ticks
+  home=$(make_home ticketed_queue)
+  mkdir -p "$home/queues/phones/tickets" "$home/queues/suite/tickets" "$home/wt-alpha" "$home/wt-beta"
+  printf 'worktree=%s\n' "$home/wt-alpha" >> "$home/state/alpha.meta"
+  printf 'worktree=%s\n' "$home/wt-beta" >> "$home/state/beta.meta"
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/adb-commands"
+if [ "$1" = devices ]; then
+  printf 'List of devices attached\nR5CT32HRVNM device model:SM_S901E\nRZ8N71EC9ZB device model:SM_M315F\nRZCX224VH4T device model:SM_G990E\n'
+elif [ "$2" = R5CT32HRVNM ]; then
+  printf 'mKeyguardShowing=true\n'
+else
+  printf 'mKeyguardShowing=false\n'
+fi
+EOF
+  chmod +x "$stub/adb"
+  held=$(sleeper_in "$home/wt-alpha")
+  vip=$(sleeper_in "$home/wt-beta")
+  vip_two=$(sleeper_in "$home/wt-alpha")
+  any=$(sleeper_in "$home/wt-beta")
+  suite_wait=$(sleeper_in "$home/wt-alpha")
+  suite_hold=$(sleeper_in "$home/wt-beta")
+  now=$(date +%s)
+  boot=$(cat /proc/sys/kernel/random/boot_id)
+  ticks() { sed 's/.*) //' "/proc/$1/stat" | awk '{print $20}'; }
+  printf '{"pid":%s,"start_ticks":"%s","boot_id":"%s","requested":"R5CT32HRVNM","holding":"R5CT32HRVNM","requested_unix_ns":%s000000000,"acquired_unix_ns":%s000000000}\n' \
+    "$held" "$(ticks "$held")" "$boot" "$((now-600))" "$((now-480))" > "$home/queues/phones/tickets/001-held.json"
+  printf '{"pid":%s,"start_ticks":"%s","boot_id":"%s","requested":"R5CT32HRVNM","requested_unix_ns":%s000000000}\n' \
+    "$vip" "$(ticks "$vip")" "$boot" "$((now-180))" > "$home/queues/phones/tickets/002-vip.json"
+  printf '{"pid":%s,"start_ticks":"%s","boot_id":"%s","requested":"any","requested_unix_ns":%s000000000}\n' \
+    "$any" "$(ticks "$any")" "$boot" "$((now-120))" > "$home/queues/phones/tickets/003-any.json"
+  printf '{"pid":%s,"start_ticks":"%s","boot_id":"%s","requested":"R5CT32HRVNM","requested_unix_ns":%s000000000}\n' \
+    "$vip_two" "$(ticks "$vip_two")" "$boot" "$((now-60))" > "$home/queues/phones/tickets/004-vip.json"
+  printf '{"pid":%s,"start_ticks":"%s","boot_id":"%s","cwd":"%s","requested_unix":%s}\n' \
+    "$suite_wait" "$(ticks "$suite_wait")" "$boot" "$home/wt-alpha" "$((now-240))" > "$home/queues/suite/tickets/001-wait.json"
+  printf 'pid=%s\ncwd=%s\nstarted=%s\nheartbeat=%s\n' "$suite_hold" "$home/wt-beta" "$((now-300))" "$now" > "$home/queues/suite.holder"
+  PATH="$stub:/usr/bin:/bin" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
+    FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'ticketed queue refresh failed'
+  assert_equals locked "$(jq -r '.panels.phones[] | select(.id == "R5CT32HRVNM") | .status' "$home/state/crew-board.json")" 'keyguard is a locked state'
+  assert_equals 'EDITOR|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE' \
+    "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'fixed resource sections and any-phone queue'
+  assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \
+    'waiting 4m' 'suite ticket wait duration'
+  assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "phone-R5CT32HRVNM-wait-'"$vip"'") | .status' "$home/state/crew-board.json")" \
+    'waiting 3m' 'VIP ticket wait duration'
+  assert_equals 'NEXT: Fix the gadget|#2: Make the widget spin' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-R5CT32HRVNM-wait-")) | .title] | join("|")' "$home/state/crew-board.json")" \
+    'VIP waiters stay in ticket order'
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.nid == "phone-locked:R5CT32HRVNM")] | length' "$home/state/crew-board.json")" \
+    'a locked phone with a waiting test raises one notification'
+  assert_not_contains "$(cat "$home/adb-commands")" 'kill-server' 'board never disturbs adb sessions'
+  assert_not_contains "$(cat "$home/adb-commands")" 'reconnect' 'board never reconnects adb sessions'
+  rm -f "$home/queues/phones/tickets/002-vip.json" "$home/queues/phones/tickets/004-vip.json"
+  PATH="$stub:/usr/bin:/bin" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
+    FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'cleared phone queue refresh failed'
+  assert_equals 0 "$(jq '[.panels.alerts[] | select(.nid == "phone-locked:R5CT32HRVNM")] | length' "$home/state/crew-board.json")" \
+    'a locked phone with no waiting test is quiet'
+  kill "$held" "$vip" "$vip_two" "$any" "$suite_wait" "$suite_hold" 2>/dev/null
+  wait 2>/dev/null
+  pass 'ticketed editor and phone queues show holders, ordered waits, and locked phone notifications'
 }
 
 test_suite_lock_probe() {
@@ -1311,6 +1375,7 @@ test_playbot_check_unavailable
 test_full_questions_and_backlog
 test_backlog_counts_from_a_capped_listing
 test_phone_testing_and_test_queue
+test_ticketed_queue_and_locked_phone
 test_suite_lock_probe
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state

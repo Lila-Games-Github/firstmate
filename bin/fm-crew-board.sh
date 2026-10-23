@@ -17,6 +17,8 @@
 # Tab/Shift-Tab cycle panels, gg/G and Ctrl-u/Ctrl-d jump within a panel, Enter/o expands a row,
 # O focuses the selected worker's recorded pane (or prints an attach command),
 # za/Space collapses a panel, Alt-1..9 selects a row, / filters,
+# s opens the information rail at full width (including on narrow terminals),
+# and Ctrl-n/Ctrl-p scroll its actual rows.
 # r replies to a selected question, i or : focuses the note line,
 # Esc leaves input, ? shows help, and q or :q quits.
 #

@@ -85,6 +85,7 @@ func TestHeaderShowsHomeAndTabState(t *testing.T) {
 func TestAllPagesRenderLocalPanels(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.Phones = []item{{Title: "S22", Status: "locked", Alert: true}}
+	m.data.Panels.TestQueue = []item{{Title: "Galaxy S22", Status: "section"}, {Title: "Locked", Status: "locked"}}
 	m.data.Panels.Builds = []item{{Title: "Android build", Status: "passed"}}
 	m.data.Panels.Bugs = []item{{Title: "Rocketboard login", Status: "in progress"}}
 	m.data.Panels.Allowance = []item{{Title: "Codex", Status: "65% remaining"}}
@@ -94,7 +95,7 @@ func TestAllPagesRenderLocalPanels(t *testing.T) {
 	}
 	press(m, key('4'))
 	view := m.View().Content
-	for _, value := range []string{"TESTING", "PHONES", "S22", "BUILDS", "Android build"} {
+	for _, value := range []string{"TESTING", "TEST QUEUE", "Galaxy S22", "LATEST BUILDS", "Android build"} {
 		if !strings.Contains(view, value) {
 			t.Errorf("TESTING page missing %q", value)
 		}
@@ -189,8 +190,8 @@ func TestPlanningBacklogCarriesTheFullBacklog(t *testing.T) {
 	if view := m.View().Content; !strings.Contains(view, "Finish the widget animation") {
 		t.Fatal("Enter did not show the backlog item's full note")
 	}
-	if summary := panelSummary(panelSpec{"backlog", "BACKLOG"}, m.items("backlog"), 60); !strings.Contains(summary, "2 tasks") {
-		t.Fatalf("backlog summary counted headings: %q", summary)
+	if count := len(withoutSections(m.items("backlog"))); count != 2 {
+		t.Fatalf("backlog rows counted headings: %d", count)
 	}
 	m.data.Panels.FullBacklog = nil
 	if !strings.Contains(m.View().Content, "Short next row") {
@@ -271,8 +272,9 @@ func TestViewFitsTerminal(t *testing.T) {
 	m := fixtureApp(t)
 	for _, size := range [][2]int{{120, 30}, {55, 18}} {
 		m.width, m.height = size[0], size[1]
-		for _, mode := range []string{"normal", "motion", "help", "filter"} {
+		for _, mode := range []string{"normal", "motion", "help", "filter", "rail-detail"} {
 			m.help, m.filterActive = false, false
+			m.railDetail = nil
 			m.slide = 0
 			switch mode {
 			case "motion":
@@ -281,6 +283,8 @@ func TestViewFitsTerminal(t *testing.T) {
 				m.help = true
 			case "filter":
 				m.filterActive = true
+			case "rail-detail":
+				m.railDetail = &item{Title: "Waiting test", Detail: strings.Repeat("Unlock the phone.\n", 20)}
 			}
 			lines := strings.Split(m.View().Content, "\n")
 			if mode == "help" && !strings.Contains(m.View().Content, "q/:q quit") {
@@ -577,11 +581,10 @@ func TestQuestionsLiveOnlyOnTheirPageWithACountBadge(t *testing.T) {
 	}
 }
 
-func TestEmptyAlertsAndReadyExplainThemselves(t *testing.T) {
+func TestEmptyNotificationsAndReadyExplainThemselves(t *testing.T) {
 	m := fixtureApp(t)
-	m.focus = "alerts"
-	if view := m.View().Content; !strings.Contains(view, "Nothing needs your attention") {
-		t.Fatal("empty ALERTS did not explain what it shows")
+	if view := m.View().Content; !strings.Contains(view, "NOTIFICATIONS") || !strings.Contains(view, "none") {
+		t.Fatal("empty notifications missing from the rail")
 	}
 	m.focus = "ready"
 	if view := m.View().Content; !strings.Contains(view, "Nothing is waiting on you") {
@@ -668,14 +671,14 @@ func TestNarrowTabStripKeepsFocusedTabVisible(t *testing.T) {
 	if !strings.Contains(m.View().Content, active("FEED")) {
 		t.Fatal("focused FEED sub-tab was clipped at narrow width")
 	}
-	m.page, m.focus = 1, "allowance"
+	m.page, m.focus = 1, "backlog"
 	strip = m.subTabs(m.width - 4)
-	if !strings.Contains(strip, active("AI ALLOWANCE")) {
+	if !strings.Contains(strip, active("BACKLOG")) {
 		t.Fatalf("PLANNING sub-tab strip lost its focused tab: %q", strip)
 	}
 	view := m.View().Content
-	if !strings.Contains(view, "2 PLANNING") || !strings.Contains(view, active("AI ALLOWANCE")) {
-		t.Fatal("focused PLANNING page or AI ALLOWANCE sub-tab was clipped")
+	if !strings.Contains(view, "2 PLANNING") || !strings.Contains(view, active("BACKLOG")) {
+		t.Fatal("focused PLANNING page or BACKLOG sub-tab was clipped")
 	}
 }
 
@@ -698,97 +701,39 @@ func TestShortWideLayoutKeepsCardsInsideTheBody(t *testing.T) {
 	}
 }
 
-func TestSummaryCardsAndEmptyFocusedPanel(t *testing.T) {
+func TestInformationRailShowsRowsAndScrolls(t *testing.T) {
 	m := fixtureApp(t)
-	empty := m.renderCompact(panelSpec{"phones", "PHONES"}, 40)
-	m.data.Panels.Landings = []item{{Title: "Release A"}, {Title: "Release B"}}
-	filled := m.renderCompact(panelSpec{"landings", "TODAY'S LANDINGS"}, 40)
-	m.data.Panels.Alerts = []item{{Title: "Device locked", Alert: true}}
-	alert := m.renderCompact(panelSpec{"alerts", "ALERTS"}, 40)
-	for _, card := range []string{empty, filled, alert} {
-		if len(strings.Split(card, "\n")) != 4 || !strings.Contains(card, "latest:") {
-			t.Fatalf("summary is not a uniform two-line card: %q", card)
+	m.data.Panels.Alerts = []item{{Title: "S22 locked", Status: "locked", Alert: true}}
+	m.data.Panels.TestQueue = []item{
+		{Title: "EDITOR", Status: "section"},
+		{Title: "RUNNING: suite", Status: "running 5m"},
+		{Title: "Galaxy S22", Status: "section"},
+		{Title: "Locked", Status: "locked"},
+	}
+	m.data.Panels.Builds = []item{{Title: "Android build", Status: "passed"}}
+	m.data.Panels.Routines = []item{{Title: "Daily check", Status: "done"}}
+	m.data.Panels.Allowance = []item{{Title: "Claude", Status: "70% left"}}
+	for _, page := range pages {
+		for _, spec := range page {
+			for _, rail := range railPanels {
+				if spec.id == rail.id {
+					t.Fatalf("rail panel %s remains a main sub-tab", spec.id)
+				}
+			}
 		}
 	}
-	if !strings.Contains(empty, "none") || !strings.Contains(filled, "2 landed") ||
-		!strings.Contains(filled, "latest: Release B") || !strings.Contains(alert, "1 alerts") {
-		t.Fatal("summary labels or latest item missing")
+	seen := map[string]bool{}
+	for offset := 0; offset < 50; offset += 3 {
+		m.railOffset = offset
+		view := m.View().Content
+		for _, value := range []string{"NOTIFICATIONS", "TEST QUEUE", "LATEST BUILDS", "DAILY ROUTINES", "AI ALLOWANCE", "S22 locked", "RUNNING: suite", "Android build", "Daily check", "Claude"} {
+			seen[value] = seen[value] || strings.Contains(view, value)
+		}
 	}
-	m.page, m.focus = 3, "phones"
-	emptyFull := m.renderFocused(panelSpec{"phones", "PHONES"}, 80, 22)
-	m.data.Panels.Phones = []item{{Title: "Pixel 8"}}
-	filledFull := m.renderFocused(panelSpec{"phones", "PHONES"}, 80, 22)
-	if len(strings.Split(emptyFull, "\n")) != len(strings.Split(filledFull, "\n")) ||
-		!strings.Contains(emptyFull, "No phones connected") {
-		t.Fatal("empty focused panel did not keep its full-size slot")
-	}
-}
-
-func TestPhoneCardCountsOnlyConnectedDevices(t *testing.T) {
-	m := fixtureApp(t)
-	spec := panelSpec{"phones", "PHONES"}
-	m.data.Panels.Phones = []item{
-		{ID: "serial-one", Title: "Pixel 8", Status: "locked", ADB: "device"},
-		{ID: "serial-two", Title: "serial-two", Status: "unauthorized", ADB: "unauthorized", Alert: true},
-		{Title: "Cache only", Status: "ready", Detail: "manual"},
-	}
-	card := m.renderCompact(spec, 60)
-	if !strings.Contains(card, "1 connected") || !strings.Contains(card, "1 cached") {
-		t.Fatalf("phone card counted an unauthorized device or a cache row as connected: %q", card)
-	}
-	m.data.Panels.Phones = m.data.Panels.Phones[:2]
-	if card := m.renderCompact(spec, 60); !strings.Contains(card, "1 connected") || strings.Contains(card, "cached") {
-		t.Fatalf("phone card with one attached device reads: %q", card)
-	}
-	m.data.Panels.Phones = []item{{
-		Title: "Phone check", Detail: "adb was not found on PATH", Status: "unavailable", ADB: "unavailable", Alert: true,
-	}}
-	if card := m.renderCompact(spec, 60); !strings.Contains(card, "PHONES  unavailable") || strings.Contains(card, "connected") {
-		t.Fatalf("unanswered phone check reads: %q", card)
-	}
-}
-
-func TestAllowanceCardReadsUnavailableWithoutASnapshot(t *testing.T) {
-	m := fixtureApp(t)
-	m.data.Panels.Allowance = []item{{
-		Title: "Allowance check", Detail: "no quota snapshot is recorded", Status: "unavailable",
-		Quota: "unavailable", Alert: true,
-	}}
-	if card := m.renderCompact(panelSpec{"allowance", "AI ALLOWANCE"}, 60); !strings.Contains(card, "AI ALLOWANCE  unavailable") {
-		t.Fatalf("failed allowance sampler reads: %q", card)
-	}
-	m.data.Panels.Allowance = nil
-	if card := m.renderCompact(panelSpec{"allowance", "AI ALLOWANCE"}, 60); !strings.Contains(card, "none") {
-		t.Fatalf("allowance card without providers reads: %q", card)
-	}
-}
-
-func TestSummaryCardsCountWhatTheyName(t *testing.T) {
-	m := fixtureApp(t)
-	m.data.Panels.Allowance = []item{
-		{Title: "claude", Status: "70% left · 2m ago"},
-		{Title: "qwen", Status: "40% left · 2m ago"},
-		{Title: "qwen / model:fable", Status: "exhausted now", Alert: true},
-		{Title: "2 providers unavailable", Status: "unavailable", Quota: "summary", Providers: 2},
-	}
-	card := m.renderCompact(panelSpec{"allowance", "AI ALLOWANCE"}, 60)
-	if !strings.Contains(card, "AI ALLOWANCE  4 providers") {
-		t.Fatalf("allowance card counted rows instead of providers: %q", card)
-	}
-	m.data.Panels.Allowance = []item{
-		{Title: "4 providers unavailable", Status: "unavailable", Quota: "summary", Providers: 4},
-	}
-	if card := m.renderCompact(panelSpec{"allowance", "AI ALLOWANCE"}, 60); !strings.Contains(card, "AI ALLOWANCE  4 providers") {
-		t.Fatalf("allowance card of only aggregate rows reads: %q", card)
-	}
-	m.data.Panels.TestQueue = []item{
-		{Title: "RUNNING: Make the widget spin", Status: "running 8m"},
-		{Title: "NEXT: Fix the gadget", Status: "next"},
-		{Title: "#2: Investigate crash", Status: "waiting"},
-	}
-	card = m.renderCompact(panelSpec{"test_queue", "TEST QUEUE"}, 60)
-	if !strings.Contains(card, "TEST QUEUE  2 queued (1 running)") {
-		t.Fatalf("test queue card counted a running suite as queued: %q", card)
+	for value, found := range seen {
+		if !found {
+			t.Errorf("rail never displayed %s while scrolling", value)
+		}
 	}
 }
 
@@ -804,8 +749,8 @@ func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
 			t.Fatalf("project grouping missing %q", value)
 		}
 	}
-	if len(rows) != 3 || owners[0] != -1 || !strings.Contains(panelSummary(panelSpec{id: "workers", title: "WORKERS"}, rows, 80), "widget 2") {
-		t.Fatal("headings became selectable or summary lost project counts")
+	if len(rows) != 3 || owners[0] != -1 {
+		t.Fatal("headings became selectable or worker group lost rows")
 	}
 	for index := range rows {
 		press(m, key('j'))
@@ -962,7 +907,7 @@ func TestMouseSelectsDisplayedRowsAndTabs(t *testing.T) {
 	_ = m.View()
 	rect := m.lastRects[0]
 	m.slide = 0
-	activeX := rect.x + 1 + lipgloss.Width(m.subTab(pages[0][0])) + 2
+	activeX := rect.x + 2
 	m.Update(tea.MouseClickMsg{X: activeX, Y: rect.y + 1})
 	if m.slide != 0 || m.focus != "workers" {
 		t.Fatal("clicking the active sub-tab started motion")
@@ -972,8 +917,8 @@ func TestMouseSelectsDisplayedRowsAndTabs(t *testing.T) {
 		_, owners := m.panelLines(panelSpec{id: "workers"}, rect.width-4)
 		t.Fatalf("click after expanded detail chose row %d or slide %d; owners=%v", m.selected["workers"], m.slide, owners)
 	}
-	m.Update(tea.MouseClickMsg{X: rect.x + 2, Y: rect.y + 1})
-	if m.focus != "alerts" || m.slide == 0 {
+	m.Update(tea.MouseClickMsg{X: rect.x + 1 + lipgloss.Width(m.subTab(pages[0][0])) + 2, Y: rect.y + 1})
+	if m.focus != "ready" || m.slide == 0 {
 		t.Fatal("clicking another sub-tab did not focus and animate it")
 	}
 	m.focus, m.slide = "workers", 0
@@ -992,34 +937,24 @@ func TestMouseSelectsDisplayedRowsAndTabs(t *testing.T) {
 	}
 }
 
-func TestMouseFocusesSummaryCards(t *testing.T) {
-	for _, size := range [][2]int{{120, 30}, {55, 40}} {
-		m := fixtureApp(t)
-		m.width, m.height = size[0], size[1]
-		_ = m.View()
-		var card panelRect
-		for _, rect := range m.lastRects {
-			if rect.id != m.focus {
-				card = rect
-				break
-			}
+func TestRailRowsStayOnEveryPageAndClicksShowDetail(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = []item{{Title: "Device locked", Detail: "Unlock S22", Alert: true, Nid: "locked:s22", Sig: "waiter"}}
+	m.data.Panels.TestQueue = []item{{Title: "EDITOR", Status: "section"}, {Title: "NEXT: Build widget", Status: "waiting 4m"}}
+	for page := range pages {
+		m.page, m.focus = page, pages[page][0].id
+		view := m.View().Content
+		if !strings.Contains(view, "NOTIFICATIONS") || !strings.Contains(view, "NEW Device locked") ||
+			!strings.Contains(view, "TEST QUEUE") || !strings.Contains(view, "NEXT: Build widget") {
+			t.Fatalf("page %d lost actual rail rows: %q", page, view)
 		}
-		if card.id == "" {
-			t.Fatalf("%dx%d layout recorded no summary card for an unfocused sub-tab", size[0], size[1])
+		if _, ok := m.railHit[7]; !ok {
+			t.Fatalf("page %d has no clickable alert row", page)
 		}
-		m.Update(tea.MouseClickMsg{X: card.x + 2, Y: card.y + 1})
-		if m.focus != card.id {
-			t.Errorf("%dx%d click on the %s card focused %s instead", size[0], size[1], card.id, m.focus)
-		}
-		if m.slide == 0 {
-			t.Errorf("%dx%d click on the %s card did not animate the change", size[0], size[1], card.id)
-		}
-		m.slide = 0
-		_ = m.View()
-		m.Update(tea.MouseClickMsg{X: 0, Y: 0})
-		if m.focus != card.id || m.slide != 0 {
-			t.Errorf("%dx%d click outside every panel focused %s or animated", size[0], size[1], m.focus)
-		}
+	}
+	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 7})
+	if len(m.newAlerts()) != 0 || m.railDetail == nil || !strings.Contains(m.View().Content, "Unlock S22") {
+		t.Fatal("clicking a rail notification did not acknowledge it or show detail")
 	}
 }
 
@@ -1214,23 +1149,18 @@ func TestRefreshMovesASelectionOffAHeading(t *testing.T) {
 	press(m, key('3'))
 	m.selected["full_questions"] = 1
 	m.data.Panels.TestQueue = []item{{Title: "Full suite", Status: "section"}, {Title: "RUNNING: Build widget", Status: "running 8m"}}
-	m.selected["test_queue"] = 1
 	data := m.data
 	data.Panels.FullQuestions = []item{
 		{Title: "Your decisions", Status: "section"},
 		{Title: "For Tarun", Status: "section"},
 		{ID: "question-1", Title: "Which device?", Detail: "Use the staging device"},
 	}
-	data.Panels.TestQueue = []item{{Title: "Full suite", Status: "section"}, {Title: "Phones", Status: "section"}}
 	m.Update(refreshedMsg{data: data, feed: m.feed})
 	if m.selected["full_questions"] != 2 || m.selectedQuestion() == nil || m.selectedQuestion().ID != "question-1" {
 		t.Fatalf("answered question left the cursor on a heading: %#v", m.selected)
 	}
 	if !strings.Contains(m.View().Content, "Use the staging device") {
 		t.Fatal("the next question's full text did not show after a refresh")
-	}
-	if _, ok := m.selected["test_queue"]; ok {
-		t.Fatalf("a panel left with only headings kept a selection: %#v", m.selected)
 	}
 	data.Panels.FullQuestions = []item{
 		{ID: "question-0", Title: "Pick the UI"},
@@ -1263,7 +1193,7 @@ func TestSelectedYellowPhaseTagIsADarkChip(t *testing.T) {
 
 func TestPageOrderAndNumberKeys(t *testing.T) {
 	want := []string{"NOW", "PLANNING", "QUESTIONS", "TESTING"}
-	first := []string{"workers", "bugs", "full_questions", "phones"}
+	first := []string{"workers", "bugs", "full_questions", "landings"}
 	if strings.Join(pageNames, ",") != strings.Join(want, ",") {
 		t.Fatalf("page names = %v, want %v", pageNames, want)
 	}
@@ -1351,21 +1281,19 @@ func TestMouseClickSwitchesSubTabs(t *testing.T) {
 	}
 }
 
-func TestMouseClickSubTabWhenRowIsScrolled(t *testing.T) {
+func TestNarrowInformationFallback(t *testing.T) {
 	m := fixtureApp(t)
-	m.width, m.height = 50, 30
-	m.page, m.focus = 3, pages[3][len(pages[3])-1].id
-	_ = m.View()
-	rect := m.lastRects[0]
-	innerWidth := max(1, rect.width-4)
-	start := m.subTabStart(innerWidth)
-	if start == 0 {
-		t.Fatal("sub-tab row did not scroll at this size")
+	m.width, m.height = 55, 18
+	if view := m.View().Content; strings.Contains(view, "INFORMATION") {
+		t.Fatal("narrow terminal did not prioritize the main panel")
 	}
-	first := pages[3][start]
-	m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: rect.x + 2, Y: rect.y + 1})
-	if m.focus != first.id {
-		t.Fatalf("click on the first visible sub-tab focused %s, want %s", m.focus, first.id)
+	press(m, key('s'))
+	if view := m.View().Content; !strings.Contains(view, "INFORMATION") || !strings.Contains(view, "NOTIFICATIONS") {
+		t.Fatal("narrow terminal cannot open the information rail")
+	}
+	press(m, key('s'))
+	if view := m.View().Content; !strings.Contains(view, "WORKERS") {
+		t.Fatal("narrow terminal cannot return to the main panel")
 	}
 }
 
@@ -1453,7 +1381,6 @@ func TestNewAlertsAppearAsCountedNotificationOnEveryPage(t *testing.T) {
 		}
 	}
 	m.setPage(0)
-	m.focus = "alerts"
 	if !strings.Contains(m.View().Content, "NEW alpha: failed") {
 		t.Fatal("unseen alert row is not marked NEW")
 	}
@@ -1462,8 +1389,8 @@ func TestNewAlertsAppearAsCountedNotificationOnEveryPage(t *testing.T) {
 func TestViewingAnAlertMarksItSeenAndItRecedes(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.Alerts = twoAlerts()
-	m.focus = "alerts"
-	press(m, key('j'))
+	_ = m.View()
+	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 7})
 	if got := len(m.newAlerts()); got != 1 {
 		t.Fatalf("selecting the first alert left %d new, want 1", got)
 	}
@@ -1477,7 +1404,9 @@ func TestViewingAnAlertMarksItSeenAndItRecedes(t *testing.T) {
 	if !strings.Contains(m.View().Content, "alpha: failed") {
 		t.Fatal("a seen alert must stay listed until its cause clears")
 	}
-	press(m, key('j'))
+	press(m, special(tea.KeyEsc))
+	_ = m.View()
+	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 9})
 	if len(m.newAlerts()) != 0 || strings.Contains(m.header(), "NEW") {
 		t.Fatal("viewing every alert should clear the notification")
 	}
@@ -1486,9 +1415,11 @@ func TestViewingAnAlertMarksItSeenAndItRecedes(t *testing.T) {
 func TestSeenAlertSurvivesRestartAndReturnsWhenItChanges(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.Alerts = twoAlerts()
-	m.focus = "alerts"
-	press(m, key('j'))
-	press(m, key('j'))
+	_ = m.View()
+	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 7})
+	press(m, special(tea.KeyEsc))
+	_ = m.View()
+	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 9})
 	again := newApp(m.paths, m.data, nil)
 	if len(again.newAlerts()) != 0 {
 		t.Fatal("seen state did not survive a board restart")
@@ -1505,9 +1436,11 @@ func TestSeenAlertSurvivesRestartAndReturnsWhenItChanges(t *testing.T) {
 func TestClearedAlertIsForgottenSoARecurrenceIsNewAgain(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.Alerts = twoAlerts()
-	m.focus = "alerts"
-	press(m, key('j'))
-	press(m, key('j'))
+	_ = m.View()
+	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 7})
+	press(m, special(tea.KeyEsc))
+	_ = m.View()
+	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 9})
 	cleared := m.data
 	cleared.Panels.Alerts = twoAlerts()[1:]
 	m.Update(refreshedMsg{data: cleared})

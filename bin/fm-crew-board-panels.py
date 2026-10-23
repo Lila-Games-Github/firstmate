@@ -4,13 +4,12 @@
 Usage: fm-crew-board-panels.py <fleet-snapshot.json>
        fm-crew-board-panels.py --refresh-allowance|--allowance-loop
 
-Connected phones come from a bounded local adb query, and whether each one is
-testing comes from the shared FrogPile phone FIFO under
-/tmp/frogpile-phone-<serial>.queue (FM_CREW_BOARD_PHONE_QUEUE_ROOT overrides
-/tmp). The test queue reads that FIFO plus the full-suite lock named by
-FROGPILE_SUITE_LOCK and its holder sidecar FROGPILE_SUITE_LOCK_HOLDER, with the
-defaults tests/run_suite.sh uses; waiters on the suite lock come from
-/proc/locks. Daily routines come from this home's state/*-daily.check.sh
+Connected phones come from a bounded local adb query and a read-only keyguard
+probe. The test queue reads FrogPile tickets under FROGPILE_QUEUE_ROOT (default
+~/.frogpile-queues), the full-suite holder sidecar FROGPILE_SUITE_LOCK_HOLDER,
+and the ticket queues' arrival-ordered records. The older per-phone queue and
+kernel suite-lock readers remain for isolated test fixtures that set their
+legacy overrides. Daily routines come from this home's state/*-daily.check.sh
 scripts and their state/.<name>-last markers. Ready-for-you rows come from the
 fleet snapshot: a PR whose recorded run reports green checks, a finished
 local-only branch, a scout whose current state is done and whose report file
@@ -22,7 +21,7 @@ AI allowance uses a separately scheduled quota-axi snapshot, never the fast
 board refresh, and a failed attempt records what it reported in
 state/.crew-board-quota-error for the panel to repeat. The optional
 data/crew-board-cache.json supplies phone observations
-such as locks and panels without a cheap local source (builds and Rocketboard
+and panels without a cheap local source (builds and Rocketboard
 bugs), plus optional overlays for the other panels. The fast projection never
 queries a network service; the separately launched allowance sampler may ask
 quota-axi for provider data. Its output is embedded in crew-board.json by
@@ -50,6 +49,7 @@ SOURCE = DATA / "crew-board-cache.json"
 QUOTA = STATE / "crew-board-quota.json"
 QUOTA_ERROR = STATE / ".crew-board-quota-error"
 QUOTA_BROKEN_STATES = frozenset({"auth_required", "error", "unavailable", "expired", "failed", "revoked", "missing"})
+USED_PROVIDERS = frozenset({"claude", "codex", "openrouter"})
 
 
 def item(title, detail="", status="", link="", alert=False, item_id="", nid="", sig=""):
@@ -312,7 +312,8 @@ def local_phones():
     return rows, ""
 
 
-FRIENDLY_PHONES = {"SM_S901E": "Galaxy S22", "SM_M315F": "Galaxy M31"}
+FRIENDLY_PHONES = {"SM_S901E": "Galaxy S22", "SM_M315F": "Galaxy M31",
+                   "SM_G990B2": "Galaxy S21 FE", "SM_G990E": "Galaxy S21 FE"}
 
 
 def friendly_phone(model):
@@ -352,6 +353,10 @@ def phone_entries(cache):
             row.update(status=entry["status"] or row["status"],
                        detail=entry["detail"] or row["detail"],
                        link=entry["link"], alert=entry["alert"] or row["alert"])
+    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ:
+        for row in rows:
+            if row.get("adb") == "device":
+                row["status"] = "connected"
     return rows + cached
 
 
@@ -459,7 +464,20 @@ def playbot_workers():
 
 
 def phone_queue_root():
-    return Path(os.environ.get("FM_CREW_BOARD_PHONE_QUEUE_ROOT", "/tmp"))
+    return Path(os.environ.get("FROGPILE_QUEUE_ROOT", Path.home() / ".frogpile-queues")) / "phones"
+
+
+PHONE_ORDER = (("R5CT32HRVNM", "Galaxy S22"),
+               ("RZ8N71EC9ZB", "Galaxy M31"),
+               ("RZCX224VH4T", "Galaxy S21 FE"))
+
+
+def suite_queue_root():
+    if os.environ.get("FROGPILE_SUITE_QUEUE"):
+        return Path(os.environ["FROGPILE_SUITE_QUEUE"])
+    if os.environ.get("FROGPILE_SUITE_LOCK"):
+        return Path(os.environ["FROGPILE_SUITE_LOCK"] + ".queue")
+    return Path(os.environ.get("FROGPILE_QUEUE_ROOT", Path.home() / ".frogpile-queues")) / "suite"
 
 
 def suite_lock_paths():
@@ -470,7 +488,8 @@ def suite_lock_paths():
 
 def start_ticks(pid):
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[19]
+        fields = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()
+        return fields[19] if fields[0] not in ("Z", "X") else None
     except (OSError, IndexError):
         return None
 
@@ -482,7 +501,47 @@ def pid_alive(pid, ticks=None):
         pass
     except (OSError, ValueError, TypeError, OverflowError):
         return False
-    return ticks is None or start_ticks(pid) in (None, str(ticks))
+    observed = start_ticks(pid)
+    return observed is not None and (ticks is None or observed == str(ticks))
+
+
+def live_tickets(queue):
+    """Observe tickets without pruning them or taking the producer's mutex."""
+    try:
+        paths = sorted((queue / "tickets").glob("*.json"))
+    except OSError:
+        return []
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        boot = ""
+    rows = []
+    for path in paths:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or (boot and record.get("boot_id") not in (None, boot)):
+                continue
+            if not pid_alive(int(record["pid"]), record.get("start_ticks")):
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        rows.append((path.stem, record))
+    return rows
+
+
+def since_unix(record, name, now):
+    try:
+        value = float(record[name]) / (1e9 if name.endswith("_ns") else 1)
+    except (ValueError, TypeError, KeyError):
+        return "unknown time"
+    return duration(now - value)
+
+
+def seconds_since(record, name, now):
+    try:
+        return max(0, now - float(record[name]))
+    except (ValueError, TypeError, KeyError):
+        return None
 
 
 def duration(seconds):
@@ -547,7 +606,23 @@ def epoch(value):
 
 def phone_queue(serial, trees, now):
     """Read one phone's FIFO: the live holder and live waiters in ticket order."""
-    queue = phone_queue_root() / f"frogpile-phone-{serial}.queue"
+    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ:
+        queue = phone_queue_root()
+        holder = None
+        waiting = []
+        for _ticket, owner in live_tickets(queue):
+            if owner.get("holding") != serial and owner.get("requested") != serial:
+                continue
+            pid = int(owner["pid"])
+            task, kind, _ = process_owner(pid, trees, owner.get("cwd", ""))
+            entry = {"task": task, "kind": kind, "pid": pid,
+                     "for": since_unix(owner, "acquired_unix_ns" if owner.get("holding") else "requested_unix_ns", now)}
+            if owner.get("holding") == serial:
+                holder = entry
+            else:
+                waiting.append(entry)
+        return holder, waiting
+    queue = Path(os.environ["FM_CREW_BOARD_PHONE_QUEUE_ROOT"]) / f"frogpile-phone-{serial}.queue"
     acquired = {}
     for line in tail_lines(queue / "events.jsonl"):
         try:
@@ -576,7 +651,8 @@ def phone_queue(serial, trees, now):
         if not pid_alive(pid, owner.get("start_ticks")):
             continue
         task, kind, _ = process_owner(pid, trees)
-        entry = {"task": task, "kind": kind, "pid": pid}
+        entry = {"task": task, "kind": kind, "pid": pid,
+                 "for": since_unix(owner, "requested_unix_ns", now)}
         if path.stem in acquired and holder is None:
             since = acquired[path.stem]
             entry["for"] = duration(now - since) if since else "unknown time"
@@ -584,6 +660,20 @@ def phone_queue(serial, trees, now):
         else:
             waiting.append(entry)
     return holder, waiting
+
+
+def any_phone_waiters(trees, now):
+    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" in os.environ:
+        return []
+    waiting = []
+    for _ticket, owner in live_tickets(phone_queue_root()):
+        if owner.get("requested") != "any" or owner.get("holding"):
+            continue
+        pid = int(owner["pid"])
+        task, kind, _ = process_owner(pid, trees, owner.get("cwd", ""))
+        waiting.append({"task": task, "kind": kind, "pid": pid,
+                        "for": since_unix(owner, "requested_unix_ns", now)})
+    return waiting
 
 
 def phone_activity(phones, trees, now, titles):
@@ -595,12 +685,44 @@ def phone_activity(phones, trees, now, titles):
         if holder:
             phone["detail"] = (f"Testing: {titles.get(holder['task'], holder['task'])} ({holder['kind'] or 'test'}) for "
                                f"{holder['for']}{behind}\n{phone['detail']}")
-            if phone["status"] == "connected":
-                phone["status"] = "testing"
+            if phone["status"] in ("connected", "idle"):
+                phone["status"] = "busy"
         elif phone["status"] == "connected":
             phone["status"] = "idle"
             if waiting:
                 phone["detail"] = f"{len(waiting)} waiting\n{phone['detail']}"
+
+
+def keyguard_showing(binary, serial):
+    """A bounded, read-only adb query; never reconnect the shared adb server."""
+    try:
+        run = subprocess.run([binary, "-s", serial, "shell", "dumpsys", "window"],
+                             capture_output=True, text=True, timeout=1, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if run.returncode:
+        return None
+    values = re.findall(r"\b(?:mShowingLockscreen|mKeyguardShowing|isKeyguardShowing|"
+                        r"mDreamingLockscreen)\s*[:=]\s*(true|false)\b", run.stdout, re.IGNORECASE)
+    if not values:
+        return None
+    return any(value.lower() == "true" for value in values)
+
+
+def phone_locks(phones):
+    binary = adb_binary()
+    if binary is None:
+        return
+    known = {serial for serial, _name in PHONE_ORDER}
+    for phone in phones:
+        if phone.get("adb") != "device" or phone.get("id") not in known:
+            continue
+        locked = keyguard_showing(binary, phone["id"])
+        if locked is True:
+            phone["status"] = "locked"
+        elif locked is None:
+            phone["status"] = "unavailable"
+            phone["detail"] = "Keyguard status could not be read\n" + phone["detail"]
 
 
 def suite_waiters(lock):
@@ -619,6 +741,22 @@ def suite_waiters(lock):
         if len(fields) >= 7 and fields[1] == "->" and fields[2] == "FLOCK" and fields[6] == device:
             pids.append(int(fields[5]))
     return pids
+
+
+def queued_suite_waiters(lock, trees, now):
+    if "FROGPILE_SUITE_LOCK" in os.environ and "FROGPILE_SUITE_QUEUE" not in os.environ:
+        return [{"pid": pid, "task": process_owner(pid, trees)[0],
+                 "wait_seconds": process_age(pid, now),
+                 "for": duration(process_age(pid, now) or 0)} for pid in suite_waiters(lock)]
+    waiting = []
+    for _ticket, owner in live_tickets(suite_queue_root()):
+        pid = int(owner["pid"])
+        task, _, cwd = process_owner(pid, trees, owner.get("cwd", ""))
+        waiting.append({"pid": pid, "task": task,
+                        "detail": f"pid {pid} in {cwd}",
+                        "wait_seconds": seconds_since(owner, "requested_unix", now),
+                        "for": since_unix(owner, "requested_unix", now)})
+    return waiting
 
 
 def task_titles(snapshot):
@@ -645,18 +783,19 @@ def test_queue(snapshot, phones, now, tags=None):
     titles = task_titles(snapshot)
     rows = []
 
-    def group(heading, holder, waiting, key):
-        if not holder and not waiting:
-            return
+    def group(heading, holder, waiting, key, empty="idle"):
         rows.append(item(heading, status="section", item_id=f"{key}-heading"))
         if holder:
             rows.append(item(f"RUNNING: {titles.get(holder['task'], holder['task'])}",
                              f"Task: {holder['task']} for {holder['for']}\n{holder['detail']}", f"running {holder['for']}",
                              item_id=f"{key}-running"))
+        if empty != "idle" or (not holder and not waiting):
+            rows.append(item(empty.capitalize(), status=empty, item_id=f"{key}-state"))
         for position, entry in enumerate(waiting, 1):
             label = "NEXT" if position == 1 else f"#{position}"
             rows.append(item(f"{label}: {titles.get(entry['task'], entry['task'])}",
-                             f"Task: {entry['task']}\n{entry['detail']}", "next" if position == 1 else "waiting",
+                             f"Task: {entry['task']} for {entry.get('for', 'unknown time')}\n{entry.get('detail', '')}",
+                             f"waiting {entry.get('for', 'unknown time')}",
                              item_id=f"{key}-wait-{entry['pid']}"))
 
     lock, holder_path = suite_lock_paths()
@@ -672,7 +811,7 @@ def test_queue(snapshot, phones, now, tags=None):
     except ValueError:
         fresh = False
     running = None
-    if fresh:
+    if fresh and pid_alive(holder.get("pid")):
         task, _, cwd = process_owner(holder.get("pid", ""), trees, holder.get("cwd", ""))
         try:
             ran = duration(now - int(holder.get("started", "")))
@@ -682,18 +821,22 @@ def test_queue(snapshot, phones, now, tags=None):
         if task in task_ids:
             resource_tag(tags, task, 0, f"FULL SUITE {ran}")
     suite_queue = []
-    for position, pid in enumerate(suite_waiters(lock), 1):
-        task, _, cwd = process_owner(pid, trees)
-        suite_queue.append({"task": task, "pid": pid, "detail": f"pid {pid} in {cwd}"})
+    for position, entry in enumerate(queued_suite_waiters(lock, trees, now), 1):
+        task, pid = entry["task"], entry["pid"]
+        suite_queue.append(entry)
         if task in task_ids:
             resource_tag(tags, task, 1, f"WAITING FOR FULL SUITE #{position}")
-    group("FULL TEST SUITE", running, suite_queue, "suite")
-    serials = sorted(path.name[len("frogpile-phone-"):-len(".queue")]
-                     for path in phone_queue_root().glob("frogpile-phone-*.queue"))
-    names = {phone["id"]: phone["title"] for phone in phones if phone.get("id")}
-    for serial in serials:
+    group("EDITOR", running, suite_queue, "suite")
+    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" in os.environ:
+        serials = sorted(path.name[len("frogpile-phone-"):-len(".queue")]
+                         for path in Path(os.environ["FM_CREW_BOARD_PHONE_QUEUE_ROOT"]).glob("frogpile-phone-*.queue"))
+        named = {phone["id"]: phone["title"] for phone in phones if phone.get("id")}
+        phone_sections = [(serial, named.get(serial, serial)) for serial in serials]
+    else:
+        phone_sections = PHONE_ORDER
+    phones_by_id = {phone["id"]: phone for phone in phones if phone.get("id")}
+    for serial, name in phone_sections:
         active, waiting = phone_queue(serial, trees, now)
-        name = names.get(serial, serial)
         short = re.sub(r"^Galaxy\s+", "", name).upper()
         if active:
             active["detail"] = f"{active['kind'] or 'test'} holding {serial}"
@@ -703,7 +846,13 @@ def test_queue(snapshot, phones, now, tags=None):
             entry["detail"] = f"{entry['kind'] or 'test'} waiting for {serial}"
             if entry["task"] in task_ids:
                 resource_tag(tags, entry["task"], 1, f"WAITING FOR {short} #{position}")
-        group(name, active, waiting, f"phone-{serial}")
+        state = phones_by_id.get(serial, {}).get("status", "disconnected")
+        if state not in ("idle", "busy", "locked", "unavailable"):
+            state = "disconnected"
+        group(name, active, waiting, f"phone-{serial}", state)
+    any_waiting = any_phone_waiters(trees, now)
+    if any_waiting:
+        group("ANY PHONE", None, any_waiting, "phone-any")
     return rows
 
 
@@ -1143,11 +1292,12 @@ def suite_wait_alerts(snapshot, now):
     titles = task_titles(snapshot)
     trees = task_worktrees(snapshot)
     rows = []
-    for pid in suite_waiters(lock):
-        waited = process_age(pid, now)
+    for entry in queued_suite_waiters(lock, trees, now):
+        pid = entry["pid"]
+        waited = entry.get("wait_seconds")
         if waited is None or waited <= limit:
             continue
-        task, _, _ = process_owner(pid, trees)
+        task = entry["task"]
         rows.append(alert_row(f"{titles.get(task, task)}: waiting for the full test suite",
                               "A full test run is queued behind another suite run", waited,
                               "The worker cannot finish validating until the suite frees up.",
@@ -1233,9 +1383,24 @@ def alert_entries(snapshot, cache, phones, allowance):
             alerts.append(item(f"Phone {phone['title']} {adb}",
                                f"adb reports {adb}, so the phone cannot take tests",
                                adb, alert=True))
-        if phone["status"] in ("locked", "unavailable"):
+        if phone["status"] == "locked" and phone.get("id"):
+            _holder, waiting = phone_queue(phone["id"], task_worktrees(snapshot), now)
+            if waiting:
+                alerts.append(item(f"{phone['title']} locked: test waiting",
+                                   "Unlock the phone so its queued test can start.", "locked", alert=True,
+                                   nid=f"phone-locked:{phone['id']}",
+                                   sig=",".join(str(entry["pid"]) for entry in waiting)))
+        if phone["status"] == "unavailable":
             alerts.append(item(f"Phone {phone['title']} {phone['status']}",
                                phone["detail"], phone["status"], alert=True))
+    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ and not any(
+            phone.get("adb") == "unavailable" for phone in phones):
+        known = {phone.get("id") for phone in phones if phone.get("id")}
+        for serial, name in PHONE_ORDER:
+            if serial not in known:
+                alerts.append(item(f"Phone {name} not connected",
+                                   "adb does not list this registered phone", "disconnected", alert=True,
+                                   nid=f"phone-offline:{serial}", sig="disconnected"))
     for row in allowance:
         if row.get("quota") == "unavailable":
             alerts.append(item(row["title"], row["detail"], row["status"], alert=True))
@@ -1323,18 +1488,27 @@ def quota_entries():
         providers = snapshot["payload"]["providers"]
         failed = QUOTA_ERROR.is_file() and QUOTA_ERROR.stat().st_mtime >= QUOTA.stat().st_mtime
     except (OSError, ValueError, KeyError, TypeError):
-        return []
+        return [], set()
     if not isinstance(providers, list):
-        return []
+        return [], set()
     stale = failed or age > 360
     age_label = f"{age // 60}m ago" + (" (stale)" if stale else "")
     rows = []
-    unavailable = []
-    unmeasured = []
+    hidden = 0
+    observed = set()
     for provider in providers:
         if not isinstance(provider, dict):
             continue
         name = str(provider.get("provider") or "provider")
+        observed.add(name.casefold())
+        if name.casefold() not in USED_PROVIDERS:
+            hidden += 1
+            continue
+        state_info = provider.get("state")
+        state = state_info.get("status") if isinstance(state_info, dict) else ""
+        if state in QUOTA_BROKEN_STATES:
+            hidden += 1
+            continue
         raw_windows = provider.get("windows")
         windows = {window.get("id"): window for window in (raw_windows if isinstance(raw_windows, list) else [])
                    if isinstance(window, dict)}
@@ -1367,8 +1541,7 @@ def quota_entries():
             scoped += 1
         if scopes:
             if not scoped:
-                rows.append(item(name, f"limit: unknown; reset: unknown; runway: unknown; observed: {age_label}",
-                                 "headroom unknown"))
+                hidden += 1
             continue
         credits = provider.get("credits")
         credits = credits if isinstance(credits, dict) else {}
@@ -1383,21 +1556,12 @@ def quota_entries():
             rows.append(item(name, detail,
                              f"{remaining:g} {unit} · {age_label}"))
         else:
-            state_info = provider.get("state")
-            state = state_info.get("status") if isinstance(state_info, dict) else "unavailable"
-            state = state or "unavailable"
-            (unavailable if state in QUOTA_BROKEN_STATES else unmeasured).append(f"{name}: {state}")
-    for bucket, wording, status in ((unavailable, "unavailable", "unavailable"),
-                                    (unmeasured, "unmeasured", "headroom unknown")):
-        if not bucket:
-            continue
-        noun = "provider" if len(bucket) == 1 else "providers"
-        bucket_row = item(f"{len(bucket)} {noun} {wording}",
-                          "\n".join(bucket) + f"\nobserved: {age_label}", status)
-        bucket_row["quota"] = "summary"
-        bucket_row["providers"] = len(bucket)
-        rows.append(bucket_row)
-    return rows
+            hidden += 1
+    if hidden:
+        row = item(f"{hidden} hidden", status="hidden")
+        row["quota"] = "hidden"
+        rows.append(row)
+    return rows, observed
 
 
 def allowance_failure():
@@ -1415,16 +1579,17 @@ def allowance_failure():
 
 
 def allowance_entries(cache):
-    rows = quota_entries()
+    rows, observed = quota_entries()
     if not rows:
         failure = allowance_failure()
         if failure:
             row = item("Allowance check", failure, "unavailable", alert=True)
             row["quota"] = "unavailable"
             return [row]
-    live = {row["title"].split(" / ", 1)[0].strip().casefold() for row in rows}
     return rows + [entry for entry in entries(cache, "allowance")
-                   if entry["title"].split(" / ", 1)[0].strip().casefold() not in live]
+                   if entry["title"].split(" / ", 1)[0].strip().casefold() in USED_PROVIDERS
+                   and entry["title"].split(" / ", 1)[0].strip().casefold() not in observed
+                   and entry["status"] not in QUOTA_BROKEN_STATES]
 
 
 def watcher_verdict():
@@ -1498,9 +1663,10 @@ def project(snapshot):
     phones = phone_entries(cache)
     lanes, playbot_failure = playbot_workers()
     phone_activity(phones, task_worktrees(snapshot), now, task_titles(snapshot))
+    phone_locks(phones)
     allowance = allowance_entries(cache)
     resources = {}
-    tests = test_queue(snapshot, phones, now, resources) + entries(cache, "test_queue")
+    tests = test_queue(snapshot, phones, now, resources)
     queued = tasks_axi_list("queued")
     in_flight = tasks_axi_list("in_flight")
     backlog = {
