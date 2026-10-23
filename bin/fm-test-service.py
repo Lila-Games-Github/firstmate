@@ -422,7 +422,7 @@ def retest_moved(db):
             scratch = ROOT / "rebase" / row["id"]
             shutil.rmtree(scratch, ignore_errors=True)
             scratch.parent.mkdir(parents=True, exist_ok=True)
-            clone = run(["git", "clone", "--no-local", "--quiet", str(repo), str(scratch)])
+            clone = run(["git", "clone", "--local", "--quiet", str(repo), str(scratch)])
             if clone.returncode:
                 raise RuntimeError(clone.stderr.strip())
             if run(["git", "-C", str(scratch), "fetch", "--quiet", str(repo), tip]).returncode:
