@@ -239,10 +239,37 @@ def entries(cache, key):
     return rows
 
 
-def open_bugs(cache):
-    """Rocketboard bugs still needing work; cards the QA team owns are left out."""
-    return [row for row in entries(cache, "bugs")
-            if not re.match(r"\s*(with|in)\s+QA\b", row.get("status", ""), re.I)]
+def open_bugs(cache, snapshot):
+    """Rocketboard cards first, then owner-reported bugs in backlog order."""
+    rows = []
+    for row in entries(cache, "bugs"):
+        if re.match(r"\s*(with|in)\s+QA\b", row["status"], re.I):
+            continue
+        source = "Rocketboard" + (f" #{row['id']}" if row["id"] else "")
+        row["status"] = source + (f" · {row['status']}" if row["status"] else "")
+        rows.append(row)
+
+    workers = {str(task.get("id")): task for task in snapshot.get("tasks", [])
+               if isinstance(task, dict) and task.get("id")}
+    for record in snapshot.get("backlog", {}).get("records", []):
+        if not isinstance(record, dict) or not record.get("structured"):
+            continue
+        title = record.get("title")
+        if not isinstance(title, str) or not re.match(r"^Bug: ", title, re.I):
+            continue
+        state = record.get("state")
+        if state == "queued":
+            status = "queued"
+        elif state == "in_flight":
+            worker = workers.get(str(record.get("id")))
+            status = "in progress" + (f" · {worker['id']}" if worker else "")
+        elif state == "done":
+            status = "done recently"
+        else:
+            continue
+        rows.append(item(title, str(record.get("body_excerpt") or ""), status,
+                         item_id=str(record.get("id") or "")))
+    return rows
 
 
 def homebrew_binary(name):
@@ -1480,6 +1507,28 @@ def refresh_allowance():
         record_quota_error(str(failure))
 
 
+def reset_time(window):
+    """Render a quota reset timestamp in India Standard Time."""
+    raw = window.get("resetsAt") or window.get("resetText")
+    try:
+        if isinstance(raw, (int, float)):
+            value = dt.datetime.fromtimestamp(raw / 1000 if raw > 1e11 else raw, dt.timezone.utc)
+        elif isinstance(raw, str):
+            value = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=dt.timezone.utc)
+        else:
+            return "unknown"
+    except (OverflowError, ValueError, TypeError):
+        return "unknown"
+    india = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    local = value.astimezone(india)
+    hour = local.hour % 12 or 12
+    period = "am" if local.hour < 12 else "pm"
+    day = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[local.weekday()]
+    return f"{hour:02d}:{local.minute:02d}:{local.second:02d} {period} IST {local:%d-%m-%y} ({day})"
+
+
 def quota_entries():
     try:
         snapshot = json.loads(QUOTA.read_text(encoding="utf-8"))
@@ -1525,18 +1574,17 @@ def quota_entries():
             runway = runway_info.get("status") if isinstance(runway_info, dict) else "unknown"
             runway = runway or "unknown"
             title = name if scope.get("scope") == "all_models" else f"{name} / {scope.get('scope')}"
-            percent = scope.get("effectivePercentRemaining")
-            if not isinstance(percent, (int, float)):
-                if runway == "exhausted_now":
-                    rows.append(item(title, f"limit: unknown; reset: unknown; runway: {runway}; observed: {age_label}",
-                                     "exhausted now", alert=True))
-                    scoped += 1
-                continue
             window_ids = scope.get("limitingWindowIds")
             limits = [windows.get(key, {}) for key in window_ids] if isinstance(window_ids, list) else []
             limit = ", ".join(str(window.get("label") or window.get("id") or "unknown") for window in limits) or "unknown"
-            reset = ", ".join(str(window.get("resetsAt") or window.get("resetText") or "unknown")
-                              for window in limits) or "unknown"
+            reset = ", ".join(reset_time(window) for window in limits) or "unknown"
+            percent = scope.get("effectivePercentRemaining")
+            if not isinstance(percent, (int, float)):
+                if runway == "exhausted_now":
+                    rows.append(item(title, f"limit: {limit}; reset: {reset}; runway: {runway}; observed: {age_label}",
+                                     "exhausted now", alert=True))
+                    scoped += 1
+                continue
             detail = f"limit: {limit}; reset: {reset}; runway: {runway}; observed: {age_label}"
             rows.append(item(title, detail, f"{percent:g}% left · {age_label}",
                              alert=runway in ("projected_exhaustion", "exhausted_now")))
@@ -1553,7 +1601,7 @@ def quota_entries():
             credit_window = next((window for window in windows.values()
                                   if window.get("kind") == "credits"), next(iter(windows.values()), {}))
             limit = credit_window.get("label") or credit_window.get("id") or "unknown"
-            reset = credit_window.get("resetsAt") or credit_window.get("resetText") or "unknown"
+            reset = reset_time(credit_window)
             detail = f"limit: {limit}; reset: {reset}; runway: unknown; observed: {age_label}"
             rows.append(item(name, detail,
                              f"{remaining:g} {unit} · {age_label}"))
@@ -1694,7 +1742,7 @@ def project(snapshot):
         "landings": landed_today(snapshot) + entries(cache, "landings"),
         "builds": entries(cache, "builds"),
         "routines": daily_routines(now) + entries(cache, "routines"),
-        "bugs": open_bugs(cache),
+        "bugs": open_bugs(cache, snapshot),
         "backlog": backlog,
         "allowance": allowance,
         "cached_at": str(cache.get("observed_at", "")),

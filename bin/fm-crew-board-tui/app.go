@@ -16,7 +16,7 @@ type panelSpec struct{ id, title string }
 
 var pages = [][]panelSpec{
 	{{"workers", "WORKERS"}, {"ready", "READY FOR YOU"}, {"feed", "FEED"}},
-	{{"bugs", "ROCKETBOARD BUGS"}, {"backlog", "BACKLOG"}},
+	{{"bugs", "BUGS"}, {"backlog", "BACKLOG"}},
 	{{"full_questions", "CAPTAIN QUESTIONS"}},
 	{{"landings", "TODAY'S LANDINGS"}},
 }
