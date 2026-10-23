@@ -81,9 +81,11 @@
 #          backend resumed it. The agent process's own directory is read from
 #          the recorded endpoint (crew_cwd_reconcile owns the reading). A
 #          locked session hands every worker found in the primary checkout to
-#          one detached background worker that relaunches each into its
-#          recorded copy through bin/fm-control.sh relaunch with a progress
-#          note, off the bounded session-start path; the line says the
+#          one detached background worker that relaunches each one still in
+#          the primary checkout when its turn comes into its recorded copy
+#          through bin/fm-control.sh relaunch with a progress note, off the
+#          bounded session-start path (crew_cwd_relaunch_worker owns the
+#          per-home serialization and re-check); the line says the
 #          relaunch started, and each outcome (relaunched, or failed with
 #          fm-control's first output line and the relaunch command) arrives
 #          later as a check wake; a failure is not queued when the agent is
