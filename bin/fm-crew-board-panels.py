@@ -7,7 +7,8 @@ Usage: fm-crew-board-panels.py <fleet-snapshot.json>
 Connected phones come from a bounded local adb query and a read-only keyguard
 probe. The test queue reads FrogPile tickets under FROGPILE_QUEUE_ROOT (default
 ~/.frogpile-queues), the full-suite holder sidecar FROGPILE_SUITE_LOCK_HOLDER,
-and the ticket queues' arrival-ordered records. The older per-phone queue and
+live Godot suite processes, and the test service's status.json when present.
+The ticket queues' arrival-ordered records remain the waiting source. The older per-phone queue and
 kernel suite-lock readers remain for isolated test fixtures that set their
 legacy overrides. Daily routines come from this home's state/*-daily.check.sh
 scripts and their state/.<name>-last markers. Ready-for-you rows come from the
@@ -37,6 +38,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -65,6 +67,7 @@ def question_entries(path):
     rows = []
     entry = []
     options_open = False
+    section = ""
 
     def flush():
         nonlocal options_open
@@ -75,13 +78,17 @@ def question_entries(path):
         bold = re.match(r"^\*\*(.+?)\*\*", title)
         if bold:
             title = bold.group(1)
-        rows.append(item(title, "\n".join(entry).strip(), item_id=f"question-{len(rows)}"))
+        status = "decision" if section == "Your decisions" else (
+            f"waiting on {section[4:]} (follow-up)" if section.startswith("For ") else "follow-up")
+        rows.append(item(title, "\n".join(entry).strip(), status=status,
+                         item_id=f"question-{len(rows)}"))
         entry.clear()
 
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("## "):
             flush()
-            rows.append(item(line[3:].strip(), status="section"))
+            section = line[3:].strip()
+            rows.append(item(section, status="section"))
             continue
         if line.strip() == "---":
             flush()
@@ -776,13 +783,129 @@ def queued_suite_waiters(lock, trees, now):
                  "for": duration(process_age(pid, now) or 0)} for pid in suite_waiters(lock)]
     waiting = []
     for _ticket, owner in live_tickets(suite_queue_root()):
+        if owner.get("holding") or owner.get("acquired_unix_ns"):
+            continue
         pid = int(owner["pid"])
         task, _, cwd = process_owner(pid, trees, owner.get("cwd", ""))
         waiting.append({"pid": pid, "task": task,
+                        "cwd": cwd,
                         "detail": f"pid {pid} in {cwd}",
                         "wait_seconds": seconds_since(owner, "requested_unix", now),
                         "for": since_unix(owner, "requested_unix", now)})
     return waiting
+
+
+def suite_process_root():
+    return Path(os.environ.get("FM_CREW_BOARD_PROC_ROOT", "/proc"))
+
+
+def suite_task_worktrees(trees):
+    """Include live task metadata even if a task missed the snapshot."""
+    found = dict(trees)
+    for meta in STATE.glob("*.meta"):
+        try:
+            worktree = next((line[9:] for line in meta.read_text().splitlines()
+                             if line.startswith("worktree=")), "")
+        except OSError:
+            continue
+        if worktree:
+            found[os.path.realpath(worktree)] = meta.stem
+    return sorted(found.items(), key=lambda pair: len(pair[0]), reverse=True)
+
+
+def suite_version(cwd):
+    if not cwd:
+        return "unknown"
+    try:
+        run = subprocess.run(["git", "-C", cwd, "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=1, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    return run.stdout.strip() if run.returncode == 0 else "unknown"
+
+
+def suite_progress(path):
+    if not path:
+        return ""
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return ""
+    except OSError:
+        return ""
+    for line in reversed(tail_lines(path)):
+        match = re.search(r"\b(\d+)\s*(?:/|of)\s*(\d+)\s*(?:tests?)?\b", line, re.IGNORECASE)
+        if match and 0 <= int(match[1]) <= int(match[2]) and int(match[2]) > 0:
+            return f"{match[1]}/{match[2]} tests"
+    return ""
+
+
+def suite_processes(trees, now):
+    """The command line is the full-run discriminator; a holder is optional."""
+    result = []
+    root = suite_process_root()
+    for proc in root.glob("[0-9]*"):
+        try:
+            argv = [part.decode(errors="replace") for part in (proc / "cmdline").read_bytes().split(b"\0") if part]
+            if not any(arg.lstrip("./").endswith("tests/run_tests.gd") for arg in argv):
+                continue
+            if any(arg in ("--filter", "--focus", "--test", "--case", "--class", "--method")
+                   or arg.startswith(("--filter=", "--focus=", "--test=", "--case=")) for arg in argv):
+                continue
+            cwd = os.readlink(proc / "cwd")
+            stat = (proc / "stat").read_text().rpartition(")")[2].split()
+            if not stat or stat[0] in ("Z", "X"):
+                continue
+            pid = int(proc.name)
+            if root == Path("/proc"):
+                elapsed = process_age(pid, now)
+            else:
+                elapsed = max(0, now - float((proc / "started").read_text()))
+            log = proc / "fd/1"
+            log_path = os.readlink(log) if log.exists() else ""
+            task, _, _ = process_owner(pid, trees, cwd) if root == Path("/proc") else process_owner("", trees, cwd)
+            result.append({"pid": pid, "task": task, "cwd": cwd, "for": duration(elapsed) if elapsed is not None else "unknown time",
+                           "version": suite_version(cwd), "progress": suite_progress(log_path),
+                           "detail": f"pid {pid} in {cwd}"})
+        except (OSError, ValueError, IndexError):
+            continue
+    return sorted(result, key=lambda row: row["pid"])
+
+
+def service_suite_rows(trees, now):
+    root = Path(os.environ.get("FM_TEST_SERVICE_STATE", Path.home() / ".local/state/firstmate-test-service"))
+    try:
+        status = json.loads((root / "status.json").read_text())
+    except (OSError, ValueError):
+        return [], []
+    if not isinstance(status, dict) or status.get("schema") != "fm-test-service.v1":
+        return [], []
+    running, waiting = [], []
+    for request in status.get("requests", []):
+        if not isinstance(request, dict) or not isinstance(request.get("options"), dict) or not request["options"].get("suite"):
+            continue
+        rid = str(request.get("id", ""))
+        if not rid or "/" in rid or ".." in rid:
+            continue
+        source = str(request.get("source") or "")
+        task, _, _ = process_owner("", trees, source)
+        state = request.get("state")
+        if state == "running" and any(step.get("name") == "suite" and step.get("state") == "running"
+                                      for step in request.get("steps", []) if isinstance(step, dict)):
+            cwd = str(root / "runs" / rid)
+            started = next((step.get("started") for step in request["steps"] if step.get("name") == "suite"), None)
+            try:
+                ran = duration(now - float(started))
+            except (ValueError, TypeError):
+                ran = "unknown time"
+            log = root / "logs" / f"{rid}-{request.get('generation', 0)}-suite.log"
+            running.append({"pid": None, "task": task, "cwd": cwd, "for": ran,
+                            "version": str(request.get("sha") or "unknown")[:7], "progress": suite_progress(log),
+                            "detail": f"test service request {rid} in {cwd}"})
+        elif state in ("queued", "preparing"):
+            waiting.append({"pid": f"service-{rid}", "task": task, "cwd": source,
+                            "for": duration(request.get("wait_seconds") or 0),
+                            "detail": f"test service request {rid} for {str(request.get('sha') or '')[:7]}"})
+    return running, waiting
 
 
 def task_titles(snapshot):
@@ -804,7 +927,7 @@ def test_queue(snapshot, phones, now, tags=None):
     """Return TEST QUEUE rows grouped per shared resource and record each
     worker's held or awaited resource in tags."""
     tags = {} if tags is None else tags
-    trees = task_worktrees(snapshot)
+    trees = suite_task_worktrees(task_worktrees(snapshot))
     task_ids = {task for _, task in trees}
     titles = task_titles(snapshot)
     rows = []
@@ -852,7 +975,45 @@ def test_queue(snapshot, phones, now, tags=None):
         suite_queue.append(entry)
         if task in task_ids:
             resource_tag(tags, task, 1, f"WAITING FOR FULL SUITE #{position}")
-    group("EDITOR", running, suite_queue, "suite")
+    service_running, service_waiting = service_suite_rows(trees, now)
+    suite_running = suite_processes(trees, now)
+    waiting_cwds = {os.path.realpath(entry.get("cwd", "")) for entry in suite_queue}
+    by_cwd = {os.path.realpath(entry["cwd"]): entry for entry in suite_running}
+    for entry in service_running:
+        cwd = os.path.realpath(entry["cwd"])
+        if cwd in by_cwd:
+            by_cwd[cwd]["task"] = entry["task"]
+        elif cwd not in waiting_cwds:
+            suite_running.append(entry)
+            by_cwd[cwd] = entry
+    if running and not suite_running:
+        running.update({"pid": holder.get("pid"), "cwd": holder.get("cwd", ""),
+                        "version": suite_version(holder.get("cwd", "")), "progress": ""})
+        suite_running.append(running)
+    for entry in service_waiting:
+        if os.path.realpath(entry["cwd"]) not in waiting_cwds:
+            suite_queue.append(entry)
+            waiting_cwds.add(os.path.realpath(entry["cwd"]))
+    rows.append(item(f"EDITOR: {len(suite_running)} running, {len(suite_queue)} waiting",
+                     status="section", item_id="suite-heading"))
+    if not suite_running and not suite_queue:
+        rows.append(item("Idle", status="idle", item_id="suite-state"))
+    for entry in suite_running:
+        detail = (f"Task: {entry['task']} for {entry['for']}\nVersion: {entry['version']}"
+                  + (f"\nProgress: {entry['progress']}" if entry['progress'] else "")
+                  + f"\n{entry['detail']}")
+        rows.append(item(f"RUNNING: {titles.get(entry['task'], entry['task'])} · {entry['version']}"
+                         + (f" · {entry['progress']}" if entry["progress"] else ""),
+                         detail, f"running {entry['for']}", item_id=f"suite-running-{entry['pid'] or entry['cwd']}"))
+        if entry["task"] in task_ids:
+            resource_tag(tags, entry["task"], 0, f"FULL SUITE {entry['for']}")
+    for position, entry in enumerate(suite_queue, 1):
+        if entry["task"] in task_ids:
+            resource_tag(tags, entry["task"], 1, f"WAITING FOR FULL SUITE #{position}")
+        rows.append(item(f"{'NEXT' if position == 1 else '#' + str(position)}: "
+                         f"{titles.get(entry['task'], entry['task'])}",
+                         f"Task: {entry['task']} for {entry.get('for', 'unknown time')}\n{entry.get('detail', '')}",
+                         f"waiting {entry.get('for', 'unknown time')}", item_id=f"suite-wait-{entry['pid']}"))
     if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" in os.environ:
         serials = sorted(path.name[len("frogpile-phone-"):-len(".queue")]
                          for path in Path(os.environ["FM_CREW_BOARD_PHONE_QUEUE_ROOT"]).glob("frogpile-phone-*.queue"))
@@ -1334,7 +1495,7 @@ def suite_wait_alerts(snapshot, now):
 
 def decisions_summary(snapshot, now):
     questions = [entry for entry in question_entries(DATA / "captain-questions.md")
-                 if entry.get("status") != "section"]
+                 if entry.get("status") == "decision"]
     if not questions:
         return None
     labels = {entry_label(entry) for entry in questions} - {""}

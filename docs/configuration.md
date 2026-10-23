@@ -640,12 +640,15 @@ The right-hand information rail stays the same on every page and shows notificat
 Clicking a rail row opens its full detail and marks a notification seen; Esc returns to the board, and `s` opens the rail at full width, including on narrow terminals where the main panel otherwise takes the full width.
 The main area keeps WORKERS, FEED, READY FOR YOU, BUGS, BACKLOG, CAPTAIN QUESTIONS, and TODAY'S LANDINGS as sub-tabs on their existing pages.
 The test queue has Editor, Galaxy S22, Galaxy M31, and Galaxy S21 FE sections, plus an Any phone section while an any-phone ticket waits.
-Each section shows its live holder, time since acquisition, ordered waiters, and their wait times, using the ticket files under `FROGPILE_QUEUE_ROOT` (default `~/.frogpile-queues`) and the suite holder sidecar.
+Editor shows the count and each live full-suite Godot process with its worker task, checkout version, elapsed time, and log progress when available; it also reads the test service's published `status.json` and keeps the FrogPile ticket waiters.
+Phone sections show their live holder, time since acquisition, ordered waiters, and their wait times, using the ticket files under `FROGPILE_QUEUE_ROOT` (default `~/.frogpile-queues`).
+The legacy suite holder sidecar remains a fallback when no full-suite process is visible.
 An attached phone shows `busy` while held, `locked` when its keyguard is showing, and `idle` when free; a keyguard state that cannot be read keeps that status and only notes it in the detail, and a missing registered phone shows `disconnected` in the queue.
 A waiting test on a locked phone raises a notification, and the keyguard check uses a bounded `adb -s <serial> shell dumpsys window` read without restarting the adb server.
 Phones use friendly names for known adb models (`SM_S901E` is Galaxy S22, `SM_M315F` is Galaxy M31, and `SM_G990B2` or `SM_G990E` is Galaxy S21 FE) and otherwise the adb model string.
 DAILY ROUTINES lists one row per registered `state/<name>-daily.check.sh` with its last run from `state/.<name>-last`, its next due time derived from the hour the check script gates on, and whether today's run happened.
-The QUESTIONS page has one sub-tab, CAPTAIN QUESTIONS, offering every open captain question grouped by its heading.
+The QUESTIONS page has one sub-tab, CAPTAIN QUESTIONS, offering every open question grouped by its heading.
+Only entries under `## Your decisions` count as decisions waiting on the product owner in its badge and notification; entries under `## For ...` remain visible with a waiting-on-team follow-up label.
 The PLANNING BACKLOG sub-tab is the one place the backlog lives: under a heading carrying the in-flight and queued counts, it lists every in-flight, held, and queued backlog item read through `bin/fm-tasks-axi.sh` with its full note, captain holds apart from other holds, and falls back to the next queued tasks, under that read's own reason, when the full list cannot be read.
 Section headings in both render as styled headings with a divider and are skipped by the cursor and by clicks; the highlighted captain question shows its full text in place without Enter, backlog rows expand with Enter, and Ctrl-f/Ctrl-b scroll long entries.
 Questions live only on this page, and its page tab carries a badge counting open questions.
