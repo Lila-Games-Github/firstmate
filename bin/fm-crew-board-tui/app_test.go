@@ -1405,9 +1405,17 @@ func TestMergeWaitingWorkerIsTaggedColouredAndSortedFirst(t *testing.T) {
 		t.Fatalf("merge-waiting worker is not the first row with its PR link: %#v", rows[0])
 	}
 	line := m.rowLine("workers", rows[0], 0, 100)
-	if !strings.Contains(line, phaseColor(mergeWaitingPhase).Render("PR #78 READY TO MERGE")) &&
-		!strings.Contains(line, "PR #78 READY TO MERGE") {
-		t.Fatalf("row lost its merge tag: %q", line)
+	style := phaseColor(mergeWaitingPhase)
+	if sel, ok := m.selected["workers"]; ok && sel == 0 {
+		style = phaseChip(mergeWaitingPhase)
+	}
+	open, _, _ := strings.Cut(style.Render("\x00"), "\x00")
+	if open == "" {
+		t.Fatal("pr-ready style rendered no colour sequence")
+	}
+	_, tagged, ok := strings.Cut(line, open)
+	if !ok || !strings.Contains(tagged, "PR #78 READY TO MERGE") {
+		t.Fatalf("row tag is not drawn in the pr-ready colour: %q", line)
 	}
 	if phaseColor(mergeWaitingPhase).GetForeground() == phaseColor("done").GetForeground() ||
 		phaseColor(mergeWaitingPhase).GetForeground() == phaseColor("ready-to-merge").GetForeground() {
