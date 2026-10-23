@@ -273,7 +273,7 @@ func (m *app) renderInfoRail(width, height int) string {
 		view = append(view, "")
 	}
 	view = append(view, lipgloss.NewStyle().Foreground(muted).Render(
-		ansi.Truncate("Ctrl-n/p scroll · s expand", inner, "…")))
+		ansi.Truncate("n next new · Ctrl-n/p scroll · s expand", inner, "…")))
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(green).
 		Width(max(1, width-2)).Height(max(1, height-2)).Render(strings.Join(view, "\n"))
 }
@@ -533,7 +533,7 @@ func (m *app) helpOverlay(width, height int) string {
 		"Tab cycles  s info  Ctrl-n/p scroll",
 		"Enter/o expand  O focus selected worker pane",
 		"za/Space collapse  Alt-1..9 select",
-		"1/2/3/4 pages  / filter",
+		"1/2/3/4 pages  / filter  n next notification",
 		"Ctrl-f/b scroll detail  r reply to question  i/: note",
 		"q/:q quit  ? close help",
 	}

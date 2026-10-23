@@ -721,7 +721,6 @@ def phone_locks(phones):
         if locked is True:
             phone["status"] = "locked"
         elif locked is None:
-            phone["status"] = "unavailable"
             phone["detail"] = "Keyguard status could not be read\n" + phone["detail"]
 
 
@@ -1507,7 +1506,10 @@ def quota_entries():
         state_info = provider.get("state")
         state = state_info.get("status") if isinstance(state_info, dict) else ""
         if state in QUOTA_BROKEN_STATES:
-            hidden += 1
+            row = item(name, f"quota-axi reports {state}; observed: {age_label}",
+                       state.replace("_", " "), alert=True)
+            row["quota"] = "unavailable"
+            rows.append(row)
             continue
         raw_windows = provider.get("windows")
         windows = {window.get("id"): window for window in (raw_windows if isinstance(raw_windows, list) else [])

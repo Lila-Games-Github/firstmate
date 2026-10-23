@@ -71,8 +71,8 @@ func TestHeaderShowsHomeAndTabState(t *testing.T) {
 	}
 	active := lipgloss.NewStyle().Foreground(background).Background(yellow).Bold(true).Render(" 1 NOW ")
 	badge := lipgloss.NewStyle().Foreground(background).Background(red).Bold(true).Render(" 1 ")
-	if !strings.Contains(header, active) || !strings.Contains(header, badge) {
-		t.Fatal("active tab or red alert badge missing")
+	if !strings.Contains(header, active) || strings.Contains(header, badge) || !strings.Contains(header, "1 NEW: Needs attention") {
+		t.Fatal("active tab missing, or a rail notification badged the NOW tab instead of the header")
 	}
 	m.data.Home = "secondmate"
 	m.page = 1
@@ -1398,8 +1398,8 @@ func TestViewingAnAlertMarksItSeenAndItRecedes(t *testing.T) {
 	if !strings.Contains(header, "1 NEW: 3 decisions waiting on you") {
 		t.Fatalf("header should count only the unseen alert: %q", header)
 	}
-	if m.alertCount(0) != 1 {
-		t.Fatalf("tab badge counts %d, want 1", m.alertCount(0))
+	if m.alertCount(0) != 0 {
+		t.Fatalf("NOW tab badge counts %d rail notifications, want 0", m.alertCount(0))
 	}
 	if !strings.Contains(m.View().Content, "alpha: failed") {
 		t.Fatal("a seen alert must stay listed until its cause clears")
@@ -1409,6 +1409,26 @@ func TestViewingAnAlertMarksItSeenAndItRecedes(t *testing.T) {
 	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 9})
 	if len(m.newAlerts()) != 0 || strings.Contains(m.header(), "NEW") {
 		t.Fatal("viewing every alert should clear the notification")
+	}
+}
+
+func TestNextNotificationKeyOpensAndAcknowledgesEachNewAlert(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = twoAlerts()
+	press(m, key('n'))
+	if m.railDetail == nil || m.railDetail.Nid != "failed:alpha" || len(m.newAlerts()) != 1 {
+		t.Fatalf("n should open and acknowledge the first new alert, detail %#v", m.railDetail)
+	}
+	press(m, key('n'))
+	if m.railDetail == nil || m.railDetail.Nid != "decisions:summary" || len(m.newAlerts()) != 0 {
+		t.Fatalf("n should step to the next new alert, detail %#v", m.railDetail)
+	}
+	if strings.Contains(m.header(), "NEW") {
+		t.Fatal("acknowledging every alert by keyboard should clear the header count")
+	}
+	press(m, key('n'))
+	if m.notice != "No new notifications" {
+		t.Fatalf("n with nothing new should say so, got %q", m.notice)
 	}
 }
 

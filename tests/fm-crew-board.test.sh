@@ -442,8 +442,10 @@ EOF
   jq '.allowance += [{"title":"OpenRouter","status":"20 usd"}]' "$home/data/crew-board-cache.json" > "$home/cache-updated.json"
   mv "$home/cache-updated.json" "$home/data/crew-board-cache.json"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "auth-required quota refresh failed"
-  assert_equals 0 "$(jq '[.panels.allowance[] | select(.title | ascii_downcase == "openrouter")] | length' "$home/state/crew-board.json")" \
-    "an auth-required used provider cannot reappear from cache"
+  assert_equals 'auth required' "$(jq -r '[.panels.allowance[] | select(.title | ascii_downcase == "openrouter") | .status] | join("|")' "$home/state/crew-board.json")" \
+    "an auth-required used provider shows its broken state, not a cached balance"
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "openrouter" and .status == "auth required")] | length' "$home/state/crew-board.json")" \
+    "an auth-required used provider raises a notification"
   pass "quota allowance uses a slow structured snapshot and keeps the last good result"
 }
 
@@ -816,6 +818,8 @@ if [ "$1" = devices ]; then
   printf 'List of devices attached\nR5CT32HRVNM device model:SM_S901E\nRZ8N71EC9ZB device model:SM_M315F\nRZCX224VH4T device model:SM_G990E\n'
 elif [ "$2" = R5CT32HRVNM ]; then
   printf 'mKeyguardShowing=true\n'
+elif [ "$2" = RZCX224VH4T ]; then
+  exit 1
 else
   printf 'mKeyguardShowing=false\n'
 fi
@@ -845,6 +849,10 @@ EOF
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'ticketed queue refresh failed'
   assert_equals locked "$(jq -r '.panels.phones[] | select(.id == "R5CT32HRVNM") | .status' "$home/state/crew-board.json")" 'keyguard is a locked state'
+  assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "RZCX224VH4T") | .status' "$home/state/crew-board.json")" \
+    'an unreadable keyguard keeps the phone state'
+  assert_equals 0 "$(jq '[.panels.alerts[] | select(.title | test("S21 FE|RZCX224VH4T"))] | length' "$home/state/crew-board.json")" \
+    'an unreadable keyguard raises no notification'
   assert_equals 'EDITOR|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE' \
     "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'fixed resource sections and any-phone queue'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \

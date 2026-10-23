@@ -298,9 +298,6 @@ func questionLabel(title string) string {
 
 func (m *app) alertCount(page int) int {
 	count := 0
-	if page == 0 {
-		count += len(m.newAlerts())
-	}
 	for _, spec := range pages[page] {
 		for _, row := range m.rawItems(spec.id) {
 			if row.Alert && (spec.id != "alerts" || m.isNew(row)) {
@@ -542,13 +539,7 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if row, ok := m.railHit[msg.Y]; ok && !m.inputActive &&
 			(m.railOpen || m.width >= 100 && msg.X >= m.width-max(34, m.width/3)) {
-			m.railDetail = &row
-			m.railDetailOffset = 0
-			if row.Alert {
-				nid, sig := alertKey(row)
-				m.seen[nid] = sig
-				m.saveSeen()
-			}
+			m.openRailRow(row)
 			return m, nil
 		}
 		for _, rect := range m.lastRects {
@@ -659,6 +650,14 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "s":
 			m.railDetail = nil
 			m.railOpen = !m.railOpen
+			return m, nil
+		case "n":
+			fresh := m.newAlerts()
+			if len(fresh) == 0 {
+				m.notice = "No new notifications"
+				return m, nil
+			}
+			m.openRailRow(fresh[0])
 			return m, nil
 		case "ctrl+n":
 			if m.railDetail != nil {
