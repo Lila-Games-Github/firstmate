@@ -62,6 +62,7 @@ type panels struct {
 	Backlog       backlog           `json:"backlog"`
 	Allowance     []item            `json:"allowance"`
 	WorkerTags    map[string]string `json:"worker_tags"`
+	MergeWaiting  map[string]string `json:"merge_waiting"`
 	CachedAt      string            `json:"cached_at"`
 }
 

@@ -1394,3 +1394,34 @@ func TestMouseClickPageTabIgnoredWhileModal(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeWaitingWorkerIsTaggedColouredAndSortedFirst(t *testing.T) {
+	m := fixtureApp(t)
+	url := "https://github.com/example/repo/pull/78"
+	m.data.Panels.WorkerTags = map[string]string{"beta": "PR #78 READY TO MERGE"}
+	m.data.Panels.MergeWaiting = map[string]string{"beta": url}
+	rows := m.items("workers")
+	if rows[0].ID != "beta" || rows[0].Status != mergeWaitingPhase || rows[0].Link != url {
+		t.Fatalf("merge-waiting worker is not the first row with its PR link: %#v", rows[0])
+	}
+	line := m.rowLine("workers", rows[0], 0, 100)
+	if !strings.Contains(line, phaseColor(mergeWaitingPhase).Render("PR #78 READY TO MERGE")) &&
+		!strings.Contains(line, "PR #78 READY TO MERGE") {
+		t.Fatalf("row lost its merge tag: %q", line)
+	}
+	if phaseColor(mergeWaitingPhase).GetForeground() == phaseColor("done").GetForeground() ||
+		phaseColor(mergeWaitingPhase).GetForeground() == phaseColor("ready-to-merge").GetForeground() {
+		t.Fatal("merge-waiting colour is not distinct from done and ready")
+	}
+	m.selected["workers"] = 0
+	m.expanded["workers"] = 1
+	if !strings.Contains(m.View().Content, url) {
+		t.Fatal("selected merge-waiting worker did not show the full PR URL")
+	}
+	m.data.Panels.MergeWaiting = nil
+	for _, row := range m.items("workers") {
+		if row.Status == mergeWaitingPhase {
+			t.Fatalf("worker without a waiting PR got the merge look: %#v", row)
+		}
+	}
+}

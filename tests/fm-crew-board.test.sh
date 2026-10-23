@@ -930,6 +930,25 @@ test_worker_tags_name_the_state() {
   pass 'worker tags name the worker state in plain words'
 }
 
+test_worker_tags_flag_pr_waiting_for_merge() {
+  local home snapshot
+  home=$(make_home worker_tag_merge)
+  snapshot="$home/snapshot.json"
+  jq -n '{schema: "fm-fleet-snapshot.v1", tasks: [
+    {id: "green", phase: {name: "ready-to-merge", note: ""}, pr: {url: "https://github.com/o/r/pull/78"},
+     current_state: {state: "done", detail: "PR checks green"}},
+    {id: "merged", phase: {name: "ready-to-merge", note: ""}, pr: {url: "https://github.com/o/r/pull/79"},
+     current_state: {state: "merged", detail: "merged"}},
+    {id: "nopr", phase: {name: "testing", note: ""}, current_state: {state: "done", detail: "checks green"}}]}' > "$snapshot"
+  run_panels "$home" "$snapshot" > "$home/panels.json" || fail 'merge waiting projection failed'
+  assert_equals 'PR #78 READY TO MERGE' "$(jq -r '.worker_tags.green' "$home/panels.json")" 'green open PR tag names its number'
+  assert_equals 'https://github.com/o/r/pull/78' "$(jq -r '.merge_waiting.green' "$home/panels.json")" 'waiting PR url'
+  assert_equals 'null' "$(jq -r '.merge_waiting.merged' "$home/panels.json")" 'merged PR is not waiting'
+  assert_equals 'null' "$(jq -r '.merge_waiting.nopr' "$home/panels.json")" 'task without a PR is not waiting'
+  assert_equals 'READY-TO-MERGE' "$(jq -r '.worker_tags.merged' "$home/panels.json")" 'merged keeps its old look'
+  pass 'a worker whose PR waits for a merge is flagged and a merged or PR-less one is not'
+}
+
 test_worker_tags_from_live_evidence() {
   local home snapshot stub held waiter
   home=$(make_home worker_tags)
@@ -1124,3 +1143,4 @@ test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
 test_worker_tags_from_live_evidence
 test_worker_tags_name_the_state
+test_worker_tags_flag_pr_waiting_for_merge

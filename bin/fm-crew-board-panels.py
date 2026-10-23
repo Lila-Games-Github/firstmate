@@ -860,6 +860,10 @@ def worker_tags(snapshot, resources):
         if not isinstance(task, dict) or not task.get("id"):
             continue
         task_id = str(task["id"])
+        waiting = merge_waiting_pr(task)
+        if waiting:
+            tags[task_id] = pr_label(waiting)
+            continue
         state = state_tag(task, questions)
         tag = ""
         if task_id in resources:
@@ -909,6 +913,28 @@ def daily_routines(now):
     return rows
 
 
+def merge_waiting_pr(task):
+    """The task's open PR URL when its checks are green and only a merge decision remains, else an empty string."""
+    current = task.get("current_state") or {}
+    hints = task.get("hints") or {}
+    pr = str((task.get("pr") or {}).get("url") or "")
+    green = "checks green" in f"{current.get('detail', '')} {hints.get('last_event_text', '')}"
+    if pr and current.get("state") == "done" and (green or current.get("source") == "run-step"):
+        return pr
+    return ""
+
+
+def pr_label(url):
+    number = re.search(r"/pull/(\d+)", url)
+    return f"PR #{number.group(1)} READY TO MERGE" if number else "PR READY TO MERGE"
+
+
+def merge_waiting(snapshot):
+    """Task id to open PR URL for every worker whose PR waits only on a merge decision."""
+    return {str(task["id"]): pr for task in snapshot.get("tasks", [])
+            if isinstance(task, dict) and task.get("id") and (pr := merge_waiting_pr(task))}
+
+
 def ready_entries(snapshot):
     rows = []
     for task in snapshot.get("tasks", []):
@@ -920,8 +946,7 @@ def ready_entries(snapshot):
         hints = task.get("hints") or {}
         pr = str((task.get("pr") or {}).get("url") or "")
         done = current.get("state") == "done"
-        green = "checks green" in f"{current.get('detail', '')} {hints.get('last_event_text', '')}"
-        if pr and done and (green or current.get("source") == "run-step"):
+        if merge_waiting_pr(task):
             rows.append(item(title, f"Checks are green; review and merge the PR\n{pr}", "merge?", pr, item_id=task_id))
         elif task.get("mode") == "local-only" and done:
             rows.append(item(title, "The local branch is finished; approve landing it", "land?", item_id=task_id))
@@ -1218,6 +1243,7 @@ def project(snapshot):
         "playbot_workers": lanes,
         "test_queue": tests,
         "worker_tags": worker_tags(snapshot, resources),
+        "merge_waiting": merge_waiting(snapshot),
         "landings": landed_today(snapshot) + entries(cache, "landings"),
         "builds": entries(cache, "builds"),
         "routines": daily_routines(now) + entries(cache, "routines"),
