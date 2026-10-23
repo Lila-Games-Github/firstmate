@@ -623,6 +623,7 @@ Use `bin/fm-crew-board.sh --help` for the key map, `refresh` for the JSON payloa
 
 Each page shows its focused sub-tab as the large panel, marked by the highlighted border, the sub-tab strip, and the focus cue on its cursor row, and lists every sub-tab, the focused one included, as a summary card beside or below that panel; a terminal too short for both drops the cards, and QUESTIONS shows only its one sub-tab at full width.
 Clicking a summary card focuses that sub-tab with the same change animation as picking it from the sub-tab strip, while a click that lands outside every panel does nothing.
+Clicking a page tab in the header switches to that page as its number key does, and is ignored while help, a filter, or the note line is open.
 Each card's number names what it counts rather than the rows behind it: the phones card counts attached devices, the AI allowance card counts the providers the panel reports on (a provider's own scoped rows count once, and a row aggregating broken providers contributes the providers it names), and the test queue card counts the entries waiting for a resource beside the runs holding one.
 The NOW page reads workers and phase counts from `state/crew-board.json` and a feed from worker status files.
 Its ALERTS sub-tab lists only what needs attention, each with a one-line reason: monitoring down, a blocked or failed worker, a worker decision not yet held for the captain, and an unavailable phone; a paused worker is an expected wait and stays only in WORKERS.
