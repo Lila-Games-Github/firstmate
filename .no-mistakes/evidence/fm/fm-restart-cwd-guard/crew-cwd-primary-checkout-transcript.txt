@@ -1,0 +1,21 @@
+### Scenario: after host restart, task restored-task's restored agent (pid 246657) runs with cwd:
+/tmp/fm-bootstrap-tests.MNPJvn/demo-primary/project
+### recorded worktree (state/restored-task.meta): /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/pool/1/repo ; primary checkout: /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/project
+
+### bin/fm-bootstrap.sh output (locked session):
+CREW_CWD: task restored-task's agent is running in the primary checkout /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/project instead of its recorded local copy /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/pool/1/repo; started relaunching it into that copy with a progress note in the background - its outcome arrives as a check wake
+
+### stubbed fm-control.sh invocation made by the detached worker:
+FM_HOME=/tmp/fm-bootstrap-tests.MNPJvn/demo-primary/home
+FM_SPAWN_NO_GUARD=1
+arg=restored-task
+arg=relaunch
+arg=--note
+arg=Session start found this worker's agent running in /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/project, the project's primary checkout, instead of its recorded local copy /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/pool/1/repo - a host restart resumed the session there - so it relaunched the worker into /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/pool/1/repo. None of the previous conversation carries over: re-read these instructions, act on any waiting steering message, inspect this copy's branch, commits, and uncommitted changes for the work already done, and continue from where the work stands. Run nothing in /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/project.
+
+### state/.wake-queue (outcome wake for firstmate):
+1792735610	1	check	crew-cwd:restored-task	check: crew-cwd: task restored-task's agent was running in the primary checkout /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/project instead of its recorded local copy /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/pool/1/repo; relaunched it into that copy with a progress note - confirm the replacement is working through its instructions
+
+### Same scenario, read-only session (FM_BOOTSTRAP_DETECT_ONLY=1):
+CREW_CWD: task restored-task's agent is running in the primary checkout /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/project instead of its recorded local copy /tmp/fm-bootstrap-tests.MNPJvn/demo-primary/pool/1/repo; read-only session must leave the relaunch to the session holding the fleet lock before it writes there
+### fm-control calls from read-only session: 0 bytes
