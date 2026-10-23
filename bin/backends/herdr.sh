@@ -2168,7 +2168,7 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   printf '%s\n' "$rows" | awk -v shell="$shell_pid" '$1 == shell { found = 1 } END { exit(found ? 0 : 1) }' \
     || { printf 'unreadable'; return 0; }
   while IFS=$'\t' read -r pid name; do
-    [ -n "$pid" ] || continue
+    [ -n "$pid" ] && [ "$pid" != "$shell_pid" ] || continue
     args=$(LC_ALL=C "$ps_bin" -p "$pid" -o args= 2>/dev/null) || continue
     args=${args#"${args%%[![:space:]]*}"}
     argv0=${args%%[[:space:]]*}
@@ -2177,26 +2177,7 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
       return 0
     fi
   done <<EOF
-$(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
-  {
-    pid[NR] = $1; ppid[NR] = $2
-    line = $0
-    sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+/, "", line)
-    comm[NR] = line
-  }
-  END {
-    want[shell] = 1
-    changed = 1
-    while (changed) {
-      changed = 0
-      for (n = 1; n <= NR; n++) {
-        if ((ppid[n] in want) && !(pid[n] in want)) { want[pid[n]] = 1; changed = 1 }
-      }
-    }
-    for (n = 1; n <= NR; n++) {
-      if ((pid[n] in want) && pid[n] != shell) printf "%s\t%s\n", pid[n], comm[n]
-    }
-  }')
+$(fm_agent_process_tree "$shell_pid" "$rows")
 EOF
   printf 'shell'
 }
@@ -2351,6 +2332,23 @@ fm_backend_herdr_agent_state() {  # <target>
       esac
       ;;
   esac
+}
+
+# fm_backend_herdr_pane_root_pid: the pane shell's pid from `pane process-info`
+# (the same read fm_backend_herdr_pane_process_state classifies), the root
+# that fm_backend_agent_process walks down to the agent. The response must
+# echo the recorded pane id back, so a reshaped or misrouted answer is never
+# read as this pane's. Read-only: it never starts a server for a stopped
+# session.
+fm_backend_herdr_pane_root_pid() {  # <target>
+  local info
+  fm_backend_herdr_parse_target "$1" || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info \
+    --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -er --arg pane "$FM_BACKEND_HERDR_PANE" '
+    select(.result.type == "pane_process_info" and .result.process_info.pane_id == $pane)
+    | .result.process_info.shell_pid | select(type == "number" and . > 1) | floor
+  ' 2>/dev/null
 }
 
 # Backward-compatible three-state view for callers that only need a yes/no

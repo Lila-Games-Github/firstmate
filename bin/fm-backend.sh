@@ -988,6 +988,31 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_agent_process: where the recorded endpoint's agent process is
+# actually running, as one "<pid>\t<cwd>" line. The backend supplies only the
+# pane's root process (tmux #{pane_pid}, Herdr's process-info shell_pid); the
+# walk down to the shallowest verified-harness process and the kernel read of
+# its working directory are owned by bin/fm-agent-process-lib.sh, so both
+# backends answer the question the same way. Only the agent's own directory
+# answers it: a pane's recorded or foreground path can name another process in
+# that pane, such as the shell a restored agent was resumed from or a
+# `treehouse get` still sitting in the primary checkout
+# (bin/fm-bootstrap.sh's crew_cwd_reconcile is the consumer). Fails, saying
+# nothing, for an unreadable or absent pane, a pane with no harness process,
+# an unreadable directory, and every backend other than tmux and Herdr.
+fm_backend_agent_process() {  # <backend> <target>
+  local backend=$1 target=$2 root pid cwd
+  fm_backend_source "$backend" 2>/dev/null || return 1
+  case "$backend" in
+    tmux) root=$(fm_backend_tmux_pane_root_pid "$target") || return 1 ;;
+    herdr) root=$(fm_backend_herdr_pane_root_pid "$target") || return 1 ;;
+    *) return 1 ;;
+  esac
+  pid=$(fm_agent_process_tree_agent_pid "$root") || return 1
+  cwd=$(fm_agent_process_cwd "$pid") || return 1
+  printf '%s\t%s\n' "$pid" "$cwd"
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

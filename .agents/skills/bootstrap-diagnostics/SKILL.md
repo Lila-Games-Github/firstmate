@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, SLOT_RECONCILE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, SLOT_RECONCILE, CREW_CWD, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or any other BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -43,6 +43,13 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Read the named task's current state with `bin/fm-crew-state.sh <id>`, then reconcile in whichever direction the evidence supports: a task that is genuinely still working keeps its record and its copy, while a finished or dead one is cleaned up normally so the copy returns to the pool.
   Dispatch into that project is safe while the line stands, because a spawn refuses a copy a live record still names rather than preparing it.
   When the copy has ALREADY been handed to a second task, cleanup of both records refuses instead, and `bin/fm-teardown.sh --reconcile-slot` is the one sanctioned way out; its header owns the proofs it requires, and it never discards work.
+- `CREW_CWD: task <id>'s agent ... <dir> ... recorded local copy <path>; ...` - a live worker's agent process is working outside the isolated copy its record names, usually after a host restart resumed it in the project's primary checkout, where any relative command it runs writes.
+  `relaunched it into that copy` means this locked session already moved it: confirm the replacement is processing its instructions and handle any trust dialog through `harness-adapters`, exactly as after a spawn; nothing else is owed.
+  Every other form is still misplaced and is urgent before that worker's next turn: relaunch it into its recorded copy with the printed `bin/fm-control.sh <id> relaunch --note <progress note>`, writing a note that says where it was found and that it must re-check the copy's branch and uncommitted work before continuing.
+  A failed automatic relaunch names the refusal; resolve that refusal through its owner (`stuck-crewmate-recovery` for an unreadable or ambiguous endpoint) rather than retrying around it.
+  Never move the work by editing, copying, or cleaning either directory; the copy already holds the work, and only the agent's location is wrong.
+  A read-only session leaves the relaunch to the session holding the fleet lock.
+  A `SLOT_RECONCILE` line reading free for the same copy is the same restart and clears once the relaunched worker is back inside it.
 - `STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>` - the visible startup-memory budget is not a safe one-line positive decimal file; do not infer the default or propagate it.
   Correct the local primary file, then rerun session start so the normal convergence path can deliver the validated value to secondmate homes.
 - `CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>` - the optional dispatch profile file exists but failed low-cost bootstrap validation; stop profile-based dispatch, report the actionable error, and require correction of the malformed schema, unverified harness name, or invalid harness/effort pair rather than falling back around it or selecting a bad profile.

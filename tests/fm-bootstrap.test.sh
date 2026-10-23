@@ -1576,6 +1576,295 @@ ROWS
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
 
+# --- crew working-directory check (bin/fm-bootstrap.sh crew_cwd_reconcile) ---
+#
+# Each case builds a real process tree standing in for a restored pane: a root
+# shell (the pane's own process) whose child is an agent-named process, each
+# with its own working directory. A fake tmux reports that root as the pane's
+# process, so the sweep has to walk down to the agent and read the agent's
+# directory, not the pane's.
+
+# crew_cwd_procs_in <dir> [skip-pid]: pids whose working directory is <dir> or
+# under it, other than <skip-pid>. Written to a file so the fake treehouse can
+# take the same reading.
+crew_cwd_write_procs_helper() {  # <file>
+  cat > "$1" <<'SH'
+crew_cwd_procs_in() {
+  local dir=$1 skip=${2:-} p cwd
+  if [ -d /proc/self ]; then
+    for p in /proc/[0-9]*; do
+      cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
+      case "$cwd" in
+        "$dir"|"$dir"/*) [ "${p#/proc/}" = "$skip" ] || printf '%s\n' "${p#/proc/}" ;;
+      esac
+    done
+  else
+    lsof -a -d cwd -Fpn 2>/dev/null | awk -v d="$dir" -v skip="$skip" '
+      /^p/ { pid = substr($0, 2) }
+      /^n/ { path = substr($0, 2); if ((path == d || index(path, d "/") == 1) && pid != skip) print pid }'
+  fi
+}
+SH
+}
+
+# make_crew_cwd_case <name>: a slot case (make_slot_case) plus a fake tmux that
+# names the window and answers #{pane_pid} with FM_TEST_PANE_PID, a fake
+# treehouse whose status is FM_FAKE_TREEHOUSE_SLOT_STATUS - or, for `count`,
+# in-use only while some process OTHER than FM_TEST_AGENT_PID works inside the
+# slot (a Treehouse that does not see the agent) - and a logging fm-control.sh
+# stub under the FM_ROOT the bootstrap run resolves.
+# Echoes "<case-dir>|<home>|<project>|<worktree>|<fakebin>".
+make_crew_cwd_case() {
+  local name=$1 rec case_dir home proj wt fakebin
+  rec=$(make_slot_case "$name" in-use)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  crew_cwd_write_procs_helper "$case_dir/procs-in.sh"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' "${FM_TEST_TMUX_WINDOWS:-}"; exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in *pane_pid*) printf '%s\n' "${FM_TEST_PANE_PID:-}"; exit 0 ;; esac
+    done
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  exit 0
+fi
+if [ "\${1:-}" = status ] && [ "\${2:-}" = --json ]; then
+  status=\${FM_FAKE_TREEHOUSE_SLOT_STATUS:-in-use}
+  if [ "\$status" = count ]; then
+    . '$case_dir/procs-in.sh'
+    status=available
+    [ -z "\$(crew_cwd_procs_in '$wt' "\${FM_TEST_AGENT_PID:-}")" ] || status=in-use
+  fi
+  printf '[{"name":"1","path":"%s","status":"%s","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]\n' '$wt' "\$status"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  mkdir -p "$home/bin"
+  cat > "$home/bin/fm-control.sh" <<'SH'
+#!/usr/bin/env bash
+{
+  printf 'FM_HOME=%s\n' "${FM_HOME:-}"
+  printf 'arg=%s\n' "$@"
+} >> "${FM_TEST_CONTROL_LOG:?}"
+if [ "${FM_TEST_CONTROL_FAIL:-0}" = 1 ]; then
+  echo "error: endpoint state is ambiguous; refusing to relaunch" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$home/bin/fm-control.sh"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+# start_crew_cwd_tree <case-dir> <root-cwd> <agent-cwd>: a root shell working in
+# <root-cwd> whose child is an agent-named process working in <agent-cwd>.
+# Echoes "<root-pid> <agent-pid>".
+start_crew_cwd_tree() {
+  local dir=$1 root_cwd=$2 agent_cwd=$3 root agent='' tries=0
+  mkdir -p "$dir/agentbin"
+  # A symlink to a real long-running binary, so the kernel records `claude` as
+  # the executable identity (a copied platform binary fails code signing on macOS).
+  ln -sf "$(command -v sleep)" "$dir/agentbin/claude"
+  # shellcheck disable=SC2016 # expanded by the root shell.
+  ( cd "$root_cwd" && exec sh -c '(cd "$2" && exec "$1" 300); :' sh "$dir/agentbin/claude" "$agent_cwd" ) \
+    </dev/null >/dev/null 2>&1 &
+  root=$!
+  while [ -z "$agent" ] && [ "$tries" -lt 50 ]; do
+    agent=$(pgrep -P "$root" 2>/dev/null | head -1)
+    [ -n "$agent" ] || sleep 0.1
+    tries=$((tries + 1))
+  done
+  [ -n "$agent" ] || fail "the fake agent process never started under root $root"
+  printf '%s %s\n' "$root" "$agent"
+}
+
+stop_crew_cwd_tree() {  # <root-pid> <agent-pid>
+  kill "$2" "$1" 2>/dev/null || true
+}
+
+run_crew_cwd_bootstrap() {  # <home> <fakebin> <id> <root-pid> <log> [VAR=value ...]
+  local home=$1 fakebin=$2 id=$3 root=$4 log=$5
+  shift 5
+  run_slot_bootstrap "$home" "$fakebin" FM_TEST_TMUX_WINDOWS="fm-$id" \
+    FM_TEST_PANE_PID="$root" FM_TEST_CONTROL_LOG="$log" "$@"
+}
+
+write_crew_cwd_meta() {  # <home> <id> <worktree> <project>
+  fm_write_meta "$1/state/$2.meta" \
+    "window=firstmate:fm-$2" "endpoint_task_id=$2" \
+    "worktree=$3" "project=$4" "harness=claude" "kind=ship"
+}
+
+test_crew_cwd_inside_recorded_copy_is_silent() {
+  local rec case_dir home proj wt fakebin out id=cwd-ok-task log tree root agent
+
+  rec=$(make_crew_cwd_case crew-cwd-ok)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  write_crew_cwd_meta "$home" "$id" "$wt" "$proj"
+  log="$case_dir/control.log"; : > "$log"
+  # The pane's own process sits in the primary checkout - the shape a
+  # `treehouse get` subshell leaves - while the agent works in its copy.
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$wt")
+  read -r root agent <<EOF
+$tree
+EOF
+  . "$case_dir/procs-in.sh"
+  crew_cwd_procs_in "$proj" | grep -qx "$root" \
+    || fail "precondition: the pane root should work in the primary checkout"
+
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log")
+  stop_crew_cwd_tree "$root" "$agent"
+  assert_not_contains "$out" CREW_CWD "a worker inside its recorded copy was reported misplaced"
+  assert_not_contains "$out" BOOTSTRAP_INFO "a correctly placed worker on an in-use slot produced a fact"
+  [ ! -s "$log" ] || fail "a correctly placed worker was relaunched: $(cat "$log")"
+  pass "crew working directory: an agent inside its recorded copy is left alone, whatever its pane root's directory"
+}
+
+test_crew_cwd_in_primary_checkout_is_relaunched() {
+  local rec case_dir home proj wt fakebin out id=cwd-primary-task log tree root agent
+
+  rec=$(make_crew_cwd_case crew-cwd-primary)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  write_crew_cwd_meta "$home" "$id" "$wt" "$proj"
+  log="$case_dir/control.log"; : > "$log"
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$proj")
+  read -r root agent <<EOF
+$tree
+EOF
+
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log")
+  assert_contains "$out" "CREW_CWD: task $id's agent was running in the primary checkout $proj instead of its recorded local copy $wt; relaunched it into that copy" \
+    "a locked session did not report the automatic relaunch"
+  assert_grep "FM_HOME=$home" "$log" "the relaunch did not carry the explicit home"
+  assert_grep "arg=$id" "$log" "the relaunch did not target the task id"
+  assert_grep "arg=relaunch" "$log" "the lifecycle owner was not asked to relaunch"
+  assert_grep "arg=--note" "$log" "the relaunch carried no progress note"
+  assert_grep "instead of its recorded local copy $wt" "$log" "the progress note did not name the copy"
+
+  : > "$log"
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" FM_TEST_CONTROL_FAIL=1)
+  assert_contains "$out" "the automatic relaunch failed: error: endpoint state is ambiguous; refusing to relaunch; relaunch it into that copy with FM_HOME=$home bin/fm-control.sh $id relaunch" \
+    "a failed relaunch was not reported with its refusal and the manual command"
+
+  : > "$log"
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" FM_BOOTSTRAP_DETECT_ONLY=1)
+  stop_crew_cwd_tree "$root" "$agent"
+  assert_contains "$out" "CREW_CWD: task $id's agent is running in the primary checkout $proj instead of its recorded local copy $wt; read-only session must leave the relaunch to the session holding the fleet lock" \
+    "a read-only session did not report the misplaced worker as advisory"
+  [ ! -s "$log" ] || fail "a read-only session relaunched a worker: $(cat "$log")"
+  pass "crew working directory: an agent in the primary checkout is relaunched by a locked session and only reported by a read-only one"
+}
+
+test_crew_cwd_elsewhere_is_reported_not_relaunched() {
+  local rec case_dir home proj wt fakebin out id=cwd-elsewhere-task log tree root agent
+
+  rec=$(make_crew_cwd_case crew-cwd-elsewhere)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  mkdir -p "$case_dir/elsewhere"
+  write_crew_cwd_meta "$home" "$id" "$wt" "$proj"
+  log="$case_dir/control.log"; : > "$log"
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$case_dir/elsewhere")
+  read -r root agent <<EOF
+$tree
+EOF
+
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log")
+  stop_crew_cwd_tree "$root" "$agent"
+  assert_contains "$out" "CREW_CWD: task $id's agent is running in $case_dir/elsewhere, not its recorded local copy $wt; relaunch it into that copy with FM_HOME=$home bin/fm-control.sh $id relaunch --note" \
+    "an agent outside both its copy and the primary checkout was not reported"
+  [ ! -s "$log" ] || fail "an agent in an unexpected directory was relaunched automatically: $(cat "$log")"
+  pass "crew working directory: an agent anywhere else is reported for relaunch, never moved automatically"
+}
+
+test_crew_cwd_free_slot_is_reclaimed() {
+  local rec case_dir home proj wt fakebin out id=cwd-slot-task log tree root agent holders tries
+
+  rec=$(make_crew_cwd_case crew-cwd-slot)
+  IFS='|' read -r case_dir home proj wt fakebin <<EOF
+$rec
+EOF
+  write_crew_cwd_meta "$home" "$id" "$wt" "$proj"
+  log="$case_dir/control.log"; : > "$log"
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$wt")
+  read -r root agent <<EOF
+$tree
+EOF
+  . "$case_dir/procs-in.sh"
+
+  # A Treehouse that cannot see the agent reads the slot free until another
+  # process works inside it.
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" \
+    FM_FAKE_TREEHOUSE_SLOT_STATUS=count FM_TEST_AGENT_PID="$agent")
+  holders=$(crew_cwd_procs_in "$wt" "$agent")
+  assert_contains "$out" "BOOTSTRAP_INFO: task $id's local copy $wt read free to Treehouse while its agent works there; re-claimed it" \
+    "a correctly placed worker's free slot was not re-claimed"
+  assert_not_contains "$out" SLOT_RECONCILE "a re-claimed slot was still reported free"
+  assert_not_contains "$out" CREW_CWD "a correctly placed worker was reported misplaced"
+  [ -n "$holders" ] || fail "no process holds the re-claimed slot"
+  [ ! -s "$log" ] || fail "re-claiming a slot relaunched the worker: $(cat "$log")"
+  # shellcheck disable=SC2086 # one pid per word.
+  kill $holders 2>/dev/null || true
+
+  # A Treehouse that a held process does not move either keeps reporting the
+  # slot free, and the useless holder is stopped rather than left behind.
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" \
+    FM_FAKE_TREEHOUSE_SLOT_STATUS=available)
+  assert_not_contains "$out" "re-claimed" "a hold Treehouse ignored was reported as a re-claim"
+  assert_contains "$out" "SLOT_RECONCILE: task $id's local copy $wt reads free" \
+    "the free slot fell out of the drift report after a failed re-claim"
+  tries=0
+  holders=$(crew_cwd_procs_in "$wt" "$agent")
+  while [ -n "$holders" ] && [ "$tries" -lt 30 ]; do
+    sleep 0.1
+    holders=$(crew_cwd_procs_in "$wt" "$agent")
+    tries=$((tries + 1))
+  done
+  stop_crew_cwd_tree "$root" "$agent"
+  if [ -n "$holders" ]; then
+    # shellcheck disable=SC2086 # one pid per word.
+    kill $holders 2>/dev/null || true
+    fail "a hold that changed nothing was left running in the copy: $holders"
+  fi
+
+  # A read-only session never takes a claim.
+  tree=$(start_crew_cwd_tree "$case_dir" "$proj" "$wt")
+  read -r root agent <<EOF
+$tree
+EOF
+  out=$(run_crew_cwd_bootstrap "$home" "$fakebin" "$id" "$root" "$log" \
+    FM_FAKE_TREEHOUSE_SLOT_STATUS=count FM_TEST_AGENT_PID="$agent" FM_BOOTSTRAP_DETECT_ONLY=1)
+  holders=$(crew_cwd_procs_in "$wt" "$agent")
+  stop_crew_cwd_tree "$root" "$agent"
+  if [ -n "$holders" ]; then
+    # shellcheck disable=SC2086 # one pid per word.
+    kill $holders 2>/dev/null || true
+    fail "a read-only session re-claimed a slot"
+  fi
+  assert_contains "$out" "SLOT_RECONCILE: task $id's local copy $wt reads free" \
+    "a read-only session did not report the free slot"
+  pass "crew working directory: a correctly placed worker's free slot is re-claimed, and only when Treehouse then reads it taken"
+}
+
 test_bootstrap_reporting
 test_recorded_slot_that_reads_free_is_reported
 test_no_mistakes_target_readiness() {
@@ -1608,6 +1897,10 @@ test_recorded_slot_is_identified_through_a_path_alias
 test_recorded_slot_with_foreign_lease_is_reported
 test_secondmate_home_with_foreign_lease_is_reported
 test_slot_drift_survives_a_grep_without_bre_alternation
+test_crew_cwd_inside_recorded_copy_is_silent
+test_crew_cwd_in_primary_checkout_is_relaunched
+test_crew_cwd_elsewhere_is_reported_not_relaunched
+test_crew_cwd_free_slot_is_reclaimed
 
 test_no_mistakes_target_readiness
 test_no_mistakes_min_version

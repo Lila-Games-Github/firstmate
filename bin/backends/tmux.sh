@@ -422,6 +422,28 @@ EOF
   esac
 }
 
+# fm_backend_tmux_pane_root_pid: the pid of the process tmux started in the
+# recorded pane (#{pane_pid}, normally its shell), the root that
+# fm_backend_agent_process walks down to the agent. The exact window must
+# appear in a successful session inventory first, for the reason
+# fm_backend_tmux_agent_state gives: tmux answers an absent target from the
+# client's active window, which would describe some other task's pane.
+fm_backend_tmux_pane_root_pid() {  # <target>
+  local target=$1 session window windows pid
+  case "$target" in
+    *:*:*|'':*|*:'') return 1 ;;
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  windows=$(fm_backend_tmux_window_inventory "$session") || return 1
+  printf '%s\n' "$windows" | grep -Fqx "$window" || return 1
+  pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$pid"
+}
+
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
 fm_backend_tmux_agent_alive() {  # <target>

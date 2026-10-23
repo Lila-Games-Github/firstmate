@@ -2099,6 +2099,33 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
 
+## Agent process working directory
+
+`bin/fm-backend.sh`'s `fm_backend_agent_process`, which `bin/fm-bootstrap.sh`'s `CREW_CWD` check consumes, was verified on 2026-10-23 on Fedora against both backends whose pane root it reads.
+On Herdr 0.9.5, reading a live crewmate's own pane returned the Claude process inside its pool slot, past the `treehouse get` process that still sits in the primary checkout between the pane shell and the agent:
+
+```sh
+bash -c '. bin/fm-backend.sh; fm_backend_agent_process herdr default:wCR:p2'
+```
+
+```text
+342476	/var/home/sanchith/.treehouse/firstmate-da2b8e/1/firstmate
+```
+
+On tmux 3.7c, on a private server whose pane shell works in `/tmp` and whose agent-named child works in a scratch directory, the reading named the child's directory, and a window absent from the session gave no reading at all:
+
+```sh
+tmux new-session -d -s fmcwd -n w "sh -c '(cd <scratch>/agentdir && exec <scratch>/bin/claude 60); :'"
+bash -c '. bin/fm-backend.sh; fm_backend_agent_process tmux fmcwd:w; fm_backend_agent_process tmux fmcwd:nope; echo rc=$?'
+```
+
+```text
+2460490	<scratch>/agentdir
+rc=1
+```
+
+The portable regressions, which drive real process trees under a faked pane, are the `test_crew_cwd_*` cases in `tests/fm-bootstrap.test.sh`.
+
 ## Treehouse return path matching
 
 `treehouse return` matching of its path argument against pool records was verified on 2026-08-20 with treehouse v2.1.1 on Fedora (ostree layout, where `/home` is a symlink to `/var/home`).
@@ -2160,5 +2187,18 @@ cd /var/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate && treehouse statu
 ```
 
 That is why the status read is always taken from the project directory, never from the slot being asked about.
+
+Any process working inside a slot holds it, not only a worker: on 2026-10-23, with the same treehouse v2.1.1 on the same host, a bare `sleep` started inside idle slot 2 flipped that slot to `in-use` with the process listed.
+This is the reading `bin/fm-bootstrap.sh`'s `crew_slot_hold` relies on when it re-claims the freed slot of a correctly placed worker with a process kept inside it.
+
+```sh
+cd /var/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate && (sleep 20 &)
+cd /var/home/sanchith/LILA/firstmate && sleep 1 && treehouse status --json
+```
+
+```text
+{"name":"2","path":"/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":554382,"name":"sleep"}]
+```
+
 The portable regressions pinning the freed-slot report, its silence on `in-use`, its silence when the status read fails, and the alias match above are in `tests/fm-bootstrap.test.sh` (`test_recorded_slot_that_reads_free_is_reported` and `test_recorded_slot_is_identified_through_a_path_alias`).
 Refresh this proof against a scratch pool after a treehouse upgrade if the `status` vocabulary or the record shape changes.
