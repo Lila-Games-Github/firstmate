@@ -1,0 +1,11 @@
+{
+  "worker_tags": {
+    "fm-78": "PR #78 READY TO MERGE",
+    "fm-77": "READY-TO-MERGE",
+    "fm-80": "TESTING",
+    "gd-12": "FIXING"
+  },
+  "merge_waiting": {
+    "fm-78": "https://github.com/Lila-Games-Github/firstmate/pull/78"
+  }
+}
