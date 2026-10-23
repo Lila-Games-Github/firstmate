@@ -43,29 +43,21 @@ echo "prepare-v1" >> "$EVENTS"
 PREPARE
 cat > suite.sh <<'SUITE'
 #!/usr/bin/env bash
-if [ -n "${TEST_USER_DATA:-}" ]; then
-  [ "${FROGPILE_SUITE_LOCK_HELD:-}" = 1 ]
-  mkdir -p "$TEST_USER_DATA"
-  echo "parallel-start:$TEST_USER_DATA" >> "$EVENTS"
+set -euo pipefail
+if [ -e "$HOME/parallel-mode" ]; then
+  [ -z "${FROGPILE_SUITE_LOCK_HELD:-}" ]
+  echo "parallel-start:$PWD" >> "$EVENTS"
 else
   echo "suite-start-v1" >> "$EVENTS"
 fi
-sleep "${PARALLEL_SUITE_SLEEP:-${SUITE_SLEEP:-2}}"
-if [ -n "${TEST_USER_DATA:-}" ]; then
-  echo "parallel-end:$TEST_USER_DATA" >> "$EVENTS"
+if [ -e "$HOME/parallel-mode" ]; then sleep 7; else sleep "${SUITE_SLEEP:-2}"; fi
+if [ -e "$HOME/parallel-mode" ]; then
+  echo "parallel-end:$PWD" >> "$EVENTS"
 else
   echo "suite-end-v1" >> "$EVENTS"
 fi
 echo suite-end-v1
 SUITE
-cat > verdict.py <<'VERDICT'
-from pathlib import Path
-import sys
-if 'suite-end-v1' not in Path(sys.argv[1]).read_text():
-    print('FAIL: suite verdict missing')
-    raise SystemExit(1)
-print('suite verdict accepted')
-VERDICT
 cat > phone.sh <<'PHONE'
 #!/usr/bin/env bash
 serial=$2
@@ -196,7 +188,8 @@ print(next(r['run_seconds'] for r in json.load(open(sys.argv[1]))['requests'] if
 PY
 )
 sleep 2.3
-python3 - "$FM_TEST_SERVICE_STATE/status.json" "$restart" "$time_before" <<'PY'
+$svc status --json > "$tmp/current-status.json"
+python3 - "$tmp/current-status.json" "$restart" "$time_before" <<'PY'
 import json,sys
 now=next(r['run_seconds'] for r in json.load(open(sys.argv[1]))['requests'] if r['id']==sys.argv[2])
 assert now > float(sys.argv[3])+1
@@ -232,8 +225,9 @@ done
 [ "$state" = conflict ]
 # Four clean copies run their full suites at once; the fifth waits for a slot.
 cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
-{"prepare":["prepare.sh"],"suite":["suite.sh"],"parallel_suite":["suite.sh"],"parallel_suite_env":{"FROGPILE_SUITE_LOCK_HELD":"1","TEST_USER_DATA":"{user_data}","PARALLEL_SUITE_SLEEP":"7"},"parallel_suite_error_pattern":"(?m)^SCRIPT ERROR:","parallel_suite_verdict":"verdict.py","max_concurrent":4,"device":["phone.sh","--serial","{serial}"],"phones":["S22","S21"],"landing_branch":"main"}
+{"prepare":["prepare.sh"],"suite":["suite.sh"],"max_concurrent":4,"device":["phone.sh","--serial","{serial}"],"phones":["S22","S21"],"landing_branch":"main"}
 JSON
+touch "$HOME/parallel-mode"
 cd "$tmp/project"
 parallel_ids=()
 for n in 1 2 3 4 5; do
@@ -298,10 +292,11 @@ for id in "${parallel_restart[@]}"; do
   $svc wait "$id" | grep -q "^passed $sha1"
 done
 [ "$(rg -c '^parallel-start:' "$EVENTS")" -ge "$((before_parallel + 8))" ]
-# A zero-exit engine script error still fails the parallel suite and writes a failure record.
+# The project suite entry point reports its script error to the service.
 cat > suite.sh <<'SCRIPT_ERROR'
 #!/usr/bin/env bash
 echo 'SCRIPT ERROR: fake parse failure'
+exit 1
 SCRIPT_ERROR
 git add suite.sh && git commit -qm v3
 sha3=$(git rev-parse HEAD)

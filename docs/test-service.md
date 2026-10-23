@@ -13,19 +13,15 @@ The service keeps a private copy of each submitted commit so removing a worker's
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
 The file names the suite and device executable argv arrays relative to the tested checkout, the ordered phone serials, named scenario argument arrays, and the landing branch.
 `max_concurrent` limits active requests for that project; it defaults to four for FrogPile and one for other projects, and may be set from one to sixteen.
-An optional `parallel_suite` argv replaces `suite` when the service owns a project's concurrency limit; projects without it continue through their configured suite entry point.
-`parallel_suite_env` supplies that command's environment, with `{user_data}` expanded to a private directory for the request and tested SHA generation.
-`parallel_suite_error_pattern` fails an otherwise successful command when its log matches the regular expression.
-`parallel_suite_verdict` names a Python script in the tested checkout that receives the suite log path and must exit zero for a pass.
-`parallel_suite_watchdog_seconds` sets its no-output timeout, defaulting to 300 seconds.
+Each suite command must use its project's shared queue entry point, so other callers and service requests share the same capacity and arrival order.
 An optional `prepare` argv runs once in the clean detached copy before either suite or phone step; it must leave the tracked tree clean.
 Retests read the submitting worktree's common Git storage by default, so a disposable linked worktree can disappear after submission.
 An optional `landing_repo` absolute path, with `{fm_home}` expansion, selects a different durable local clone.
 Use `{serial}` in the device argv where the chosen serial belongs.
 The phone command must use the project's shared phone queue entry point when it has one.
-FrogPile's suite configuration uses the Godot command from `run_suite.sh` with `FROGPILE_SUITE_LOCK_HELD=1`, an isolated `{user_data}` directory per request, a 300-second no-output watchdog, the script-error guard, and `suite_verdict.py` over that request's log.
-The service enforces FrogPile's four-request limit itself while the project's `run_suite.sh` still holds its serial queue for workers using that entry point; this is the approved parallel-suite interim arrangement until the queue follow-up lands.
-The service does not take a raw flock or stop the adb server.
+FrogPile's suite configuration calls `prototype-game/tests/run_suite.sh`, whose four-place queue owns suite admission, worktree isolation, the no-output watchdog, and script-error verdicts for service and direct callers alike.
+The service also caps FrogPile at four active requests; these request slots include phone and preparation time.
+The service takes no separate suite or phone lock and does not stop the adb server.
 The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
 
 For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json`.

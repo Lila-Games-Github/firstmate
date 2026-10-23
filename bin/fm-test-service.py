@@ -52,24 +52,9 @@ def config(project):
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 16:
         raise ValueError("max_concurrent must be an integer from 1 to 16")
     data["max_concurrent"] = limit
-    if "parallel_suite" in data:
-        if not isinstance(data["parallel_suite"], list) or not isinstance(data.get("parallel_suite_env"), dict):
-            raise ValueError("parallel_suite needs command and environment configuration")
-        if not all(isinstance(key, str) and isinstance(value, str) for key, value in data["parallel_suite_env"].items()):
-            raise ValueError("parallel_suite_env must map strings to strings")
-        if "parallel_suite_verdict" in data and (not isinstance(data["parallel_suite_verdict"], str) or Path(data["parallel_suite_verdict"]).is_absolute() or ".." in Path(data["parallel_suite_verdict"]).parts):
-            raise ValueError("parallel_suite_verdict must be a relative path")
-        if "parallel_suite_error_pattern" in data:
-            if not isinstance(data["parallel_suite_error_pattern"], str):
-                raise ValueError("parallel_suite_error_pattern must be a regular expression")
-            re.compile(data["parallel_suite_error_pattern"])
-        watchdog = data.get("parallel_suite_watchdog_seconds", 300)
-        if isinstance(watchdog, bool) or not isinstance(watchdog, int) or watchdog < 1:
-            raise ValueError("parallel_suite_watchdog_seconds must be positive")
-        data["parallel_suite_watchdog_seconds"] = watchdog
     if "landing_repo" in data:
         data["landing_repo"] = data["landing_repo"].replace("{fm_home}", str(HOME))
-    for name in ("prepare", "suite", "parallel_suite", "device", "any_device"):
+    for name in ("prepare", "suite", "device", "any_device"):
         if name in data and (not data[name] or Path(data[name][0]).is_absolute() or ".." in Path(data[name][0]).parts):
             raise ValueError(name + " executable must be relative to the tested checkout")
     return data
@@ -302,29 +287,12 @@ def execute(db, row):
             return name, 127, "command missing or not executable: " + argv[0]
         log_path = ROOT / "logs" / (rid + "-" + str(row["generation"]) + "-" + re.sub(r"[^A-Za-z0-9_-]", "_", name) + ".log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        parallel_suite = name == "suite" and "parallel_suite" in cfg
-        env = os.environ.copy()
-        if parallel_suite:
-            user_data = ROOT / "user-data" / rid / str(row["generation"]) / "suite"
-            for key, value in cfg["parallel_suite_env"].items():
-                env[key] = value.replace("{user_data}", str(user_data))
-        watchdog = cfg["parallel_suite_watchdog_seconds"] if parallel_suite else None
-        last_size = -1
-        last_output = time.monotonic()
-        timed_out = False
         with log_path.open("wb") as log:
-            proc = subprocess.Popen(argv, cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc = subprocess.Popen(argv, cwd=work, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(proc)
             while proc.poll() is None:
-                if watchdog:
-                    size = log_path.stat().st_size
-                    if size != last_size:
-                        last_size = size
-                        last_output = time.monotonic()
-                    elif time.monotonic() - last_output >= watchdog:
-                        timed_out = True
                 cancelled = watch_db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]
-                if cancelled or STOP or timed_out:
+                if cancelled or STOP:
                     try:
                         os.killpg(proc.pid, signal.SIGTERM)
                     except ProcessLookupError:
@@ -334,27 +302,8 @@ def execute(db, row):
                     except subprocess.TimeoutExpired:
                         os.killpg(proc.pid, signal.SIGKILL)
                 time.sleep(.1)
-        code = 124 if timed_out else proc.returncode
+        code = proc.returncode
         output = log_path.read_text(errors="replace")
-        extra = ""
-        if timed_out:
-            extra = "\nFAIL: suite produced no output for " + str(watchdog) + " seconds\n"
-        if parallel_suite and code == 0:
-            if re.search(cfg.get("parallel_suite_error_pattern", r"(?m)^\s*SCRIPT ERROR:"), output):
-                code = 1
-            elif cfg.get("parallel_suite_verdict"):
-                verdict = (work / cfg["parallel_suite_verdict"]).resolve()
-                if os.path.commonpath((str(work), str(verdict))) != str(work) or not verdict.is_file():
-                    code = 127
-                    extra = "\nFAIL: suite verdict script is missing\n"
-                else:
-                    checked = run([sys.executable, str(verdict), str(log_path)], cwd=work)
-                    code = checked.returncode
-                    extra = "\n" + checked.stdout + checked.stderr
-        if extra:
-            with log_path.open("a") as log:
-                log.write(extra)
-            output += extra
         step_state(watch_db, rid, row["generation"], name, "passed" if code == 0 else "failed", code)
         watch_db.close()
         return name, code, output
@@ -386,7 +335,7 @@ def execute(db, row):
             step_state(db, rid, row["generation"], "phone-prep", "passed", 0)
         steps = []
         if opts["suite"]:
-            steps.append(("suite", expand(cfg.get("parallel_suite", cfg["suite"]))))
+            steps.append(("suite", expand(cfg["suite"])))
         if opts["device_gate"]:
             command = expand(cfg["any_device"] if serial == "any" else cfg["device"], serial)
             for scenario in opts["scenarios"]:
