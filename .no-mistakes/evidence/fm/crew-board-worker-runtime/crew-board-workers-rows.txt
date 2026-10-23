@@ -1,0 +1,32 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│FIRSTMATE  //  home   ▲ 1 NEW: Monitoring status unavailable   16:54:47   WORKERS 4                                           │
+│ 1 NOW   1    2 PLANNING    3 QUESTIONS    4 TESTING                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────────────────────────╮╭──────────────────────────────────────╮
+│ ALERTS  1   WORKERS   READY FOR YOU   FEED                                         ││ALERTS  1 alerts                      │
+│WORKERS  FIXING 1  TESTING 1                                                        ││latest: Monitoring status unavailable │
+│GADGET  1 worker                                                                    │╰──────────────────────────────────────╯
+│  ⠙ ▸ gadget / Fix the gadget crash           Codex (GPT-6-Sol)  <1m  INVESTIGATING │╭──────────────────────────────────────╮
+│FROGPILE  1 worker                                                                  ││WORKERS  4 workers (gadget 1, frogpil…│
+│  ⠙ ▸ frogpile / FrogPile perf tooling capture        Claude (Opus 5.5)  <1m  SUITE ││latest: widget / Tidy the build script│
+│WIDGET  2 workers                                                                   │╰──────────────────────────────────────╯
+│    ▸ widget / Refresh the widget docs      Pi (DeepSeek v4.1 Flash)  <1m  STARTING │╭──────────────────────────────────────╮
+│    ▸ widget / Tidy the build script                           Codex  <1m  STARTING ││READY FOR YOU  none                   │
+│                                                                                    ││latest: none                          │
+│                                                                                    │╰──────────────────────────────────────╯
+│                                                                                    │╭──────────────────────────────────────╮
+│                                                                                    ││FEED  4 updates                       │
+│                                                                                    ││latest: plain-worker: phase: planning │
+│                                                                                    │╰──────────────────────────────────────╯
+│                                                                                    │
+│                                                                                    │
+│                                                                                    │
+│                                                                                    │
+│                                                                                    │
+│                                                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────╯
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│NOTE [all] i: message firstmate  > Type note; Enter sends                                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit

@@ -1,0 +1,32 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│FIRSTMATE  //  home   ▲ 1 NEW: Monitoring status unavailable   16:54:50   WORKERS 4                                           │
+│ 1 NOW   1    2 PLANNING    3 QUESTIONS    4 TESTING                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────────────────────────╮╭──────────────────────────────────────╮
+│ ALERTS  1   WORKERS   READY FOR YOU   FEED                                         ││ALERTS  1 alerts                      │
+│WORKERS  FIXING 1  TESTING 1                                                        ││latest: Monitoring status unavailable │
+│GADGET  1 worker                                                                    │╰──────────────────────────────────────╯
+│› ⠧ ▾ gadget / Fix the gadget crash           Codex (GPT-6-Sol)  <1m  INVESTIGATING │╭──────────────────────────────────────╮
+│    Runtime: Codex (GPT-6-Sol), effort xhigh                                        ││WORKERS  4 workers (gadget 1, frogpil…│
+│    investigating                                                                   ││latest: widget / Tidy the build script│
+│    LIVE SCREEN (read only, via fm-peek.sh)                                         │╰──────────────────────────────────────╯
+│    peek codex-fix: WARNING: watcher still down (same stale episode; last beat: ne… │╭──────────────────────────────────────╮
+│    error: no backend target recorded in /tmp/go-tc/home/state/codex-fix.meta: exi… ││READY FOR YOU  none                   │
+│FROGPILE  1 worker                                                                  ││latest: none                          │
+│  ⠧ ▸ frogpile / FrogPile perf tooling capture        Claude (Opus 5.5)  <1m  SUITE │╰──────────────────────────────────────╯
+│WIDGET  2 workers                                                                   │╭──────────────────────────────────────╮
+│    ▸ widget / Refresh the widget docs      Pi (DeepSeek v4.1 Flash)  <1m  STARTING ││FEED  4 updates                       │
+│    ▸ widget / Tidy the build script                           Codex  <1m  STARTING ││latest: plain-worker: phase: planning │
+│                                                                                    │╰──────────────────────────────────────╯
+│                                                                                    │
+│                                                                                    │
+│                                                                                    │
+│                                                                                    │
+│                                                                                    │
+│                                                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────╯
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│NOTE [codex-fix] i: message firstmate  > Type note; Enter sends                                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit
