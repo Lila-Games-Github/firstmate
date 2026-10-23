@@ -1,0 +1,87 @@
+{
+  "phones": [
+    {
+      "id": "R5CT32HRVNM",
+      "title": "Galaxy S22",
+      "status": "locked"
+    },
+    {
+      "id": "RZ8N71EC9ZB",
+      "title": "Galaxy M31",
+      "status": "busy"
+    },
+    {
+      "id": "RZCX224VH4T",
+      "title": "Galaxy S21 FE",
+      "status": "idle"
+    }
+  ],
+  "test_queue": [
+    {
+      "title": "EDITOR",
+      "status": "section"
+    },
+    {
+      "title": "NEXT: Make the widget spin",
+      "status": "waiting 4m"
+    },
+    {
+      "title": "Galaxy S22",
+      "status": "section"
+    },
+    {
+      "title": "Locked",
+      "status": "locked"
+    },
+    {
+      "title": "NEXT: Fix the gadget",
+      "status": "waiting 3m"
+    },
+    {
+      "title": "Galaxy M31",
+      "status": "section"
+    },
+    {
+      "title": "RUNNING: Make the widget spin",
+      "status": "running 8m"
+    },
+    {
+      "title": "Busy",
+      "status": "busy"
+    },
+    {
+      "title": "Galaxy S21 FE",
+      "status": "section"
+    },
+    {
+      "title": "Idle",
+      "status": "idle"
+    },
+    {
+      "title": "ANY PHONE",
+      "status": "section"
+    },
+    {
+      "title": "NEXT: Fix the gadget",
+      "status": "waiting 2m"
+    }
+  ],
+  "allowance": [
+    {
+      "title": "claude",
+      "status": "70% left · 0m ago"
+    },
+    {
+      "title": "codex",
+      "status": "17% left · 0m ago"
+    },
+    {
+      "title": "openrouter",
+      "status": "27.3 usd · 0m ago"
+    },
+    {
+      "title": "2 hidden",
+      "status": "hidden"
+    }
+  ]
+}
