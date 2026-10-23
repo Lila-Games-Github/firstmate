@@ -1742,6 +1742,7 @@ EOF
   read -r root agent <<EOF
 $tree
 EOF
+  # shellcheck source=/dev/null
   . "$case_dir/procs-in.sh"
   crew_cwd_procs_in "$proj" | grep -qx "$root" \
     || fail "precondition: the pane root should work in the primary checkout"
@@ -1964,6 +1965,7 @@ EOF
   read -r root agent <<EOF
 $tree
 EOF
+  # shellcheck source=/dev/null
   . "$case_dir/procs-in.sh"
 
   # A Treehouse that cannot see the agent reads the slot free until another
