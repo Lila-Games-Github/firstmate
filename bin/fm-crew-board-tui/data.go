@@ -28,6 +28,27 @@ type worker struct {
 	Gone       bool   `json:"gone"`
 }
 
+type runtime struct {
+	Runtime string `json:"runtime"`
+	Model   string `json:"model"`
+	Effort  string `json:"effort"`
+}
+
+func (r runtime) label() string {
+	if r.Model == "" {
+		return r.Runtime
+	}
+	return r.Runtime + " (" + r.Model + ")"
+}
+
+func (r runtime) full() string {
+	text := r.label()
+	if r.Effort != "" {
+		text += ", effort " + r.Effort
+	}
+	return text
+}
+
 type item struct {
 	ID        string `json:"id"`
 	Group     string `json:"-"`
@@ -51,21 +72,22 @@ type backlog struct {
 }
 
 type panels struct {
-	Alerts        []item            `json:"alerts"`
-	FullQuestions []item            `json:"full_questions"`
-	FullBacklog   []item            `json:"full_backlog"`
-	Ready         []item            `json:"ready"`
-	Phones        []item            `json:"phones"`
-	TestQueue     []item            `json:"test_queue"`
-	Landings      []item            `json:"landings"`
-	Builds        []item            `json:"builds"`
-	Routines      []item            `json:"routines"`
-	Bugs          []item            `json:"bugs"`
-	Backlog       backlog           `json:"backlog"`
-	Allowance     []item            `json:"allowance"`
-	WorkerTags    map[string]string `json:"worker_tags"`
-	MergeWaiting  map[string]string `json:"merge_waiting"`
-	CachedAt      string            `json:"cached_at"`
+	Alerts         []item             `json:"alerts"`
+	FullQuestions  []item             `json:"full_questions"`
+	FullBacklog    []item             `json:"full_backlog"`
+	Ready          []item             `json:"ready"`
+	Phones         []item             `json:"phones"`
+	TestQueue      []item             `json:"test_queue"`
+	Landings       []item             `json:"landings"`
+	Builds         []item             `json:"builds"`
+	Routines       []item             `json:"routines"`
+	Bugs           []item             `json:"bugs"`
+	Backlog        backlog            `json:"backlog"`
+	Allowance      []item             `json:"allowance"`
+	WorkerTags     map[string]string  `json:"worker_tags"`
+	WorkerRuntimes map[string]runtime `json:"worker_runtimes"`
+	MergeWaiting   map[string]string  `json:"merge_waiting"`
+	CachedAt       string             `json:"cached_at"`
 }
 
 type board struct {

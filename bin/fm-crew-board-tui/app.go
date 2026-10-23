@@ -209,6 +209,9 @@ func (m *app) rawItems(id string) []item {
 				project = "unknown project"
 			}
 			detail := worker.Note
+			if rt, ok := m.data.Panels.WorkerRuntimes[worker.ID]; ok {
+				detail = "Runtime: " + rt.full() + "\n" + detail
+			}
 			status, group, link := worker.Phase, project, worker.PRURL
 			if url := m.data.Panels.MergeWaiting[worker.ID]; url != "" {
 				status, group, link = mergeWaitingPhase, mergeWaitingGroup, url

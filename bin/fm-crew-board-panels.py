@@ -892,6 +892,74 @@ def worker_tags(snapshot, resources):
     return tags
 
 
+RUNTIME_NAMES = {
+    "claude": "Claude", "codex": "Codex", "pi": "Pi", "pi-signed": "Pi", "omp": "OMP",
+    "opencode": "OpenCode", "grok": "Grok", "kimi": "Kimi", "cursor": "Cursor",
+    "gemini": "Gemini", "muse": "Muse", "rovo": "Rovo", "agy": "Agy",
+}
+
+
+def readable_model(model):
+    """A known model id in plain words; any other id comes back unchanged."""
+    raw = str(model or "").strip()
+    if raw in ("", "-", "default"):
+        return ""
+    name = re.sub(r"\[[^\]]*\]$", "", raw.rsplit("/", 1)[-1]).strip()
+    lower = name.lower()
+    match = re.fullmatch(r"claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?", lower)
+    if match:
+        version = match.group(2) + ("." + match.group(3) if match.group(3) else "")
+        return f"{match.group(1).capitalize()} {version}"
+    if re.fullmatch(r"gpt-[0-9][a-z0-9.]*(?:-[a-z0-9.]+)*", lower):
+        return "-".join(part.upper() if part == "gpt" else part.capitalize()
+                        for part in lower.split("-"))
+    match = re.fullmatch(r"deepseek-(v\d+(?:\.\d+)*)((?:-[a-z0-9]+)*)", lower)
+    if match:
+        rest = [part.capitalize() for part in match.group(2).split("-") if part]
+        return " ".join(["DeepSeek", match.group(1)] + rest)
+    return raw
+
+
+def meta_fields(task_id):
+    fields = {}
+    try:
+        for line in (STATE / f"{task_id}.meta").read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key in ("harness", "model", "effort"):
+                fields[key] = value.strip()
+    except OSError:
+        pass
+    return fields
+
+
+def runtime_entry(harness, model, effort):
+    harness = str(harness or "").strip()
+    if harness in ("", "-", "default"):
+        return None
+    effort = str(effort or "").strip()
+    return {"runtime": RUNTIME_NAMES.get(harness, harness), "model": readable_model(model),
+            "effort": "" if effort in ("-", "default") else effort}
+
+
+def worker_runtimes(snapshot, lanes):
+    """Each worker's runtime, readable model, and effort from its task record or lane record."""
+    runtimes = {}
+    for task in snapshot.get("tasks", []):
+        if not isinstance(task, dict) or not task.get("id"):
+            continue
+        meta = meta_fields(str(task["id"]))
+        entry = runtime_entry(meta.get("harness") or task.get("harness"), meta.get("model"),
+                              meta.get("effort"))
+        if entry:
+            runtimes[str(task["id"])] = entry
+    for lane in lanes:
+        if isinstance(lane, dict) and lane.get("id"):
+            runtimes[str(lane["id"])] = {
+                "runtime": "Playbot", "model": readable_model(lane.get("model")),
+                "effort": str(lane.get("effort") or "")}
+    return runtimes
+
+
 def daily_routines(now):
     rows = []
     today = dt.datetime.fromtimestamp(now).date()
@@ -1453,6 +1521,7 @@ def project(snapshot):
         "playbot_workers": lanes,
         "test_queue": tests,
         "worker_tags": worker_tags(snapshot, resources),
+        "worker_runtimes": worker_runtimes(snapshot, lanes),
         "merge_waiting": merge_waiting(snapshot),
         "landings": landed_today(snapshot) + entries(cache, "landings"),
         "builds": entries(cache, "builds"),

@@ -1256,6 +1256,39 @@ EOF
 }
 
 test_rows_and_phase_time
+test_worker_runtimes_name_harness_and_model() {
+  local home snapshot
+  home=$(make_home worker_runtimes)
+  meta() { printf 'harness=%s\nmodel=%s\neffort=%s\n' "$2" "$3" "$4" > "$home/state/$1.meta"; }
+  meta claude_opus claude claude-opus-5-5 high
+  meta claude_sonnet claude claude-sonnet-5-5 low
+  meta codex_gpt codex gpt-6-sol xhigh
+  meta pi_deepseek pi deepseek-v4.1-flash medium
+  meta pi_prefixed pi openrouter/deepseek/deepseek-v4.1-flash -
+  meta unknown_model claude some-future-model-9 default
+  meta default_model claude default default
+  printf 'harness=codex\n' > "$home/state/no_model.meta"
+  snapshot="$home/snapshot.json"
+  jq -n '{schema: "fm-fleet-snapshot.v1", tasks: [
+    {id: "claude_opus"}, {id: "claude_sonnet"}, {id: "codex_gpt"}, {id: "pi_deepseek"},
+    {id: "pi_prefixed"}, {id: "unknown_model"}, {id: "default_model"}, {id: "no_model"},
+    {id: "no_meta", harness: "pi"}, {id: "nothing"}]}' > "$snapshot"
+  run_panels "$home" "$snapshot" > "$home/panels.json" || fail 'worker runtime projection failed'
+  rt() { jq -r --arg id "$1" '.worker_runtimes[$id] | if . == null then "none" else "\(.runtime)|\(.model)|\(.effort)" end' "$home/panels.json"; }
+  assert_equals 'Claude|Opus 5.5|high' "$(rt claude_opus)" 'claude opus reads in plain words'
+  assert_equals 'Claude|Sonnet 5.5|low' "$(rt claude_sonnet)" 'claude sonnet reads in plain words'
+  assert_equals 'Codex|GPT-6-Sol|xhigh' "$(rt codex_gpt)" 'codex gpt reads in plain words'
+  assert_equals 'Pi|DeepSeek v4.1 Flash|medium' "$(rt pi_deepseek)" 'pi deepseek reads in plain words'
+  assert_equals 'Pi|DeepSeek v4.1 Flash|' "$(rt pi_prefixed)" 'a provider-prefixed id reads the same and a dash effort is dropped'
+  assert_equals 'Claude|some-future-model-9|' "$(rt unknown_model)" 'an unknown model id falls back to the raw id'
+  assert_equals 'Claude||' "$(rt default_model)" 'a default model shows the runtime alone'
+  assert_equals 'Codex||' "$(rt no_model)" 'a missing model field shows the runtime alone'
+  assert_equals 'Pi||' "$(rt no_meta)" 'a task without meta falls back to the snapshot harness'
+  assert_equals 'none' "$(rt nothing)" 'a worker with no recorded runtime has no entry'
+  pass 'worker runtimes name the harness and model in plain words'
+}
+
+
 test_refresh_and_gone
 test_tui_render_and_note
 test_narrow_terminal
@@ -1286,3 +1319,4 @@ test_monitoring_alert_fires_only_when_down
 test_worker_tags_from_live_evidence
 test_worker_tags_name_the_state
 test_worker_tags_flag_pr_waiting_for_merge
+test_worker_runtimes_name_harness_and_model

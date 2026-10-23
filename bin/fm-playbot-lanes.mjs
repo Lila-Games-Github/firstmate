@@ -5185,6 +5185,7 @@ function boardLanes(state) {
       phase: status === "working" ? "working" : parked ? "parked" : delivery,
       phase_since: Number.isFinite(since) ? Math.floor(since / 1000) : Math.floor(Date.now() / 1000),
       note: parked ? "Waiting on you: answer the card in this Playbot chat" : `Playbot lane ${delivery}`,
+      model: thread.execution_model ?? null, effort: thread.execution_reasoning_level ?? null,
       pr_url: parked ? chat : null, endpoint: "playbot", gone: false, left_at: null,
     });
   }
