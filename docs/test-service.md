@@ -3,7 +3,7 @@
 `bin/fm-test-service.py` runs submitted tests after the submitting worker exits.
 It keeps its SQLite request database, independent Git copies, logs, result records, and `status.json` under `~/.local/state/firstmate-test-service/`.
 `FM_TEST_SERVICE_STATE` can select a different persistent directory for a separate instance or a test.
-The status file contains queue order, the running request, per-request and per-step state, wait time, run time, tested SHA, and failure summary for the crew board.
+The status file contains queue order, `running_requests` and `waiting_requests` arrays with task, SHA, state, start time, and elapsed times, plus per-request and per-step detail for the crew board.
 
 Install the user unit from the checked-out code root with `bin/fm-test-service.py install-unit`, then run `systemctl --user daemon-reload` and `systemctl --user enable --now fm-test-service.service`.
 The generated unit runs `serve`, restarts it after a failure, and stops its process group on shutdown.
@@ -12,12 +12,15 @@ The service keeps a private copy of each submitted commit so removing a worker's
 
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
 The file names the suite and device executable argv arrays relative to the tested checkout, the ordered phone serials, named scenario argument arrays, and the landing branch.
+`max_concurrent` limits active requests for that project; it defaults to four for FrogPile and one for other projects, and may be set from one to sixteen.
 An optional `prepare` argv runs once in the clean detached copy before either suite or phone step; it must leave the tracked tree clean.
 Retests read the submitting worktree's common Git storage by default, so a disposable linked worktree can disappear after submission.
 An optional `landing_repo` absolute path, with `{fm_home}` expansion, selects a different durable local clone.
 Use `{serial}` in the device argv where the chosen serial belongs.
-The configured commands must be the project's existing shared queue entry points when it has them.
-The service invokes FrogPile's suite and phone scripts, which own their shared tickets and locks; it does not take a competing lock or stop the adb server.
+The phone command must use the project's shared phone queue entry point when it has one.
+FrogPile's suite configuration uses the Godot command from `run_suite.sh` with `FROGPILE_SUITE_LOCK_HELD=1`, an isolated `{user_data}` directory per request, a 300-second no-output watchdog, the script-error guard, and `suite_verdict.py` over that request's log.
+The service enforces FrogPile's four-request limit itself while the project's `run_suite.sh` still holds its serial queue for workers using that entry point; this is the approved parallel-suite interim arrangement until the queue follow-up lands.
+The service does not take a raw flock or stop the adb server.
 The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
 
 For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json`.
@@ -32,7 +35,7 @@ For a dispatched FrogPile ship task, use the exact `data/<task-id>/suite.receipt
 ```sh
 task_id=frogpile-example
 sha=$(git rev-parse HEAD)
-request=$(bin/fm-test-service.py submit frogpile "$PWD" "$sha" --suite --device-gate any --receipt "$FM_HOME/data/$task_id/suite.receipt")
+request=$(bin/fm-test-service.py submit frogpile "$PWD" "$sha" --task "$task_id" --suite --device-gate any --receipt "$FM_HOME/data/$task_id/suite.receipt")
 bin/fm-test-service.py wait "$request"
 ```
 

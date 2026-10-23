@@ -884,7 +884,7 @@ case "$REPO" in
     TEST_SERVICE_RECEIPT_ARG=$(shell_quote "$TEST_SERVICE_RECEIPT")
     TEST_SERVICE_GUIDANCE="# FrogPile test gate
 When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit and wait through the Firstmate test service.
-Use \`$FM_ROOT/bin/fm-test-service.py submit frogpile \"\$PWD\" \"\$(git rev-parse HEAD)\" --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`, then \`$FM_ROOT/bin/fm-test-service.py wait <request-id>\`.
+Use \`$FM_ROOT/bin/fm-test-service.py submit frogpile \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`, then \`$FM_ROOT/bin/fm-test-service.py wait <request-id>\`.
 On success, the service automatically writes \`$TEST_SERVICE_RECEIPT\` in exactly this three-line form for the tested full SHA:
 \`\`\`text
 schema=fm-full-suite.v1

@@ -43,10 +43,29 @@ echo "prepare-v1" >> "$EVENTS"
 PREPARE
 cat > suite.sh <<'SUITE'
 #!/usr/bin/env bash
-echo "suite-start-v1" >> "$EVENTS"
-sleep "${SUITE_SLEEP:-2}"
-echo "suite-end-v1" >> "$EVENTS"
+if [ -n "${TEST_USER_DATA:-}" ]; then
+  [ "${FROGPILE_SUITE_LOCK_HELD:-}" = 1 ]
+  mkdir -p "$TEST_USER_DATA"
+  echo "parallel-start:$TEST_USER_DATA" >> "$EVENTS"
+else
+  echo "suite-start-v1" >> "$EVENTS"
+fi
+sleep "${PARALLEL_SUITE_SLEEP:-${SUITE_SLEEP:-2}}"
+if [ -n "${TEST_USER_DATA:-}" ]; then
+  echo "parallel-end:$TEST_USER_DATA" >> "$EVENTS"
+else
+  echo "suite-end-v1" >> "$EVENTS"
+fi
+echo suite-end-v1
 SUITE
+cat > verdict.py <<'VERDICT'
+from pathlib import Path
+import sys
+if 'suite-end-v1' not in Path(sys.argv[1]).read_text():
+    print('FAIL: suite verdict missing')
+    raise SystemExit(1)
+print('suite verdict accepted')
+VERDICT
 cat > phone.sh <<'PHONE'
 #!/usr/bin/env bash
 serial=$2
@@ -211,4 +230,51 @@ PY
   sleep .2
 done
 [ "$state" = conflict ]
-echo 'ok - test service ordering, pinning, restart, records, retest, cancel, and phone unlock'
+# Four clean copies run their full suites at once; the fifth waits for a slot.
+cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
+{"prepare":["prepare.sh"],"suite":["suite.sh"],"parallel_suite":["suite.sh"],"parallel_suite_env":{"FROGPILE_SUITE_LOCK_HELD":"1","TEST_USER_DATA":"{user_data}","PARALLEL_SUITE_SLEEP":"7"},"parallel_suite_error_pattern":"(?m)^SCRIPT ERROR:","parallel_suite_verdict":"verdict.py","max_concurrent":4,"device":["phone.sh","--serial","{serial}"],"phones":["S22","S21"],"landing_branch":"main"}
+JSON
+cd "$tmp/project"
+parallel_ids=()
+for n in 1 2 3 4 5; do
+  parallel_ids+=("$($svc submit fake "$PWD" "$sha1" --task "parallel-$n" --suite)")
+done
+for i in $(seq 1 300); do
+  if python3 - "$FM_TEST_SERVICE_STATE/status.json" "${parallel_ids[4]}" "$sha1" 2>/dev/null <<'PY'
+import json,sys
+status=json.load(open(sys.argv[1]))
+running=status['running_requests']
+waiting=status['waiting_requests']
+assert len(running)==4
+assert {r['task'] for r in running}=={f'parallel-{n}' for n in range(1,5)}
+assert all(r['sha']==sys.argv[3] and r['started'] and r['run_seconds']>=0 for r in running)
+assert any(r['id']==sys.argv[2] and r['task']=='parallel-5' and r['state']=='queued' for r in waiting)
+PY
+  then break; fi
+  sleep .05
+done
+[ "$i" -lt 300 ]
+for id in "${parallel_ids[@]}"; do
+  $svc wait "$id" | grep -q "^passed $sha1"
+done
+python3 - "$EVENTS" <<'PY'
+from pathlib import Path
+import sys
+events=Path(sys.argv[1]).read_text().splitlines()
+starts=[(i,e.split(':',1)[1]) for i,e in enumerate(events) if e.startswith('parallel-start:')]
+ends=[i for i,e in enumerate(events) if e.startswith('parallel-end:')]
+assert len(starts)==len(ends)==5
+assert len({path for _,path in starts})==5
+assert starts[3][0] < ends[0] < starts[4][0]
+PY
+# A zero-exit engine script error still fails the parallel suite and writes a failure record.
+cat > suite.sh <<'SCRIPT_ERROR'
+#!/usr/bin/env bash
+echo 'SCRIPT ERROR: fake parse failure'
+SCRIPT_ERROR
+git add suite.sh && git commit -qm v3
+sha3=$(git rev-parse HEAD)
+script_error=$($svc submit fake "$PWD" "$sha3" --task parallel-error --suite)
+$svc wait "$script_error" > "$tmp/script-error.out" && exit 1 || true
+rg -q 'SCRIPT ERROR: fake parse failure' "$FM_TEST_SERVICE_STATE/results/$script_error/$sha3.failure.json"
+echo 'ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites'

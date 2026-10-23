@@ -1670,6 +1670,7 @@ import sys
 brief = Path(sys.argv[1]).read_text()
 receipt = sys.argv[2]
 assert f"--receipt '{receipt}'" in brief
+assert "--task 'frogpile-receipt'" in brief
 assert f"automatically writes `{receipt}`" in brief
 assert "schema=fm-full-suite.v1\nsha=<full tested SHA>\nfailures=0\n" in brief
 assert "--device-gate any" in brief

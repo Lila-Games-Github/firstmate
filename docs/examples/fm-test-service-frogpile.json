@@ -10,6 +10,22 @@
   "suite": [
     "prototype-game/tests/run_suite.sh"
   ],
+  "max_concurrent": 4,
+  "parallel_suite": [
+    "scripts/godot-automation.sh",
+    "--headless",
+    "--path",
+    "prototype-game",
+    "-s",
+    "tests/run_tests.gd"
+  ],
+  "parallel_suite_env": {
+    "FROGPILE_SUITE_LOCK_HELD": "1",
+    "FROGPILE_AUTOMATION_DATA_DIR": "{user_data}"
+  },
+  "parallel_suite_error_pattern": "(?m)^\\s*SCRIPT ERROR:",
+  "parallel_suite_verdict": "prototype-game/tests/suite_verdict.py",
+  "parallel_suite_watchdog_seconds": 300,
   "device": [
     "prototype-game/tests/e2e/run_device_flow.sh",
     "--serial",

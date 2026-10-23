@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Firstmate test service: durable CLI and user-service worker.
 
-Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--suite] [--device-gate SERIAL|any]
+Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--device-gate SERIAL|any]
        [--scenario NAME]... [--harness PATH]... [--receipt PATH] [--retest-on-move]
        fm-test-service.py serve | status [--json] | wait ID | cancel ID
        fm-test-service.py install-unit
@@ -48,9 +48,28 @@ def config(project):
         raise ValueError("configuration needs phones and landing_branch")
     if "any_device" in data and (not isinstance(data["any_device"], list) or not isinstance(data.get("any_phones"), list)):
         raise ValueError("any_device requires any_phones and argv arrays")
+    limit = data.get("max_concurrent", 4 if project.lower() == "frogpile" else 1)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 16:
+        raise ValueError("max_concurrent must be an integer from 1 to 16")
+    data["max_concurrent"] = limit
+    if "parallel_suite" in data:
+        if not isinstance(data["parallel_suite"], list) or not isinstance(data.get("parallel_suite_env"), dict):
+            raise ValueError("parallel_suite needs command and environment configuration")
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in data["parallel_suite_env"].items()):
+            raise ValueError("parallel_suite_env must map strings to strings")
+        if "parallel_suite_verdict" in data and (not isinstance(data["parallel_suite_verdict"], str) or Path(data["parallel_suite_verdict"]).is_absolute() or ".." in Path(data["parallel_suite_verdict"]).parts):
+            raise ValueError("parallel_suite_verdict must be a relative path")
+        if "parallel_suite_error_pattern" in data:
+            if not isinstance(data["parallel_suite_error_pattern"], str):
+                raise ValueError("parallel_suite_error_pattern must be a regular expression")
+            re.compile(data["parallel_suite_error_pattern"])
+        watchdog = data.get("parallel_suite_watchdog_seconds", 300)
+        if isinstance(watchdog, bool) or not isinstance(watchdog, int) or watchdog < 1:
+            raise ValueError("parallel_suite_watchdog_seconds must be positive")
+        data["parallel_suite_watchdog_seconds"] = watchdog
     if "landing_repo" in data:
         data["landing_repo"] = data["landing_repo"].replace("{fm_home}", str(HOME))
-    for name in ("prepare", "suite", "device", "any_device"):
+    for name in ("prepare", "suite", "parallel_suite", "device", "any_device"):
         if name in data and (not data[name] or Path(data[name][0]).is_absolute() or ".." in Path(data[name][0]).parts):
             raise ValueError(name + " executable must be relative to the tested checkout")
     return data
@@ -98,12 +117,16 @@ def snapshot(db):
         now = time.time()
         for r in rows:
             r["options"] = json.loads(r["options"])
+            r["task"] = r["options"].get("task") or (Path(r["options"]["receipt"]).parent.name if r["options"].get("receipt") else Path(r["source"]).name)
             r["wait_seconds"] = max(0, (r["started"] or now) - r["queued_at"])
             r["run_seconds"] = max(0, (r["finished"] or now) - r["started"]) if r["started"] else 0
             r["steps"] = [dict(step) for step in db.execute("SELECT name,state,started,finished,exit_code FROM steps WHERE request_id=? AND generation=? ORDER BY started,name", (r["id"], r["generation"]))]
+        summary = lambda r: {key: r[key] for key in ("id", "task", "project", "sha", "state", "submitted", "queued_at", "started", "wait_seconds", "run_seconds")}
         data = {"schema": "fm-test-service.v1", "updated": now,
                 "queue": [r["id"] for r in rows if r["state"] in ("preparing", "queued")],
                 "running": next((r["id"] for r in rows if r["state"] == "running"), None),
+                "running_requests": [summary(r) for r in rows if r["state"] == "running"],
+                "waiting_requests": [summary(r) for r in rows if r["state"] in ("preparing", "queued")],
                 "requests": rows}
         atomic_write(STATUS, json.dumps(data, indent=2) + "\n")
         return data
@@ -126,6 +149,8 @@ def submit(args):
         raise ValueError("a full-suite receipt requires --suite")
     if args.scenario and not args.device_gate:
         raise ValueError("scenarios require --device-gate")
+    if args.task and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.task):
+        raise ValueError("invalid task name")
     source = Path(args.worktree).resolve()
     top = run(["git", "-C", str(source), "rev-parse", "--show-toplevel"])
     if top.returncode or Path(top.stdout.strip()).resolve() != source:
@@ -151,7 +176,7 @@ def submit(args):
     branch_source = str((source / common.stdout.strip()).resolve())
     opts = {"suite": args.suite, "device_gate": args.device_gate, "scenarios": args.scenario,
             "harnesses": args.harness, "receipt": str(Path(args.receipt).resolve()) if args.receipt else None,
-            "retest_on_move": args.retest_on_move, "branch_source": branch_source}
+            "retest_on_move": args.retest_on_move, "branch_source": branch_source, "task": args.task}
     db = connection()
     rid = uuid.uuid4().hex[:16]
     repo = ROOT / "repos" / rid
@@ -277,12 +302,29 @@ def execute(db, row):
             return name, 127, "command missing or not executable: " + argv[0]
         log_path = ROOT / "logs" / (rid + "-" + str(row["generation"]) + "-" + re.sub(r"[^A-Za-z0-9_-]", "_", name) + ".log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        parallel_suite = name == "suite" and "parallel_suite" in cfg
+        env = os.environ.copy()
+        if parallel_suite:
+            user_data = ROOT / "user-data" / rid / str(row["generation"]) / "suite"
+            for key, value in cfg["parallel_suite_env"].items():
+                env[key] = value.replace("{user_data}", str(user_data))
+        watchdog = cfg["parallel_suite_watchdog_seconds"] if parallel_suite else None
+        last_size = -1
+        last_output = time.monotonic()
+        timed_out = False
         with log_path.open("wb") as log:
-            proc = subprocess.Popen(argv, cwd=work, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc = subprocess.Popen(argv, cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(proc)
             while proc.poll() is None:
+                if watchdog:
+                    size = log_path.stat().st_size
+                    if size != last_size:
+                        last_size = size
+                        last_output = time.monotonic()
+                    elif time.monotonic() - last_output >= watchdog:
+                        timed_out = True
                 cancelled = watch_db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]
-                if cancelled or STOP:
+                if cancelled or STOP or timed_out:
                     try:
                         os.killpg(proc.pid, signal.SIGTERM)
                     except ProcessLookupError:
@@ -292,9 +334,30 @@ def execute(db, row):
                     except subprocess.TimeoutExpired:
                         os.killpg(proc.pid, signal.SIGKILL)
                 time.sleep(.1)
-        step_state(watch_db, rid, row["generation"], name, "passed" if proc.returncode == 0 else "failed", proc.returncode)
+        code = 124 if timed_out else proc.returncode
+        output = log_path.read_text(errors="replace")
+        extra = ""
+        if timed_out:
+            extra = "\nFAIL: suite produced no output for " + str(watchdog) + " seconds\n"
+        if parallel_suite and code == 0:
+            if re.search(cfg.get("parallel_suite_error_pattern", r"(?m)^\s*SCRIPT ERROR:"), output):
+                code = 1
+            elif cfg.get("parallel_suite_verdict"):
+                verdict = (work / cfg["parallel_suite_verdict"]).resolve()
+                if os.path.commonpath((str(work), str(verdict))) != str(work) or not verdict.is_file():
+                    code = 127
+                    extra = "\nFAIL: suite verdict script is missing\n"
+                else:
+                    checked = run([sys.executable, str(verdict), str(log_path)], cwd=work)
+                    code = checked.returncode
+                    extra = "\n" + checked.stdout + checked.stderr
+        if extra:
+            with log_path.open("a") as log:
+                log.write(extra)
+            output += extra
+        step_state(watch_db, rid, row["generation"], name, "passed" if code == 0 else "failed", code)
         watch_db.close()
-        return name, proc.returncode, log_path.read_text(errors="replace")
+        return name, code, output
     try:
         if cfg.get("prepare"):
             _name, code, log = step("prepare", expand(cfg["prepare"]))
@@ -323,7 +386,7 @@ def execute(db, row):
             step_state(db, rid, row["generation"], "phone-prep", "passed", 0)
         steps = []
         if opts["suite"]:
-            steps.append(("suite", expand(cfg["suite"])))
+            steps.append(("suite", expand(cfg.get("parallel_suite", cfg["suite"]))))
         if opts["device_gate"]:
             command = expand(cfg["any_device"] if serial == "any" else cfg["device"], serial)
             for scenario in opts["scenarios"]:
@@ -353,6 +416,8 @@ def execute(db, row):
     for name, code, log in results:
         if code:
             return "failed", first_error(log, code, name), work
+    if run(["git", "-C", str(work), "status", "--porcelain"]).stdout.strip():
+        return "failed", "test copy changed during test", work
     return "passed", None, work
 
 
@@ -476,27 +541,47 @@ def serve():
         tick_db.close()
     threading.Thread(target=publish_time, name="test-service-status", daemon=True).start()
     last_retest = 0
+    active = {}
+    def process_request(row):
+        worker_db = connection()
+        try:
+            try:
+                state, error, _ = execute(worker_db, row)
+            except Exception as exc:
+                state, error = "failed", "service error: " + str(exc)
+            if not STOP:
+                complete(worker_db, row, state, error)
+        finally:
+            worker_db.close()
     while not STOP:
-        row = db.execute("SELECT * FROM requests WHERE state IN ('preparing','queued') ORDER BY queued_at,seq LIMIT 1").fetchone()
-        if row and row["state"] == "queued":
+        for rid, (thread, _project) in list(active.items()):
+            if not thread.is_alive():
+                thread.join()
+                del active[rid]
+        for row in db.execute("SELECT * FROM requests WHERE state IN ('preparing','queued') ORDER BY queued_at,seq").fetchall():
+            if row["state"] == "preparing":
+                break
             if row["cancel_requested"]:
                 complete(db, row, "cancelled", "cancelled before start")
                 continue
-            db.execute("UPDATE requests SET state='running',started=? WHERE id=?", (time.time(), row["id"]))
+            limit = config(row["project"])["max_concurrent"]
+            in_project = sum(1 for rid in active if active[rid][1] == row["project"])
+            if in_project >= limit:
+                continue
+            updated = db.execute("UPDATE requests SET state='running',started=? WHERE id=? AND state='queued' AND cancel_requested=0", (time.time(), row["id"]))
+            if updated.rowcount != 1:
+                continue
             snapshot(db)
-            try:
-                state, error, _ = execute(db, row)
-            except Exception as exc:
-                state, error = "failed", "service error: " + str(exc)
-            if STOP:
-                snapshot(db)
-                break
-            complete(db, row, state, error)
-            continue
+            thread = threading.Thread(target=process_request, args=(row,), name="test-" + row["id"])
+            active[row["id"]] = (thread, row["project"])
+            thread.start()
         if time.time() - last_retest > 5:
             retest_moved(db)
             last_retest = time.time()
         time.sleep(.2)
+    for thread, _project in active.values():
+        thread.join()
+    snapshot(db)
 
 
 def main():
@@ -504,6 +589,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("submit")
     s.add_argument("project"); s.add_argument("worktree"); s.add_argument("sha")
+    s.add_argument("--task")
     s.add_argument("--suite", action="store_true")
     s.add_argument("--device-gate")
     s.add_argument("--scenario", action="append", default=[])
