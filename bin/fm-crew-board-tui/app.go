@@ -186,7 +186,11 @@ func (m *app) rawItems(id string) []item {
 				order[project] = len(order)
 			}
 		}
+		waiting := func(w worker) bool { return m.data.Panels.MergeWaiting[w.ID] != "" }
 		sort.SliceStable(workers, func(i, j int) bool {
+			if waiting(workers[i]) != waiting(workers[j]) {
+				return waiting(workers[i])
+			}
 			left, right := workers[i].Project, workers[j].Project
 			if left == "" {
 				left = "unknown project"
@@ -203,6 +207,13 @@ func (m *app) rawItems(id string) []item {
 				project = "unknown project"
 			}
 			detail := worker.Note
+			status, group, link := worker.Phase, project, worker.PRURL
+			if url := m.data.Panels.MergeWaiting[worker.ID]; url != "" {
+				status, group, link = mergeWaitingPhase, mergeWaitingGroup, url
+				if worker.PRURL == "" {
+					worker.PRURL = url
+				}
+			}
 			if worker.PRURL != "" {
 				label := "PR: "
 				if worker.Kind == "playbot" {
@@ -210,13 +221,18 @@ func (m *app) rawItems(id string) []item {
 				}
 				detail += "\n" + label + worker.PRURL
 			}
-			rows = append(rows, item{ID: worker.ID, Group: project, Title: project + " / " + worker.Title,
-				Detail: strings.TrimSpace(detail), Status: worker.Phase, Link: worker.PRURL})
+			rows = append(rows, item{ID: worker.ID, Group: group, Title: project + " / " + worker.Title,
+				Detail: strings.TrimSpace(detail), Status: status, Link: link})
 		}
 		return rows
 	}
 	return nil
 }
+
+const (
+	mergeWaitingPhase = "pr-ready"
+	mergeWaitingGroup = "PR ready to merge"
+)
 
 func (m *app) items(id string) []item {
 	rows := m.rawItems(id)

@@ -13,3 +13,4 @@ __pycache__/
 config/
 
 .tools/
+/bin/fm-crew-board-tui/fm-crew-board-tui

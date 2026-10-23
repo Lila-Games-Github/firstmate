@@ -18,6 +18,7 @@ var (
 	red        = lipgloss.Color("#FF717D")
 	muted      = lipgloss.Color("#9AA8A5")
 	white      = lipgloss.Color("#E6F2ED")
+	magenta    = lipgloss.Color("#FF8CF0")
 	background = lipgloss.Color("#080D16")
 )
 
@@ -41,6 +42,8 @@ func phaseColor(phase string) lipgloss.Style {
 		color = red
 	case "parked":
 		color = yellow
+	case mergeWaitingPhase:
+		color = magenta
 	case "unavailable", "auth_required", "idle", "not yet today":
 		color = muted
 	case "due now":
