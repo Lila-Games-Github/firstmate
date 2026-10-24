@@ -2514,13 +2514,19 @@ rm -f "$FIXTURE_ROOT/workspace-roots-delay-ms" "$FIXTURE_ROOT/workspace-vanishes
   || fail "the fixture never managed to withdraw the created workspace: $(cat "$FIXTURE_ROOT/deferred-write-failure")"
 OUT="$out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" ORPHAN_FILE="$FIXTURE_ROOT/settle-vanish-orphan.json" node --no-warnings <<'NODE' || fail "a re-read that failed to resolve lost the wait and its recovery"
 const fs = require('node:fs');
-const message = JSON.parse(process.env.OUT).error?.message ?? '';
-const match = /^Workspace (\S+) and chat (\S+) were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in [^:]+: \1\. Dispatch re-read it over (\d+)ms across (\d+) completed read\(s\) and refused on that reading\. Both still exist: once workspace \1 reads fresh, deliver this task with send_message against chat \2 rather than dispatching again\.$/.exec(message);
-if (!match) process.exit(1);
-if (Number(match[3]) < 100 || Number(match[4]) < 1) process.exit(1);
+const response = JSON.parse(process.env.OUT);
+const message = response.error?.message ?? '';
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
-if (calls.some(call => call.channel === 'threads:send')) process.exit(1);
-if (calls.some(call => call.channel === 'workspace:delete' || call.channel === 'threads:archiveThread')) process.exit(1);
+const evidence = () => `error=${JSON.stringify(response.error ?? null)}; completedReads=${match?.[4] ?? 'unavailable'}; waitedMs=${match?.[3] ?? 'unavailable'}; ipcCalls=${JSON.stringify(calls)}`;
+const reject = (condition) => { console.error(`${condition}: ${evidence()}`); process.exit(1); };
+const match = /^Workspace (\S+) and chat (\S+) were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in [^:]+: \1\. Dispatch re-read it over (\d+)ms across (\d+) completed read\(s\) and refused on that reading\. Both still exist: once workspace \1 reads fresh, deliver this task with send_message against chat \2 rather than dispatching again\.$/.exec(message);
+if (!match) reject('vanished workspace refusal did not include the expected recovery');
+if (Number(match[3]) < 100) reject('vanished workspace refusal reported too little wait time');
+if (Number(match[4]) < 1) reject('vanished workspace refusal reported no completed reads');
+const sent = calls.filter(call => call.channel === 'threads:send');
+if (sent.length) reject(`vanished workspace reached threads:send: ${JSON.stringify(sent)}`);
+const deleted = calls.filter(call => call.channel === 'workspace:delete' || call.channel === 'threads:archiveThread');
+if (deleted.length) reject(`vanished workspace reached deletion IPC: ${JSON.stringify(deleted)}`);
 fs.writeFileSync(process.env.ORPHAN_FILE, JSON.stringify({ workspace: match[1], thread: match[2] }));
 NODE
 FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "the withdrawn workspace's chat was not left behind for recovery"
@@ -8385,6 +8391,7 @@ for _ in $(seq 1 150); do
   kill -0 "$publish_two_pid" 2>/dev/null || break
   sleep 0.02
 done
+[ ! -s "$publish_two_out" ] || fail "the concurrent listing completed while inventory publication was paused before its receipt"
 touch "$publish_go"
 wait "$publish_one_pid" || fail "the paused inventory listing failed"
 wait "$publish_two_pid" || fail "the concurrent inventory listing failed"
@@ -8399,6 +8406,14 @@ const bytes = fs.readFileSync(receipt.file);
 if (require('node:crypto').createHash('sha256').update(bytes).digest('hex') !== receipt.sha256) process.exit(1);
 NODE
 [ -f "$first_file" ] || fail "the listing that ran last did not keep the inventory its receipt names"
+AUDITED_FILE="$audited_file" node --no-warnings <<'NODE' \
+  || fail "a concurrent listing pruned the inventory retained by the retirement audit"
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const file = process.env.AUDITED_FILE;
+const expected = /^([0-9a-f]{64})-([0-9a-f]{64})\.jsonl$/.exec(require('node:path').basename(file));
+if (!expected || crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') !== expected[2]) process.exit(1);
+NODE
 rm -f "$publish_shim" "$publish_ready" "$publish_go" "$publish_one_out" "$publish_two_out"
 pass "fm-playbot-lanes: concurrent listings cannot leave a receipt naming a pruned inventory"
 
