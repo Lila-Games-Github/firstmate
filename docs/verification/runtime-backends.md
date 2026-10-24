@@ -565,6 +565,49 @@ It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact fl
 It spends no model tokens, so it runs by default wherever Codex is installed.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
 
+## Codex startup update prompt
+
+Verified 2026-10-25 on codex-cli 0.164.0, Fedora Linux, against the flag set `bin/fm-spawn.sh` builds for a codex launch.
+
+Codex draws an interactive `Update available! ... Press enter to continue` prompt at its startup once a newer release than the installed one exists on the machine.
+An unattended worker never answers it, so a host restart that resumed the fleet after a codex upgrade brought every pane back parked on it.
+
+`codex --help` lists no flag for that check, but it is codex's own configuration key, and `codex doctor --json` reports the effective value codex resolves for it:
+
+```sh
+codex doctor --json | jq -r '.checks."updates.status".details."check for update on startup"'
+codex doctor --json -c check_for_update_on_startup=false | jq -r '.checks."updates.status".details."check for update on startup"'
+codex doctor --json -c check_for_update_on_startup=true | jq -r '.checks."updates.status".details."check for update on startup"'
+```
+
+```text
+true
+false
+true
+```
+
+The middle arm is the posture `bin/fm-spawn.sh` launches with, and the outer two are its disconfirming control, so a codex that stopped honoring the key could not pass by reporting a constant.
+The prompt itself was not reproduced, and does not need to be: what the launch depends on is the effective value of that check, which those three arms already differ in.
+
+An unrecognized `-c` key is not an error by itself - codex ignores it silently - so the key is not safe to depend on by name alone.
+`--strict-config` on a subcommand that accepts it is what makes that dependency loud, and it rejected a deliberately unknown key while accepting this one:
+
+```sh
+codex resume 00000000-0000-0000-0000-000000000000 --strict-config -c totally_bogus_field_xyz=true
+codex resume 00000000-0000-0000-0000-000000000000 --strict-config -c check_for_update_on_startup=false
+```
+
+```text
+Error loading config.toml: unknown configuration field `totally_bogus_field_xyz` in -c/--config override
+Error: stdin is not a terminal
+```
+
+The accepted arm stops on the missing terminal instead of on the configuration, which is what marks it as the accepted one.
+
+`tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record: it captures the launch `bin/fm-spawn.sh` actually builds, hands those exact flags to the installed codex, and fails naming the harness and version if the effective update check is on.
+It spends no model tokens.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins that a crewmate and a secondmate launch both carry the override, and `bin/fm-control.sh relaunch` drives that same `bin/fm-spawn.sh` template.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

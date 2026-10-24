@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
-# Live guard for the codex crewmate launch's hook posture.
+# Live guard for the codex crewmate launch flags.
 #
-# The verdict here comes from the installed codex, not from a stub: a stub can
+# The verdicts here come from the installed codex, not from a stub: a stub can
 # only confirm the assumption already written into it, and what this guard
-# protects is exactly a vendor-owned surface. Codex blocks a fresh crewmate
-# launch on an unanswerable "Hooks need review" modal whenever the machine's
-# ~/.codex/hooks.json or a project's .codex/hooks.json carries a hook it has no
-# persisted trust for, so the crewmate launch disables codex's hook layer
-# outright (bin/fm-spawn.sh's launch template owns the flag).
+# protects is exactly a vendor-owned surface.
+#
+# Codex blocks a fresh crewmate launch on an unanswerable "Hooks need review"
+# modal whenever the machine's ~/.codex/hooks.json or a project's
+# .codex/hooks.json carries a hook it has no persisted trust for, so the
+# crewmate launch disables codex's hook layer outright (bin/fm-spawn.sh's launch
+# template owns the flag).
+# Codex likewise draws an interactive "Update available! ... Press enter to
+# continue" prompt at its startup when a newer release exists on the machine,
+# which parks a resumed worker no human is there to answer, so the launch turns
+# the startup update check off the same way.
 #
 # The guard replays the REAL launch flags fm-spawn builds - captured from a
 # spawn driven through a fake pane - against the installed codex and asks codex
-# itself whether hooks ended up disabled. If a codex release renames or drops
-# the feature, the flag becomes a hard "Unknown feature flag" error and this
-# guard fails naming the harness and version instead of letting the modal
-# silently come back.
+# itself for the effective state those flags resolve to. If a codex release
+# renames or drops what they configure, this guard fails naming the harness and
+# version instead of letting the modal come back.
 #
-# It spends no model tokens (`codex features list` resolves configuration only),
-# so it runs by default wherever codex is installed.
+# It spends no model tokens (`codex features list` and `codex doctor --json`
+# resolve configuration only), so it runs by default wherever codex is
+# installed.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -60,6 +66,36 @@ codex_global_flags() {
   printf '%s' "$flags"
 }
 
+# codex_update_check_state <flags>: the value codex itself reports for its
+# startup update check once <flags> are applied, read from the effective
+# configuration `codex doctor --json` describes. Prints nothing when the
+# installed codex does not report that field at all.
+codex_update_check_state() {
+  local flags=$1 report
+  report=$(eval "codex $flags doctor --json" 2>/dev/null) || true
+  printf '%s' "$report" \
+    | jq -r '.checks."updates.status".details."check for update on startup" // empty' 2>/dev/null
+}
+
+test_installed_codex_suppresses_the_update_prompt_for_the_captured_crewmate_launch() {
+  local launch flags armed off
+  launch=$(capture_codex_launch update-prompt --mode no-mistakes --yolo off)
+  flags=$(codex_global_flags "$launch")
+
+  # Disconfirming control first: the same key set the other way must read true,
+  # so a codex that stopped reporting the effective value - or reported a
+  # constant - cannot pass this guard by printing the answer it wants.
+  armed=$(codex_update_check_state "-c check_for_update_on_startup=true")
+  [ "$armed" = true ] \
+    || fail "codex $CODEX_VERSION did not report check_for_update_on_startup=true for an explicit override (got '$armed'), so the startup update check this launch disables can no longer be read and the interactive update prompt may have come back unguarded"
+
+  off=$(codex_update_check_state "$flags")
+  [ "$off" = false ] \
+    || fail "codex $CODEX_VERSION left the startup update check on for firstmate's crewmate launch flags (got '$off'), so a host restart can park a resumed worker on the interactive update prompt"
+
+  printf 'ok - codex %s runs a firstmate crewmate launch with the startup update prompt suppressed\n' "$CODEX_VERSION"
+}
+
 test_installed_codex_disables_hooks_for_the_captured_crewmate_launch() {
   local launch flags state
   launch=$(capture_codex_launch ship --mode no-mistakes --yolo off)
@@ -93,5 +129,6 @@ test_installed_codex_still_reports_the_hook_feature() {
 
 test_installed_codex_still_reports_the_hook_feature
 test_installed_codex_disables_hooks_for_the_captured_crewmate_launch
+test_installed_codex_suppresses_the_update_prompt_for_the_captured_crewmate_launch
 
 echo "# all fm-codex-hook-layer-live-e2e tests passed"
