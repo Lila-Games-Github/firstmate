@@ -1,0 +1,52 @@
+=== f7-configured ===
+10:Final-head health: green
+11-
+12-# Test service gate
+13-When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit and wait through the Firstmate test service.
+14-Use `/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M5QRXEWRJB2EYMTFG335P7H6/bin/fm-test-service.py submit frogpile "$PWD" "$(git rev-parse HEAD)" --task 'f7-configured' --suite --device-gate any --receipt '$FM_HOME/data/f7-configured/suite.receipt'`, then `/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M5QRXEWRJB2EYMTFG335P7H6/bin/fm-test-service.py wait <request-id>`.
+--
+129:# Evidence and access
+130-Before answering a no-mistakes gate, account for its complete outstanding finding set and include every authorized repair in one response; if no gate remains for a known finding, report it to firstmate instead of editing during a run.
+131-For an MCP OAuth sign-in blocker, ask firstmate to have the owner authenticate in this worker session first; a relayed link can expire after five minutes.
+132-FrogPile's `tests/task_evidence/*.log` files are gitignored; when this task requires one, add it with `git add -f` and confirm it appears in `git ls-files` before reporting done.
+133-
+15-On success, the service automatically writes `$FM_HOME/data/f7-configured/suite.receipt` in exactly this three-line form for the tested full SHA:
+16-```text
+17:schema=fm-full-suite.v1
+18-sha=<full tested SHA>
+19-failures=0
+20-```
+21-Add `--scenario <name>` or `--harness <committed-relative-path>` for any scenario or benchmark you wrote.
+22-See `/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M5QRXEWRJB2EYMTFG335P7H6/docs/test-service.md` for the full contract.
+23-
+24-
+25-
+=== f7-unconfigured ===
+10:Final-head health: green
+11-The final-head suite receipt belongs at `$FM_HOME/data/f7-unconfigured/suite.receipt`.
+12-Its sanctioned producer is the Firstmate test service, `/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M5QRXEWRJB2EYMTFG335P7H6/bin/fm-test-service.py`, which writes exactly this three-line form for the full tested head SHA:
+13-```text
+14-schema=fm-full-suite.v1
+--
+126:# Evidence and access
+127-Before answering a no-mistakes gate, account for its complete outstanding finding set and include every authorized repair in one response; if no gate remains for a known finding, report it to firstmate instead of editing during a run.
+128-For an MCP OAuth sign-in blocker, ask firstmate to have the owner authenticate in this worker session first; a relayed link can expire after five minutes.
+129-FrogPile's `tests/task_evidence/*.log` files are gitignored; when this task requires one, add it with `git add -f` and confirm it appears in `git ls-files` before reporting done.
+130-
+12-Its sanctioned producer is the Firstmate test service, `/home/sanchith/.no-mistakes/worktrees/f62841b885f5/01M5QRXEWRJB2EYMTFG335P7H6/bin/fm-test-service.py`, which writes exactly this three-line form for the full tested head SHA:
+13-```text
+14:schema=fm-full-suite.v1
+15-sha=<full tested SHA>
+16-failures=0
+17-```
+18-No test-service project is configured for this repository; ask firstmate to configure one before submitting the final head.
+19-
+20-
+21-
+22-
+=== f7-ordinary ===
+115:# Evidence and access
+116-Before answering a no-mistakes gate, account for its complete outstanding finding set and include every authorized repair in one response; if no gate remains for a known finding, report it to firstmate instead of editing during a run.
+117-For an MCP OAuth sign-in blocker, ask firstmate to have the owner authenticate in this worker session first; a relayed link can expire after five minutes.
+118-FrogPile's `tests/task_evidence/*.log` files are gitignored; when this task requires one, add it with `git add -f` and confirm it appears in `git ls-files` before reporting done.
+119-
