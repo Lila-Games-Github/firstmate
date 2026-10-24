@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Worker-owned local landing train. Never merges, rebases, pushes, or runs tests.
-# Usage: fm-landing-queue.sh <ready|status|receipt|fail> <task-id>
+# Usage: fm-landing-queue.sh <ready|status|receipt|fail|baseline> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--reason <text>]
@@ -10,6 +10,7 @@
 # repository's origin/HEAD, main, or master. All branches must be local refs.
 #
 # ready joins at the back, or updates an active car, with --branch and --head.
+# A head already contained in the landing tip has nothing to land and is refused.
 # After rebasing, repeat ready with --target from status to acknowledge the new
 # base. The target must still be current and an ancestor of the submitted head.
 # status reconciles the whole queue and prints this car as key=value lines:
@@ -26,6 +27,10 @@
 # rejoin. Start a new task id after resolving a failed car. Landed ids also stay
 # terminal. A missing branch whose recorded head is in the landing tip is landed;
 # any other missing branch becomes a failed car on reconciliation.
+# baseline requires --receipt for exactly the live landing tip and records it as
+# that tip's landing-health baseline, under the same lock as fm-merge-local.sh,
+# without moving any ref. It refuses a set conflicting with one already recorded.
+# A queued task id names the car whose needs-baseline wake prompted it.
 #
 # Durable format: data/landing-queue/<hash>/queue is a versioned TSV snapshot,
 # identified by the canonical common Git directory and landing branch. Rows in
@@ -41,8 +46,9 @@
 # Known-red acceptance uses the current landing-health baseline, as the local
 # merge gate does. A red bottom receipt is needs-baseline when the live tip has
 # no recorded baseline, or red-receipt when it names failures outside that
-# baseline; neither demands another suite run on the same head. red-receipt is
-# the worker's to fix on a new head or fail.
+# baseline; neither demands another suite run on the same head. Once firstmate
+# records the baseline, the car becomes ready-to-land or red-receipt.
+# red-receipt is the worker's to fix on a new head or fail.
 # Only ready-to-land (bottom, acceptable receipt, fast-forward of the live tip),
 # needs-baseline, and failed transitions append durable `check: landing-queue`
 # wakes, deduplicated per event. A wake is an event: firstmate rechecks status
@@ -59,7 +65,7 @@ die() { echo "error: $*" >&2; exit 1; }
 [ "$#" -ge 2 ] || { usage >&2; exit 2; }
 ACTION=$1 ID=$2
 shift 2
-case "$ACTION" in ready|status|receipt|fail) ;; *) die "unknown queue command $ACTION" ;; esac
+case "$ACTION" in ready|status|receipt|fail|baseline) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
 PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON=''
@@ -117,10 +123,12 @@ for path in "$DATA" "$DATA/landing-queue" "$DIR"; do
 done
 mkdir -p "$DIR"
 LOCK="$STATE/.landing-queue-$KEY.lock"
-TMP='' WAKE_HELD=0
+HEALTH_LOCK="$STATE/.landing-health-$HEALTH_KEY.lock"
+TMP='' WAKE_HELD=0 HEALTH_HELD=0
 cleanup() {
   trap '' TERM INT HUP
   [ -z "$TMP" ] || rm -f -- "$TMP"
+  [ "$HEALTH_HELD" -eq 0 ] || fm_lock_release "$HEALTH_LOCK" || true
   [ "$WAKE_HELD" -eq 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
   fm_lock_release "$LOCK" || true
 }
@@ -209,6 +217,7 @@ if [ "$ACTION" = ready ]; then
     for ((i=0; i<count; i++)); do
       [ "${branches[i]}" != "$BRANCH" ] || die 'branch already belongs to a queue car'
     done
+    ! git -C "$PROJECT" merge-base --is-ancestor "$HEAD" "$TIP" || die 'nothing to land: head is already in the landing branch'
     found=$count
     ids[count]=$ID branches[count]=$BRANCH heads[count]=$HEAD states[count]=active
     bases[count]=$(git -C "$PROJECT" merge-base "$HEAD" "$TIP") || die 'task and landing branch have no common base'
@@ -277,6 +286,25 @@ case "$ACTION" in
     [ "${states[found]}" != landed ] || die 'cannot fail a landed car'
     states[found]=failed reasons[found]=$REASON
     receipts[found]=- targets[found]=-
+    ;;
+  baseline)
+    [ -n "$RECEIPT" ] || die 'baseline requires --receipt'
+    fm_lock_acquire_wait "$HEALTH_LOCK"
+    HEALTH_HELD=1
+    TMP=$(mktemp "$DIR/.baseline.XXXXXX")
+    cp -- "$RECEIPT" "$TMP" || die 'cannot stage baseline receipt'
+    fm_health_receipt_read "$TMP" "$TIP" || die "baseline receipt must name the landing tip $TIP"
+    supplied_count=$FM_HEALTH_COUNT supplied_set=$FM_HEALTH_SET
+    if fm_health_receipt_read "$DATA/landing-health/$HEALTH_KEY.receipt" "$TIP" >/dev/null 2>&1; then
+      [ "$FM_HEALTH_COUNT" -eq "$supplied_count" ] && [ "$FM_HEALTH_SET" = "$supplied_set" ] \
+        || die "baseline conflicts with the failing set already recorded for $TIP"
+    else
+      fm_health_store "$TMP" "$DATA" "$HEALTH_KEY" || die 'cannot record baseline receipt'
+    fi
+    rm -f -- "$TMP"
+    TMP=
+    fm_lock_release "$HEALTH_LOCK"
+    HEALTH_HELD=0
     ;;
 esac
 assign

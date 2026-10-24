@@ -236,13 +236,39 @@ case "$(wake_payloads)" in
   "check: landing-queue needs-baseline task=a "*"tip=$BASE "*) ;;
   *) fail "unexpected baseline wake: $(wake_payloads)" ;;
 esac
-health_key=$(printf '%s\n%s\n' "$CASE/project" main | git hash-object --stdin)
-mkdir -p "$CASE/home/data/landing-health"
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" \
-  > "$CASE/home/data/landing-health/$health_key.receipt"
-expect_field "$(queue status a)" status ready-to-land
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$(head_of a)" > "$CASE/not-tip.receipt"
+if queue baseline a --receipt "$CASE/not-tip.receipt" > "$CASE/not-tip.out" 2>&1; then fail 'a non-tip baseline was accepted'; fi
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" > "$CASE/tip.receipt"
+out=$(queue baseline a --receipt "$CASE/tip.receipt")
+expect_field "$out" status ready-to-land
+[ "$(git -C "$CASE/project" rev-parse main)" = "$BASE" ] || fail 'recording a baseline moved the landing branch'
 [ "$(wake_count)" = 2 ] || fail 'recorded baseline did not ring readiness'
-pass 'a red receipt on an unrecorded red tip wakes firstmate once instead of demanding reruns'
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$BASE" > "$CASE/conflict.receipt"
+if queue baseline a --receipt "$CASE/conflict.receipt" > "$CASE/conflict.out" 2>&1; then fail 'a conflicting baseline was accepted'; fi
+expect_field "$(queue status a)" status ready-to-land
+pass 'a red receipt on an unrecorded red tip wakes firstmate once and resolves from a recorded tip baseline'
+
+make_case baseline-regression
+car a main; join a >/dev/null; prepare a
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=2\nfailure=known-red\nfailure=new-red\n' "$(head_of a)" > "$CASE/red.receipt"
+expect_field "$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")" status needs-baseline
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" > "$CASE/tip.receipt"
+out=$(queue baseline a --receipt "$CASE/tip.receipt")
+expect_field "$out" status red-receipt
+expect_field "$out" reason 'receipt names failures outside the landing-health baseline'
+git -C "$CASE/a" commit -qm fix --allow-empty
+expect_field "$(queue status a)" status needs-final
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$(head_of a)" > "$CASE/fixed.receipt"
+out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/fixed.receipt")
+expect_field "$out" status ready-to-land
+[ "$(wake_count)" = 2 ] || fail 'expected one baseline wake and one readiness wake'
+pass 'a regression found after recording a missing baseline stays with its worker under the same task id'
+
+make_case empty-car
+git -C "$CASE/project" branch fm/empty
+if queue ready empty --branch fm/empty --head "$BASE" > "$CASE/empty.out" 2>&1; then fail 'a car with nothing to land was admitted'; fi
+if queue status empty > "$CASE/empty-status.out" 2>&1; then fail 'a refused empty car joined the queue'; fi
+pass 'a head already in the landing tip is refused at admission rather than reported landed'
 
 make_case red-receipt-fix
 car a main; join a >/dev/null; prepare a
