@@ -1,0 +1,18 @@
+### case: passing refusal
+exit=0
+orphan recorded: {"workspace":"ws-1","thread":"chat-1"}
+### case: wrong message
+vanished workspace refusal did not include the expected recovery: error={"code":-32000,"message":"something else"}; completedReads=unavailable; waitedMs=unavailable; ipcCalls=[{"channel":"workspace:create"}]
+exit=1
+### case: too little wait
+vanished workspace refusal reported too little wait time: error={"code":-32000,"message":"Workspace ws-1 and chat chat-1 were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in db: ws-1. Dispatch re-read it over 20ms across 3 completed read(s) and refused on that reading. Both still exist: once workspace ws-1 reads fresh, deliver this task with send_message against chat chat-1 rather than dispatching again."}; completedReads=3; waitedMs=20; ipcCalls=[{"channel":"workspace:create"}]
+exit=1
+### case: no completed reads
+vanished workspace refusal reported no completed reads: error={"code":-32000,"message":"Workspace ws-1 and chat chat-1 were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in db: ws-1. Dispatch re-read it over 250ms across 0 completed read(s) and refused on that reading. Both still exist: once workspace ws-1 reads fresh, deliver this task with send_message against chat chat-1 rather than dispatching again."}; completedReads=0; waitedMs=250; ipcCalls=[{"channel":"workspace:create"}]
+exit=1
+### case: reached threads:send
+vanished workspace reached threads:send: [{"channel":"threads:send","args":["chat-1","hi"]}]: error={"code":-32000,"message":"Workspace ws-1 and chat chat-1 were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in db: ws-1. Dispatch re-read it over 250ms across 3 completed read(s) and refused on that reading. Both still exist: once workspace ws-1 reads fresh, deliver this task with send_message against chat chat-1 rather than dispatching again."}; completedReads=3; waitedMs=250; ipcCalls=[{"channel":"workspace:create"},{"channel":"threads:send","args":["chat-1","hi"]}]
+exit=1
+### case: reached deletion IPC
+vanished workspace reached deletion IPC: [{"channel":"workspace:delete","args":["ws-1"]}]: error={"code":-32000,"message":"Workspace ws-1 and chat chat-1 were created, but dispatch stopped before sending because freshness could not be read: Workspace not found in db: ws-1. Dispatch re-read it over 250ms across 3 completed read(s) and refused on that reading. Both still exist: once workspace ws-1 reads fresh, deliver this task with send_message against chat chat-1 rather than dispatching again."}; completedReads=3; waitedMs=250; ipcCalls=[{"channel":"workspace:create"},{"channel":"workspace:delete","args":["ws-1"]}]
+exit=1
