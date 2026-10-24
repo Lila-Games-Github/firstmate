@@ -30,6 +30,11 @@
     "RZ8N71EC9ZB"
   ],
   "landing_branch": "proto/godot/frog-pile",
+  "repos": [
+    "frogpile",
+    "FrogPile",
+    "ProjectWhite"
+  ],
   "any_phones": [
     "R5CT32HRVNM",
     "RZCX224VH4T"

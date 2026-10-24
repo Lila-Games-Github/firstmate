@@ -13,7 +13,9 @@ The service keeps a private copy of each submitted commit so removing a worker's
 
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
 The file names the suite and device executable argv arrays relative to the tested checkout, the ordered phone serials, named scenario argument arrays, and the landing branch.
-`max_concurrent` limits active requests for that project; it defaults to four for FrogPile and one for other projects, and may be set from one to sixteen.
+`max_concurrent` limits active requests for that project; it defaults to one and may be set from one to sixteen.
+An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
+A ship brief for a repository that matches exactly one configuration names that project in its test-service gate.
 Each suite command must use its project's shared queue entry point, so other callers and service requests share the same capacity and arrival order.
 An optional `prepare` argv runs once in the clean detached copy before either suite or phone step; it must leave the tracked tree clean.
 Retests read the submitting worktree's common Git storage by default, so a disposable linked worktree can disappear after submission.
@@ -21,7 +23,7 @@ An optional `landing_repo` absolute path, with `{fm_home}` expansion, selects a 
 Use `{serial}` in the device argv where the chosen serial belongs.
 The phone command must use the project's shared phone queue entry point when it has one.
 FrogPile's suite configuration calls `prototype-game/tests/run_suite.sh`, whose four-place queue owns suite admission, worktree isolation, the no-output watchdog, and script-error verdicts for service and direct callers alike.
-The service also caps FrogPile at four active requests; these request slots include phone and preparation time.
+The example caps FrogPile at four active requests through `max_concurrent`; these request slots include phone and preparation time.
 The service takes no separate suite or phone lock and does not stop the adb server.
 The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
 
@@ -37,7 +39,7 @@ The M31 remains explicitly addressable for performance requests and is excluded 
 The example is configuration, not a second copy of the suite or phone queue.
 
 A worker can submit the exact committed head, wait for its result, and hand the success record to `fm-merge-local.sh --receipt`:
-For a dispatched FrogPile ship task, use the exact `data/<task-id>/suite.receipt` path printed in its brief; the service creates that receipt on success.
+For a dispatched ship task in a configured project, use the exact `data/<task-id>/suite.receipt` path printed in its brief; the service creates that receipt on success.
 
 ```sh
 task_id=frogpile-example
@@ -54,7 +56,8 @@ Per-step logs stay under the service state directory.
 `--retest-on-move` watches the configured landing branch after the first run.
 When it changes, the service rebases the original commit onto the new tip in a scratch copy and queues the resulting SHA for a fresh run.
 A rebase conflict becomes a `conflict` result and is never guessed through.
-The updated tested SHA and receipt appear in status and results.
+The updated tested SHA and its receipt appear in status and under `results/ID/`.
+A retest of a rebased SHA never writes the `--receipt` path, so that receipt always names the submitted commit.
 The original commit copy remains available for later branch moves.
 
 Before every phone run, the service wakes the selected phone, sets `stay_on_while_plugged_in` to `2` if needed, and checks the keyguard.

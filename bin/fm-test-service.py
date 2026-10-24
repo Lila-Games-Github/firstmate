@@ -4,7 +4,7 @@
 Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--device-gate SERIAL|any]
        [--scenario NAME]... [--harness PATH]... [--receipt PATH] [--retest-on-move]
        fm-test-service.py serve | status [--json] | wait ID | cancel ID
-       fm-test-service.py install-unit
+       fm-test-service.py install-unit | project-for-repo REPO
 Configuration: FM_HOME/config/test-service/PROJECT.json (see docs/test-service.md).
 State: FM_TEST_SERVICE_STATE or ~/.local/state/firstmate-test-service.
 """
@@ -58,7 +58,10 @@ def config(project):
         for phone, peers in equivalents.items()
     ):
         raise ValueError("equivalent_phones must map configured phones to configured alternatives")
-    limit = data.get("max_concurrent", 4 if project.lower() == "frogpile" else 1)
+    if "repos" in data and (not isinstance(data["repos"], list)
+                            or not all(isinstance(repo, str) and repo for repo in data["repos"])):
+        raise ValueError("repos must be a list of repository names")
+    limit = data.get("max_concurrent", 1)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 16:
         raise ValueError("max_concurrent must be an integer from 1 to 16")
     data["max_concurrent"] = limit
@@ -68,6 +71,20 @@ def config(project):
         if name in data and (not data[name] or Path(data[name][0]).is_absolute() or ".." in Path(data[name][0]).parts):
             raise ValueError(name + " executable must be relative to the tested checkout")
     return data
+
+
+def project_for_repo(repo):
+    names = []
+    for path in sorted((HOME / "config/test-service").glob("*.json")):
+        try:
+            data = config(path.stem)
+        except (ValueError, OSError, json.JSONDecodeError):
+            continue
+        if repo == path.stem or repo in data.get("repos", []):
+            names.append(path.stem)
+    if len(names) != 1:
+        return None
+    return names[0]
 
 
 def connection():
@@ -450,7 +467,7 @@ def complete(db, row, state, error):
         receipt = "schema=fm-full-suite.v1\nsha=" + sha + "\nfailures=0\n"
         atomic_write(result_dir / (sha + ".receipt"), receipt)
         path = json.loads(row["options"]).get("receipt")
-        if path:
+        if path and sha == row["original_sha"]:
             atomic_write(path, receipt)
     elif state == "failed":
         atomic_write(result_dir / (sha + ".failure.json"), json.dumps({"sha": sha, "first_failure": error}, indent=2) + "\n")
@@ -620,11 +637,17 @@ def main():
     s = sub.add_parser("wait"); s.add_argument("id")
     s = sub.add_parser("cancel"); s.add_argument("id")
     sub.add_parser("serve"); sub.add_parser("install-unit")
+    s = sub.add_parser("project-for-repo"); s.add_argument("repo")
     args = p.parse_args()
     if args.cmd == "submit":
         submit(args)
     elif args.cmd == "serve":
         serve()
+    elif args.cmd == "project-for-repo":
+        project = project_for_repo(args.repo)
+        if not project:
+            return 1
+        print(project)
     elif args.cmd == "install-unit":
         unit = Path.home() / ".config/systemd/user/fm-test-service.service"
         unit.parent.mkdir(parents=True, exist_ok=True)

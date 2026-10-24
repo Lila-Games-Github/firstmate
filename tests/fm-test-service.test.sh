@@ -265,6 +265,35 @@ PY
   sleep .2
 done
 [ "$state" = conflict ]
+# A passing retest of a rebased SHA keeps the worker's receipt on the submitted commit.
+git clone --no-local -q "$tmp/project" "$tmp/receipt-project"
+cd "$tmp/receipt-project"
+git config user.name Test
+git config user.email test@example.com
+git checkout -q -B main "$sha1"
+git checkout -qb feature
+echo feature > feature.txt
+git add feature.txt && git commit -qm feature
+worker_sha=$(git rev-parse HEAD)
+git checkout -q main
+retested=$($svc submit fake "$PWD" "$worker_sha" --suite --receipt "$tmp/worker.receipt" --retest-on-move)
+$svc wait "$retested" | grep -q "^passed $worker_sha"
+echo landed > landed.txt
+git add landed.txt && git commit -qm landed
+for i in $(seq 1 300); do
+  rebased_sha=$(python3 - "$FM_TEST_SERVICE_STATE/status.json" "$retested" "$worker_sha" 2>/dev/null <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))['requests'] if r['id']==sys.argv[2])
+assert row['generation']==1 and row['state']=='passed' and row['sha']!=sys.argv[3]
+print(row['sha'])
+PY
+) && break
+  sleep .2
+done
+[ -n "$rebased_sha" ]
+[ "$(cat "$tmp/worker.receipt")" = "$(printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0' "$worker_sha")" ]
+[ "$(cat "$FM_TEST_SERVICE_STATE/results/$retested/$rebased_sha.receipt")" = "$(printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0' "$rebased_sha")" ]
+$svc cancel "$retested"
 # Four clean copies run their full suites at once; the fifth waits for a slot.
 cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
 {"prepare":["prepare.sh"],"suite":["suite.sh"],"max_concurrent":4,"device":["phone.sh","--serial","{serial}"],"phones":["S22","S21"],"landing_branch":"main"}
@@ -334,6 +363,29 @@ for id in "${parallel_restart[@]}"; do
   $svc wait "$id" | grep -q "^passed $sha1"
 done
 [ "$(rg -c '^parallel-start:' "$EVENTS")" -ge "$((before_parallel + 8))" ]
+# A project's concurrency comes only from its configuration, never from its name.
+cat > "$FM_HOME/config/test-service/frogpile.json" <<'JSON'
+{"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"phones":["S22"],"landing_branch":"main"}
+JSON
+named=()
+for n in 1 2; do
+  named+=("$($svc submit frogpile "$PWD" "$sha1" --task "named-$n" --suite)")
+done
+for i in $(seq 1 300); do
+  if python3 - "$FM_TEST_SERVICE_STATE/status.json" 2>/dev/null <<'PY'
+import json,sys
+status=json.load(open(sys.argv[1]))
+assert [r['task'] for r in status['running_requests'] if r['project']=='frogpile']==['named-1']
+assert any(r['task']=='named-2' and r['state']=='queued' for r in status['waiting_requests'])
+PY
+  then break; fi
+  sleep .05
+done
+[ "$i" -lt 300 ]
+for id in "${named[@]}"; do
+  $svc wait "$id" | grep -q "^passed $sha1"
+done
+rm "$FM_HOME/config/test-service/frogpile.json"
 # The project suite entry point reports its script error to the service.
 cat > suite.sh <<'SCRIPT_ERROR'
 #!/usr/bin/env bash

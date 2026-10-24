@@ -878,13 +878,13 @@ fi
 WORKSPACE_KIND=crewmate
 [ "$LANE" -eq 0 ] || WORKSPACE_KIND=lane
 TEST_SERVICE_GUIDANCE=
-case "$REPO" in
-  frogpile|FrogPile|ProjectWhite)
-    TEST_SERVICE_RECEIPT="$DATA/$ID/suite.receipt"
-    TEST_SERVICE_RECEIPT_ARG=$(shell_quote "$TEST_SERVICE_RECEIPT")
-    TEST_SERVICE_GUIDANCE="# FrogPile test gate
+TEST_SERVICE_PROJECT=$(FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-test-service.py" project-for-repo "$REPO" 2>/dev/null) || TEST_SERVICE_PROJECT=
+if [ -n "$TEST_SERVICE_PROJECT" ]; then
+  TEST_SERVICE_RECEIPT="$DATA/$ID/suite.receipt"
+  TEST_SERVICE_RECEIPT_ARG=$(shell_quote "$TEST_SERVICE_RECEIPT")
+  TEST_SERVICE_GUIDANCE="# Test service gate
 When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit and wait through the Firstmate test service.
-Use \`$FM_ROOT/bin/fm-test-service.py submit frogpile \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`, then \`$FM_ROOT/bin/fm-test-service.py wait <request-id>\`.
+Use \`$FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`, then \`$FM_ROOT/bin/fm-test-service.py wait <request-id>\`.
 On success, the service automatically writes \`$TEST_SERVICE_RECEIPT\` in exactly this three-line form for the tested full SHA:
 \`\`\`text
 schema=fm-full-suite.v1
@@ -893,8 +893,8 @@ failures=0
 \`\`\`
 Add \`--scenario <name>\` or \`--harness <committed-relative-path>\` for any scenario or benchmark you wrote.
 See \`$FM_ROOT/docs/test-service.md\` for the full contract.
-" ;;
-esac
+"
+fi
 HEALTH_MARKER=
 [ "$GREEN_FINAL_HEAD" -eq 0 ] || HEALTH_MARKER='Final-head health: green'
 OPEN_QUESTIONS_SECTION=
