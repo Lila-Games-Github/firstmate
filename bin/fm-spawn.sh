@@ -1890,11 +1890,28 @@ launch_template() {
   # session-start digest, and cd/arm seatbelts are exactly those project hooks
   # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
   # secondmate launch deliberately keeps hooks on.
+  #
+  # -c check_for_update_on_startup=false suppresses the interactive
+  # "Update available! ... Press enter to continue" prompt codex draws at startup
+  # when a newer release exists on the machine. An unattended worker never
+  # answers an interactive modal, so a codex worker started after a codex upgrade
+  # parks on it with nobody to press enter. The override is per launch and never
+  # written to the operator's ~/.codex/config.toml, exactly like the model and
+  # effort overrides above, so it covers only the codex processes firstmate
+  # itself starts: a fresh spawn of either kind, and bin/fm-control.sh relaunch,
+  # which drives this same template through bin/fm-spawn.sh --relaunch - the path
+  # every codex worker was restarted through after the 2026-10-24 host restart.
+  # A codex session Herdr resumes natively is not launched through this template
+  # and is not covered.
+  # tests/fm-codex-hook-layer-live-e2e.test.sh proves the installed codex still
+  # honors the key through `codex doctor --json`, so a release that renames it
+  # fails that guard naming the harness and version rather than silently
+  # restoring the prompt.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c check_for_update_on_startup=false "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c check_for_update_on_startup=false --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;

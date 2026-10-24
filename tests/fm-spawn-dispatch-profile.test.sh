@@ -530,6 +530,39 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   pass "a codex secondmate keeps the project hook layer its primary session runs on"
 }
 
+# A codex worker started after a codex upgrade parks on codex's interactive
+# "Update available!" prompt unless the launch turns the startup update check
+# off, and an unattended worker never answers a modal. Both kinds carry the
+# override, and bin/fm-control.sh relaunch drives this same launch template
+# through bin/fm-spawn.sh --relaunch, so a relaunch carries it too. A session
+# Herdr resumes natively does not go through this template and is not covered.
+# tests/fm-codex-hook-layer-live-e2e.test.sh proves the installed codex still
+# honors the key; this case pins that fm-spawn actually emits it.
+test_codex_launches_suppress_the_startup_update_prompt() {
+  local rec id smid out status launch sm
+  id=profile-codex-update-z4e
+  smid=profile-codex-update-secondmate-z4f
+  rec=$(make_spawn_case profile-codex-update codex "$id" "$smid")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex crewmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "check_for_update_on_startup=false" \
+    "codex crewmate launch left the startup update prompt armed"
+
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$smid"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$smid" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "codex secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "check_for_update_on_startup=false" \
+    "codex secondmate launch left the startup update prompt armed"
+  pass "codex launches, crewmate and secondmate alike, suppress the startup update prompt"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -1522,6 +1555,7 @@ test_codex_refuses_max_effort_for_model_without_catalog_support
 test_codex_refuses_max_effort_when_catalog_unreadable
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
+test_codex_launches_suppress_the_startup_update_prompt
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

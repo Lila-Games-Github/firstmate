@@ -61,7 +61,38 @@ Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
+## Pane ownership before a steer to a resumed worker
+
+A restored pane is not evidence of which task it hosts.
+Herdr brings each pane back with the session it recorded for that pane, and that mapping has failed across a host restart: a worker's recorded pane came back hosting another task's session, so a firstmate steer meant for one task was delivered into the other and that worker acted on instructions that were never its own.
+
+Ownership is decided by the live agent PROCESS's own working directory, read by `bin/fm-backend.sh`'s `fm_backend_agent_process` as one `<pid>\t<cwd>` line.
+Never use a pane's rendered or recorded path: that belongs to the shell the agent was restored under, not to the agent, and it is exactly what hides this failure.
+`bin/fm-bootstrap.sh`'s `crew_cwd_reconcile` reads the same fact for every live ship and scout at session start and reports each one found outside its recorded copy as a `CREW_CWD:` line, so a worker it already relaunched is back in its copy and needs no second check.
+
+Read it once before the first steer to any worker whose pane was restored by a host restart or resumed since.
+Run this from the firstmate repo root:
+
+```sh
+bash -c '. bin/fm-backend.sh; . bin/fm-slot-record-lib.sh; m=<home>/state/<id>.meta
+  line=$(fm_backend_agent_process "$(fm_backend_of_meta "$m")" "$(fm_backend_target_of_meta "$m")") || exit 0
+  echo "pid=${line%%[[:space:]]*}"
+  echo "observed=$(fm_slot_canonical_dir "${line#*[[:space:]]}")"
+  echo "recorded=$(fm_slot_canonical_dir "$(fm_meta_get "$m" worktree)")"'
+```
+
+Compare only the resolved `observed=` and `recorded=` lines, never the raw process directory against the raw `worktree=` value: `/proc` always reports the physical path, while the record may spell the same copy through a symlinked prefix (Fedora's `/home -> /var/home`), and `fm_slot_canonical_dir` is the same `pwd -P` canonicalisation `crew_cwd_reconcile` applies to both sides.
+
+- `observed=` equal to `recorded=`, or inside it, means the pane is owned: steer normally.
+- Any other resolved directory refuses the steer, and this is not a warning to weigh against a pending instruction.
+  Nothing downstream can tell the message was misrouted, so whatever session the pane actually hosts will act on instructions written for another task.
+  Report the task `blocked:` or `failed:` with the recorded copy, the observed directory, and the pid, then reconcile the pane through `bin/fm-control.sh <task-id> relaunch --note '<progress so far>'` from the escalation ladder below, which returns the task to its own copy.
+- A reading that says nothing - no output, no endpoint, no harness process in the pane, an empty `observed=` or `recorded=`, or a backend with no process view - is not evidence of a foreign session.
+  Continue through the escalation ladder and leave that verdict to the endpoint-liveness owners.
+
 ## Live-endpoint escalation
+
+Prove pane ownership first whenever the pane was restored or resumed (see above); never steer a pane whose live agent is working outside the task's recorded copy.
 
 Escalate in order:
 
