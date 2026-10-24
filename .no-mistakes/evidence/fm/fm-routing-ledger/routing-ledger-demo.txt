@@ -1,0 +1,12 @@
+$ fm-routing-ledger.py record ... (as fm-teardown.sh does at cleanup)
+
+--- data/routing-ledger.jsonl (key fields) ---
+{"task_id":"cheap-task","routing_rule":"rule_cheap","outcome":{"captain_corrected":null,"captain_corrected_reason":"no captain-correction learning candidate captured for this task incarnation","captain_rejected":null,"captain_rejected_reason":"no review-rejection learning candidate captured for this task incarnation","landed":true,"method":"pr-merge"},"cost":{"usd_estimate":0.004,"reason":null},"blocked_count":1,"stale_wake_count":1,"wall_seconds":600.627,"validation_rounds":null,"pipeline_reason":"no-mistakes run records absent"}
+{"task_id":"strong-task","routing_rule":"rule_strong","outcome":{"captain_corrected":null,"captain_corrected_reason":"no captain-correction learning candidate captured for this task incarnation","captain_rejected":null,"captain_rejected_reason":"no review-rejection learning candidate captured for this task incarnation","landed":true,"method":"pr-merge"},"cost":{"usd_estimate":0.00662,"reason":null},"blocked_count":0,"stale_wake_count":0,"wall_seconds":600.712,"validation_rounds":null,"pipeline_reason":"no-mistakes run records absent"}
+{"task_id":"lost-task","routing_rule":"rule_strong","outcome":{"captain_corrected":null,"captain_corrected_reason":"no captain-correction learning candidate captured for this task incarnation","captain_rejected":null,"captain_rejected_reason":"no review-rejection learning candidate captured for this task incarnation","landed":false,"method":"unknown"},"cost":{"usd_estimate":null,"reason":"no matching readable session usage"},"blocked_count":0,"stale_wake_count":0,"wall_seconds":600.797,"validation_rounds":null,"pipeline_reason":"no-mistakes run records absent"}
+
+--- a captain correction captured AFTER teardown for strong-task ---
+$ fm-routing-ledger.py summary --data data --state state --from <week start> --to <week end>
+rule         tasks  landed_share  median_rounds  rejected_or_corrected  cost_coverage  median_cost_usd  cost_per_landing_usd
+rule_cheap   1      1.000         null           0                      1/1            0.004            0.004
+rule_strong  2      0.500         null           1                      1/2            0.00662          null
