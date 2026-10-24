@@ -330,7 +330,7 @@ The queue reads project refs and writes private queue records; firstmate retains
 The queue is independent of the harness and runtime backend: its only supervision output uses the shared durable wake queue, and it does not schedule full-suite slots.
 No-mistakes workers start validation after committing and continue through PR creation and green checks using the shared delivery contract in `bin/fm-dod-lib.sh`.
 The project-agnostic text format is owned by the header of [`bin/fm-landing-health-lib.sh`](../bin/fm-landing-health-lib.sh): `schema=fm-full-suite.v1`, a full `sha=`, a decimal `failures=`, and one stable `failure=` identifier per failure.
-An already-red landing tip can be recorded once with `--base-receipt <file>`; later candidates may retain or fix its named failures, and any new failure refuses the landing.
+An already-red landing tip can be recorded once with `--base-receipt <file>`, or without landing through the queue's `baseline` command; later candidates may retain or fix its named failures, and any new failure refuses the landing.
 The current tip's receipt is stored in this home's `data/landing-health/` by project and branch, and a red landing opens or reuses one make-it-green backlog task for that branch.
 If the merge succeeds but recording its receipt fails, the script exits 3 with a message saying the landing succeeded, so the next landing needs `--base-receipt`.
 At intake, `bin/fm-brief.sh --green-final-head` marks a crewmate ship whose final-head definition of done requires a green full suite; `bin/fm-spawn.sh --base-health-receipt <file>` then requires a zero-failure receipt naming the exact selected landing base before that ship is dispatched.
