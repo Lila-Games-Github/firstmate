@@ -303,7 +303,7 @@ Avoid repeated engine calls while readiness is already known to fail, and keep b
 
 A confirmed readiness verdict certifies engine execution, not a full-suite verdict.
 A project's full suite is a shell-launched runner that reports its own result, so the suite is certified by a shell-capable worker running that project's pinned suite runner and recording the exact commit with the runner's own verdict.
-The engine bridge is not a full-suite entry point: an expected negative-path `push_error` diagnostic a test deliberately triggers can pause a bridge-driven run, and that pause is the bridge stopping at a diagnostic rather than the runner reporting a failure, so a Playbot-executed run must never be reported as the suite's verdict.
+The engine bridge is not a full-suite entry point: an expected negative-path `push_error` diagnostic a test deliberately triggers can pause a bridge-driven run, and that pause is the bridge stopping at a diagnostic rather than the runner reporting a failure, so a bridge-driven run must never be reported as the suite's verdict.
 An engine run still supplies engine-state and authoring evidence on the separate terms above, so keep the two apart instead of asking one to certify the other.
 When a lane's validation is defined by its suite runner's verdict, route that suite to the shell-capable worker that can run it and record the engine assertions left unverified, exactly as an unconfirmed readiness verdict is routed; the routing reason names the suite runner, not a readiness failure.
 
