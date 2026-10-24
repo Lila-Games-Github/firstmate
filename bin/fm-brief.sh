@@ -277,7 +277,7 @@ for a in "$@"; do
     --lane) LANE=1 ;;
     --lane-branch) want_value=lane-branch ;;
     --lane-branch=*) LANE_BRANCH=${a#--lane-branch=}; LANE_BRANCH_SET=1 ;;
-    --landing-branch) want_value=landing-branch ;;
+    --landing-branch) want_value='landing-branch' ;;
     --landing-branch=*) LANDING_BRANCH=${a#--landing-branch=}; LANDING_BRANCH_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then

@@ -729,7 +729,7 @@ for a in "$@"; do
     YOLO=${a#--yolo=}
     YOLO_SET=1
     ;;
-  --landing-branch) want_value=landing-branch ;;
+  --landing-branch) want_value='landing-branch' ;;
   --landing-branch=*)
     LANDING_BRANCH=${a#--landing-branch=}
     LANDING_SET=1
