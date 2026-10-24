@@ -49,11 +49,13 @@
 // Playbot's SQLite state only for discovery, exact session-to-chat identity,
 // and completed-turn deduplication. It never writes either Playbot database
 // directly.
-// get_engine_readiness uses app:metadata and the verified 0.117.0/0.124.0/0.129.0
-// engine:listWorkspaceProjects reader to inspect existing sessions without
-// activation. Dispatch requires confirmed engine readiness unless its caller
-// explicitly declares file-only work with engineDependent=false, and refuses
-// engine-dependent newWorkspace dispatch before creating anything.
+// get_engine_readiness uses app:metadata and the engine:listWorkspaceProjects
+// reader to inspect existing sessions without activation, classifying that
+// channel's contract by capability rather than by an app-version allowlist.
+// Dispatch requires confirmed engine readiness unless its caller explicitly
+// declares file-only work with engineDependent=false, refuses engine-dependent
+// newWorkspace dispatch before creating anything, and refuses a task that
+// requires rendered editor capture when the routed session is headless.
 // addon-guard reads only app:metadata and the packaged bundle.
 // bin/fm-playbot-engine-readiness.mjs owns packaged-bundle discovery mechanics.
 //
@@ -3792,45 +3794,112 @@ async function playbotInvoke(channel, payload) {
   return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`));
 }
 
-// These 0.117.0/0.124.0/0.129.0 readers enumerate detected projects and peek existing sessions;
-// they do not activate a project, resume a chat, or start an engine instance.
-// Unknown versions fail closed before using an unverified engine IPC contract.
-// Playbot updated from 0.128.0 to 0.129.0 during verification, so 0.128.0 remains unverified.
+// These readers enumerate detected projects and peek existing sessions; they do
+// not activate a project, resume a chat, or start an engine instance.
+//
+// The engine snapshot IPC contract is classified by capability, never by an
+// app-version allowlist. An allowlist strands every engine-dependent lane on the
+// next Playbot upgrade until someone extends it, which happened twice in six
+// weeks. Instead the channel is called and its response shape validated, so a
+// version this file has never seen is admitted when the contract it actually
+// exposes matches. A version on the verified list is still reported as
+// version-verified; any other admitted version rests on that probe alone and
+// says so. A missing channel, a changed shape, a failed call, and an unreachable
+// bridge each keep their own status and stay fail-closed.
+const ENGINE_IPC_CHANNEL = "engine:listWorkspaceProjects";
+const ENGINE_IPC_VERIFIED_VERSION_LIST = ["0.117.0", "0.124.0", "0.129.0"];
+const ENGINE_IPC_VERIFIED_VERSIONS = `${ENGINE_IPC_VERIFIED_VERSION_LIST.slice(0, -1).join(", ")}, and ${ENGINE_IPC_VERIFIED_VERSION_LIST.at(-1)}`;
+
+// One probe per readiness read: the first engine:listWorkspaceProjects call both
+// reads the projects and classifies the contract, so the probe costs no extra
+// IPC. Only the first completed attempt decides the status.
+function engineContract(appVersion) {
+  return {
+    channel: ENGINE_IPC_CHANNEL,
+    status: "unprobed",
+    observedVersion: appVersion ?? null,
+    verifiedVersions: ENGINE_IPC_VERIFIED_VERSIONS,
+    detail: "No engine IPC call completed, so the contract this Playbot exposes was not classified.",
+  };
+}
+
+function classifyEngineContract(contract, status, detail) {
+  if (contract.status !== "unprobed") return;
+  contract.status = status;
+  contract.detail = detail;
+}
+
 async function engineReadInvoke(channel, payload) {
   return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`, 2_500), 2_500);
 }
 
 async function engineReadiness(project, workspace) {
-  const app = { version: null, verifiedVersions: "0.117.0, 0.124.0, and 0.129.0" };
+  const app = { version: null, verifiedVersions: ENGINE_IPC_VERIFIED_VERSIONS };
   const errors = [];
+  // app:metadata is the bridge proof, and it is free: it already runs. Reading
+  // persisted Playbot state can succeed while the live DevTools bridge to the
+  // running app is gone, and those two faults have different recoveries, so the
+  // report states the bridge separately from the engine contract.
+  const bridge = { channel: "app:metadata", status: "unreachable", detail: "Playbot's own DevTools bridge was not reached, so no live Playbot or engine state could be read." };
   try {
     const metadata = await engineReadInvoke("app:metadata", undefined);
     if (typeof metadata?.version === "string") app.version = metadata.version.trim();
-  } catch (error) { errors.push({ source: "app:metadata", message: error.message }); }
-  const bundle = engineBundle(app.version);
-  const detected = [];
-  if (!["0.117.0", "0.124.0", "0.129.0"].includes(app.version)) errors.push({ source: "engine:listWorkspaceProjects", message: `Engine snapshot IPC is unverified for Playbot ${app.version ?? "unconfirmed"}; no engine read was attempted.` });
-  else {
-    if (!workspace.roots.length || workspace.roots.length !== project.roots.length) errors.push({ source: "workspace-roots", message: "Workspace root coverage is incomplete." });
-    const seenRoots = new Set();
-    for (const root of workspace.roots) {
-      if (!project.roots.some((candidate) => candidate.id === root.projectRootId) || seenRoots.has(root.projectRootId)) {
-        errors.push({ source: "workspace-roots", message: "Workspace root identity is unknown or duplicated." });
-        continue;
-      }
-      seenRoots.add(root.projectRootId);
-      try {
-        const projects = await engineReadInvoke("engine:listWorkspaceProjects", { workspacePath: root.path });
-        if (!Array.isArray(projects) || projects.some((item) => !item || typeof item.engineKind !== "string" || typeof item.projectPath !== "string" || !path.isAbsolute(item.projectPath))) throw new Error("Engine discovery returned an unreadable project list");
-        for (const item of projects.filter((item) => item.engineKind === "godot")) {
-          const relative = path.relative(canonicalPath(root.path), canonicalPath(item.projectPath));
-          if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Detected engine project lies outside its workspace root");
-          if (!detected.some((candidate) => candidate.projectPath === item.projectPath)) detected.push(item);
-        }
-      } catch (error) { errors.push({ source: root.path, message: error.message }); }
-    }
+    bridge.status = "reachable";
+    bridge.detail = "Playbot answered app:metadata over its own DevTools bridge, so live Playbot state can be read.";
+  } catch (error) {
+    errors.push({ source: "app:metadata", message: error.message });
+    bridge.detail = `Playbot's own DevTools bridge could not be reached (${error.message}), so the engine IPC contract was never classified.`;
   }
-  return engineReadinessReport(app, bundle, workspace, detected, errors);
+  const bundle = engineBundle(app.version);
+  const contract = engineContract(app.version);
+  const detected = [];
+  if (!workspace.roots.length || workspace.roots.length !== project.roots.length) errors.push({ source: "workspace-roots", message: "Workspace root coverage is incomplete." });
+  const seenRoots = new Set();
+  for (const root of workspace.roots) {
+    if (!project.roots.some((candidate) => candidate.id === root.projectRootId) || seenRoots.has(root.projectRootId)) {
+      errors.push({ source: "workspace-roots", message: "Workspace root identity is unknown or duplicated." });
+      continue;
+    }
+    seenRoots.add(root.projectRootId);
+    // Without a reachable bridge no channel can be called at all, so the contract
+    // is left unclassified rather than reported as a channel fault.
+    if (bridge.status !== "reachable") continue;
+    let projects;
+    try {
+      projects = await engineReadInvoke(ENGINE_IPC_CHANNEL, { workspacePath: root.path });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // A channel Playbot no longer registers, a call that did not answer, and
+      // an unreachable bridge are three different faults, so they never share
+      // one status.
+      classifyEngineContract(contract, /No handler registered/i.test(message) ? "channel-missing" : "call-failed",
+        /No handler registered/i.test(message)
+          ? `Playbot does not register ${ENGINE_IPC_CHANNEL}, so the engine snapshot contract this tool reads is gone.`
+          : `${ENGINE_IPC_CHANNEL} did not answer for ${root.path} (${message}), so its contract could not be classified.`);
+      errors.push({ source: root.path, message });
+      continue;
+    }
+    if (!Array.isArray(projects) || projects.some((item) => !item || typeof item.engineKind !== "string" || typeof item.projectPath !== "string" || !path.isAbsolute(item.projectPath))) {
+      classifyEngineContract(contract, "shape-changed", `${ENGINE_IPC_CHANNEL} answered for ${root.path} with a shape this tool cannot read, so the engine snapshot contract changed.`);
+      errors.push({ source: root.path, message: "Engine discovery returned an unreadable project list" });
+      continue;
+    }
+    const versionVerified = ENGINE_IPC_VERIFIED_VERSION_LIST.includes(app.version);
+    classifyEngineContract(contract, versionVerified ? "version-verified" : "capability-verified",
+      versionVerified
+        ? `Playbot ${app.version} is a verified version and ${ENGINE_IPC_CHANNEL} returned the contract this tool reads.`
+        : `Playbot ${app.version ?? "an unconfirmed version"} is not on the verified list (${ENGINE_IPC_VERIFIED_VERSIONS}), but ${ENGINE_IPC_CHANNEL} returned the contract this tool reads, so the engine snapshot IPC is compatible on capability evidence alone. Re-verify this version and add it to the verified list once a focused read confirms the whole engine surface.`);
+    try {
+      for (const item of projects.filter((item) => item.engineKind === "godot")) {
+        const relative = path.relative(canonicalPath(root.path), canonicalPath(item.projectPath));
+        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Detected engine project lies outside its workspace root");
+        if (!detected.some((candidate) => candidate.projectPath === item.projectPath)) detected.push(item);
+      }
+    } catch (error) { errors.push({ source: root.path, message: error.message }); }
+  }
+  if (bridge.status !== "reachable") errors.push({ source: ENGINE_IPC_CHANNEL, message: "No engine read was attempted: Playbot's own DevTools bridge was not reached." });
+  else if (contract.status === "unprobed") classifyEngineContract(contract, "unprobed", "No workspace root was probed, so the engine IPC contract was not classified.");
+  return engineReadinessReport(app, bundle, workspace, detected, errors, { bridge, contract });
 }
 
 // Addon preservation needs only bundle identity and file comparison, so it
@@ -3858,11 +3927,31 @@ function engineDependentRequest(args) {
   return args.engineDependent !== false;
 }
 
-async function requireEngineReadiness(project, workspace, createdWorker = null) {
+// Rendered editor evidence is a separate capability from engine execution: a
+// headless engine runs code but refuses screenshots. A brief that needs the
+// screenshots says so here so the refusal happens before dispatch instead of at
+// review, when the captures turn out to be impossible.
+function graphicalCaptureRequest(args, engineDependent) {
+  if (args.requiresGraphicalCapture !== undefined && typeof args.requiresGraphicalCapture !== "boolean") throw new Error("requiresGraphicalCapture must be a boolean; omission declares that the task's completion needs no rendered editor evidence");
+  const requiresGraphicalCapture = args.requiresGraphicalCapture === true;
+  if (requiresGraphicalCapture && !engineDependent) throw new Error("requiresGraphicalCapture needs the engine readiness read that engineDependent=false explicitly declines; declare engine work, or omit requiresGraphicalCapture for a task whose completion needs no rendered editor evidence");
+  return requiresGraphicalCapture;
+}
+
+async function requireEngineReadiness(project, workspace, createdWorker = null, { requiresGraphicalCapture = false } = {}) {
   const report = await engineReadiness(project, workspace);
+  const created = createdWorker ? ` Chat ${createdWorker.thread_id} remains in workspace ${workspace.id}; inspect this pair before retrying so no second pair is created.` : "";
   if (!report.ready || report.verdict !== "ready") {
-    const created = createdWorker ? ` Chat ${createdWorker.thread_id} remains in workspace ${workspace.id}; inspect this pair before retrying so no second pair is created.` : "";
-    throw new Error(`Engine readiness ${report.verdict} in workspace ${workspace.id}; dispatch stopped before sending.${created} Use get_engine_readiness for the evidence, or route engine validation to an ordinary worker. ${JSON.stringify(report)}`);
+    // The refusal names which half failed, because a bridge that never answered
+    // and a contract that changed need different repairs, and the fallback route
+    // is stated rather than left to be inferred.
+    throw new Error(`Engine readiness ${report.verdict} in workspace ${workspace.id} (Playbot bridge ${report.ipc.bridge.status}; engine snapshot contract ${report.ipc.contract.status}); dispatch stopped before sending.${created} Use get_engine_readiness for the evidence, or route engine validation to an ordinary worker whose instructions permit the project's pinned native validation route. ${JSON.stringify(report)}`);
+  }
+  if (requiresGraphicalCapture) {
+    const unavailable = report.projects.filter((candidate) => candidate.graphicalCapture.status === "unavailable");
+    if (unavailable.length) {
+      throw new Error(`Graphical capture is unavailable in workspace ${workspace.id}: ${unavailable.map((candidate) => `${candidate.storedPath} (${candidate.graphicalCapture.reason})`).join(", ")}. A headless engine's display driver cannot supply rendered editor screenshots, so a task that requires them cannot be completed here.${created} Dispatch it to an ordinary worker that can render and capture the editor, or drop requiresGraphicalCapture if the task's completion needs no rendered editor evidence. ${JSON.stringify(report.ipc)}`);
+    }
   }
   return report;
 }
@@ -6408,7 +6497,7 @@ function toolDefinitions() {
   return [
     {
       name: "get_engine_readiness",
-      description: "Read-only Godot readiness for one exact workspace: app/bundled/workspace addon versions and complete byte comparison, stored/canonical project identity, existing session startup/admission evidence, and selected executable when an existing launch log proves it. Starts no engine session or chat; unknown evidence is unconfirmed.",
+      description: "Read-only Godot readiness for one exact workspace: app/bundled/workspace addon versions and complete byte comparison, stored/canonical project identity, existing session startup/admission evidence, and selected executable when an existing launch log proves it. Reports Playbot's own bridge reachability separately from how the engine snapshot IPC contract was classified, the engine bridge handshake for each exact project path, and whether rendered editor capture is available or merely unproven. Starts no engine session or chat; unknown evidence is unconfirmed.",
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Exact workspace id, path, or name") }, ["project", "workspace"]),
       annotations: { readOnlyHint: true },
     },
@@ -6581,7 +6670,7 @@ function toolDefinitions() {
     {
       name: "dispatch",
       description: `Resolve or create a worker chat by project and send the task, optionally creating an isolated workspace first. Optional model and reasoningEffort apply only when a chat is created, select one catalog-validated profile for both linked planning and execution modes, and are refused if dispatch resolves an existing chat; model alone uses its catalog default effort, reasoningEffort requires model, and omitting or nulling both preserves Playbot's default. Dispatch returns workspace.roots with branch names read back from Playbot registration, so callers can regenerate a named lane brief when newWorkspace.branch was ignored. Marked ordinary crewmate briefs are refused before creation or send; unmarked custom/legacy messages remain supported. A created worker's returned thread reports the model and effort read back from Playbot state, never the requested values by assumption, and when that read-back differs from the requested profile dispatch refuses before sending, naming the created chat so it can be archived or sent deliberately. Legacy threads:openThread Playbots explicitly refuse profile selection. Reports the same delivery verdict as send_message, so a task Playbot is only holding is never reported as delivered. force=true has the same exact-message steering semantics when dispatch resolves an existing busy chat; a new or idle chat normally needs no promotion. A Playbot-chat caller also receives a routed Stop-hook wake. An external-terminal caller has no push path, so this call arms that worker's firstmate watcher poll itself rather than asking the caller to remember to: it writes and registers state/<taskId>.check.sh, which fires when the worker parks on a card or stops and stays silent while it works. The result's supervision block reports which path was taken and, when arming failed, says so instead of leaving an unwatched worker looking supervised.`,
-      inputSchema: object({ engineDependent: boolean("Require confirmed Godot engine readiness before sending; defaults true, false explicitly declares file-only work", true), project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), mode: { type: "string", enum: LANE_DELIVERY_MODES, description: "Delivery mode recorded on the firstmate lane task identity this taskId arms; required when taskId arms one and rejected otherwise. local-only is the only mode fm-merge-local.sh will land; no-mistakes and direct-PR lanes ship through their own existing pipelines." }, thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
+      inputSchema: object({ engineDependent: boolean("Require confirmed Godot engine readiness before sending; defaults true, false explicitly declares file-only work", true), requiresGraphicalCapture: boolean("Require the routed engine session to be able to supply rendered editor screenshots; defaults false, and an observed headless session refuses the dispatch before sending because its display driver cannot capture", false), project: string("Worker project id, root path, or unique project name"), workspace: string("Optional worker workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), newWorkspace: newWorkspace(), landingBranch: string("Explicit branch the new workspace's work must land on; required with newWorkspace and rejected without it"), mode: { type: "string", enum: LANE_DELIVERY_MODES, description: "Delivery mode recorded on the firstmate lane task identity this taskId arms; required when taskId arms one and rejected otherwise. local-only is the only mode fm-merge-local.sh will land; no-mistakes and direct-PR lanes ship through their own existing pipelines." }, thread: string("Optional existing worker thread id, session id, or exact title"), title: string("Title when a worker chat must be created"), message: string("Task to send"), taskId: { description: "Firstmate task id the armed watcher poll is keyed on; missing, null, or non-string values use the worker's workspace id, which arms the poll but leaves task teardown unable to retire it", type: ["string", "null", "number", "boolean", "object", "array"] }, force: boolean("Promote this exact task into a resolved existing worker's active turn instead of leaving it queued; Playbot 0.95.x only", false), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"], default: "full-access" }, planMode: boolean("Create a new worker in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; only used when creating a chat, null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model and a newly created chat, null uses the model's catalog default") }, ["project", "message"]),
     },
     {
       name: "list_lanes",
@@ -6735,6 +6824,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
 
   if (name === "dispatch") {
     const engineDependent = engineDependentRequest(args);
+    const requiresGraphicalCapture = graphicalCaptureRequest(args, engineDependent);
     // Match the scaffold's fixed execution contract before creating or sending.
     // Unmarked legacy/custom task messages retain their existing behavior.
     const workspaceContracts = [...String(args.message ?? "").matchAll(/^Execution contract: workspace=(.*)$/gm)]
@@ -6770,7 +6860,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     // Inspect the destination before resolving a title or creating a chat.
     if (engineDependent && !wantsNewWorkspace) {
       const existing = args.thread ? resolveThreadInProject(project, args.workspace, args.thread) : null;
-      await requireEngineReadiness(project, resolveWorkspace(project, existing?.workspace_id ?? args.workspace));
+      await requireEngineReadiness(project, resolveWorkspace(project, existing?.workspace_id ?? args.workspace), null, { requiresGraphicalCapture });
     }
     let worker = null;
     const workerProfile = requestedWorkerProfile(args.model, args.reasoningEffort);
@@ -6839,7 +6929,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       warnings.push(`Workspace ${worker.workspace_id} could not be read back (${reason}), so workspace is null and no branch was observed; read it with get_workspace_freshness before relying on a branch name.`);
     }
     const engineReport = engineDependent
-      ? await requireEngineReadiness(resolveProject(project.id), resolveWorkspace(resolveProject(project.id), worker.workspace_id), createdChat ? worker : null)
+      ? await requireEngineReadiness(resolveProject(project.id), resolveWorkspace(resolveProject(project.id), worker.workspace_id), createdChat ? worker : null, { requiresGraphicalCapture })
       : null;
     const lane = caller ? registerLane(caller, worker) : null;
     const armingBaseline = caller ? null : supervisionArmingBaseline(worker);

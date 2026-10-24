@@ -81,6 +81,9 @@ Every chat view, including the thread returned from creation, carries `model` an
 `dispatch` refuses profile fields when it resolves an existing chat because launch-time selection cannot safely mutate that chat.
 When `create_chat` or `dispatch` creates a chat and the persisted `model` or `reasoningEffort` differs from the requested profile, the call refuses and names the created chat and workspace, the persisted values, and the requested values; `dispatch` refuses before `threads:send`, so no task reaches that chat and the caller can archive it or use the persisted profile deliberately with `send_message`.
 The legacy `threads:openThread` creation path also refuses profile fields explicitly because its verified schema cannot honor them.
+For an empty `create_chat`, the proof that a selected profile took effect is Playbot's own persisted `workspace_threads` execution fields, which the returned thread reports as `model` and `reasoningEffort`.
+A harness session row is required only once an authorized first message has started that session, because Playbot creates the harness thread lazily.
+A verification brief that forbids sending a task must therefore ask for those Playbot-side fields and never for a harness row, which an empty chat has not created yet.
 
 ### Workspace freshness
 
@@ -275,14 +278,29 @@ On Linux, a connected headless session can confirm its selected native binary fr
 `PLAYBOT_LANES_APP_RESOURCES` can identify the packaged app's resources directory when running-process discovery is unavailable; the script header owns its discovery and version-binding mechanics.
 An editor preference or PATH candidate is insufficient selection evidence because Playbot checks executable compatibility before choosing it.
 Unreadable evidence remains `unconfirmed`; the tool never runs the candidate executable to fill that gap.
-The engine snapshot reader is verified for Playbot 0.117.0, 0.124.0, and 0.129.0; other app versions return `unconfirmed` without calling unverified engine IPC.
+The engine snapshot IPC contract is classified by capability, never by an app-version allowlist: the tool calls `engine:listWorkspaceProjects` and validates the shape it returns, so a Playbot version it has never seen is admitted when the contract that version actually exposes matches.
+An allowlist is what this replaces, because it strands every engine-dependent lane on the next Playbot upgrade until someone extends the list.
+The report's `ipc.contract` carries the classification, the observed app version, the versions already verified end to end, and a detail line.
+`version-verified` means the app version is on the verified list and the channel returned the expected contract; `capability-verified` means the version is not on that list and the channel nevertheless returned the expected contract, so the read proceeds on probe evidence alone and the detail names the currently verified versions, then says to re-verify the observed version and add it to that list once a focused read confirms the whole engine surface.
+`channel-missing`, `shape-changed`, `call-failed`, and `unprobed` are the failing classifications, and each of them refuses engine-dependent dispatch as `unconfirmed`.
+A version on the verified list whose channel shape changed still refuses, because the returned shape is what is trusted rather than the version string.
+Readiness reports the live Playbot bridge separately from the engine handshake, because reading persisted project and workspace state proves only that Playbot's own database parsed.
+The report's `ipc.bridge` is `reachable` only when Playbot answered `app:metadata` over its own DevTools bridge; an unreachable bridge leaves the engine contract `unprobed` with no engine read attempted, rather than reporting a channel fault that was never called.
+Each project report carries `bridge` for the engine's own handshake against that exact project path, with `connected`, `not-connected`, or `no-session` plus the observed lifecycle status and startup activity.
+A routed session whose handshake has not completed raises its own `bridge-not-connected` reason naming that exact path, so a stalled connection never reads the same as a session that was never there.
+Each project report also carries `graphicalCapture`, which is `unavailable` with reason `headless-display-driver` when the routed session is a headless engine, because that display driver cannot supply rendered editor screenshots.
+This diagnostic attempts no capture, so any other session is `unproven` rather than `available`.
+A brief whose completion needs rendered editor evidence declares `requiresGraphicalCapture: true` on `dispatch`, which then refuses before creating a chat when any detected project reports `unavailable`, applies the same check to the re-read before sending and names the created chat and workspace if that later read refuses, and refuses that field outright beside `engineDependent: false`.
+Omitting it declares that the task's completion needs no rendered editor evidence.
+Playbot's bundled resolver reads the engine executable override from `PLAYBOT_DATA_DIR/godot-editor.json`, which resolves to `~/.playbot/godot-editor.json` on a default install, and not from `~/.config/@playbot/desktop/godot-editor.json`; editing the desktop config therefore changes nothing about engine selection.
+A selection change is proven only by the launched process, such as the `selectedExecutable` this tool reads from a live headless process or an existing launch log, never inferred from a settings file having been written.
 For Playbot 0.124.0 on a symlinked home, use `get_worktree_root` to inspect the effective storage path and `canonicalize_worktree_root` to select its canonical spelling through Playbot's own settings IPC before creating a workspace.
 That setting changes the path Playbot records for future workspaces, while existing workspaces retain their recorded paths.
 After creating a Godot workspace, `prepare_engine_workspace` uses Playbot's engine IPC to install missing bundled native addon files in that exact idle workspace and verifies complete byte identity before engine validation.
 The tool refuses a stored project path alias and addon drift beyond missing native files.
 Playbot 0.124.0's system instruction prohibits an agent from running Godot through its shell even in a `full-access` chat; a direct `!` shell command sent by the user/controller runs through Playbot's `thread/shellCommand` route and can run the project's native automation.
 The agent can use `execute_engine_code` for engine state; a GDScript runner must return its result because `print()` alone leaves the tool's returned text empty.
-The diagnostic distinguishes `addon-drift`, `missing-addon-files`, `startup-pending`, `identity-admission-risk`, an observed `identity-admission-rejected`, generic `engine-failure`, and `unconfirmed`, retaining all reasons when several apply.
+The diagnostic distinguishes `addon-drift`, `missing-addon-files`, `startup-pending`, `bridge-not-connected`, `identity-admission-risk`, an observed `identity-admission-rejected`, generic `engine-failure`, and `unconfirmed`, retaining all reasons when several apply.
 A Flatpak or other observed namespace launcher and differing stored/canonical paths are admission risks, while `connectionBlocked` alone does not prove a PID rejection.
 Readiness requires an existing routed connected session reporting the current loaded addon, complete matching disk bytes, and a readable native launch executable with no reported failure or identity risk.
 
