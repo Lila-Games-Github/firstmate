@@ -1737,6 +1737,29 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_headroom_report() {
+  local tmp out script
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-headroom.XXXXXX")
+  script=$("$RUNNER" --list --lane portable-parallel-1 | head -n 1)
+  python3 - "$tmp/lane.json" "$script" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump({"selection": "lane=portable-parallel-1", "scripts": [
+        {"path": sys.argv[2], "duration_ms": 9000000, "exit": 0, "gate_skip": False}
+    ]}, output)
+PY
+  out=$("$RUNNER" --headroom-report 600000 1800000 18000 "$tmp/lane.json") \
+    || { rm -rf "$tmp"; fail "headroom report failed"; }
+  assert_contains "$out" "FM_TEST_HEADROOM worst_lane=" "headroom report names the tightest lane"
+  assert_contains "$out" "worst_lane=portable-parallel-1" "a large completed measurement changes the worst-lane projection"
+  assert_contains "$out" "setup_ms=18000" "headroom report includes observed setup time"
+  assert_contains "$out" "FM_TEST_DRIFT" "headroom report compares artifact duration to a hint"
+  assert_contains "$out" "measured_ms=9000000" "headroom report uses the completed timing record"
+  assert_contains "$out" "FM_TEST_HEADROOM_INCOMPLETE" "partial artifacts cannot imply full measured coverage"
+  rm -rf "$tmp"
+  pass "headroom report uses current memberships, timing records, and cap inputs"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1776,3 +1799,4 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_headroom_report
