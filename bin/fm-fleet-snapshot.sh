@@ -894,7 +894,7 @@ task_json_one() {  # <captured-meta>
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local folded_decisions_tsv open_decisions_tsv open_decisions_json phase_tsv phase_name phase_note
-  local freshness=fresh observed_at=$SNAPSHOT_NOW age_seconds=null observed_epoch observed_decisions decision
+  local freshness=fresh observed_at=$SNAPSHOT_NOW age_seconds=null observed_epoch observed_decisions unobserved_decisions decision
 
     meta=$1
     id=$(basename "$meta" .meta)
@@ -971,12 +971,17 @@ task_json_one() {  # <captured-meta>
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
       if [ "$freshness" = stale ]; then
         observed_decisions=$(status_open_decisions "$SNAPSHOT_TASK_DIR/$id.observed-status" "$kind")
-        open_decisions_tsv=$(
-          while IFS= read -r decision; do
-            [ -n "$decision" ] || continue
-            case $'\n'"$observed_decisions"$'\n' in *$'\n'"$decision"$'\n'*) ;; *) printf '%s\n' "$decision" ;; esac
-          done <<< "$open_decisions_tsv"
-        )
+        # Accumulate in the current shell: stock Bash 3.2 cannot parse a case
+        # statement's unbalanced ')' patterns inside a $( ) substitution.
+        unobserved_decisions=""
+        while IFS= read -r decision; do
+          [ -n "$decision" ] || continue
+          case $'\n'"$observed_decisions"$'\n' in
+            *$'\n'"$decision"$'\n'*) ;;
+            *) unobserved_decisions="$unobserved_decisions$decision"$'\n' ;;
+          esac
+        done <<< "$open_decisions_tsv"
+        open_decisions_tsv=${unobserved_decisions%$'\n'}
       else
         open_decisions_tsv=""
       fi
