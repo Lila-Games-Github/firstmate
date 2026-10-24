@@ -1,0 +1,137 @@
+{
+ "selection": "lane=portable-serial-5of9",
+ "scripts": [
+  {
+   "path": "tests/fm-backlog-atomicity.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-remote-reply.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-spawn-pool-base-freshen.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-inactive-reconcile.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-bootstrap.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-muse-harness.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-teardown-endpoint-safety.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-busy-adapter-wiring.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-crew-board.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-merge-local.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-backend.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-pi-branch-responsiveness-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-mail-check.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-startup-memory-budget.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-gate-refuse.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-remote-job-orphan-reap.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-live-gate.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-peek-remote.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-lint-workflows.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-bearings-board-lavish-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-herdr-pi-stale-registration-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  }
+ ]
+}

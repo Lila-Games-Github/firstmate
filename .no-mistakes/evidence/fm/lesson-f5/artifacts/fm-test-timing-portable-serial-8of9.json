@@ -1,0 +1,143 @@
+{
+ "selection": "lane=portable-serial-8of9",
+ "scripts": [
+  {
+   "path": "tests/fm-secondmate-harness.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-spawn-dispatch-profile.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-watch-arm.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-remote-secondmate-trace-context.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-agy-harness.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-control.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-turnend-guard.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-pending-reply.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-crew-board-focus.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-learning-candidate.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-backend-orca.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-update.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-backend-zellij.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-wake-daemon-lifecycle-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-send-secondmate-marker.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-session-lock-ancestry.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-tmux-agent-liveness.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-harness-liveness-drift-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-supervision-events.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-gitignore-config.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-stat-shadowing.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-omp-primary-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-backend-cmux-smoke.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  }
+ ]
+}

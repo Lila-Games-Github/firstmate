@@ -1,0 +1,155 @@
+{
+ "selection": "lane=portable-serial-3of9",
+ "scripts": [
+  {
+   "path": "tests/fm-pr-check-security.test.sh",
+   "duration_ms": 200000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-secondmate-reconcile.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-startup-network.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-cursor-primary.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-vendor-auth-probe.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-home-summary-refresh.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-voice-relay.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-daemon.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-jev.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-pr-fork-sync-proof.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-fleet-snapshot-view.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-guard-stale-banner.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-claude-trust.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-extension-binding.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-harness-precedence.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-backend-cmux.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-turnend-foreign-owner-arm-fix.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-documentation-audiences.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-composer-codex-idle-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-project-origin.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-harness-adapter-references.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-quota-array-dispatch-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-codex-hook-layer-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-pi-codex-native.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-backend-zellij-smoke.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  }
+ ]
+}

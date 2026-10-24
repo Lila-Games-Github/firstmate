@@ -1,0 +1,8 @@
+$ bin/fm-test-run.sh --headroom-report 600000 1800000 18000 fm-test-timing-portable-*.json   # runner @024d77a on dfac774 tree, artifacts from green CI run 39975212905 (dfac774)
+FM_TEST_HEADROOM worst_lane=portable-parallel-1 hint_sum_ms=365815 estimate_ms=373382 setup_ms=18000 cap_ms=600000 headroom_ms=208618 complete_artifacts=12/12
+FM_TEST_DRIFT lane=portable-serial-2of9 script=tests/fm-playbot-lanes.test.sh hint_ms=27000 measured_ms=414891 delta_ms=387891
+FM_TEST_DRIFT lane=portable-serial-1of9 script=tests/fm-watch-triage.test.sh hint_ms=697969 measured_ms=849233 delta_ms=151264
+FM_TEST_DRIFT lane=portable-serial-2of9 script=tests/fm-watch-checkpoint.test.sh hint_ms=6076 measured_ms=84427 delta_ms=78351
+FM_TEST_DRIFT lane=portable-serial-8of9 script=tests/fm-crew-board.test.sh hint_ms=27000 measured_ms=83535 delta_ms=56535
+FM_TEST_DRIFT lane=portable-serial-4of9 script=tests/fm-jev.test.sh hint_ms=27000 measured_ms=80722 delta_ms=53722
+exit=0

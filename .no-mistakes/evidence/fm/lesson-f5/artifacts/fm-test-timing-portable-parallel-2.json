@@ -1,0 +1,35 @@
+{
+ "selection": "lane=portable-parallel-2",
+ "scripts": [
+  {
+   "path": "tests/fm-captain-hold-lifecycle.test.sh",
+   "duration_ms": 420000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-cd-pretool-check.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-send-strict.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-spawn-batch.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-composer-ghost.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  }
+ ]
+}

@@ -1,0 +1,149 @@
+{
+ "selection": "lane=portable-serial-2of9",
+ "scripts": [
+  {
+   "path": "tests/fm-remote-secondmate-lifecycle-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-wake-queue.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-claude-stop-autoarm.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-backlog-handoff.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-calm-pi-extension.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-bearings-board.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-cursor-harness.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-send-resolve-key.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-dispatch-preflight-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-playbot-engine-readiness.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-afk-return.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-tool-update-check.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-secondmate-lifecycle-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-tangle-guard.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-pi-windows-shell-invocation.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-stow-cascade.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-procevent-quota.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-subagent-pretool-check.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-check-unregister.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-ask-user-authority.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-cursor-primary-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-agy-signals-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-composer-matrix-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  },
+  {
+   "path": "tests/fm-send-inbox-doorbell-live-e2e.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  }
+ ]
+}

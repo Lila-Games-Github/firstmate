@@ -1,0 +1,28 @@
+$ bin/fm-test-run.sh --headroom-report 600000 1800000 18000 artifacts/fm-test-timing-portable-*.json   # complete green cohort, one parallel-2 script drifted to 420s
+FM_TEST_HEADROOM worst_lane=portable-parallel-2 hint_sum_ms=366047 estimate_ms=451307 setup_ms=18000 cap_ms=600000 headroom_ms=130693 complete_artifacts=12/12
+FM_TEST_DRIFT lane=portable-parallel-2 script=tests/fm-captain-hold-lifecycle.test.sh hint_ms=340826 measured_ms=420000 delta_ms=79174
+FM_TEST_DRIFT lane=portable-serial-3of9 script=tests/fm-backend-zellij-smoke.test.sh hint_ms=21 measured_ms=5000 delta_ms=4979
+FM_TEST_DRIFT lane=portable-serial-8of9 script=tests/fm-backend-cmux-smoke.test.sh hint_ms=33 measured_ms=5000 delta_ms=4967
+FM_TEST_DRIFT lane=portable-serial-9of9 script=tests/fm-afk-pi-herdr-return-e2e.test.sh hint_ms=45 measured_ms=5000 delta_ms=4955
+FM_TEST_DRIFT lane=portable-serial-7of9 script=tests/fm-claude-stop-autoarm-live-e2e.test.sh hint_ms=45 measured_ms=5000 delta_ms=4955
+exit=0
+
+$ # cohort where portable-parallel-1 was cancelled at the cap (no artifact) and parallel-3 has a failed row
+FM_TEST_HEADROOM worst_lane=portable-parallel-2 hint_sum_ms=366047 estimate_ms=451307 setup_ms=18000 cap_ms=600000 headroom_ms=130693 complete_artifacts=10/12
+FM_TEST_DRIFT lane=portable-parallel-2 script=tests/fm-captain-hold-lifecycle.test.sh hint_ms=340826 measured_ms=420000 delta_ms=79174
+FM_TEST_DRIFT lane=portable-serial-3of9 script=tests/fm-backend-zellij-smoke.test.sh hint_ms=21 measured_ms=5000 delta_ms=4979
+FM_TEST_DRIFT lane=portable-serial-8of9 script=tests/fm-backend-cmux-smoke.test.sh hint_ms=33 measured_ms=5000 delta_ms=4967
+FM_TEST_DRIFT lane=portable-serial-9of9 script=tests/fm-afk-pi-herdr-return-e2e.test.sh hint_ms=45 measured_ms=5000 delta_ms=4955
+FM_TEST_DRIFT lane=portable-serial-7of9 script=tests/fm-claude-stop-autoarm-live-e2e.test.sh hint_ms=45 measured_ms=5000 delta_ms=4955
+FM_TEST_HEADROOM_INCOMPLETE lanes=portable-parallel-1,portable-parallel-3
+exit=0
+
+$ bin/fm-test-run.sh --headroom-report 600000 1800000 18000   # no artifacts
+fm-test-run: --headroom-report requires parallel cap, serial cap, setup overhead, and timing artifacts
+exit=2
+$ bin/fm-test-run.sh --headroom-report 10m 1800000 18000 x.json
+fm-test-run: headroom inputs must be whole milliseconds
+exit=2
+$ bin/fm-test-run.sh --headroom-report 600000 1800000 18000 missing.json
+fm-test-run: headroom input not found: /tmp/nope.json
+exit=2

@@ -1,0 +1,9 @@
+$ bin/fm-test-run.sh --headroom-report 600000 1800000 18000 fm-test-timing-portable-*.json   # runner and tree @024d77a, artifacts from run 39975212905
+FM_TEST_HEADROOM worst_lane=portable-parallel-1 hint_sum_ms=365815 estimate_ms=373382 setup_ms=18000 cap_ms=600000 headroom_ms=208618 complete_artifacts=4/12
+FM_TEST_DRIFT lane=portable-serial-1of9 script=tests/fm-watch-triage.test.sh hint_ms=697969 measured_ms=849233 delta_ms=151264
+FM_TEST_DRIFT lane=portable-serial-5of9 script=tests/fm-spawn-pool-base-freshen.test.sh hint_ms=62249 measured_ms=114839 delta_ms=52590
+FM_TEST_DRIFT lane=portable-serial-6of9 script=tests/fm-session-start.test.sh hint_ms=179350 measured_ms=221606 delta_ms=42256
+FM_TEST_DRIFT lane=portable-serial-9of9 script=tests/fm-teardown.test.sh hint_ms=145174 measured_ms=181507 delta_ms=36333
+FM_TEST_DRIFT lane=portable-serial-3of9 script=tests/fm-pr-check-security.test.sh hint_ms=226546 measured_ms=253355 delta_ms=26809
+FM_TEST_HEADROOM_INCOMPLETE lanes=portable-serial-2of9,portable-serial-3of9,portable-serial-4of9,portable-serial-5of9,portable-serial-6of9,portable-serial-7of9,portable-serial-8of9,portable-serial-9of9
+exit=0

@@ -1,0 +1,11 @@
+{
+ "selection": "lane=portable-serial-1of9",
+ "scripts": [
+  {
+   "path": "tests/fm-watch-triage.test.sh",
+   "duration_ms": 5000,
+   "exit": 0,
+   "gate_skip": false
+  }
+ ]
+}

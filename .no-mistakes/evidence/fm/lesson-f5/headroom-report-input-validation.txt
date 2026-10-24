@@ -1,0 +1,12 @@
+$ bin/fm-test-run.sh --headroom-report 600000 1800000 18s /tmp/x.json
+fm-test-run: headroom inputs must be whole milliseconds
+exit=2
+$ bin/fm-test-run.sh --headroom-report 0 1800000 18000 /tmp/fm-timing.qPdsm2/fm-test-timing-portable-parallel-1/fm-test-timing-portable-parallel-1.json
+fm-test-run: headroom caps must be positive
+exit=2
+$ bin/fm-test-run.sh --headroom-report 600000 1800000 18000 /tmp/nope.json
+fm-test-run: headroom input not found: /tmp/nope.json
+exit=2
+$ bin/fm-test-run.sh --headroom-report 600000 1800000
+fm-test-run: --headroom-report requires parallel cap, serial cap, setup overhead, and timing artifacts
+exit=2
