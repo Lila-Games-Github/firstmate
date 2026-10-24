@@ -227,6 +227,14 @@ test_ship_modes_generate_clean_briefs() {
       "$id: ship brief does not describe its base as the recorded landing branch, else the default branch"
     assert_no_grep "at a detached HEAD on a clean default branch" "$brief" \
       "$id: ship brief still describes its base as the default branch unconditionally"
+    assert_grep "# Long-suite and evidence snapshot contract" "$brief" \
+      "$id: ship brief missing the durable long-suite and evidence snapshot contract"
+    assert_grep "reattach through that identifier instead of re-running the suite" "$brief" \
+      "$id: long-suite contract lost the durable reattachable job shape"
+    assert_grep "invalidates that evidence" "$brief" \
+      "$id: long-suite contract lost the moved-tip snapshot policy"
+    assert_grep "one re-capture and re-run" "$brief" \
+      "$id: long-suite contract lost its named re-capture budget"
   done
   id='brief-scout-preamble-a1'
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1; status=$?
@@ -236,6 +244,8 @@ test_ship_modes_generate_clean_briefs() {
     "$id: scout brief lost its default-branch base wording although scouts take no landing branch"
   assert_no_grep "recorded landing branch" "$brief" \
     "$id: scout brief gained landing-branch wording although scouts take no landing branch"
+  assert_no_grep "# Long-suite and evidence snapshot contract" "$brief" \
+    "$id: scout brief gained the ship-only long-suite contract"
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 

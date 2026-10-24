@@ -38,6 +38,12 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# fm_long_suite_block owns the worker-side contract for a task whose definition
+# of done requires a long-running suite: the durable reattachable job shape that
+# survives one execution-session limit, and the evidence snapshot policy that
+# keeps every cited capture and the final suite receipt describing one commit.
+# bin/fm-brief.sh and bin/fm-promote.sh render it into every ship brief and
+# promotion payload; the function below owns why it is not gated on a flag.
 
 # fm_nm_target_block <landing-branch> owns the no-mistakes target handoff.
 # An empty branch emits nothing, preserving the pipeline's default behavior.
@@ -281,6 +287,26 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
    For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
    \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
    naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
+EOF
+}
+
+# The worker-side half of the durable-long-suite contract. AGENTS.md section 7
+# owns the supervision half: firstmate leaves such a job running and lets the
+# worker reattach instead of relaunching, interrupting, or tearing it down.
+# Rendered into every ship brief and every promotion payload rather than gated on
+# --green-final-head: that marker carries the dispatch-time base-health receipt
+# requirement, and a promoted scout's payload is built without any such marker,
+# so gating would lose this contract exactly where a promoted worker still owes a
+# long final suite.
+# A missed trigger would lose the whole protection, and this contract is four
+# sentences, so the wider trigger is the cheaper error.
+fm_long_suite_block() {
+  cat <<'EOF'
+# Long-suite and evidence snapshot contract
+When the definition of done requires a long-running suite, run it as a durable job that outlives one execution session: keep its progress and its identifier outside the process that started it (a log path plus a recorded job or session identifier), and reattach through that identifier instead of re-running the suite.
+A required suite that is still running, or queued behind a shared suite lock, is work under way rather than a stalled task: report it as the declared external wait rule 4 defines, naming its identifier and what it is waiting on, and never abandon, duplicate, or restart it because one command call was killed, timed out, or hit an execution-session limit.
+Evidence must describe one snapshot: every capture and artifact you cite and the final suite receipt must all name the same commit.
+Either the landing tip is held still from the first capture through the final suite, or a tip that moved invalidates that evidence, and the re-capture budget is one re-capture and re-run - a second move is the same obstacle twice, so report it as a blocker rather than repeating.
 EOF
 }
 

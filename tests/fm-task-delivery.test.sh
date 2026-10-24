@@ -350,6 +350,8 @@ STUB
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
     assert_grep "# Definition of done" "$payload" \
       "$mode: promoted worker did not receive a Definition of done"
+    assert_grep "# Long-suite and evidence snapshot contract" "$payload" \
+      "$mode: promoted worker did not receive the durable long-suite and snapshot contract"
     assert_grep "pwd -P" "$payload" \
       "$mode: promoted worker was not told to verify its physical worktree"
     assert_grep "git rev-parse --show-toplevel" "$payload" \

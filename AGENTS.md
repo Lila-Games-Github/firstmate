@@ -394,6 +394,10 @@ Running, fixing, or CI states remain working; parked approval or fix-review stat
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
+A required long suite is durable work under way, not a stalled worker: when a worker reports one still running or queued behind a shared suite lock, leave it running and let the worker reattach rather than relaunching, interrupting, or tearing it down.
+For work whose definition of done requires a long final suite, either hold the landing tip still from the first capture through that suite, or accept that a tip which moved invalidates the evidence and spends the one re-capture budget.
+`bin/fm-dod-lib.sh` owns both the worker-side durable-job shape and that budget.
+
 ### PR ready, landing, and teardown
 
 Unless the corresponding Jev use is explicitly off, run `bin/fm-jev-accept-check.sh <id>` before judging a worker's terminal report and run `bin/fm-jev-commit-lint.sh <worktree>` before landing; both are advisory observers that write their findings to `data/<id>/acceptance.json` and `data/<id>/commit-lint.json`, never to the task's status file, and [`docs/jev.md`](docs/jev.md) owns their workflow.
