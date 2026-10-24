@@ -473,7 +473,8 @@ jobs:
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
-    timeout-minutes: 10
+    # Eight independent consumer bounds total 17.5 minutes; leave setup headroom.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - name: Run snapshot consumers with stock Bash
@@ -488,94 +489,13 @@ jobs:
           esac
           /bin/bash --version | head -1
           command -v jq >/dev/null || { echo "::error::jq is required"; exit 1; }
-
-          shell_inventory="$RUNNER_TEMP/fm-shell-inventory"
-          bin/fm-lint.sh --list-files > "$shell_inventory"
-          parse_fail=0
-          while IFS= read -r f; do
-            /bin/bash -n "$f" || { echo "::error::stock macOS Bash 3.2 failed to parse $f"; parse_fail=1; }
-          done < "$shell_inventory"
-          [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
-
           command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
           npm install -g tasks-axi@0.2.5 >/dev/null
           PATH="$(npm prefix -g)/bin:$PATH"
           export PATH
           command -v tasks-axi >/dev/null || { echo "::error::tasks-axi is required for the stock Bash regressions"; exit 1; }
 
-          snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
-          printf '%s\n' "$snapshot_output"
-          snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 18 ] || {
-            echo "::error::expected 18 snapshot/fleet-view tests, got $snapshot_count"
-            exit 1
-          }
-
-          # The fork's oversized parsed-backlog route is a MAX_ARG_STRLEN
-          # regression that runs as its own consumer with its own bound, the way
-          # bin/fm-stock-bash-compat.sh ran it. Keep it out of the full suite:
-          # folding it in is what broke this job, and upstream's 59 is itself the
-          # count of a run without it.
-          bearings_output=$(FM_BEARINGS_TEST_SKIP_OVERSIZED=1 \
-            /bin/bash tests/fm-bearings-snapshot.test.sh)
-          printf '%s\n' "$bearings_output"
-          bearings_count=$(printf '%s\n' "$bearings_output" | grep -c '^ok - ')
-          [ "$bearings_count" -eq 59 ] || {
-            echo "::error::expected 59 Bearings tests, got $bearings_count"
-            exit 1
-          }
-
-          oversized_output=$(FM_BEARINGS_TEST_ONLY=oversized-parsed-backlog \
-            /bin/bash tests/fm-bearings-snapshot.test.sh)
-          printf '%s\n' "$oversized_output"
-          oversized_count=$(printf '%s\n' "$oversized_output" | grep -c '^ok - ')
-          [ "$oversized_count" -eq 1 ] || {
-            echo "::error::expected 1 Bearings oversized parsed-backlog route, got $oversized_count"
-            exit 1
-          }
-
-          # The full public-followup suite is not a stock-bash snapshot; run only
-          # the empty-lock register regression under real /bin/bash 3.2.
-          pf_output=$(FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32 \
-            /bin/bash tests/fm-public-followup.test.sh)
-          printf '%s\n' "$pf_output"
-          pf_count=$(printf '%s\n' "$pf_output" | grep -c '^ok - ')
-          [ "$pf_count" -eq 1 ] || {
-            echo "::error::expected 1 public-followup bash 3.2 register regression, got $pf_count"
-            exit 1
-          }
-
-          # Same shape for the watcher's churn-deferral regression: an already-
-          # marked churn window expands an empty array that only stock Bash
-          # treats as an unbound variable under set -u.
-          churn_output=$(FM_TEST_ONLY=test_turn_ended_churn_existing_marker_absorbed \
-            /bin/bash tests/fm-watch-triage.test.sh)
-          printf '%s\n' "$churn_output"
-          churn_count=$(printf '%s\n' "$churn_output" | grep -c '^ok - ')
-          [ "$churn_count" -eq 1 ] || {
-            echo "::error::expected 1 watcher churn-deferral bash 3.2 regression, got $churn_count"
-            exit 1
-          }
-
-          # Lila stock-Bash regressions: the fork's own Bash 3.2 fixes for the
-          # learning-candidate NUL enumeration and local-merge branch resolution
-          # are not covered by the sweep above and must keep their verdicts.
-          learning_output=$(FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
-            /bin/bash tests/fm-learning-candidate.test.sh)
-          printf '%s\n' "$learning_output"
-          learning_count=$(printf '%s\n' "$learning_output" | grep -c '^ok - ')
-          [ "$learning_count" -eq 1 ] || {
-            echo "::error::expected 1 learning-candidate bash 3.2 regression, got $learning_count"
-            exit 1
-          }
-
-          merge_output=$(/bin/bash tests/fm-merge-local.test.sh)
-          printf '%s\n' "$merge_output"
-          merge_count=$(printf '%s\n' "$merge_output" | grep -c '^ok - ')
-          [ "$merge_count" -eq 14 ] || {
-            echo "::error::expected 14 local-merge bash 3.2 tests, got $merge_count"
-            exit 1
-          }
+          /bin/bash bin/fm-stock-bash-compat.sh
 
   invariants:
     name: Repo invariants

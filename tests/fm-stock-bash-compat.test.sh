@@ -24,18 +24,20 @@ SH
   cat > "$tmp/tests/consumer.sh" <<'SH'
 #!/usr/bin/env bash
 case "${0##*/}" in
-  fm-fleet-snapshot-view.test.sh) key=fleet; count=15 ;;
+  fm-fleet-snapshot-view.test.sh) key=fleet; count=18 ;;
   fm-bearings-snapshot.test.sh)
     if [ "${FM_BEARINGS_TEST_ONLY:-}" = oversized-parsed-backlog ]; then
       key=oversized
       count=1
     else
       key=bearings
-      count=41
+      count=59
     fi
     ;;
+  fm-public-followup.test.sh) key=public-followup; count=1 ;;
+  fm-watch-triage.test.sh) key=watch-churn; count=1 ;;
   fm-learning-candidate.test.sh) key=learning; count=1 ;;
-  fm-merge-local.test.sh) key=merge; count=5 ;;
+  fm-merge-local.test.sh) key=merge; count=14 ;;
   *) exit 2 ;;
 esac
 if [ "${FM_TEST_HANG_CONSUMER:-}" = "$key" ]; then
@@ -47,6 +49,9 @@ if [ "$key" = learning ]; then
       printf 'wait: pid 42 is not a child of this shell\n' >&2
       exit 2
     fi
+    if [ "${FM_TEST_SHORT_LEARNING:-0}" = 1 ]; then
+      count=0
+    fi
 fi
 while [ "$count" -gt 0 ]; do
   printf 'ok - fixture assertion %s\n' "$count"
@@ -57,6 +62,8 @@ SH
   for file in \
     fm-fleet-snapshot-view.test.sh \
     fm-bearings-snapshot.test.sh \
+    fm-public-followup.test.sh \
+    fm-watch-triage.test.sh \
     fm-learning-candidate.test.sh \
     fm-merge-local.test.sh
   do
@@ -73,6 +80,8 @@ run_fixture() {
     FM_STOCK_BASH_FLEET_TIMEOUT=1 \
     FM_STOCK_BASH_BEARINGS_TIMEOUT=1 \
     FM_STOCK_BASH_BEARINGS_OVERSIZED_TIMEOUT=1 \
+    FM_STOCK_BASH_PUBLIC_FOLLOWUP_TIMEOUT=1 \
+    FM_STOCK_BASH_WATCH_CHURN_TIMEOUT=1 \
     FM_STOCK_BASH_LEARNING_TIMEOUT=1 \
     FM_STOCK_BASH_MERGE_TIMEOUT=1 \
     "$@" /bin/bash bin/fm-stock-bash-compat.sh 2>&1)
@@ -91,6 +100,9 @@ case " $* " in
   *" FM_BEARINGS_TEST_ONLY=oversized-parsed-backlog "*)
     printf '%s\n' "$3" > "$FM_TEST_TIMEOUT_RECORD"
     ;;
+  *" FM_BEARINGS_TEST_SKIP_OVERSIZED=1 "*)
+    printf '%s\n' "$3" > "$FM_TEST_TIMEOUT_RECORD.suite"
+    ;;
 esac
 shift 3
 "$@"
@@ -104,11 +116,16 @@ SH
     FM_TEST_TIMEOUT_RECORD="$record" \
     /bin/bash bin/fm-stock-bash-compat.sh 2>&1) || rc=$?
   expect_code 0 "$rc" "default stock Bash compatibility fixture completes"
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 8 ] \
+    || fail "each of the eight stock Bash consumers needs one passing verdict"
   assert_contains "$out" "ok - fixture assertion 1" \
     "default oversized route completes through the public compatibility wrapper"
   assert_present "$record" "default oversized route did not receive a timeout bound"
   [ "$(cat "$record")" = 180 ] \
     || fail "default oversized route needs the proven 180s Bearings runner bound, got $(cat "$record")s"
+  assert_present "$record.suite" "default Bearings snapshot suite did not receive a timeout bound"
+  [ "$(cat "$record.suite")" = 420 ] \
+    || fail "default Bearings snapshot suite needs the 420s bound above its 231-349s macOS CI runtime, got $(cat "$record.suite")s"
   pass "stock Bash compatibility: oversized route uses the proven Bearings runner bound"
 }
 
@@ -124,6 +141,8 @@ test_every_hung_consumer_is_named_and_streamed() {
       "$key consumer streams output before its deadline"
     assert_contains "$out" "Stock Bash consumer timed out::$label exceeded 1s" \
       "$key failure is attributed to its exact consumer"
+    [ "$(printf '%s\n' "$out" | grep -Ec "Stock Bash consumer (timed out|failed|incomplete|passed)::$label ")" -eq 1 ] \
+      || fail "$key must emit exactly one explicit verdict"
     assert_contains "$out" "one or more stock macOS Bash consumers failed" \
       "$key timeout produces the final compatibility verdict"
     if [ "$key" != merge ]; then
@@ -135,6 +154,8 @@ inventory|shell parse sweep
 fleet|fleet snapshot and view
 bearings|Bearings snapshot
 oversized|Bearings oversized parsed-backlog route
+public-followup|public-followup empty-lock register
+watch-churn|watcher churn deferral
 learning|PR 18 learning-candidate NUL enumeration
 merge|PR 19 local-merge branch resolution
 EOF
@@ -158,6 +179,24 @@ test_failed_learning_summary_is_named_and_later_merge_runs() {
   pass "stock Bash compatibility: failed PR 18 summary is named and later consumers run"
 }
 
+test_incomplete_consumer_has_one_verdict_and_later_merge_runs() {
+  local tmp out rc
+  tmp=$(fm_test_tmproot fm-stock-bash-compat-incomplete)
+  make_fixture "$tmp"
+
+  rc=0
+  out=$(run_fixture "$tmp" env FM_TEST_SHORT_LEARNING=1) || rc=$?
+  expect_code 1 "$rc" "incomplete learning summary produces an aggregate failure"
+  assert_contains "$out" "Stock Bash consumer incomplete::PR 18 learning-candidate NUL enumeration emitted 0 of 1 expected assertions" \
+    "incomplete learning summary has an explicit verdict"
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::PR 18 learning-candidate NUL enumeration ')" -eq 0 ] \
+    || fail "incomplete learning summary must not also receive a passing verdict"
+  assert_contains "$out" "later consumer completed" \
+    "incomplete learning summary does not suppress the final consumer"
+  pass "stock Bash compatibility: incomplete consumer has one verdict and later consumers run"
+}
+
 test_oversized_route_default_has_runner_headroom
 test_every_hung_consumer_is_named_and_streamed
 test_failed_learning_summary_is_named_and_later_merge_runs
+test_incomplete_consumer_has_one_verdict_and_later_merge_runs
