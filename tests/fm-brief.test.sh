@@ -562,21 +562,26 @@ test_ship_project_memory_wording() {
 test_green_final_head_names_service_receipt() {
   local home brief plain
   home="$TMP_ROOT/green-receipt-home"
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/config/test-service"
+  cp "$ROOT/docs/examples/fm-test-service-frogpile.json" "$home/config/test-service/some-proj.json"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" green-receipt some-proj --mode local-only --green-final-head >/dev/null \
     || fail "green-final-head brief did not scaffold"
   brief="$home/data/green-receipt/brief.md"
   assert_grep "Final-head health: green" "$brief" "green brief lost its health marker"
   assert_grep "$home/data/green-receipt/suite.receipt" "$brief" "green brief omitted its task receipt path"
-  assert_grep "fm-test-service.py' submit" "$brief" "green brief omitted the sanctioned pass-record producer"
-  assert_grep "--task 'green-receipt' --suite --receipt" "$brief" "green brief omitted service receipt arguments"
-  assert_grep "fm-test-service.py' wait <request-id>" "$brief" "green brief omitted the service result check"
-  assert_grep "do not hand-write a pass record" "$brief" "green brief permitted a second receipt format"
+  assert_grep "fm-test-service.py submit some-proj" "$brief" "green brief omitted the configured pass-record producer"
+  assert_grep "--task 'green-receipt' --suite --device-gate any --receipt" "$brief" "green brief omitted service receipt arguments"
+  assert_grep "fm-test-service.py wait <request-id>" "$brief" "green brief omitted the service result check"
+  assert_grep "schema=fm-full-suite.v1" "$brief" "green brief omitted the service receipt form"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-receipt some-proj --mode local-only >/dev/null \
     || fail "ordinary brief did not scaffold"
   plain="$home/data/ordinary-receipt/brief.md"
-  assert_no_grep "suite.receipt" "$plain" "ordinary brief gained final-head receipt instructions"
+  assert_no_grep "Final-head health: green" "$plain" "ordinary brief gained final-head instructions"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" unconfigured-receipt other-proj --mode local-only --green-final-head >/dev/null \
+    || fail "unconfigured green-final-head brief did not scaffold"
+  assert_grep "No test-service project is configured" "$home/data/unconfigured-receipt/brief.md" \
+    "unconfigured green brief omitted its configuration blocker"
   pass "fm-brief.sh: green-final-head brief names its task receipt and sanctioned producer"
 }
 

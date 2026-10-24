@@ -901,13 +901,12 @@ HEALTH_MARKER=
 # ship brief; its text and its supervision counterpart are owned elsewhere.
 LONG_SUITE_SECTION=$(fm_long_suite_block)
 if [ "$GREEN_FINAL_HEAD" -eq 1 ]; then
-  RECEIPT_PATH=$(shell_quote "$DATA/$ID/suite.receipt")
-  SERVICE_CMD=$(shell_quote "$FM_ROOT/bin/fm-test-service.py")
-  HEALTH_MARKER="Final-head health: green
+  HEALTH_MARKER='Final-head health: green'
+  if [ -z "$TEST_SERVICE_PROJECT" ]; then
+    HEALTH_MARKER="$HEALTH_MARKER
 The final-head suite receipt belongs at \`$DATA/$ID/suite.receipt\`.
-After committing the final head, set PROJECT to this task's configured test-service project and run \`FM_HOME=$(shell_quote "$FM_HOME") $SERVICE_CMD submit \"\$PROJECT\" \"\$PWD\" \"\$(git rev-parse HEAD)\" --task $(shell_quote "$ID") --suite --receipt $RECEIPT_PATH\`.
-Capture the returned request ID and run \`$SERVICE_CMD wait <request-id>\` before reporting done; \`bin/fm-test-service.py\` writes the receipt accepted by \`bin/fm-merge-local.sh --receipt\`.
-The receipt format is owned by \`bin/fm-merge-local.sh\`; do not hand-write a pass record."
+No test-service project is configured for this repository; ask firstmate to configure one before submitting the final head."
+  fi
 fi
 OPEN_QUESTIONS_SECTION=
 if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
