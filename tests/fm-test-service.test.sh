@@ -13,6 +13,15 @@ export PATH=$tmp/bin:$PATH
 cat > "$tmp/bin/adb" <<'ADB'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "$1" = devices ]; then
+  echo 'List of devices attached'
+  if [ -e "$HOME/online-devices" ]; then
+    while read -r serial; do [ -z "$serial" ] || printf '%s\tdevice\n' "$serial"; done < "$HOME/online-devices"
+  else
+    printf 'S22\tdevice\nS21\tdevice\nM31\tdevice\n'
+  fi
+  exit 0
+fi
 [ "$1" = -s ]; serial=$2; shift 2
 [ "$1" = shell ]; shift
 case "$*" in
@@ -31,7 +40,7 @@ chmod +x "$tmp/bin/adb"
 $svc install-unit > "$tmp/unit-path"
 rg -q '^ExecStart=".*/bin/fm-test-service.py" serve$' "$(cat "$tmp/unit-path")"
 cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
-{"prepare":["prepare.sh"],"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"any_device":["phone.sh","--serial","any"],"phones":["S22","S21"],"any_phones":["S22","S21"],"landing_branch":"main","scenarios":{"smoke":["--smoke"]}}
+{"prepare":["prepare.sh"],"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"any_device":["phone.sh","--serial","any"],"phones":["S22","S21","M31"],"any_phones":["S22","S21"],"equivalent_phones":{"S22":["S21"],"S21":["S22"]},"landing_branch":"main","scenarios":{"smoke":["--smoke"]}}
 JSON
 cd "$tmp/project"
 git init -q -b main
@@ -63,7 +72,7 @@ cat > phone.sh <<'PHONE'
 serial=$2
 [ "$serial" != any ] || serial=S22
 echo "phone-start-v1:$serial:${3:-}" >> "$EVENTS"
-sleep .2
+if [ "$serial" = S22 ] && [ -e "$HOME/slow-phone" ]; then sleep 8; else sleep .2; fi
 echo "phone-end-v1" >> "$EVENTS"
 PHONE
 cat > benchmark.sh <<'BENCH'
@@ -136,6 +145,39 @@ if rg -q '1234' "$FM_TEST_SERVICE_STATE/status.json" "$FM_TEST_SERVICE_STATE"/lo
 any_phone=$($svc submit fake "$PWD" "$sha1" --suite --device-gate any)
 $svc wait "$any_phone" | grep -q '^passed '
 rg -q '^phone-start-v1:S22:$' "$EVENTS"
+printf 'S21\nM31\n' > "$HOME/online-devices"
+fallback=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
+$svc wait "$fallback" | grep -q '^passed '
+rg -q '^phone-start-v1:S21:$' "$EVENTS"
+printf 'S22\nS21\n' > "$HOME/online-devices"
+touch "$HOME/slow-phone"
+before_s22=$(rg -c '^phone-start-v1:S22:$' "$EVENTS")
+before_s21=$(rg -c '^phone-start-v1:S21:$' "$EVENTS")
+disconnect=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
+for i in $(seq 1 300); do
+  count=$(rg -c '^phone-start-v1:S22:$' "$EVENTS")
+  [ "$count" -gt "$before_s22" ] && break
+  sleep .05
+done
+[ "$count" -gt "$before_s22" ]
+printf 'S21\n' > "$HOME/online-devices"
+$svc wait "$disconnect" | grep -q '^passed '
+rm "$HOME/slow-phone"
+[ "$(rg -c '^phone-start-v1:S21:$' "$EVENTS")" -gt "$before_s21" ]
+printf 'S21\n' > "$HOME/online-devices"
+performance=$($svc submit fake "$PWD" "$sha1" --device-gate M31)
+$svc wait "$performance" > "$tmp/performance.out" && exit 1 || true
+rg -q 'device-unavailable: M31' "$tmp/performance.out"
+: > "$HOME/online-devices"
+offline=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
+$svc wait "$offline" > "$tmp/offline.out" && exit 1 || true
+rg -q 'device-unavailable: S22' "$tmp/offline.out"
+python3 - "$FM_TEST_SERVICE_STATE/status.json" "$offline" <<'PY'
+import json,sys
+status=json.load(open(sys.argv[1]))
+assert any(a['id']==sys.argv[2] and 'no equivalent connected' in a['message'] for a in status['alerts'])
+PY
+rm "$HOME/online-devices"
 rm "$HOME/unlocked-S22"
 printf 'S22=9999\n' > "$HOME/.config/firstmate/test-device-pins"
 wrong=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)

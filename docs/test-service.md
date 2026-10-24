@@ -4,6 +4,7 @@
 It keeps its SQLite request database, independent Git copies, logs, result records, and `status.json` under `~/.local/state/firstmate-test-service/`.
 `FM_TEST_SERVICE_STATE` can select a different persistent directory for a separate instance or a test.
 The status file contains queue order, `running_requests` and `waiting_requests` arrays with task, SHA, state, start time, and elapsed times, plus per-request and per-step detail for the crew board.
+Its `alerts` array exposes requests that have no connected eligible phone.
 
 Install the user unit from the checked-out code root with `bin/fm-test-service.py install-unit`, then run `systemctl --user daemon-reload` and `systemctl --user enable --now fm-test-service.service`.
 The generated unit runs `serve`, restarts it after a failure, and stops its process group on shutdown.
@@ -25,9 +26,14 @@ The service takes no separate suite or phone lock and does not stop the adb serv
 The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
 
 For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json`.
-`any_device` delegates an `any` request to the project queue entry point after preparing each serial in `any_phones`, ordered with the S22 first.
+An `any` request chooses the first connected phone in `any_phones`, ordered with the S22 first, and enters the project's shared queue for that phone.
+The older `any_device` command remains accepted in existing configuration files but is ignored so a project queue cannot select a phone outside `any_phones`.
+When a named phone is disconnected, `equivalent_phones` selects the first connected alternative and the project queue waits until that phone is idle.
+The service monitors the selected phone during the test and retries on another equivalent if it disconnects.
+When none is connected, the request fails with a `device-unavailable` alert instead of leaving an offline ticket waiting forever.
+Submit a new request after a phone reconnects.
 The FrogPile preparation starts Godot's editor import so class discovery works in a fresh checkout.
-The M31 remains explicitly addressable for performance requests.
+The M31 remains explicitly addressable for performance requests and is excluded from the functional phone alternatives.
 The example is configuration, not a second copy of the suite or phone queue.
 
 A worker can submit the exact committed head, wait for its result, and hand the success record to `fm-merge-local.sh --receipt`:

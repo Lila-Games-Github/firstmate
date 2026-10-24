@@ -44,10 +44,20 @@ def config(project):
     data = json.loads(path.read_text())
     if not isinstance(data.get("suite"), list) or not isinstance(data.get("device"), list):
         raise ValueError("configuration needs suite and device argv arrays")
-    if not isinstance(data.get("phones", []), list) or not isinstance(data.get("landing_branch"), str):
+    if not isinstance(data.get("phones"), list) or not data["phones"] or not isinstance(data.get("landing_branch"), str):
         raise ValueError("configuration needs phones and landing_branch")
+    if "any_phones" in data and (not isinstance(data["any_phones"], list)
+                                 or any(phone not in data["phones"] for phone in data["any_phones"])):
+        raise ValueError("any_phones must contain configured phones")
     if "any_device" in data and (not isinstance(data["any_device"], list) or not isinstance(data.get("any_phones"), list)):
         raise ValueError("any_device requires any_phones and argv arrays")
+    equivalents = data.get("equivalent_phones", {})
+    if not isinstance(equivalents, dict) or any(
+        phone not in data["phones"] or not isinstance(peers, list)
+        or any(peer not in data["phones"] or peer == phone for peer in peers)
+        for phone, peers in equivalents.items()
+    ):
+        raise ValueError("equivalent_phones must map configured phones to configured alternatives")
     limit = data.get("max_concurrent", 4 if project.lower() == "frogpile" else 1)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 16:
         raise ValueError("max_concurrent must be an integer from 1 to 16")
@@ -112,6 +122,8 @@ def snapshot(db):
                 "running": next((r["id"] for r in rows if r["state"] == "running"), None),
                 "running_requests": [summary(r) for r in rows if r["state"] == "running"],
                 "waiting_requests": [summary(r) for r in rows if r["state"] in ("preparing", "queued")],
+                "alerts": [{"id": r["id"], "message": r["error"]} for r in rows
+                           if r["error"] and r["error"].startswith("device-unavailable:")],
                 "requests": rows}
         atomic_write(STATUS, json.dumps(data, indent=2) + "\n")
         return data
@@ -255,6 +267,33 @@ def prepare_phone(serial):
         raise RuntimeError("phone-locked: could not unlock " + serial)
 
 
+def connected_phones():
+    try:
+        result = run(["adb", "devices"], timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("device-unavailable: adb devices could not be read") from exc
+    if result.returncode:
+        raise RuntimeError("device-unavailable: adb devices failed")
+    return {fields[0] for line in result.stdout.splitlines()[1:]
+            if len(fields := line.split()) >= 2 and fields[1] == "device"}
+
+
+def phone_candidates(requested, cfg):
+    if requested == "any":
+        return cfg.get("any_phones", cfg["phones"])
+    return [requested] + cfg.get("equivalent_phones", {}).get(requested, [])
+
+
+def choose_phone(requested, cfg, excluded=()):
+    candidates = phone_candidates(requested, cfg)
+    online = connected_phones()
+    choice = next((phone for phone in candidates if phone in online and phone not in excluded), None)
+    if choice is None:
+        raise RuntimeError("device-unavailable: " + requested + " disconnected or exhausted; "
+                           "no equivalent connected (" + ", ".join(candidates) + ")")
+    return choice
+
+
 def execute(db, row):
     rid = row["id"]
     opts = json.loads(row["options"])
@@ -273,7 +312,7 @@ def execute(db, row):
     if run(["git", "-C", str(work), "status", "--porcelain"]).stdout.strip():
         return "failed", "test copy is not clean", None
     processes = []
-    def step(name, argv):
+    def step(name, argv, watch_serial=None):
         watch_db = connection()
         step_state(watch_db, rid, row["generation"], name, "running")
         target = Path(argv[0])
@@ -290,9 +329,17 @@ def execute(db, row):
         with log_path.open("wb") as log:
             proc = subprocess.Popen(argv, cwd=work, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(proc)
+            last_phone_check = 0
+            disconnected = False
             while proc.poll() is None:
                 cancelled = watch_db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]
-                if cancelled or STOP:
+                if watch_serial and time.monotonic() - last_phone_check >= 5:
+                    last_phone_check = time.monotonic()
+                    try:
+                        disconnected = watch_serial not in connected_phones()
+                    except RuntimeError:
+                        disconnected = False
+                if cancelled or STOP or disconnected:
                     try:
                         os.killpg(proc.pid, signal.SIGTERM)
                     except ProcessLookupError:
@@ -304,6 +351,9 @@ def execute(db, row):
                 time.sleep(.1)
         code = proc.returncode
         output = log_path.read_text(errors="replace")
+        if disconnected:
+            code = 125
+            output = "device-unavailable: " + watch_serial + " disconnected while waiting or running"
         step_state(watch_db, rid, row["generation"], name, "passed" if code == 0 else "failed", code)
         watch_db.close()
         return name, code, output
@@ -318,32 +368,51 @@ def execute(db, row):
             return "interrupted", "service stopping", work
         if db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
             return "cancelled", "cancelled", work
-        serial = opts["device_gate"]
-        any_serials = cfg.get("any_phones", cfg["phones"][:1])
-        if serial == "any" and "any_device" not in cfg:
-            serial = any_serials[0] if any_serials else None
-        if opts["device_gate"] and not serial:
-            return "failed", "no configured phone", work
-        if serial:
+        requested = opts["device_gate"]
+        serial = None
+        if requested:
             step_state(db, rid, row["generation"], "phone-prep", "running")
             try:
-                for target in any_serials if serial == "any" else [serial]:
-                    prepare_phone(target)
+                attempted = set()
+                while True:
+                    serial = choose_phone(requested, cfg, attempted)
+                    try:
+                        prepare_phone(serial)
+                        break
+                    except RuntimeError:
+                        if serial in connected_phones():
+                            raise
+                        attempted.add(serial)
             except (RuntimeError, OSError) as exc:
                 step_state(db, rid, row["generation"], "phone-prep", "failed", 1)
                 return "failed", str(exc), work
             step_state(db, rid, row["generation"], "phone-prep", "passed", 0)
-        steps = []
+        def device_step():
+            attempted = set()
+            while True:
+                current = serial_holder[0]
+                command = expand(cfg["device"], current)
+                for scenario in opts["scenarios"]:
+                    command += cfg.get("scenarios", {})[scenario]
+                result = step("device", command, watch_serial=current)
+                if not (result[1] == 125 and result[2].startswith("device-unavailable:")):
+                    return result
+                attempted.add(current)
+                try:
+                    next_serial = choose_phone(requested, cfg, attempted)
+                    prepare_phone(next_serial)
+                except (RuntimeError, OSError) as exc:
+                    return "device", 125, str(exc)
+                serial_holder[0] = next_serial
+        serial_holder = [serial]
+        actions = []
         if opts["suite"]:
-            steps.append(("suite", expand(cfg["suite"])))
-        if opts["device_gate"]:
-            command = expand(cfg["any_device"] if serial == "any" else cfg["device"], serial)
-            for scenario in opts["scenarios"]:
-                command += cfg.get("scenarios", {})[scenario]
-            steps.append(("device", command))
+            actions.append(lambda: step("suite", expand(cfg["suite"])))
+        if requested:
+            actions.append(device_step)
         # Each request's suite and device commands enter their project-owned shared queues concurrently.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(steps))) as pool:
-            futures = [pool.submit(step, name, argv) for name, argv in steps]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(actions))) as pool:
+            futures = [pool.submit(action) for action in actions]
             results = [future.result() for future in futures]
         if not any(code for _name, code, _log in results):
             for path in opts["harnesses"]:
@@ -364,6 +433,8 @@ def execute(db, row):
         return "interrupted", "service stopping", work
     for name, code, log in results:
         if code:
+            if log.startswith("device-unavailable:"):
+                return "failed", log, work
             return "failed", first_error(log, code, name), work
     if run(["git", "-C", str(work), "status", "--porcelain"]).stdout.strip():
         return "failed", "test copy changed during test", work

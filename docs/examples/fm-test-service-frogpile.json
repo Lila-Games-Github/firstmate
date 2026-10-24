@@ -30,13 +30,16 @@
     "RZ8N71EC9ZB"
   ],
   "landing_branch": "proto/godot/frog-pile",
-  "any_device": [
-    "prototype-game/tests/e2e/run_device_flow.sh",
-    "--serial",
-    "any"
-  ],
   "any_phones": [
     "R5CT32HRVNM",
     "RZCX224VH4T"
-  ]
+  ],
+  "equivalent_phones": {
+    "R5CT32HRVNM": [
+      "RZCX224VH4T"
+    ],
+    "RZCX224VH4T": [
+      "R5CT32HRVNM"
+    ]
+  }
 }
