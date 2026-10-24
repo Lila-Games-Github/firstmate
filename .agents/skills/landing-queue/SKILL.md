@@ -33,7 +33,7 @@ The worker and the next car observe `landed` and the new target from the queue t
 The landing tip named by the recheck's `tip` is red and has no recorded landing-health baseline, so the car's red receipt cannot yet be judged.
 Obtain a full-suite receipt for exactly that tip commit, never for the car.
 Record it with `bin/fm-landing-queue.sh baseline <id> --receipt <tip receipt>` using the same environment and options; this records the baseline only and lands nothing.
-That output's status is now `ready-to-land`, which wakes again and is handled as above, or `red-receipt`, which leaves fixing the extra failures to the car's own worker under the same task id.
+That output's status is now `ready-to-land`, which wakes again and is handled as above, or `needs-gate` or `red-receipt`, which leave the missing gate or the extra failures to the car's own worker under the same task id.
 Reserve `fail` for a car that genuinely cannot continue.
 
 ## failed

@@ -53,9 +53,10 @@
 # merge gate does. A red bottom receipt is needs-baseline when the live tip has
 # no recorded baseline, or red-receipt when it names failures outside that
 # baseline; neither demands another suite run on the same head. Once firstmate
-# records the baseline, the car becomes ready-to-land or red-receipt.
+# records the baseline, the car becomes ready-to-land, needs-gate, or red-receipt.
 # red-receipt is the worker's to fix on a new head or fail.
-# Only ready-to-land (bottom, acceptable receipt, fast-forward of the live tip),
+# Only ready-to-land (bottom, acceptable receipt, every configured gate passed,
+# fast-forward of the live tip),
 # needs-baseline, and failed transitions append durable `check: landing-queue`
 # wakes, deduplicated per event. A wake is an event: firstmate rechecks status
 # before acting, following the landing-queue agent skill.
