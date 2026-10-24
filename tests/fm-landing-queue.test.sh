@@ -286,3 +286,19 @@ wake_payloads | grep -qx 'check: landing-queue failed task=a .* reason=suite fai
 wake_payloads | grep -qx 'check: landing-queue failed task=b .* reason=local branch missing' \
   || fail "missing-branch reason misattributed: $(wake_payloads)"
 pass 'one invocation attributes explicit and missing-branch failure reasons to their own cars'
+out=$(queue status b)
+expect_field "$out" status failed
+expect_field "$out" reason 'local branch missing'
+pass 'a detected missing-branch reason survives into later status calls'
+
+make_case persisted-reason
+car a main; join a >/dev/null; prepare a
+if queue fail a --reason $'two\nlines' > "$CASE/multiline.out" 2>&1; then fail 'multi-line reason was accepted'; fi
+if queue fail a --reason $'tab\there' > "$CASE/tab.out" 2>&1; then fail 'tabbed reason was accepted'; fi
+expect_field "$(queue status a)" status needs-final
+queue fail a --reason 'new-red: failure=parser, failure=io' >/dev/null
+out=$(FM_HOME="$CASE/home" "$QUEUE" status a --project "$CASE/a" --landing-branch main)
+expect_field "$out" status failed
+expect_field "$out" reason 'new-red: failure=parser, failure=io'
+[ "$(wake_count)" = 1 ] || fail 'the worker status repeated the failure wake'
+pass 'a supervisor-recorded failure reason reaches the worker through a later status call'

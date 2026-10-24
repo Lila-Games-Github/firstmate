@@ -14,13 +14,15 @@
 # base. The target must still be current and an ancestor of the submitted head.
 # status reconciles the whole queue and prints this car as key=value lines:
 # place (bottom=1), target_ref, target_sha, rebase_from, head, status, receipt,
-# and reason (this invocation's failure or red-receipt reason, else '-').
+# and reason (a failed car's recorded reason or this invocation's red-receipt
+# reason, else '-').
 # Use git rebase --onto <target_sha> <rebase_from> when the base changes, retaining
 # only this car's commits, then ready --target before the exact-head suite.
 # receipt requires --head, --target and --receipt. It snapshots an fm-full-suite.v1
 # receipt (parser: fm-landing-health-lib.sh) only for the current head and target.
 # A target/head race refuses the submission; status then supplies the new work.
-# fail removes a car from the active train with --reason; it cannot silently
+# fail removes a car from the active train with --reason, a single line without
+# control characters other than '-', recorded for later status calls; it cannot silently
 # rejoin. Start a new task id after resolving a failed car. Landed ids also stay
 # terminal. A missing branch whose recorded head is in the landing tip is landed;
 # any other missing branch becomes a failed car on reconciliation.
@@ -28,7 +30,8 @@
 # Durable format: data/landing-queue/<hash>/queue is a versioned TSV snapshot,
 # identified by the canonical common Git directory and landing branch. Rows in
 # append order hold id, branch, head, state, acknowledged base, receipt file,
-# receipt target, and last notified event hash. '-' means absent. Immutable
+# receipt target, last notified event hash, and failure reason (failed rows
+# only). '-' means absent. Immutable
 # receipt snapshots live beside it. Queue writes are atomic and serialized by
 # state/.landing-queue-<hash>.lock using the shared recoverable lock helpers.
 # Every invocation refreshes live refs, retires heads already in the landing tip,
@@ -75,6 +78,8 @@ while [ "$#" -gt 0 ]; do
   shift 2
 done
 [ -n "$PROJECT" ] || die '--project is required'
+valid_reason() { [ -n "$1" ] && [ "$1" != - ] && ! [[ "$1" =~ [[:cntrl:]] ]]; }
+[ -z "$REASON" ] || valid_reason "$REASON" || die '--reason must be one line without control characters'
 COMMON=$(git -C "$PROJECT" rev-parse --git-common-dir) || die 'project is not a Git checkout'
 case "$COMMON" in /*) ;; *) COMMON="$PROJECT/$COMMON" ;; esac
 COMMON=$(cd "$COMMON" && pwd -P)
@@ -131,10 +136,10 @@ if [ -e "$FILE" ]; then
     IFS= read -r schema && [ "$schema" = fm-landing-queue.v1 ] || die 'invalid queue schema'
     IFS= read -r repository && [ "$repository" = "$COMMON" ] || die 'queue repository mismatch'
     IFS= read -r landing && [ "$landing" = "$LANDING" ] || die 'queue landing branch mismatch'
-    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified extra; do
+    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason extra; do
       [[ "$row_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue task id'
       valid_branch "$row_branch" || die 'invalid queue branch'
-      [ -n "$row_notified" ] && [ -z "$extra" ] || die 'incomplete queue row'
+      [ -n "$row_notified" ] && [ -n "$row_reason" ] && [ -z "$extra" ] || die 'incomplete queue row'
       [[ "$row_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
         && [[ "$row_base" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die 'invalid queue commit'
       case "$row_receipt" in
@@ -142,12 +147,17 @@ if [ -e "$FILE" ]; then
         *) [[ "$row_receipt" =~ ^[0-9a-f]{40}([0-9a-f]{24})?\.receipt$ ]] || die 'invalid queue receipt name' ;;
       esac
       case "$row_state" in active|landed|failed) ;; *) die 'invalid queue state' ;; esac
+      if [ "$row_state" = failed ]; then
+        valid_reason "$row_reason" || die 'invalid queue failure reason'
+      else
+        [ "$row_reason" = - ] || die 'queue reason on a car that has not failed'
+      fi
       for ((i=0; i<count; i++)); do
         [ "${ids[i]}" != "$row_id" ] && [ "${branches[i]}" != "$row_branch" ] || die 'duplicate queue car'
       done
       ids[count]=$row_id branches[count]=$row_branch heads[count]=$row_head states[count]=$row_state
       bases[count]=$row_base receipts[count]=$row_receipt targets[count]=$row_target notified[count]=$row_notified
-      reasons[count]=-
+      reasons[count]=$row_reason
       if [ "$row_id" = "$ID" ]; then found=$count; fi
       count=$((count + 1))
     done
@@ -155,13 +165,15 @@ if [ -e "$FILE" ]; then
 fi
 
 save() {
-  local i
+  local i reason
   TMP=$(mktemp "$DIR/.queue.XXXXXX")
   {
     printf 'fm-landing-queue.v1\n%s\n%s\n' "$COMMON" "$LANDING"
     for ((i=0; i<count; i++)); do
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
-        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}"
+      reason=-
+      [ "${states[i]}" != failed ] || reason=${reasons[i]}
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
+        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason"
     done
   } > "$TMP"
   mv -f -- "$TMP" "$FILE"
