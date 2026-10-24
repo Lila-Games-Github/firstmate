@@ -263,6 +263,10 @@ EOF
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
+  # A promoted worker receives the same worker-side long-suite and evidence
+  # snapshot contract an ordinary brief carries (bin/fm-dod-lib.sh owns it).
+  fm_long_suite_block
+  printf '\n'
   if [ "$MODE" = local-only ]; then
     promote_local_only_landing "$(fm_dod_block "$MODE" "$ID")"
     printf '\n'

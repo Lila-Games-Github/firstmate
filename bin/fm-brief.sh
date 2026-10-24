@@ -879,6 +879,9 @@ WORKSPACE_KIND=crewmate
 [ "$LANE" -eq 0 ] || WORKSPACE_KIND=lane
 HEALTH_MARKER=
 [ "$GREEN_FINAL_HEAD" -eq 0 ] || HEALTH_MARKER='Final-head health: green'
+# The durable long-suite and evidence snapshot contract is rendered into every
+# ship brief; its text and its supervision counterpart are owned elsewhere.
+LONG_SUITE_SECTION=$(fm_long_suite_block)
 OPEN_QUESTIONS_SECTION=
 if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
   OPEN_QUESTIONS_SECTION="# Open-question dependencies
@@ -957,6 +960,8 @@ Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
 If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+
+$LONG_SUITE_SECTION
 
 $DOD
 EOF
