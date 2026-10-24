@@ -1,0 +1,11 @@
+ok - Pi dollar usage, captured corrections, and pipeline rounds survive in ledger
+ok - Codex cumulative tokens use the final total and price table
+ok - Codex session discovery binds usage by worktree
+ok - Claude message ids prevent duplicate token charges
+ok - Relaunch across Pi and Codex includes both runtime records and pricing
+ok - Unreadable usage remains a null-cost row for each task incarnation
+ok - Missing relaunch usage prevents a complete cost estimate
+ok - Summary groups by rule and preserves incomplete cost
+ok - Summary joins later learning candidates by task id without rewriting the ledger
+ok - Learning candidates bind only to the task incarnation that captured them
+ok - A running incarnation bounds the earlier row's learning-candidate join
