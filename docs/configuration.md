@@ -16,7 +16,7 @@ The private phone PIN file is `~/.config/firstmate/test-device-pins`, with mode 
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
-`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, captain questions, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
+`data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, captain questions, optional shared captain preferences, learnings, backlog, briefs, scout reports, the append-only routing ledger, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 `state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`), and durable development-incident records under `state/learning-candidates/`.
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
@@ -500,6 +500,32 @@ Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Routing ledger (data/routing-ledger.jsonl)
+
+`bin/fm-spawn.sh` records the original dispatch rule, manual override reason, provider, harness, model, effort, dispatch time, and the chosen provider's `quota-axi --json` snapshot in the task metadata.
+The `profile:` line from `bin/fm-dispatch-resolve.sh` includes `--routing-rule` and `--routing-provider`; for a hand-picked profile, pass `--routing-reason` with the reason for overriding the resolved choice.
+An omitted rule is recorded as `manual` with `reason-not-recorded`, so legacy callers are visible in the review instead of being attributed to a rule.
+Relaunches preserve the original routing facts and increment `routing_relaunches` while retaining the harness history used to find rerun sessions.
+Teardown appends one JSON object per task incarnation to `data/routing-ledger.jsonl` before removing task runtime records, including when usage cannot be read.
+The writer and weekly summary require Python 3, which bootstrap checks as a required local tool.
+The append is locked and a retry recognizes the task id and start time, preventing a duplicate line.
+The `schema: 1` object has `task_id`, `instance_id` (the original spawn generation), `project`, `kind`, `delivery_mode`, `routing`, `started_at`, `ended_at`, `wall_seconds`, `outcome`, `needs_decision_count`, `blocked_count`, `stale_wake_count`, `validation_runs`, `validation_rounds`, `failed_rounds`, `pipeline`, `relaunches`, `learning_candidates`, and `cost`.
+`routing` contains `rule`, `override_reason`, `provider`, `harness`, `model`, `effort`, the full provider `quota_snapshot` object or null, and `quota_reason` naming why a snapshot is null.
+`outcome` contains `landed`, `method` (`pr-merge`, `local-landing`, `scout-report`, `secondmate-retired`, `discarded`, or `unknown`), `captain_rejected`, and `captain_corrected`.
+The rejection and correction fields come only from learning candidates captured for the task with a `review-rejection` or `captain-correction` signal (`bin/fm-learning-candidate.sh`) whose `captured_at` falls within this task incarnation, from its dispatch onward: a matching candidate records `true`, and otherwise the field is null with a `captain_rejected_reason` or `captain_corrected_reason`, never a guessed `false`.
+The decision, block, and stale wake counts come from task status events; they are observed events rather than an inferred number of unreported attempts.
+`validation_runs`, `validation_rounds` (pipeline auto-fix rounds), and `failed_rounds` (failed pipeline steps) are read from the no-mistakes run records in `NM_HOME/state.sqlite` (default `~/.no-mistakes`) for the task's `fm/<id>` branch in its project since dispatch; `pipeline.run_ids` lists those runs, and when no records can be read all three are null with `pipeline.reason`.
+A zero stale wake count means no stale wake was reported in the task status file; acknowledged watcher queue events are not retained there.
+`learning_candidates` lists captured candidate ids whose origin task matches the task and whose capture time falls within this incarnation at teardown.
+`cost.sessions` keeps each matching runtime session path, harness, model, and raw token or dollar usage, and `cost.usd_estimate` is null with a reason when no complete estimate is available.
+When fewer session usage records are readable than recorded launches, the total estimate remains null even if one session has a known cost.
+Pi's own dollar total is retained directly, while Codex and Claude token usage is converted with the versioned, documented `bin/fm-routing-prices.json` table whose per-model rates are copied into each session entry.
+That table uses published [OpenAI API prices](https://developers.openai.com/api/docs/pricing) and [Anthropic model prices](https://platform.claude.com/docs/en/about-claude/pricing) as reference estimates; subscription or tier billing can differ.
+A legacy task without a dispatch timestamp records null start and cost rather than attributing another task's session in a reused worktree.
+The read-only `bin/fm-routing-ledger.py summary --data data --state state --from YYYY-MM-DD --to YYYY-MM-DD` command prints tasks, landed share, median known pipeline fix rounds, tasks rejected or corrected, median USD estimate, and total USD per successful landing per routing rule.
+Because a correction can follow landing, `--state` joins learning candidates captured later by task id at review time, binding each to the incarnation whose start precedes its capture and the next incarnation's start follows it (including a still-running incarnation's `routing_started_at` in `state/<id>.meta`), without rewriting the ledger; without it only the teardown snapshot is counted.
+The summary shows cost coverage beside the median of known costs, and reports null cost per landing if any task in a rule has unknown cost.
+
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
@@ -690,7 +716,7 @@ Press `O` on a selected worker to focus its recorded tmux window or Herdr tab wh
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
-The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, no-mistakes v1.46.0 or newer built from the Lila target-branch fork (its `axi run` must support `--target-branch`), compatible gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
+The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, Python 3, no-mistakes v1.46.0 or newer built from the Lila target-branch fork (its `axi run` must support `--target-branch`), compatible gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, and compatible quota-axi.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.

@@ -386,7 +386,7 @@ family_for_basename() {
     fm-check-unregister.test.sh|fm-landing-queue.test.sh|fm-merge-local.test.sh|fm-pr-check-security.test.sh|\
     fm-pr-fork-sync-proof.test.sh|fm-pr-merge.test.sh|\
     fm-pr-reviewers.test.sh|fm-pr-state.test.sh|\
-    fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
+    fm-review-diff.test.sh|fm-routing-ledger.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
@@ -785,6 +785,7 @@ tests/fm-project-origin.test.sh 136
 tests/fm-public-followup.test.sh 153508
 tests/fm-quota-array-dispatch-live-e2e.test.sh 71
 tests/fm-quota-choose.test.sh 1484
+tests/fm-routing-ledger.test.sh 700
 tests/fm-remote-backlog-handoff.test.sh 73123
 tests/fm-remote-doctor.test.sh 13889
 tests/fm-remote-entrypoint.test.sh 108
@@ -1553,6 +1554,10 @@ families_for_changed_path() {
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      ;;
+    bin/fm-routing-ledger.py|bin/fm-routing-prices.json)
+      printf '%s\n' "__script__:fm-routing-ledger.test.sh"
+      printf '%s\n' "__script__:fm-teardown.test.sh"
       ;;
     bin/fm-jev*.sh|bin/jev-questions/*|tests/jev-http-server.py|tests/fixtures/jev-ledger.jsonl)
       printf '%s\n' "__script__:fm-jev.test.sh"

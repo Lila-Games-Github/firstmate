@@ -708,7 +708,7 @@ make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -769,6 +769,11 @@ test_teardown_closes_the_backlog_item_itself() {
     "closed backlog item did not record the task's PR"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
     "a landed close left its pending-close record behind"
+  jq -e 'select(.task_id == "task-x1") |
+    .outcome.landed == true and .outcome.method == "pr-merge"
+    and .cost.usd_estimate == null and .cost.reason != null' \
+    "$case_dir/data/routing-ledger.jsonl" >/dev/null \
+    || fail "teardown did not retain a null-cost routing ledger row"
   printf '%s\n' "$out" | grep -F 'bin/fm-tasks-axi.sh ready' >/dev/null \
     || fail "teardown dropped the dependency-cleared follow-up: $out"
   printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \

@@ -350,13 +350,22 @@ test_active_dispatch_profile_allows_explicit_harness() {
   rec=$(make_spawn_case profile-explicit claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  cat > "$FAKEBIN_DIR/quota-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}'
+SH
+  chmod +x "$FAKEBIN_DIR/quota-axi"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+    "$id" "$PROJ_DIR" --harness codex --model gpt-5 --effort high \
+    --routing-rule 'current events' --routing-provider codex)
   status=$?
   expect_code 0 "$status" "explicit harness should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_grep 'routing_rule=current events' "$HOME_DIR/state/$id.meta" "matched dispatch rule was not retained"
+  assert_grep 'routing_harness=codex' "$HOME_DIR/state/$id.meta" "original harness was not retained"
+  assert_grep 'routing_quota={"provider":"codex"' "$HOME_DIR/state/$id.meta" "provider quota snapshot was not retained"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
     "explicit harness launch did not thread model and effort"
@@ -371,11 +380,13 @@ test_active_dispatch_profile_allows_positional_harness() {
   enable_dispatch_profile "$HOME_DIR"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id" "$PROJ_DIR" codex --model gpt-5 --effort high)
+    "$id" "$PROJ_DIR" codex --model gpt-5 --effort high --routing-reason 'manual quota exception')
   status=$?
   expect_code 0 "$status" "positional harness should satisfy active dispatch-profile requirement"
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report positional codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_grep 'routing_rule=manual' "$HOME_DIR/state/$id.meta" "manual route was not identified"
+  assert_grep 'routing_reason=manual quota exception' "$HOME_DIR/state/$id.meta" "manual override reason was lost"
   pass "active crew-dispatch profile allows the legacy positional harness form"
 }
 
