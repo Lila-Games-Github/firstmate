@@ -1,0 +1,113 @@
+=== BEFORE (base e80109070b80c6d28cddf99e01e8acc7620e87c8): FrogPile config with real-phone gate, green suite only ===
+$ q ready car1 --branch fm/car1 --head f1cb61581ebc61785c4da6ad2386eb378b68670c --target 887637bcf6d16fea9d40aa1cf01a8bc2c1eaf236
+queue=043c38b084e089a1cf58e1249ddfe6a346acdf58
+task=car1
+branch=fm/car1
+head=f1cb61581ebc61785c4da6ad2386eb378b68670c
+landing_branch=proto/godot/frog-pile
+tip=887637bcf6d16fea9d40aa1cf01a8bc2c1eaf236
+place=1
+target_ref=refs/heads/proto/godot/frog-pile
+target_sha=887637bcf6d16fea9d40aa1cf01a8bc2c1eaf236
+rebase_from=887637bcf6d16fea9d40aa1cf01a8bc2c1eaf236
+status=needs-final
+receipt=-
+reason=-
+(exit 0)
+$ q receipt car1 --head f1cb61581ebc61785c4da6ad2386eb378b68670c --target 887637bcf6d16fea9d40aa1cf01a8bc2c1eaf236 --receipt $DEMO/before/suite.receipt
+queue=043c38b084e089a1cf58e1249ddfe6a346acdf58
+task=car1
+branch=fm/car1
+head=f1cb61581ebc61785c4da6ad2386eb378b68670c
+landing_branch=proto/godot/frog-pile
+tip=887637bcf6d16fea9d40aa1cf01a8bc2c1eaf236
+place=1
+target_ref=refs/heads/proto/godot/frog-pile
+target_sha=887637bcf6d16fea9d40aa1cf01a8bc2c1eaf236
+rebase_from=887637bcf6d16fea9d40aa1cf01a8bc2c1eaf236
+status=ready-to-land
+receipt=$DEMO/before/home/data/landing-queue/043c38b084e089a1cf58e1249ddfe6a346acdf58/628dfe488faab1398aba7b5f3e9831d014c60586.receipt
+reason=-
+(exit 0)
+wake-queue entries: 1
+
+=== AFTER (this change): same scenario ===
+$ q ready car1 --branch fm/car1 --head e551d5204cbd558072035d634a1e7a262407e524 --target 6035621f88752d2ca4bad89f90beed7f7c6bca75
+queue=a3825fc85d3368836730e45aaa1bd1b0122d93d4
+task=car1
+branch=fm/car1
+head=e551d5204cbd558072035d634a1e7a262407e524
+landing_branch=proto/godot/frog-pile
+tip=6035621f88752d2ca4bad89f90beed7f7c6bca75
+place=1
+target_ref=refs/heads/proto/godot/frog-pile
+target_sha=6035621f88752d2ca4bad89f90beed7f7c6bca75
+rebase_from=6035621f88752d2ca4bad89f90beed7f7c6bca75
+status=needs-final
+receipt=-
+reason=-
+(exit 0)
+$ q receipt car1 --head e551d5204cbd558072035d634a1e7a262407e524 --target 6035621f88752d2ca4bad89f90beed7f7c6bca75 --receipt $DEMO/after/suite.receipt
+queue=a3825fc85d3368836730e45aaa1bd1b0122d93d4
+task=car1
+branch=fm/car1
+head=e551d5204cbd558072035d634a1e7a262407e524
+landing_branch=proto/godot/frog-pile
+tip=6035621f88752d2ca4bad89f90beed7f7c6bca75
+place=1
+target_ref=refs/heads/proto/godot/frog-pile
+target_sha=6035621f88752d2ca4bad89f90beed7f7c6bca75
+rebase_from=6035621f88752d2ca4bad89f90beed7f7c6bca75
+status=needs-gate
+receipt=$DEMO/after/home/data/landing-queue/a3825fc85d3368836730e45aaa1bd1b0122d93d4/ea1dd07bbe239976a5526806b0c2129017bc39f2.receipt
+reason=missing landing gate: real-phone
+(exit 0)
+wake-queue entries: 0
+--- worker tries a gate receipt for the wrong head (fails closed) ---
+$ q gate car1 --gate real-phone --head 6035621f88752d2ca4bad89f90beed7f7c6bca75 --target 6035621f88752d2ca4bad89f90beed7f7c6bca75 --receipt $DEMO/after/bad.receipt
+error: head or target changed; check status and prepare again
+(exit 1)
+--- worker tries an undeclared gate ---
+$ q gate car1 --gate made-up --head e551d5204cbd558072035d634a1e7a262407e524 --target 6035621f88752d2ca4bad89f90beed7f7c6bca75 --receipt $DEMO/after/bad.receipt
+error: landing gate is not configured: made-up
+(exit 1)
+--- phones back: worker runs real-phone check and submits the gate receipt ---
+gate.receipt:
+  schema=fm-landing-gate.v1
+  gate=real-phone
+  sha=<head>
+  target=<target>
+$ q gate car1 --gate real-phone --head e551d5204cbd558072035d634a1e7a262407e524 --target 6035621f88752d2ca4bad89f90beed7f7c6bca75 --receipt $DEMO/after/gate.receipt
+queue=a3825fc85d3368836730e45aaa1bd1b0122d93d4
+task=car1
+branch=fm/car1
+head=e551d5204cbd558072035d634a1e7a262407e524
+landing_branch=proto/godot/frog-pile
+tip=6035621f88752d2ca4bad89f90beed7f7c6bca75
+place=1
+target_ref=refs/heads/proto/godot/frog-pile
+target_sha=6035621f88752d2ca4bad89f90beed7f7c6bca75
+rebase_from=6035621f88752d2ca4bad89f90beed7f7c6bca75
+status=ready-to-land
+receipt=$DEMO/after/home/data/landing-queue/a3825fc85d3368836730e45aaa1bd1b0122d93d4/ea1dd07bbe239976a5526806b0c2129017bc39f2.receipt
+reason=-
+(exit 0)
+wake-queue entries: 1
+--- repeated status does not re-ring ---
+wake-queue entries: 1
+--- an unrelated half-edited config doesn't break the FrogPile queue ---
+$ q status car1
+queue=a3825fc85d3368836730e45aaa1bd1b0122d93d4
+task=car1
+branch=fm/car1
+head=e551d5204cbd558072035d634a1e7a262407e524
+landing_branch=proto/godot/frog-pile
+tip=6035621f88752d2ca4bad89f90beed7f7c6bca75
+place=1
+target_ref=refs/heads/proto/godot/frog-pile
+target_sha=6035621f88752d2ca4bad89f90beed7f7c6bca75
+rebase_from=6035621f88752d2ca4bad89f90beed7f7c6bca75
+status=ready-to-land
+receipt=$DEMO/after/home/data/landing-queue/a3825fc85d3368836730e45aaa1bd1b0122d93d4/ea1dd07bbe239976a5526806b0c2129017bc39f2.receipt
+reason=-
+(exit 0)
