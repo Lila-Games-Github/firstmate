@@ -905,6 +905,12 @@ if [ "$GREEN_FINAL_HEAD" -eq 1 ]; then
   if [ -z "$TEST_SERVICE_PROJECT" ]; then
     HEALTH_MARKER="$HEALTH_MARKER
 The final-head suite receipt belongs at \`$DATA/$ID/suite.receipt\`.
+Its sanctioned producer is the Firstmate test service, \`$FM_ROOT/bin/fm-test-service.py\`, which writes exactly this three-line form for the full tested head SHA:
+\`\`\`text
+schema=fm-full-suite.v1
+sha=<full tested SHA>
+failures=0
+\`\`\`
 No test-service project is configured for this repository; ask firstmate to configure one before submitting the final head."
   fi
 fi

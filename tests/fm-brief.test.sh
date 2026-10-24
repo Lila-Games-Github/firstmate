@@ -582,6 +582,16 @@ test_green_final_head_names_service_receipt() {
     || fail "unconfigured green-final-head brief did not scaffold"
   assert_grep "No test-service project is configured" "$home/data/unconfigured-receipt/brief.md" \
     "unconfigured green brief omitted its configuration blocker"
+  python3 - "$home/data/unconfigured-receipt/brief.md" "$home/data/unconfigured-receipt/suite.receipt" "$ROOT/bin/fm-test-service.py" <<'PY' \
+    || fail "unconfigured green brief omitted its receipt form or sanctioned producer"
+from pathlib import Path
+import sys
+brief = Path(sys.argv[1]).read_text()
+assert f"`{sys.argv[2]}`" in brief
+assert f"`{sys.argv[3]}`" in brief
+assert "schema=fm-full-suite.v1\nsha=<full tested SHA>\nfailures=0\n" in brief
+assert "fm-test-service.py submit" not in brief
+PY
   pass "fm-brief.sh: green-final-head brief names its task receipt and sanctioned producer"
 }
 
