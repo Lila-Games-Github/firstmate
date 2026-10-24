@@ -1,0 +1,9 @@
+$ # readiness check step 1: is chrome-devtools-axi available to open the target?
+$ command -v chrome-devtools-axi
+(not found, rc=1) -> readiness check FAILS: do not dispatch browser work via chrome-devtools-axi; use bounded CDP fallback
+$ node cdp-capture.mjs <chrome> file://.../agents-browser-toolchain.html cdp-1280x800.png 1280 800
+{"out":"/home/sanchith/.no-mistakes/evidence/01M5P9K5AMFWD0PNSWB3939ENQ/cdp-fallback-1280x800.png","bytes":91042,"png":"1280x800","requested":"1280x800","sizeMatches":true,"snapshot":"AGENTS.md browser toolchain | nodes=10"}
+rc=0
+$ node cdp-capture.mjs <chrome> file://.../agents-browser-toolchain.html cdp-390x844.png 390 844
+{"out":"/home/sanchith/.no-mistakes/evidence/01M5P9K5AMFWD0PNSWB3939ENQ/cdp-fallback-390x844.png","bytes":27240,"png":"390x844","requested":"390x844","sizeMatches":true,"snapshot":"AGENTS.md browser toolchain | nodes=10"}
+rc=0
