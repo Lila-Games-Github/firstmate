@@ -64,8 +64,10 @@
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
-#   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
+#   local-only   implement on branch, self-service queue finalization (no push/PR);
 #                the configured merge authority approves, firstmate merges to the recorded landing branch (else the default branch)
+# Local-only ship briefs use fm-landing-queue.sh for worker-owned finalization,
+# including single-car trains. Its header owns the queue and receipt protocol.
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -715,10 +717,8 @@ fi
 if [ "$LANE" -eq 1 ]; then
   if [ -n "$LANE_BRANCH" ]; then
     LANE_BRANCH_DESC="your workspace branch \`$LANE_BRANCH\`"
-    LANE_READY_LINE="\`done: ready in branch $LANE_BRANCH\`"
   else
     LANE_BRANCH_DESC="the branch your workspace was created on"
-    LANE_READY_LINE="\`done: ready in branch {your workspace branch}\`"
   fi
   LANE_LANDING_TARGET="your landing branch \`$LANDING_BRANCH\`"
   # Whether this landing branch is safe to start from is one question with many
@@ -783,14 +783,7 @@ if [ "$LANE" -eq 0 ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; 
 fi
 DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH") || exit 1
 
-# bin/fm-dod-lib.sh owns the delivery contract and names the repository default
-# branch as the local-only landing target. This fork lands local-only work on the
-# task's recorded landing_branch=, or on a lane's --landing-branch, so the two
-# sentences that name a branch are REPLACED here rather than contradicted by a
-# note further down: a brief that says both "rebase onto main" and "rebase onto
-# your landing branch" is worse than either alone. Everything else in the block
-# stays the owner's, and a mismatch fails loudly rather than silently leaving the
-# default-branch text in place.
+# Lane substitutions preserve the shared owner while naming the workspace branch.
 dod_replace() {  # <old> <new>
   case "$DOD" in
     *"$1"*) DOD=${DOD//"$1"/"$2"} ;;
@@ -800,8 +793,8 @@ dod_replace() {  # <old> <new>
       ;;
   esac
 }
-DOD_DEFAULT_KEEP="Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward."
-DOD_DEFAULT_MERGE="The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path."
+DOD_DEFAULT_KEEP="Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$META_FILE\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded."
+DOD_DEFAULT_MERGE="The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path."
 
 if [ "$LANE" -eq 1 ]; then
   # A lane workspace owns its branch, so every `fm/<id>` instruction is
@@ -820,10 +813,7 @@ if [ "$LANE" -eq 1 ]; then
       dod_replace "The task is complete only when committed on your branch \`fm/$ID\`." \
         "The task is complete only when committed on $LANE_BRANCH_DESC."
       dod_replace "$DOD_DEFAULT_KEEP" \
-        "Keep that branch a clean fast-forward onto $LANE_LANDING_TARGET.
-If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward."
-      dod_replace "When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop." \
-        "When it is implemented and committed, append $LANE_READY_LINE to the status file and stop."
+        "Keep that branch a clean fast-forward onto $LANE_LANDING_TARGET."
       dod_replace "$DOD_DEFAULT_MERGE" \
         "The configured merge authority approves the ready branch, then firstmate merges it into $LANE_LANDING_TARGET through the guarded fast-forward path."
       ;;
@@ -839,13 +829,6 @@ This task runs in a Playbot lane workspace: your branch already exists and is $L
 For engine readiness and bounded engine-call handling, follow \`docs/playbot-lanes.md\`'s Engine readiness contract in the Firstmate code root.
 Use its Addon preservation contract before any reset, stash, engine validation, or product commit; never use a raw reset or stash that bypasses that guard.
 $LANE_DOD_OVERRIDE"
-elif [ "$MODE" = local-only ]; then
-  RULE1="1. Never push to any remote and never open a PR. Work only on your \`fm/$ID\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
-  dod_replace "$DOD_DEFAULT_KEEP" \
-    "Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$META_FILE\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.
-If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward."
-  dod_replace "$DOD_DEFAULT_MERGE" \
-    "The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path."
 fi
 
 # A lane brief must need no dispatch-time restatement of its delivery mode: the
@@ -864,7 +847,7 @@ if [ "$LANE" -eq 1 ]; then
     local-only)
       LANE_CONTRACT_RULE="No remote, no PR, no pipeline: never push, never open a PR, never run /no-mistakes. Firstmate lands your branch." ;;
     *)
-      LANE_CONTRACT_RULE="Implement and commit, then report done and WAIT: firstmate tells you when to run /no-mistakes. Do not start the pipeline before it does." ;;
+      LANE_CONTRACT_RULE="Implement and commit, then start /no-mistakes yourself and continue through the PR and green checks; follow the Definition of done below." ;;
   esac
   IFS= read -r -d '' LANE_CONTRACT_BLOCK <<EOF || true
 

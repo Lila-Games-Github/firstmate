@@ -216,7 +216,7 @@ if [ -n "$LANDING_BRANCH" ]; then
   printf -v LANDING_REFSPEC_Q '%q' "+refs/heads/$LANDING_BRANCH:refs/remotes/origin/$LANDING_BRANCH"
   printf -v LANDING_ORIGIN_Q '%q' "origin/$LANDING_BRANCH"
   PROMOTION_BASE_STEP="3. Return to a clean base on this task's recorded landing branch \`$LANDING_BRANCH\`, not the default branch, resolved the way a ship spawn resolves its base: run \`git fetch origin $LANDING_REFSPEC_Q\` and, when origin has that branch, create your branch from its fetched tip with \`git checkout -b fm/$ID $LANDING_ORIGIN_Q\`; only when origin has no such branch, use the local branch instead with \`git checkout -b fm/$ID $LANDING_Q\`. Never fall back to the default branch.
-   Keep \`fm/$ID\` a clean fast-forward onto that landing branch: if it advances, rebase onto it, so the PR aimed at it carries only this task's commits."
+   Follow the current delivery contract below when the landing branch advances."
 fi
 IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`fm/$ID\` branch and continue from its current state; do not repeat them destructively.
@@ -239,25 +239,7 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
-  # A promoted worker must receive exactly the contract bin/fm-brief.sh would
-  # have generated for the same mode (tests/fm-task-delivery.test.sh compares
-  # them byte for byte), so this fork's landing-branch substitution is applied
-  # here too. bin/fm-dod-lib.sh is the single owner of the block itself and is
-  # upstream's file, which a fork-sync merge may not extend, so the two call
-  # sites carry the same replacement until it can move into that owner.
-  promote_local_only_landing() {  # <text>
-    local meta_quoted
-    meta_quoted=$(printf "'%s'" "$(printf '%s' "$STATE/$ID.meta" | sed "s/'/'\\\\''/g")")
-    printf '%s' "$1" \
-      | sed -e "s|Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.|Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$meta_quoted\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.\nIf that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward.|" \
-            -e "s|The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.|The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path.|"
-  }
-  if [ "$MODE" = local-only ]; then
-    promote_local_only_landing "$(fm_ship_rule_one "$MODE" "$ID")"
-    printf '\n'
-  else
-    fm_ship_rule_one "$MODE" "$ID"
-  fi
+  fm_ship_rule_one "$MODE" "$ID"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
@@ -267,12 +249,7 @@ EOF
   # snapshot contract an ordinary brief carries (bin/fm-dod-lib.sh owns it).
   fm_long_suite_block
   printf '\n'
-  if [ "$MODE" = local-only ]; then
-    promote_local_only_landing "$(fm_dod_block "$MODE" "$ID")"
-    printf '\n'
-  else
-    fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH"
-  fi
+  fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }

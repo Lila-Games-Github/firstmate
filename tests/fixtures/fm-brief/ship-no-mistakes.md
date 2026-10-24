@@ -76,8 +76,8 @@ Keep it proportionate: skip `AGENTS.md` edits for trivial tasks that produced no
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-When you believe it is complete, append `done: {summary}` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Once your implementation is committed, start /no-mistakes yourself and continue through the PR and green checks without waiting for a firstmate instruction.
+Do not report `done:` before validation; the CI-green return point below is your completion gate.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and `no-mistakes axi run --help` plus the `help` lines in each `axi` response are authoritative and version-matched to the installed binary.

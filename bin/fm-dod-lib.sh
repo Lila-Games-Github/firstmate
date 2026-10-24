@@ -120,7 +120,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
       printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR."
       ;;
     local-only)
-      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
+      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
       ;;
     no-mistakes)
       printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
@@ -310,8 +310,55 @@ Either the landing tip is held still from the first capture through the final su
 EOF
 }
 
+# Quote generated worker commands independently of the caller's shell helpers.
+fm_dod_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
+# Shared worker handoff, also rendered on scout promotion. The queue executable
+# owns mechanics; this block supplies the task-bound invocation and next steps.
+fm_landing_queue_block() { # <task-id> [landing-branch]
+  local id=$1 landing=${2:-} root home state data queue_command queue_target=''
+  root=${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+  home=${FM_HOME:-$root}
+  state=${STATE:-${FM_STATE_OVERRIDE:-$home/state}}
+  data=${DATA:-${FM_DATA_OVERRIDE:-$home/data}}
+  queue_command="FM_HOME=$(fm_dod_quote "$home") FM_STATE_OVERRIDE=$(fm_dod_quote "$state") FM_DATA_OVERRIDE=$(fm_dod_quote "$data") $(fm_dod_quote "$root/bin/fm-landing-queue.sh")"
+  [ -z "$landing" ] || queue_target=" --landing-branch $(fm_dod_quote "$landing")"
+  cat <<EOF
+
+## Self-service landing train
+Use the queue tool for your place, rebase target, and final receipt; do not wait for a firstmate message assigning or updating them.
+The tool's header and \`--help\` own the protocol.
+You may update this task's shared queue and receipt state through this tool, including when its home is outside your worktree.
+Define this helper in your worker shell:
+\`\`\`sh
+landing_queue() {
+  local action=\$1
+  shift
+  $queue_command "\$action" $(fm_dod_quote "$id") --project .$queue_target "\$@"
+}
+\`\`\`
+1. Once implementation is committed, join with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)"\`.
+2. Run \`landing_queue status\` before rebasing, before the exact-head full suite, after the suite, and whenever you resume waiting.
+   Read its \`place\`, \`target_ref\`, \`target_sha\`, and \`rebase_from\`; these replace any earlier target, even if another car failed or landed.
+   When the base changes, rebase your own commits with \`git rebase --onto <target_sha> <rebase_from>\`, then acknowledge the prepared head with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <target_sha>\`.
+   Resolve rebase conflicts yourself; do not merge or keep commits from a failed lower car.
+3. At \`needs-final\`, run the task's full suite on exactly that committed head and create its receipt using the format owned by \`$root/bin/fm-landing-health-lib.sh\`.
+   Submit with \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
+   A changed head or target refuses the receipt: read status, prepare the new target, and rerun the suite on the new head.
+   If your car fails, record \`landing_queue fail --reason <failure>\` before reporting \`failed:\` and stopping.
+4. At \`waiting-to-land\` or \`ready-to-land\`, keep checking status every 30 seconds and read your steering inbox at those checkpoints.
+   The tool emits the readiness wake only for the bottom car with a valid receipt; do not add a ready \`done:\` or ask firstmate to coordinate the queue.
+   Firstmate rechecks queue status, applies the existing merge authority, runs \`bin/fm-merge-local.sh\` with the current receipt, and pushes when authorized.
+   A changed target returns you to preparation; at \`landed\`, append \`done: landed {branch} at {head}\` and stop.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id> [landing-branch]
-  local mode=$1 id=$2 landing_branch=${3:-}
+  local mode=$1 id=$2 landing_branch=${3:-} meta_file
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -325,23 +372,26 @@ EOF
       fm_direct_pr_target_block "$landing_branch" || return 1
       ;;
     local-only)
+      meta_file=$(fm_dod_quote "${STATE:-${FM_STATE_OVERRIDE:-${FM_HOME:-.}/state}}/$id.meta")
       cat <<EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$meta_file\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.
+Use the queue's current assigned target below when rebasing.
+When it is implemented and committed, follow the self-service landing train below through landing.
+The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path.
 EOF
+      fm_landing_queue_block "$id" "$landing_branch"
       ;;
     no-mistakes)
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+Once your implementation is committed, start /no-mistakes yourself and continue through the PR and green checks without waiting for a firstmate instruction.
+Do not report \`done:\` before validation; the CI-green return point below is your completion gate.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.

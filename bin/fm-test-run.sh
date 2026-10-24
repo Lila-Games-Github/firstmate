@@ -383,7 +383,7 @@ family_for_basename() {
     fm-dispatch-preflight.test.sh|fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-check-unregister.test.sh|fm-merge-local.test.sh|fm-pr-check-security.test.sh|\
+    fm-check-unregister.test.sh|fm-landing-queue.test.sh|fm-merge-local.test.sh|fm-pr-check-security.test.sh|\
     fm-pr-fork-sync-proof.test.sh|fm-pr-merge.test.sh|\
     fm-pr-reviewers.test.sh|fm-pr-state.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
@@ -1641,10 +1641,11 @@ families_for_changed_path() {
       printf '%s\n' '__script__:fm-dispatch-preflight-live-e2e.test.sh'
       ;;
     bin/fm-landing-health-lib.sh)
+      printf '%s\n' '__script__:fm-landing-queue.test.sh'
       printf '%s\n' '__script__:fm-merge-local.test.sh'
       printf '%s\n' '__script__:fm-spawn-pool-base-freshen.test.sh'
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-pr-*|bin/fm-landing-queue.sh|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
