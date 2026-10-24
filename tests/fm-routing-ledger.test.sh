@@ -13,6 +13,10 @@ mkdir -p "$LAB/state" "$LAB/data" "$LAB/wt" "$LAB/project" "$LAB/nm"
 STAMP=$(date +%s)
 export NM_HOME="$LAB/nm"
 
+iso_at() {
+  python3 -c 'import datetime, sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1"
+}
+
 make_meta() {
   local task=$1 harness=$2 usage=$3 model=$4
   cat > "$LAB/state/$task.meta" <<EOF
@@ -54,7 +58,8 @@ working: stale wake recovered
 working: captain correction recorded
 EOF
 mkdir -p "$LAB/state/learning-candidates"
-printf '%s\n' '{"id":"lc-example","incident":{"origin_task":"pi-task","signal_type":"captain-correction"}}' > "$LAB/state/learning-candidates/lc-example.unresolved.json"
+printf '{"id":"lc-example","captured_at":"%s","incident":{"origin_task":"pi-task","signal_type":"captain-correction"}}\n' \
+  "$(iso_at $((STAMP + 1)))" > "$LAB/state/learning-candidates/lc-example.unresolved.json"
 python3 - "$LAB/nm/state.sqlite" "$LAB/project" "$STAMP" <<'PY'
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
@@ -172,11 +177,35 @@ printf '%s\n' "$out" | grep -F $'rule_1\t8\t1.000\t1.5\t1\t5/8\t0.00662\tnull' >
   || fail "summary treated missing usage as zero cost: $out"
 pass "Summary groups by rule and preserves incomplete cost"
 
-printf '%s\n' '{"id":"lc-later","incident":{"origin_task":"codex-task","signal_type":"review-rejection"}}' \
-  > "$LAB/state/learning-candidates/lc-later.dismissed.json"
+printf '{"id":"lc-later","captured_at":"%s","incident":{"origin_task":"codex-task","signal_type":"review-rejection"}}\n' \
+  "$(iso_at $((STAMP + 5)))" > "$LAB/state/learning-candidates/lc-later.dismissed.json"
 out=$(python3 "$TOOL" summary --data "$LAB/data" --state "$LAB/state" --from 2026-01-01 --to 2027-01-01)
 printf '%s\n' "$out" | grep -F $'rule_1\t8\t1.000\t1.5\t2\t5/8\t0.00662\tnull' >/dev/null \
   || fail "summary did not join a correction captured after teardown: $out"
 jq -es 'map(select(.task_id == "codex-task")) | .[0].outcome.captain_rejected == null' \
   "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "summary rewrote the teardown snapshot"
 pass "Summary joins later learning candidates by task id without rewriting the ledger"
+
+reuse_record() {
+  make_meta reuse-task codex "$LAB/absent.jsonl" gpt-6.1-sol
+  printf '%s\n' "routing_rule=rule_reuse" "routing_started_at=$1" "routing_instance_id=$2" >> "$LAB/state/reuse-task.meta"
+  python3 "$TOOL" record --meta "$LAB/state/reuse-task.meta" --state "$LAB/state" \
+    --data "$LAB/data-reuse" --id reuse-task --outcome landed --method pr-merge
+}
+printf '{"id":"lc-first","captured_at":"%s","incident":{"origin_task":"reuse-task","signal_type":"captain-correction"}}\n' \
+  "$(iso_at $((STAMP - 900)))" > "$LAB/state/learning-candidates/lc-first.unresolved.json"
+reuse_record $((STAMP - 1000)) first
+reuse_record $((STAMP - 500)) second
+jq -es '.[0].outcome.captain_corrected == true and .[0].learning_candidates == ["lc-first"]
+  and .[1].outcome.captain_corrected == null and .[1].learning_candidates == []' \
+  "$LAB/data-reuse/routing-ledger.jsonl" >/dev/null \
+  || fail "a reused task id carried an earlier incarnation's correction into a later row"
+out=$(python3 "$TOOL" summary --data "$LAB/data-reuse" --state "$LAB/state" --from 2026-01-01 --to 2027-01-01)
+printf '%s\n' "$out" | grep -F $'rule_reuse\t2\t1.000\tnull\t1\t' >/dev/null \
+  || fail "summary joined an earlier incarnation's candidate to a later incarnation: $out"
+printf '{"id":"lc-second","captured_at":"%s","incident":{"origin_task":"reuse-task","signal_type":"review-rejection"}}\n' \
+  "$(iso_at $((STAMP - 400)))" > "$LAB/state/learning-candidates/lc-second.unresolved.json"
+out=$(python3 "$TOOL" summary --data "$LAB/data-reuse" --state "$LAB/state" --from 2026-01-01 --to 2027-01-01)
+printf '%s\n' "$out" | grep -F $'rule_reuse\t2\t1.000\tnull\t2\t' >/dev/null \
+  || fail "summary missed a later candidate captured during the second incarnation: $out"
+pass "Learning candidates bind only to the task incarnation that captured them"

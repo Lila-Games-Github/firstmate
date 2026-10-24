@@ -59,8 +59,20 @@ def event_counts(path):
     }
 
 
+def timestamp(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)).timestamp()
+
+
 def learning_candidates(state):
-    """Map each origin task to its captured candidate ids and signal types."""
+    """Map each origin task to its captured candidates with signal and capture time."""
     directory = Path(state) / "learning-candidates"
     tasks = {}
     unreadable = 0
@@ -80,22 +92,35 @@ def learning_candidates(state):
         if not isinstance(task, str):
             unreadable += 1
             continue
-        entry = tasks.setdefault(task, {"ids": set(), "signals": set()})
-        entry["ids"].add(item.get("id", path.name.split(".", 1)[0]))
-        if incident.get("signal_type"):
-            entry["signals"].add(incident["signal_type"])
+        tasks.setdefault(task, {})[item.get("id", path.name.split(".", 1)[0])] = {
+            "signal": incident.get("signal_type"), "captured_at": timestamp(item.get("captured_at"))}
     return tasks, ("%d learning-candidate record(s) unreadable" % unreadable if unreadable else None)
 
 
-def signal_outcome(entry, store_reason):
-    signals = entry["signals"] if entry else set()
+def incarnation_candidates(entries, started, until=None):
+    """Select candidates captured during one task incarnation: [started, until)."""
+    if started is None:
+        return {}, "start time absent; learning candidates cannot be bound to this task incarnation"
+    selected = {}
+    untimed = 0
+    for ident, candidate in (entries or {}).items():
+        at = candidate["captured_at"]
+        if at is None:
+            untimed += 1
+        elif at >= started and (until is None or at < until):
+            selected[ident] = candidate
+    return selected, ("%d learning candidate(s) for task lack a readable capture time" % untimed if untimed else None)
+
+
+def signal_outcome(selected, store_reason):
+    signals = {candidate["signal"] for candidate in selected.values()}
     result = {}
     for signal, key in SIGNALS.items():
         if signal in signals:
             result[key] = True
         else:
             result[key] = None
-            result[key + "_reason"] = store_reason or ("no %s learning candidate captured for task" % signal)
+            result[key + "_reason"] = store_reason or ("no %s learning candidate captured for this task incarnation" % signal)
     return result
 
 
@@ -328,7 +353,7 @@ def record(args):
     data = Path(args.data)
     status = event_counts(state / (args.id + ".status"))
     candidates, store_reason = learning_candidates(state)
-    entry = candidates.get(args.id)
+    selected, bind_reason = incarnation_candidates(candidates.get(args.id), start)
     row = {
         "schema": 1, "task_id": args.id, "instance_id": meta.get("routing_instance_id", meta.get("spawn_gen")),
         "project": meta.get("project"),
@@ -341,9 +366,9 @@ def record(args):
         "started_at": iso(start) if start is not None else None,
         "ended_at": iso(end), "wall_seconds": round(end - start, 3) if start is not None else None,
         "outcome": {"landed": args.outcome == "landed", "method": args.method,
-                    **signal_outcome(entry, store_reason)},
+                    **signal_outcome(selected, store_reason or bind_reason)},
         **status, **pipeline_rounds(meta, args.id, start), "relaunches": int(meta.get("routing_relaunches", "0")),
-        "learning_candidates": sorted(entry["ids"]) if entry else [],
+        "learning_candidates": sorted(selected),
         "cost": cost(meta, start) if start is not None else
         {"sessions": [], "usd_estimate": None, "reason": "start time absent from legacy metadata"},
     }
@@ -368,12 +393,16 @@ def record(args):
 def summary(args):
     ledger = Path(args.data) / "routing-ledger.jsonl"
     candidates, _ = learning_candidates(args.state) if args.state else ({}, None)
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()] if ledger.is_file() else []
+    starts = {}
+    for row in rows:
+        start = timestamp(row.get("started_at"))
+        if start is not None:
+            starts.setdefault(row["task_id"], set()).add(start)
     groups = {}
-    if ledger.is_file():
-        for line in ledger.read_text().splitlines():
-            row = json.loads(line)
-            if args.from_date <= row["ended_at"][:10] <= args.to_date:
-                groups.setdefault(row["routing"]["rule"], []).append(row)
+    for row in rows:
+        if args.from_date <= row["ended_at"][:10] <= args.to_date:
+            groups.setdefault(row["routing"]["rule"], []).append(row)
     print("rule\ttasks\tlanded_share\tmedian_rounds\trejected_or_corrected\tcost_coverage\tmedian_cost_usd\tcost_per_landing_usd")
     for rule, rows in sorted(groups.items()):
         landed = sum(x["outcome"]["landed"] for x in rows)
@@ -382,7 +411,9 @@ def summary(args):
         rounds = [x.get("validation_rounds") for x in rows if isinstance(x.get("validation_rounds"), int)]
         flagged = 0
         for x in rows:
-            later = signal_outcome(candidates.get(x["task_id"]), None)
+            start = timestamp(x.get("started_at"))
+            until = min((y for y in starts.get(x["task_id"], ()) if start is not None and y > start), default=None)
+            later = signal_outcome(incarnation_candidates(candidates.get(x["task_id"]), start, until)[0], None)
             flagged += any(x["outcome"].get(key) is True or later[key] is True for key in SIGNALS.values())
         median = lambda values: format(statistics.median(values), "g") if values else "null"
         per_landing = str(round(sum(known) / landed, 8)) if landed and len(known) == len(rows) else "null"
