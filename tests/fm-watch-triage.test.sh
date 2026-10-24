@@ -10,7 +10,9 @@
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # terminal-looking stale status lines overridden by an active run, the heartbeat
 # backstop fail-safe, and afk coherence (no double-triage while the away-mode
-# daemon owns supervision).
+# daemon owns supervision). The fixture's own reap bound and the watcher's stop
+# path - the two halves of the ~1000s serial-shard stalls CI recorded - are
+# pinned here too, since neither is a triage decision.
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -180,14 +182,147 @@ record_pi_busy() {  # <state-dir> <id>
 # into a later assertion), so an unbounded `wait` is not safe here. A healthy
 # watcher exits within one POLL of the first TERM; one still alive after a
 # generous grace gets one more TERM so its EXIT cleanup can still run, then KILL.
+# A grace that expires is reported on one named line before the escalation, so a
+# fixture that had to be forced shows up in the log as the dropped-TERM signal
+# it is instead of silently costing the window. test_reap_is_provably_bounded
+# asserts both halves, so nothing else may depend on that line being absent.
 reap() {
   local pid=$1
   kill "$pid" 2>/dev/null || true
   if wait_live "$pid" 150; then
+    echo "watch-fixture: reap escalated - pid $pid outlived the first TERM by the full grace window"
     kill "$pid" 2>/dev/null || true
     wait_live "$pid" 50 && kill -KILL "$pid" 2>/dev/null
   fi
   wait "$pid" 2>/dev/null || true
+}
+
+# The bound above is the whole fix for the two recorded ~1000s serial-shard
+# stalls: a watcher that survives TERM must cost a fixture its grace and KILL
+# window, never the watcher's own 999s pause/wedge cadence. A bound nothing
+# asserts can be reverted to the pre-0a4e0b17 form (`kill` then an unbounded
+# `wait`) with the suite still green, so this drives the real helper against a
+# child that ignores TERM and can only be collected by the KILL fallback.
+#
+# Both fixtures announce readiness after their own setup: a TERM sent in the
+# first instants after a background fork is sometimes simply lost (measured
+# 2/150 on this host, and none at all once the child had reached its own first
+# command). That handoff race is what the named diagnostic below
+# exists to make visible, but it is not what this test is about, so the test
+# never kills a child it has not seen reach its own code.
+# Fail-first: with the unbounded form the elapsed assertion fails at the
+# TERM-ignoring stub's own 60s lifetime rather than hanging, because the stub
+# also ends by itself well after the window.
+test_reap_is_provably_bounded() {
+  local dir stub healthy pid start elapsed i
+  dir=$(make_case reap-bound)
+  stub="$dir/ignores-term.sh"
+  cat > "$stub" <<SH
+#!/usr/bin/env bash
+# Ignores TERM and outlives the reap window by roughly 3x, so only the KILL
+# fallback can end it early - an unbounded reap waits out the full 60s.
+trap '' TERM
+touch "$dir/ignores-term-ready"
+for _ in \$(seq 1 600); do sleep 0.1; done
+SH
+  chmod +x "$stub"
+
+  "$stub" & pid=$!
+  for i in $(seq 1 200); do
+    [ -e "$dir/ignores-term-ready" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ -e "$dir/ignores-term-ready" ] || { reap "$pid"; fail "the TERM-ignoring fixture never reached its own trap"; }
+
+  start=$(date +%s)
+  reap "$pid" > "$dir/forced.out"
+  elapsed=$(( $(date +%s) - start ))
+  kill -0 "$pid" 2>/dev/null && fail "reap left a TERM-ignoring child alive"
+  [ "$elapsed" -lt 40 ] || fail "a TERM-ignoring child held reap for ${elapsed}s; the grace plus KILL bound is not in force"
+  grep -q '^watch-fixture: reap escalated - pid ' "$dir/forced.out" \
+    || fail "reap collected a TERM-ignoring child without reporting the forced stop"
+
+  # The diagnostic has to be specific to the forced case: a child that exits on
+  # the first TERM is collected at once and silently, exactly as before.
+  healthy="$dir/exits-on-term.sh"
+  cat > "$healthy" <<SH
+#!/usr/bin/env bash
+touch "$dir/exits-on-term-ready"
+exec sleep 60
+SH
+  chmod +x "$healthy"
+  "$healthy" & pid=$!
+  for i in $(seq 1 200); do
+    [ -e "$dir/exits-on-term-ready" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ -e "$dir/exits-on-term-ready" ] || { reap "$pid"; fail "the exit-on-TERM fixture never reached its own code"; }
+
+  start=$(date +%s)
+  reap "$pid" > "$dir/clean.out"
+  elapsed=$(( $(date +%s) - start ))
+  kill -0 "$pid" 2>/dev/null && fail "reap left a child that exits on the first TERM alive"
+  [ "$elapsed" -lt 10 ] || fail "reap took ${elapsed}s to collect a child that exits on the first TERM"
+  [ ! -s "$dir/clean.out" ] \
+    || fail "reap reported a forced stop for a child that exits on the first TERM: $(cat "$dir/clean.out")"
+  pass "reap is provably bounded (a TERM-ignoring child is forced inside the window and reported; a child that exits on TERM is collected silently)"
+}
+
+# A stop has to land while a poll is IN FLIGHT, not only between polls: the
+# watcher runs each *.check.sh as a foreground child, so a supervisor's stop
+# arrives while bash is waiting on that child. The contract is that the watcher
+# still terminates on that first TERM and takes the check down with it - its stop
+# handler must not be swapped out or deferred for the length of the check. A
+# watcher that had to be forced would say so on reap's named line, which is
+# exactly what a reintroduced dropped-TERM window fails here.
+test_stop_terminates_a_poll_in_flight() {
+  local dir state fakebin out pid checkpid i
+  dir=$(make_case stop-in-flight); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # A check that outlives the assertion window and records its own pid, so the
+  # test can prove the stop landed mid-check and that the check died with it.
+  cat > "$state/hang.check.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$\$" > "$dir/check.pid"
+sleep 90
+SH
+  chmod 0700 "$state/hang.check.sh"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" hang >/dev/null \
+    || fail "could not register the in-flight check fixture"
+  : > "$state/.last-check"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 FM_CHECK_TIMEOUT=400 \
+    "$WATCH" > "$out" &
+  pid=$!
+  checkpid=
+  for i in $(seq 1 200); do
+    checkpid=$(cat "$dir/check.pid" 2>/dev/null || true)
+    [ -n "$checkpid" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [ -z "$checkpid" ]; then
+    reap "$pid"
+    fail "the check never started, so no stop was delivered in flight: $(cat "$out")"
+  fi
+
+  reap "$pid" > "$dir/reap.out"
+  [ ! -s "$dir/reap.out" ] \
+    || fail "a stop delivered while a check was running did not terminate the watcher on the first TERM: $(cat "$dir/reap.out")"
+  kill -0 "$pid" 2>/dev/null && fail "the watcher survived a stop delivered while a check was running"
+  i=0
+  while kill -0 "$checkpid" 2>/dev/null && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$checkpid" 2>/dev/null; then
+    kill -KILL "$checkpid" 2>/dev/null || true
+    fail "the watcher exited but left its running check behind"
+  fi
+  pass "a stop delivered while a check is in flight terminates the watcher on the first TERM and takes the check with it"
 }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -5507,6 +5642,8 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit 0
 fi
 
+test_reap_is_provably_bounded
+test_stop_terminates_a_poll_in_flight
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
