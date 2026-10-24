@@ -399,6 +399,16 @@ def summary(args):
         start = timestamp(row.get("started_at"))
         if start is not None:
             starts.setdefault(row["task_id"], set()).add(start)
+    if args.state:
+        for task in starts:
+            meta = Path(args.state) / (task + ".meta")
+            if "/" in task or os.sep in task or not meta.is_file():
+                continue
+            try:
+                live = float(fields(meta).get("routing_started_at", ""))
+            except (OSError, ValueError):
+                continue
+            starts[task].add(live)
     groups = {}
     for row in rows:
         if args.from_date <= row["ended_at"][:10] <= args.to_date:

@@ -516,7 +516,7 @@ Pi's own dollar total is retained directly, while Codex and Claude token usage i
 That table uses published [OpenAI API prices](https://developers.openai.com/api/docs/pricing) and [Anthropic model prices](https://platform.claude.com/docs/en/about-claude/pricing) as reference estimates; subscription or tier billing can differ.
 A legacy task without a dispatch timestamp records null start and cost rather than attributing another task's session in a reused worktree.
 The read-only `bin/fm-routing-ledger.py summary --data data --state state --from YYYY-MM-DD --to YYYY-MM-DD` command prints tasks, landed share, median known pipeline fix rounds, tasks rejected or corrected, median USD estimate, and total USD per successful landing per routing rule.
-Because a correction can follow landing, `--state` joins learning candidates captured later by task id at review time, binding each to the incarnation whose start precedes its capture and the next incarnation's start follows it, without rewriting the ledger; without it only the teardown snapshot is counted.
+Because a correction can follow landing, `--state` joins learning candidates captured later by task id at review time, binding each to the incarnation whose start precedes its capture and the next incarnation's start follows it (including a still-running incarnation's `routing_started_at` in `state/<id>.meta`), without rewriting the ledger; without it only the teardown snapshot is counted.
 The summary shows cost coverage beside the median of known costs, and reports null cost per landing if any task in a rule has unknown cost.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)

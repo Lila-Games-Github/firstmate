@@ -209,3 +209,15 @@ out=$(python3 "$TOOL" summary --data "$LAB/data-reuse" --state "$LAB/state" --fr
 printf '%s\n' "$out" | grep -F $'rule_reuse\t2\t1.000\tnull\t2\t' >/dev/null \
   || fail "summary missed a later candidate captured during the second incarnation: $out"
 pass "Learning candidates bind only to the task incarnation that captured them"
+
+make_meta live-task codex "$LAB/absent.jsonl" gpt-6.1-sol
+printf '%s\n' "routing_rule=rule_live" "routing_started_at=$((STAMP - 1000))" "routing_instance_id=first" >> "$LAB/state/live-task.meta"
+python3 "$TOOL" record --meta "$LAB/state/live-task.meta" --state "$LAB/state" \
+  --data "$LAB/data-live" --id live-task --outcome landed --method pr-merge
+printf '%s\n' "routing_started_at=$((STAMP - 500))" "routing_instance_id=second" >> "$LAB/state/live-task.meta"
+printf '{"id":"lc-live","captured_at":"%s","incident":{"origin_task":"live-task","signal_type":"captain-correction"}}\n' \
+  "$(iso_at $((STAMP - 400)))" > "$LAB/state/learning-candidates/lc-live.unresolved.json"
+out=$(python3 "$TOOL" summary --data "$LAB/data-live" --state "$LAB/state" --from 2026-01-01 --to 2027-01-01)
+printf '%s\n' "$out" | grep -F $'rule_live\t1\t1.000\tnull\t0\t' >/dev/null \
+  || fail "summary bound a running incarnation's candidate to the earlier ledger row: $out"
+pass "A running incarnation bounds the earlier row's learning-candidate join"
