@@ -79,6 +79,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-config-push.sh`      | Push declared inherited local material to live local or remote secondmates and send the placement-specific config reread when changed |
 | `fm-project-mode.sh`     | Resolve a project's registered delivery posture, clone path, or declared open-questions register from `data/projects.md` for fleet sync, home seeding, Playbot retirement, and brief scaffolding |
 | `fm-merge-local.sh`      | Fast-forward a `local-only` task's recorded landing branch, or its project's default branch, after approval and a full-suite receipt for the exact SHA |
+| `fm-test-service.py`     | Durable per-project test service that writes those full-suite receipts for submitted commits ([test-service.md](test-service.md)) |
 | `fm-pr-fork-sync-proof.sh` | Prove the narrow marker-free fork-sync PR shape from fetched Git history |
 | `fm-review-diff.sh`      | Review a crewmate branch or resolved PR head against the authoritative base          |
 | `fm-marker-lib.sh`       | Compatibility entry point for the from-firstmate carrier owned by `fm-operational-input.sh` |
