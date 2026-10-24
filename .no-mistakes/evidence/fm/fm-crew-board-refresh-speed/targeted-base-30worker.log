@@ -1,0 +1,2 @@
+ok - payload uses worker reports and keeps time in the current phase
+not ok - 30-worker background observation count (expected '30', got '0')

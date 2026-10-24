@@ -1,0 +1,634 @@
+{
+  "schema": "fm-crew-board.v1",
+  "home": "h.IpJK",
+  "generated": "2026-10-24T20:00:23Z",
+  "generated_epoch": 1792872023,
+  "rows": [
+    {
+      "id": "asker",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on asker",
+      "phase": "needs-decision",
+      "phase_since": 1792872022,
+      "note": "pick A or B",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "merger",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on merger",
+      "phase": "ready-to-merge",
+      "phase_since": 1792872022,
+      "note": "https://github.com/o/r/pull/9 checks green",
+      "pr_url": "https://github.com/o/r/pull/9",
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-01",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-01",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-02",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-02",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-03",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-03",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-04",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-04",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-05",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-05",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-06",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-06",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-07",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-07",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-08",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-08",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-09",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-09",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-10",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-10",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-11",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-11",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-12",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-12",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-13",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-13",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-14",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-14",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-15",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-15",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-16",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-16",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    },
+    {
+      "id": "worker-17",
+      "kind": "ship",
+      "project": "widget",
+      "title": "Work on worker-17",
+      "phase": "fixing",
+      "phase_since": 1792872022,
+      "note": "work",
+      "pr_url": null,
+      "endpoint": "unknown",
+      "gone": false,
+      "left_at": null
+    }
+  ],
+  "panels": {
+    "alerts": [
+      {
+        "id": "",
+        "title": "Monitoring status unavailable",
+        "detail": "No watcher heartbeat was found, so it is unknown whether finished work, questions and failures are being noticed. Send any message to firstmate in its pane to restore it.",
+        "status": "",
+        "link": "",
+        "alert": true,
+        "nid": "monitoring:status",
+        "sig": "unavailable"
+      },
+      {
+        "id": "asker",
+        "title": "asker: decision not yet raised with you",
+        "detail": "pick A or B",
+        "status": "needs-decision",
+        "link": "",
+        "alert": true,
+        "nid": "needs-decision:asker",
+        "sig": "pick A or B"
+      },
+      {
+        "id": "",
+        "title": "Phone R5CT32HRVNM no permissions",
+        "detail": "adb reports no permissions, so the phone cannot take tests",
+        "status": "no permissions",
+        "link": "",
+        "alert": true,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "",
+        "title": "Phone RZ8N71EC9ZB no permissions",
+        "detail": "adb reports no permissions, so the phone cannot take tests",
+        "status": "no permissions",
+        "link": "",
+        "alert": true,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "",
+        "title": "Phone Galaxy S21 FE not connected",
+        "detail": "adb does not list this registered phone",
+        "status": "disconnected",
+        "link": "",
+        "alert": true,
+        "nid": "phone-offline:RZCX224VH4T",
+        "sig": "disconnected"
+      }
+    ],
+    "full_questions": [],
+    "full_backlog": [
+      {
+        "id": "",
+        "title": "Backlog unavailable",
+        "detail": "Could not read bin/fm-tasks-axi.sh",
+        "status": "error",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      }
+    ],
+    "ready": [
+      {
+        "id": "merger",
+        "title": "Work on merger",
+        "detail": "Checks are green; review and merge the PR\nhttps://github.com/o/r/pull/9",
+        "status": "merge?",
+        "link": "https://github.com/o/r/pull/9",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      }
+    ],
+    "phones": [
+      {
+        "id": "R5CT32HRVNM",
+        "title": "R5CT32HRVNM",
+        "detail": "R5CT32HRVNM",
+        "status": "no permissions",
+        "link": "",
+        "alert": true,
+        "nid": "",
+        "sig": "",
+        "adb": "no permissions"
+      },
+      {
+        "id": "RZ8N71EC9ZB",
+        "title": "RZ8N71EC9ZB",
+        "detail": "RZ8N71EC9ZB",
+        "status": "no permissions",
+        "link": "",
+        "alert": true,
+        "nid": "",
+        "sig": "",
+        "adb": "no permissions"
+      }
+    ],
+    "playbot_workers": [],
+    "test_queue": [
+      {
+        "id": "suite-heading",
+        "title": "EDITOR: 0 running, 5 waiting",
+        "detail": "",
+        "status": "section",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "suite-wait-3534608",
+        "title": "NEXT: ProjectWhite",
+        "detail": "Task: ProjectWhite for 19m\npid 3534608 in /var/home/sanchith/.treehouse/ProjectWhite-24f7b9/19/ProjectWhite",
+        "status": "waiting 19m",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "suite-wait-3698528",
+        "title": "#2: ProjectWhite",
+        "detail": "Task: ProjectWhite for 18m\npid 3698528 in /var/home/sanchith/.treehouse/ProjectWhite-24f7b9/18/ProjectWhite",
+        "status": "waiting 18m",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "suite-wait-3726252",
+        "title": "#3: ProjectWhite",
+        "detail": "Task: ProjectWhite for 18m\npid 3726252 in /var/home/sanchith/.treehouse/ProjectWhite-24f7b9/13/ProjectWhite",
+        "status": "waiting 18m",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "suite-wait-4063898",
+        "title": "#4: ProjectWhite",
+        "detail": "Task: ProjectWhite for 16m\npid 4063898 in /var/home/sanchith/.treehouse/ProjectWhite-24f7b9/25/ProjectWhite",
+        "status": "waiting 16m",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "suite-wait-355467",
+        "title": "#5: ProjectWhite",
+        "detail": "Task: ProjectWhite for 13m\npid 355467 in /var/home/sanchith/.treehouse/ProjectWhite-24f7b9/22/ProjectWhite",
+        "status": "waiting 13m",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "phone-R5CT32HRVNM-heading",
+        "title": "Galaxy S22",
+        "detail": "",
+        "status": "section",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "phone-R5CT32HRVNM-state",
+        "title": "Disconnected",
+        "detail": "",
+        "status": "disconnected",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "phone-RZ8N71EC9ZB-heading",
+        "title": "Galaxy M31",
+        "detail": "",
+        "status": "section",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "phone-RZ8N71EC9ZB-state",
+        "title": "Disconnected",
+        "detail": "",
+        "status": "disconnected",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "phone-RZCX224VH4T-heading",
+        "title": "Galaxy S21 FE",
+        "detail": "",
+        "status": "section",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "phone-RZCX224VH4T-state",
+        "title": "Disconnected",
+        "detail": "",
+        "status": "disconnected",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "phone-any-heading",
+        "title": "ANY PHONE",
+        "detail": "",
+        "status": "section",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      },
+      {
+        "id": "phone-any-wait-3146130",
+        "title": "NEXT: ProjectWhite",
+        "detail": "Task: ProjectWhite for 19m\n",
+        "status": "waiting 19m",
+        "link": "",
+        "alert": false,
+        "nid": "",
+        "sig": ""
+      }
+    ],
+    "worker_tags": {
+      "asker": "WAITING ON YOU · PICK A OR B",
+      "merger": "PR #9 READY TO MERGE",
+      "worker-01": "WORK",
+      "worker-02": "WORK",
+      "worker-03": "WORK",
+      "worker-04": "WORK",
+      "worker-05": "WORK",
+      "worker-06": "WORK",
+      "worker-07": "WORK",
+      "worker-08": "WORK",
+      "worker-09": "WORK",
+      "worker-10": "WORK",
+      "worker-11": "WORK",
+      "worker-12": "WORK",
+      "worker-13": "WORK",
+      "worker-14": "WORK",
+      "worker-15": "WORK",
+      "worker-16": "WORK",
+      "worker-17": "WORK"
+    },
+    "worker_runtimes": {
+      "asker": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "merger": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-01": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-02": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-03": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-04": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-05": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-06": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-07": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-08": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-09": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-10": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-11": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-12": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-13": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-14": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-15": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-16": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      },
+      "worker-17": {
+        "runtime": "Claude",
+        "model": "",
+        "effort": ""
+      }
+    },
+    "merge_waiting": {
+      "merger": "https://github.com/o/r/pull/9"
+    },
+    "landings": [],
+    "builds": [],
+    "routines": [],
+    "bugs": [],
+    "backlog": {
+      "queued": null,
+      "in_flight": null,
+      "next": [],
+      "source": "unavailable"
+    },
+    "allowance": [],
+    "cached_at": ""
+  }
+}

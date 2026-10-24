@@ -1,0 +1,27 @@
+== base crew-board.json ==
+{
+  "ready": [],
+  "alerts": [
+    {
+      "id": "",
+      "title": "Monitoring status unavailable"
+    },
+    {
+      "id": "asker",
+      "title": "asker: decision not yet raised with you"
+    },
+    {
+      "id": "",
+      "title": "Phone R5CT32HRVNM no permissions"
+    },
+    {
+      "id": "",
+      "title": "Phone RZ8N71EC9ZB no permissions"
+    },
+    {
+      "id": "",
+      "title": "Phone Galaxy S21 FE not connected"
+    }
+  ],
+  "rows": 19
+}

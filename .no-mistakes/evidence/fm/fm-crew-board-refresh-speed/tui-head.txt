@@ -1,0 +1,40 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮  
+│FIRSTMATE  //  h.IpJK   ▲ 5 NEW: Monitoring status unavailable   01:30:25   WORKERS 19                                                  │  
+│ 1 NOW    2 PLANNING    3 QUESTIONS    4 TESTING                                                                                        │  
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  
+╭──────────────────────────────────────────────────────────────────────────────────────────╮╭──────────────────────────────────────────╮    
+│ WORKERS   READY FOR YOU   FEED                                                           ││INFORMATION                               │    
+│WORKERS  FIXING 17  READY-TO-MERGE 1  NEEDS-DECISION 1                                    ││NOTIFICATIONS                             │    
+│PR READY TO MERGE  1 worker                                                               ││  NEW Monitoring status unavailable       │    
+│    ▸ widget / Work on merger                           Claude  <1m  PR #9 READY TO MERGE ││    No watcher heartbeat was found, so it…│    
+│WIDGET  18 workers                                                                        ││  NEW asker: decision not yet raised with…│    
+│    ▸ widget / Work on asker                    Claude  <1m  WAITING ON YOU · PICK A OR B ││    pick A or B                           │    
+│  ⠴ ▸ widget / Work on worker-01                                        Claude  <1m  WORK ││  NEW Phone R5CT32HRVNM no permissions    │    
+│  ⠴ ▸ widget / Work on worker-02                                        Claude  <1m  WORK ││    adb reports no permissions, so the ph…│    
+│  ⠴ ▸ widget / Work on worker-03                                        Claude  <1m  WORK ││  NEW Phone RZ8N71EC9ZB no permissions    │    
+│  ⠴ ▸ widget / Work on worker-04                                        Claude  <1m  WORK ││    adb reports no permissions, so the ph…│    
+│  ⠴ ▸ widget / Work on worker-05                                        Claude  <1m  WORK ││  NEW Phone Galaxy S21 FE not connected   │    
+│  ⠴ ▸ widget / Work on worker-06                                        Claude  <1m  WORK ││    adb does not list this registered pho…│    
+│  ⠴ ▸ widget / Work on worker-07                                        Claude  <1m  WORK ││                                          │    
+│  ⠴ ▸ widget / Work on worker-08                                        Claude  <1m  WORK ││TEST QUEUE                                │    
+│  ⠴ ▸ widget / Work on worker-09                                        Claude  <1m  WORK ││  EDITOR: 0 running, 5 waiting            │    
+│  ⠴ ▸ widget / Work on worker-10                                        Claude  <1m  WORK ││  NEXT: ProjectWhite · waiting 19m        │    
+│  ⠴ ▸ widget / Work on worker-11                                        Claude  <1m  WORK ││  #2: ProjectWhite · waiting 18m          │    
+│  ⠴ ▸ widget / Work on worker-12                                        Claude  <1m  WORK ││  #3: ProjectWhite · waiting 18m          │    
+│  ⠴ ▸ widget / Work on worker-13                                        Claude  <1m  WORK ││  #4: ProjectWhite · waiting 16m          │    
+│  ⠴ ▸ widget / Work on worker-14                                        Claude  <1m  WORK ││  #5: ProjectWhite · waiting 13m          │    
+│  ⠴ ▸ widget / Work on worker-15                                        Claude  <1m  WORK ││  Galaxy S22                              │    
+│  ⠴ ▸ widget / Work on worker-16                                        Claude  <1m  WORK ││  Disconnected · disconnected             │    
+│  ⠴ ▸ widget / Work on worker-17                                        Claude  <1m  WORK ││  Galaxy M31                              │    
+│                                                                                          ││  Disconnected · disconnected             │    
+│                                                                                          ││  Galaxy S21 FE                           │    
+│                                                                                          ││  Disconnected · disconnected             │    
+│                                                                                          ││  ANY PHONE                               │    
+│                                                                                          ││  NEXT: ProjectWhite · waiting 19m        │    
+│                                                                                          ││n next new · Ctrl-n/p scroll · s expand   │    
+╰──────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────╯    
+                                                                                                                                            
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮  
+│NOTE [all] i: message firstmate  > Type note; Enter sends                                                                               │  
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  
+3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit                                                   

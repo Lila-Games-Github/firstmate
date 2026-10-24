@@ -1,0 +1,48 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│FIRSTMATE  //  u-base   ▲ 4 NEW: Monitoring status unavailable   01:45:33   WORKERS 19                                                                      │
+│ 1 NOW    2 PLANNING    3 QUESTIONS    4 TESTING                                                                                                            │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────╮╭─────────────────────────────────────────────────╮
+│ WORKERS   READY FOR YOU   FEED                                                                        ││INFORMATION                                      │
+│WORKERS  FIXING 16  READY-TO-MERGE 2  NEEDS-DECISION 1                                                 ││NOTIFICATIONS                                    │
+│WIDGET  19 workers                                                                                     ││  NEW Monitoring status unavailable              │
+│    ▸ widget / Work 1                                                          Claude  <1m  MERGE CALL ││    No watcher heartbeat was found, so it is unk…│
+│    ▸ widget / Work 2                                                               Claude  <1m  HTTPS ││  NEW worker-03: decision not yet raised with you│
+│    ▸ widget / Work 3                                        Claude  <1m  WAITING ON YOU · PICK A OR B ││    pick A or B                                  │
+│  ⠹ ▸ widget / Work 4                                                                Claude  <1m  WORK ││  NEW Phone R5CT32HRVNM no permissions           │
+│  ⠹ ▸ widget / Work 5                                                                Claude  <1m  WORK ││    adb reports no permissions, so the phone can…│
+│  ⠹ ▸ widget / Work 6                                                                Claude  <1m  WORK ││  NEW Phone RZ8N71EC9ZB no permissions           │
+│  ⠹ ▸ widget / Work 7                                                                Claude  <1m  WORK ││    adb reports no permissions, so the phone can…│
+│  ⠹ ▸ widget / Work 8                                                                Claude  <1m  WORK ││                                                 │
+│  ⠹ ▸ widget / Work 9                                                                Claude  <1m  WORK ││TEST QUEUE                                       │
+│  ⠹ ▸ widget / Work 10                                                               Claude  <1m  WORK ││  EDITOR: 0 running, 3 waiting                   │
+│  ⠹ ▸ widget / Work 11                                                               Claude  <1m  WORK ││  NEXT: ProjectWhite · waiting 28m               │
+│  ⠹ ▸ widget / Work 12                                                               Claude  <1m  WORK ││  #2: ProjectWhite · waiting 4m                  │
+│  ⠹ ▸ widget / Work 13                                                               Claude  <1m  WORK ││  #3: ProjectWhite · waiting 2m                  │
+│  ⠹ ▸ widget / Work 14                                                               Claude  <1m  WORK ││                                                 │
+│  ⠹ ▸ widget / Work 15                                                               Claude  <1m  WORK ││LATEST BUILDS                                    │
+│  ⠹ ▸ widget / Work 16                                                               Claude  <1m  WORK ││  none                                           │
+│  ⠹ ▸ widget / Work 17                                                               Claude  <1m  WORK ││                                                 │
+│  ⠹ ▸ widget / Work 18                                                               Claude  <1m  WORK ││DAILY ROUTINES                                   │
+│  ⠹ ▸ widget / Work 19                                                               Claude  <1m  WORK ││  none                                           │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││AI ALLOWANCE                                     │
+│                                                                                                       ││  none                                           │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││                                                 │
+│                                                                                                       ││n next new · Ctrl-n/p scroll · s expand          │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────╯╰─────────────────────────────────────────────────╯
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│NOTE [all] i: message firstmate  > Type note; Enter sends                                                                                                   │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit

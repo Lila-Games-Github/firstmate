@@ -1,0 +1,43 @@
+ok - payload uses worker reports and keeps time in the current phase
+ok - refresh preserves unchanged payloads and retains a departed worker
+ok - terminal renders rows and phase counts, typed notes reach the captain inbox, and stop closes it
+ok - a narrow terminal stacks both panels and retains note input
+ok - plain notes and worker-only pointing reach the same captain inbox
+ok - local panel cache, captain questions, tasks-axi backlog, and one-word launcher
+ok - bug panel merges sources, tags cards, preserves order, and handles empty sources
+ok - local adb phones, unavailable states, cache overlay, and missing adb
+ok - connected and unauthorized phone rows are told apart and alert the captain
+ok - adb resolves from PATH, the Android SDK variables and locations, and Linuxbrew
+ok - an unanswered phone check alerts with its reason instead of claiming no phones
+ok - bold-led question paragraphs and bullet questions are readable
+ok - questions count before the first heading and preamble prose is ignored
+ok - column-0 option bullets under a bold question stay part of that question
+ok - quota allowance uses a slow structured snapshot and keeps the last good result
+ok - unknown headroom and exhausted_now runways stay visible and alert
+ok - a sampler that never succeeded is visible instead of an empty allowance panel
+ok - the allowance sampler follows its board instead of outliving it
+ok - an unresolved limiting window reads unknown instead of None
+ok - armed live Playbot lanes join ordinary workers, and a parked one waits on the captain instead of vanishing
+ok - an unusable Playbot lane runtime alerts with its reason instead of listing no lanes
+ok - full questions and backlog parsers retain grouped entries, hold reasons, and notes
+ok - a capped tasks-axi listing still yields the backlog counts and next tasks
+ok - phones show their tester and the test queue lists running and waiting suites and phone reservations
+ok - ticketed editor and phone queues show holders, ordered waits, and locked phone notifications
+ok - the suite lock probe reads a held FLOCK as the holder and nothing else
+ok - daily routines come from registered checks and their last-run markers
+ok - alerts drop paused workers and ready rows come from green PRs, landings, finished scouts, and preview holds
+ok - real issues each get a plain-words alert row and a quiet board has none
+ok - the monitoring alert fires only when monitoring is genuinely down and says what to do
+ok - worker tags come from held or awaited test resources, the live run step, then the phase note
+ok - worker tags name the worker state in plain words
+ok - a worker whose PR waits for a merge is flagged and a merged or PR-less one is not
+ok - worker runtimes name the harness and model in plain words
+ok - 30-worker refresh completes before the TUI timeout
+ok - a new status line keeps the last live observation, marked stale, until the observer replaces it
+ok - the board observer prunes observations of closed tasks
+ok - a metadata write keeps the last live observation, marked stale, until the observer replaces it
+ok - a relaunched task drops the previous generation observation
+
+real	1m28.357s
+user	0m51.236s
+sys	0m42.038s

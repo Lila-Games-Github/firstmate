@@ -1,0 +1,10 @@
+ok - payload uses worker reports and keeps time in the current phase
+ok - refresh preserves unchanged payloads and retains a departed worker
+ok - alerts drop paused workers and ready rows come from green PRs, landings, finished scouts, and preview holds
+ok - real issues each get a plain-words alert row and a quiet board has none
+ok - a worker whose PR waits for a merge is flagged and a merged or PR-less one is not
+ok - 30-worker refresh completes before the TUI timeout
+ok - a new status line keeps the last live observation, marked stale, until the observer replaces it
+ok - the board observer prunes observations of closed tasks
+ok - a metadata write keeps the last live observation, marked stale, until the observer replaces it
+ok - a relaunched task drops the previous generation observation

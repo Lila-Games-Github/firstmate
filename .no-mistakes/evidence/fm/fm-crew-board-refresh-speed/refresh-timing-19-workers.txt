@@ -1,0 +1,11 @@
+# 19 workers, stub tmux backend: every live probe call takes 4 s. Refresh run under 'timeout 8' like the TUI's 8 s context (exit=124 means killed).
+BASE refresh #1: 8.00s exit=124 rows=none
+BASE refresh #2: 8.00s exit=124 rows=none
+BASE observations cached: 0
+BASE sample row state: 
+BASE refresh #3: 8.01s exit=124 rows=none
+HEAD refresh #1: 1.56s exit=0 rows=19
+HEAD refresh #2: 1.15s exit=0 rows=19
+HEAD observations cached: 19
+HEAD sample row state: {"id":"worker-01","kind":"ship","project":"widget","title":"Work 01","phase":"fixing","phase_since":1792871894,"note":"work","pr_url":null,"endpoint":"unknown","gone":false,"left_at":null}
+HEAD refresh #3: 1.50s exit=0 rows=19

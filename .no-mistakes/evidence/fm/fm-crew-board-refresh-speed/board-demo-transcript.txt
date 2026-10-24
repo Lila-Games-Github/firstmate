@@ -1,0 +1,14 @@
+== base (seeded observations, then new status line + metadata pr= write)
+refresh rc=0 wall=3.28s rows=19
+ready:
+[]
+alerts:
+["Monitoring status unavailable","worker-03: decision not yet raised with you","Phone R5CT32HRVNM no permissions","Phone RZ8N71EC9ZB no permissions"]
+worker-03 tag: WAITING ON YOU · PICK A OR B
+== head (seeded observations, then new status line + metadata pr= write)
+refresh rc=0 wall=2.32s rows=19
+ready:
+[{"id":"worker-01","link":"https://github.com/Lila-Games-Github/no-mistakes/pull/8"},{"id":"worker-02","link":"https://github.com/Lila-Games-Github/no-mistakes/pull/9"}]
+alerts:
+["Monitoring status unavailable","Phone R5CT32HRVNM no permissions","Phone RZ8N71EC9ZB no permissions"]
+worker-03 tag: RESUMED PAST THE GATE

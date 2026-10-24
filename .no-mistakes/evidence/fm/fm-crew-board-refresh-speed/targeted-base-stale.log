@@ -1,0 +1,4 @@
+ok - payload uses worker reports and keeps time in the current phase
+not ok - a new status line keeps the earlier live observation, marked stale (expected 'stale done', got 'fresh unknown')
+ok - payload uses worker reports and keeps time in the current phase
+not ok - a metadata write keeps the earlier live observation, marked stale (expected 'stale done', got 'fresh unknown')
