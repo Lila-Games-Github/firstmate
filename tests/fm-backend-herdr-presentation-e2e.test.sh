@@ -479,6 +479,8 @@ normalize_meta() {  # <meta>
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
     -e 's|^spawn_gen=.*$|spawn_gen=<spawn-incarnation>|' \
+    -e 's|^routing_instance_id=.*$|routing_instance_id=<spawn-incarnation>|' \
+    -e 's|^routing_started_at=.*$|routing_started_at=<spawn-time>|' \
     "$1"
 }
 

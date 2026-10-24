@@ -4014,24 +4014,28 @@ if [ "$KIND" != secondmate ]; then
 fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-ROUTING_OUTCOME=landed
-ROUTING_METHOD=unknown
+ROUTING_OUTCOME='landed'
+ROUTING_METHOD='unknown'
 if [ "$FORCE" = --force ]; then
-  ROUTING_OUTCOME=not-landed
-  ROUTING_METHOD=discarded
+  ROUTING_OUTCOME='not-landed'
+  ROUTING_METHOD='discarded'
 elif [ "$KIND" = scout ]; then
-  ROUTING_OUTCOME=not-landed
-  ROUTING_METHOD=scout-report
+  ROUTING_OUTCOME='not-landed'
+  ROUTING_METHOD='scout-report'
 elif [ "$KIND" = secondmate ]; then
-  ROUTING_OUTCOME=not-landed
-  ROUTING_METHOD=secondmate-retired
+  ROUTING_OUTCOME='not-landed'
+  ROUTING_METHOD='secondmate-retired'
 elif [ "$MODE" = local-only ]; then
-  ROUTING_METHOD=local-landing
+  ROUTING_METHOD='local-landing'
 elif [ -n "$PR_URL" ]; then
-  ROUTING_METHOD=pr-merge
+  ROUTING_METHOD='pr-merge'
 fi
-python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
-  --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || exit 1
+# A remote secondmate's host-local endpoint record lives inside the home that
+# remove_firstmate_home just deleted; the parent home records that route.
+if [ -f "$META" ]; then
+  python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
+    --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || exit 1
+fi
 remove_task_runtime_files "$STATE" "$ID" || exit 1
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
