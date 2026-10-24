@@ -1,0 +1,10 @@
+== fail-first: reap() restored to pre-bound form (kill; unbounded wait)
+reap() {
+  local pid=$1
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+not ok - a TERM-ignoring child held reap for 61s; the grace plus KILL bound is not in force
+Command exited with non-zero status 1
+wall 60.96s
+exit 1

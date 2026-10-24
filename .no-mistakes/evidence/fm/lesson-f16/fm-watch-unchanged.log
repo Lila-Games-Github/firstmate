@@ -1,0 +1,4 @@
+$ git diff --stat 442ee30 HEAD -- bin/fm-watch.sh
+(empty => byte-identical)
+7b4898faa5a1cf5ab63e852681baf0d1dc6e693c
+7b4898faa5a1cf5ab63e852681baf0d1dc6e693c

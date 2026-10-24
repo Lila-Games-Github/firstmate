@@ -1,0 +1,8 @@
+== test_reap_is_provably_bounded
+ok - reap is provably bounded (a TERM-ignoring child is forced inside the window and reported; a child that exits on TERM is collected silently)
+wall 20.83s
+exit 0
+== test_stop_terminates_a_poll_in_flight
+ok - a stop delivered while a check is in flight terminates the watcher on the first TERM and takes the check with it
+wall 2.15s
+exit 0
