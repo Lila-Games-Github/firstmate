@@ -3940,8 +3940,8 @@ function graphicalCaptureRequest(args, engineDependent) {
 
 async function requireEngineReadiness(project, workspace, createdWorker = null, { requiresGraphicalCapture = false } = {}) {
   const report = await engineReadiness(project, workspace);
+  const created = createdWorker ? ` Chat ${createdWorker.thread_id} remains in workspace ${workspace.id}; inspect this pair before retrying so no second pair is created.` : "";
   if (!report.ready || report.verdict !== "ready") {
-    const created = createdWorker ? ` Chat ${createdWorker.thread_id} remains in workspace ${workspace.id}; inspect this pair before retrying so no second pair is created.` : "";
     // The refusal names which half failed, because a bridge that never answered
     // and a contract that changed need different repairs, and the fallback route
     // is stated rather than left to be inferred.
@@ -3950,7 +3950,7 @@ async function requireEngineReadiness(project, workspace, createdWorker = null, 
   if (requiresGraphicalCapture) {
     const unavailable = report.projects.filter((candidate) => candidate.graphicalCapture.status === "unavailable");
     if (unavailable.length) {
-      throw new Error(`Graphical capture is unavailable in workspace ${workspace.id}: ${unavailable.map((candidate) => `${candidate.storedPath} (${candidate.graphicalCapture.reason})`).join(", ")}. A headless engine's display driver cannot supply rendered editor screenshots, so a task that requires them cannot be completed here. Dispatch it to an ordinary worker that can render and capture the editor, or drop requiresGraphicalCapture if the task's completion needs no rendered editor evidence. ${JSON.stringify(report.ipc)}`);
+      throw new Error(`Graphical capture is unavailable in workspace ${workspace.id}: ${unavailable.map((candidate) => `${candidate.storedPath} (${candidate.graphicalCapture.reason})`).join(", ")}. A headless engine's display driver cannot supply rendered editor screenshots, so a task that requires them cannot be completed here.${created} Dispatch it to an ordinary worker that can render and capture the editor, or drop requiresGraphicalCapture if the task's completion needs no rendered editor evidence. ${JSON.stringify(report.ipc)}`);
     }
   }
   return report;
