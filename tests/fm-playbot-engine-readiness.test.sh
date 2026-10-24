@@ -50,7 +50,10 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import vm from 'node:vm';
 const root = process.env.FIXTURE_ROOT;
+// An unreachable bridge exposes no renderer at all, which is the fault distinct
+// from a channel that answered and a contract that changed.
 const server = http.createServer((req,res) => {
+  if(fs.existsSync(path.join(root,'bridge-down')))return res.end('[]');
   res.end(JSON.stringify([{type:'page',webSocketDebuggerUrl:`ws://127.0.0.1:${server.address().port}/page`}]));
 });
 server.on('upgrade',(req,socket) => {
@@ -91,6 +94,8 @@ server.on('upgrade',(req,socket) => {
             return {success:true};
           }
           if(channel==='engine:listWorkspaceProjects') {
+            if(fs.existsSync(path.join(root,'engine-no-handler')))throw new Error("No handler registered for 'engine:listWorkspaceProjects'");
+            if(fs.existsSync(path.join(root,'engine-shape')))return [{engineKind:'godot'}];
             if(fs.existsSync(path.join(root,'hang-engine-read'))) return new Promise(()=>{});
             const projects=JSON.parse(fs.readFileSync(path.join(root,'engine.json'),'utf8'));
             if(fs.existsSync(path.join(root,'change-on-second'))) {
@@ -142,6 +147,21 @@ function expect(verdict,code) {
   return d;
 }
 let d=expect('ready'); assert.equal(d.projects[0].addon.byteIdentical,true);
+// The live bridge, the classified IPC contract, the engine handshake for the
+// exact project path, and the capture capability are four separate readings.
+assert.equal(d.ipc.bridge.status,'reachable');
+assert.equal(d.ipc.contract.status,'version-verified');
+assert.equal(d.ipc.contract.channel,'engine:listWorkspaceProjects');
+assert.equal(d.projects[0].bridge.status,'connected');
+assert.equal(d.projects[0].bridge.projectPath,game);
+assert.equal(d.projects[0].graphicalCapture.status,'unavailable');
+assert.equal(d.projects[0].graphicalCapture.reason,'headless-display-driver');
+// A session that is not headless cannot be proven to capture either, because
+// this read-only diagnostic attempts no capture; it stays unproven, never available.
+instance.type='editor'; stage(); const nonHeadless=call('get_engine_readiness');
+assert.equal(nonHeadless.projects[0].graphicalCapture.status,'unproven');
+assert.equal(nonHeadless.projects[0].graphicalCapture.reason,'capture-not-attempted');
+instance.type='headless';
 assert(!fs.existsSync(process.env.PLAYBOT_LANES_STATE_DIR),'read-only CLI created lane state');
 fs.mkdirSync(path.join(root,'worktrees')); fs.symlinkSync(path.join(root,'worktrees'),path.join(root,'worktree-alias'));
 const worktreeRoot=call('get_worktree_root'); assert.equal(worktreeRoot.before.usesDefault,true);
@@ -220,6 +240,20 @@ assert.equal(sent.engineReadiness.verdict,'ready'); assert.equal(sent.delivery.s
 const calls=fs.readFileSync(path.join(root,'calls'),'utf8').trim().split('\n').map(JSON.parse);
 assert.equal(calls.filter(c=>c.channel==='threads:send').length,1);
 assert.equal(calls.filter(c=>c.channel==='engine:listWorkspaceProjects').length,2);
+// Rendered editor evidence is a capability separate from engine execution: a
+// headless session runs code but refuses screenshots, so a task that needs the
+// screenshots is refused before any chat exists rather than at review.
+for(const extra of [{requiresGraphicalCapture:true},{engineDependent:true,requiresGraphicalCapture:true}]) {
+  stage(); fs.writeFileSync(path.join(root,'calls'),'');
+  const r=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'call','dispatch',JSON.stringify({project:'p',workspace:'ws',title:'Capture',message:'Capture the editor',...extra})],{encoding:'utf8'});
+  assert.notEqual(r.status,0); assert.match(r.stderr,/Graphical capture is unavailable[\s\S]*headless-display-driver/);
+  const attempted=fs.readFileSync(path.join(root,'calls'),'utf8');
+  assert(!attempted.includes('threads:launch')&&!attempted.includes('threads:send'),attempted);
+}
+for(const extra of [{engineDependent:false,requiresGraphicalCapture:true},{requiresGraphicalCapture:'true'}]) {
+  const r=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'call','dispatch',JSON.stringify({project:'p',workspace:'ws',title:'Capture',message:'Capture the editor',...extra})],{encoding:'utf8'});
+  assert.notEqual(r.status,0); assert.match(r.stderr,/requiresGraphicalCapture (needs the engine readiness read|must be a boolean)/);
+}
 // A healthy preflight cannot cover a later unconfirmed destination read.
 fs.writeFileSync(path.join(root,'change-on-second'),''); fs.writeFileSync(path.join(root,'calls'),'');
 const refused=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'call','dispatch',JSON.stringify({project:'p',workspace:'ws',thread:'chat',message:'Validate exact engine'})],{encoding:'utf8'});
@@ -230,15 +264,52 @@ fs.rmSync(path.join(game,'addons/playbot/plugin.gd'));
 fs.mkdirSync(path.join(game,'addons/playbot/plugin.gd')); expect('unconfirmed','addon-unreadable');
 fs.rmdirSync(path.join(game,'addons/playbot/plugin.gd'));
 fs.copyFileSync(path.join(bundle,'plugin.gd'),path.join(game,'addons/playbot/plugin.gd'));
+// A reachable bridge whose engine call never answered is its own status, so a
+// stalled read never reads as an unreachable bridge or a changed contract.
 fs.writeFileSync(path.join(root,'hang-engine-read'),''); stage();
-assert.equal(call('get_engine_readiness').verdict,'unconfirmed');
+const stalled=call('get_engine_readiness');
+assert.equal(stalled.verdict,'unconfirmed');
+assert.equal(stalled.ipc.bridge.status,'reachable');
+assert.equal(stalled.ipc.contract.status,'call-failed');
 fs.rmSync(path.join(root,'hang-engine-read'));
-fs.writeFileSync(path.join(root,'version'),'0.118.0'); fs.writeFileSync(path.join(root,'calls'),''); stage();
-assert.equal(call('get_engine_readiness').verdict,'unconfirmed');
-assert(!fs.readFileSync(path.join(root,'calls'),'utf8').includes('engine:listWorkspaceProjects'));
+// The engine snapshot IPC contract is classified by capability, never by an
+// app-version allowlist. An allowlist stranded engine-dependent lanes on the
+// next Playbot upgrade until someone extended it, so an unlisted version whose
+// channel answers with the readable contract is admitted on that probe alone.
+fs.writeFileSync(path.join(root,'version'),'0.118.0'); fs.writeFileSync(path.join(root,'resources/app/package.json'),JSON.stringify({version:'0.118.0'}));
+fs.writeFileSync(path.join(root,'calls'),''); stage();
+const unlisted=call('get_engine_readiness');
+assert.equal(unlisted.verdict,'ready',JSON.stringify(unlisted));
+assert.equal(unlisted.ipc.contract.status,'capability-verified');
+assert.equal(unlisted.ipc.contract.observedVersion,'0.118.0');
+assert.match(unlisted.ipc.contract.detail,/not on the verified list/);
+assert(fs.readFileSync(path.join(root,'calls'),'utf8').includes('engine:listWorkspaceProjects'));
+fs.rmSync(path.join(root,'version')); fs.writeFileSync(path.join(root,'resources/app/package.json'),JSON.stringify({version:'0.117.0'}));
+// A channel Playbot no longer registers is named rather than guessed at.
+fs.writeFileSync(path.join(root,'engine-no-handler'),''); stage();
+const missingChannel=call('get_engine_readiness');
+assert.equal(missingChannel.verdict,'unconfirmed');
+assert.equal(missingChannel.ipc.contract.status,'channel-missing');
+assert.equal(missingChannel.ipc.bridge.status,'reachable');
+assert.match(missingChannel.ipc.contract.detail,/does not register engine:listWorkspaceProjects/);
+fs.rmSync(path.join(root,'engine-no-handler'));
+// A channel that answers with an unreadable shape is a changed contract.
+fs.writeFileSync(path.join(root,'engine-shape'),''); stage();
+const changedShape=call('get_engine_readiness');
+assert.equal(changedShape.verdict,'unconfirmed');
+assert.equal(changedShape.ipc.contract.status,'shape-changed');
+fs.rmSync(path.join(root,'engine-shape'));
+// An unreachable bridge is a different fault from a changed contract, and it
+// leaves the contract unclassified rather than mislabelled.
+fs.writeFileSync(path.join(root,'bridge-down'),''); stage();
+const downBridge=call('get_engine_readiness');
+assert.equal(downBridge.verdict,'unconfirmed');
+assert.equal(downBridge.ipc.bridge.status,'unreachable');
+assert.equal(downBridge.ipc.contract.status,'unprobed');
+fs.rmSync(path.join(root,'bridge-down'));
 // Reset/stash preservation exercises real Git, tracked helpers, untracked
 // helpers, and ignored native files through the same lane executable.
-fs.rmSync(path.join(root,'version'));
+fs.rmSync(path.join(root,'version'),{force:true});
 // Engine-dependent work never creates a workspace it could not confirm.
 fs.writeFileSync(path.join(root,'calls'),'');
 const fresh=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'call','dispatch',JSON.stringify({project:'p',landingBranch:'main',newWorkspace:{branch:'fm-engine'},title:'Engine',message:'Run engine tests'})],{encoding:'utf8'});

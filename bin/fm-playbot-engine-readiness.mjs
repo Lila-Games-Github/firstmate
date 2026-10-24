@@ -160,6 +160,38 @@ function verdict(reasons) {
   return VERDICT_ORDER.find((candidate) => reasons.some((reason) => reason.verdict === candidate)) ?? "ready";
 }
 
+// Playbot refuses rendered editor screenshots from a headless engine session, so
+// a brief that needs that evidence must learn it before dispatch rather than at
+// review. This module executes nothing, so it can name an observed refusal cause
+// but can never prove a capture succeeds: an unobserved or non-headless session
+// stays unproven rather than available.
+function graphicalCaptureCapability(instance) {
+  if (!instance) return { status: "unproven", reason: "no-routed-session", detail: "No existing routed engine session was observed, so no capture capability could be read." };
+  if (instance.type === "headless") return { status: "unavailable", reason: "headless-display-driver", detail: "The routed engine session is a headless engine, whose display driver cannot supply rendered editor screenshots." };
+  return { status: "unproven", reason: "capture-not-attempted", detail: `The routed engine session is not headless (type ${JSON.stringify(instance.type ?? null)}), but this read-only diagnostic attempts no capture and so cannot prove one succeeds.` };
+}
+
+// The engine bridge is Playbot's own handshake with the engine process for one
+// exact project path. Reading the persisted workspace state proves that state
+// parsed; only this reports whether the engine completed its handshake, so a
+// stalled connection never reads the same as a session that was never there.
+function engineBridge(instance, storedPath) {
+  if (!instance) return { status: "no-session", projectPath: storedPath, sessionId: null, sessionType: null, lifecycleStatus: null, startupActivity: null, detail: "No existing routed engine session was observed for this exact project path; no session was started." };
+  const connected = instance.lifecycleStatus === "connected";
+  const activity = instance.startupActivity ? ` (${instance.startupActivity})` : "";
+  return {
+    status: connected ? "connected" : "not-connected",
+    projectPath: storedPath,
+    sessionId: instance.id ?? null,
+    sessionType: instance.type ?? null,
+    lifecycleStatus: instance.lifecycleStatus ?? null,
+    startupActivity: instance.startupActivity ?? null,
+    detail: connected
+      ? "The routed engine session reports a completed handshake for this exact project path."
+      : `A routed engine session exists for this exact project path but its bridge reports ${JSON.stringify(instance.lifecycleStatus ?? "unreported")}${activity}, so Playbot and the engine have not completed their handshake.`,
+  };
+}
+
 export function inspectEngineProject(project, bundle) {
   const reasons = [];
   const add = (value, code, message) => reasons.push({ verdict: value, code, message });
@@ -176,19 +208,21 @@ export function inspectEngineProject(project, bundle) {
   const routed = Array.isArray(snapshot?.instances) && typeof snapshot.routedInstanceId === "string"
     ? snapshot.instances.filter((candidate) => candidate?.id === snapshot.routedInstanceId) : [];
   const instance = routed.length === 1 ? routed[0] : null;
+  const bridge = engineBridge(instance, storedPath);
   if (snapshot?.connectionBlocked === true) add("identity-admission-risk", "connection-blocked", "Playbot reports project connection blocked; the rejection cause is unconfirmed.");
   else if (snapshot?.connectionBlocked !== false) add("unconfirmed", "connection-unconfirmed", "Project connection admission state is unreadable.");
-  if (!instance) add("unconfirmed", "session-unconfirmed", "No existing routed engine session was observed; no session was started.");
+  if (!instance) add("unconfirmed", "session-unconfirmed", bridge.detail);
   else {
     if (instance.pluginStatus === "outdated" || (instance.pluginVersion && instance.pluginVersion !== bundle.version)) add("addon-drift", "loaded-addon-drift", "The existing session reports an outdated or different loaded addon.");
-    if (instance.lifecycleStatus === "starting" || instance.lifecycleStatus === "connecting") add("startup-pending", "startup-pending", "Existing headless engine startup is still pending.");
+    if (instance.lifecycleStatus === "starting" || instance.lifecycleStatus === "connecting") add("startup-pending", "startup-pending", `Existing headless engine startup is still pending: ${bridge.detail}`);
     if (instance.failure) {
       // A generic connection timeout does not prove PID admission rejection.
       // Reserve this verdict for an explicit structured rejection code.
       const rejected = ["registration-rejected", "identity-rejected", "admission-rejected", "process-id-mismatch"].includes(instance.failure.code);
       add(rejected ? "identity-admission-rejected" : "engine-failure", rejected ? "registration-rejected" : "engine-failure", instance.failure.message ?? "Existing engine reports a failure.");
     }
-    if (!["idle-edit", "idle-play", "busy"].includes(instance.status) || instance.type !== "headless" || instance.lifecycleStatus !== "connected" || snapshot.preferredInstanceType !== "headless" || instance.pluginStatus !== "up_to_date" || instance.pluginVersion !== bundle.version) add("unconfirmed", "session-unconfirmed", "A connected session with the bundled loaded addon is not confirmed.");
+    if (bridge.status !== "connected") add("unconfirmed", "bridge-not-connected", bridge.detail);
+    else if (!["idle-edit", "idle-play", "busy"].includes(instance.status) || instance.type !== "headless" || snapshot.preferredInstanceType !== "headless" || instance.pluginStatus !== "up_to_date" || instance.pluginVersion !== bundle.version) add("unconfirmed", "session-unconfirmed", "A connected session with the bundled loaded addon is not confirmed.");
   }
   const selectedExecutable = inspectExecutable(instance, storedPath);
   if (selectedExecutable.kind === "namespace-launcher") add("identity-admission-risk", "namespace-launcher", "The observed launcher uses a process namespace; Playbot's host process-number admission can reject it.");
@@ -200,14 +234,17 @@ export function inspectEngineProject(project, bundle) {
     startupActivity: instance.startupActivity ?? null, statusMessage: instance.statusMessage ?? null,
     failure: instance.failure ?? null,
   } : null;
-  return { storedPath, canonicalPath, normalizedProjectPath: project.normalizedProjectPath ?? null, engineKind: project.engineKind, addon, selectedExecutable, session, verdict: verdict(reasons), reasons };
+  return { storedPath, canonicalPath, normalizedProjectPath: project.normalizedProjectPath ?? null, engineKind: project.engineKind, addon, selectedExecutable, session, bridge, graphicalCapture: graphicalCaptureCapability(instance), verdict: verdict(reasons), reasons };
 }
 
-export function engineReadinessReport(app, bundle, workspace, projects, errors) {
+// ipc carries what the caller observed over Playbot's own channels: `bridge`
+// whether Playbot answered at all, and `contract` how it classified the engine
+// snapshot IPC. Both are evidence the caller owns; this module only reports it.
+export function engineReadinessReport(app, bundle, workspace, projects, errors, ipc) {
   const reports = projects.map((project) => inspectEngineProject(project, bundle));
   const reasons = reports.flatMap((project) => project.reasons);
   if (reports.length === 0 || errors.length) reasons.push({ verdict: "unconfirmed", code: "discovery-unconfirmed", message: "Complete Godot project discovery is not confirmed." });
-  return { app, bundle, workspaceId: workspace.id, observedAt: new Date().toISOString(), verdict: verdict(reasons), ready: reasons.length === 0, projects: reports, reasons, errors };
+  return { app, bundle, workspaceId: workspace.id, observedAt: new Date().toISOString(), ipc, verdict: verdict(reasons), ready: reasons.length === 0, projects: reports, reasons, errors };
 }
 
 export function addonPreservationReport(app, bundle, projectPaths, errors) {

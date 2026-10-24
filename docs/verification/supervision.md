@@ -1066,7 +1066,8 @@ FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=445872
 
 On 2026-09-28, Node v26.7.0 and Playbot 0.117.0 exercised `get_engine_readiness` through the live lane executable without activating a project, resuming a chat, or invoking an engine command.
 The reader uses `engine:listWorkspaceProjects`, whose installed 0.117.0 handler enumerates projects and snapshots existing sessions; it does not call project activation or engine detection.
-Unknown app versions are covered by a fixture that verifies no engine IPC is called.
+The engine snapshot IPC contract is classified by capability rather than by an app-version allowlist, and the fixture drives every classification apart: an unlisted version whose channel returns the readable contract is `ready` as `capability-verified`, a channel that is no longer registered is `channel-missing`, an unreadable shape is `shape-changed`, a channel that did not answer is `call-failed`, and an unreachable Playbot bridge leaves the contract `unprobed` with no engine read attempted.
+The same fixture covers the headless capture refusal: a routed headless session reports `graphicalCapture` `unavailable` and refuses a `requiresGraphicalCapture` dispatch before any chat exists.
 The selected-executable reader consumes the headless launch log's `Godot path` line when present; missing launch evidence remains unconfirmed, as observed in the live read below.
 This token-free diagnostic applies equally to terminal and MCP callers and does not depend on the worker harness or runtime backend.
 Linux running-process discovery was exercised live; other platforms require the explicit resources path described by the script header and fail closed without readable bundle evidence.
