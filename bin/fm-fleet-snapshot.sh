@@ -61,6 +61,8 @@
 #     whole status log by fm-classify-lib.sh's status_current_phase, which owns
 #     the vocabulary and the fold; it is what the worker said, never a
 #     current-state verdict, and the crew board (bin/fm-crew-board.sh) renders it.
+#     It folds the reconciled hints.open_decisions set below, so a decision the
+#     live state moved past never holds the phase on needs-decision or blocked.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -69,6 +71,10 @@
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
+#     FM_SNAPSHOT_BOARD_FAST=1 composes board rows from captured files and the
+#     last live observation of the same task generation; --board-observe refreshes
+#     those observations. One taken before the newest status or metadata write is
+#     reported with freshness "stale" and its age_seconds until the observer replaces it.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -152,6 +158,8 @@ esac
 FM_SNAPSHOT_SECONDMATES=${FM_SNAPSHOT_SECONDMATES:-20}
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=${FM_SNAPSHOT_CREW_STATE_TIMEOUT:-10}
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=${FM_SNAPSHOT_LOCAL_READ_CONCURRENCY:-8}
+FM_SNAPSHOT_BOARD_FAST=${FM_SNAPSHOT_BOARD_FAST:-0}
+BOARD_OBSERVATIONS="$STATE/crew-board-observations"
 FM_SNAPSHOT_BUDGET=${FM_SNAPSHOT_BUDGET:-5}
 FM_SNAPSHOT_CACHE_DIR=${FM_SNAPSHOT_CACHE_DIR:-$STATE/secondmate-summary-cache}
 FM_SNAPSHOT_SECONDMATE_MAX_BYTES=${FM_SNAPSHOT_SECONDMATE_MAX_BYTES:-262144}
@@ -231,6 +239,7 @@ usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
        fm-fleet-snapshot.sh --secondmate-home-summary
+       fm-fleet-snapshot.sh --board-observe
 
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
@@ -238,6 +247,8 @@ refreshes only its parent-side remote-summary cache as an observational side eff
 
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
 without worker observations or cross-home collection.
+--board-observe refreshes the crew board's cached local live observations.
+FM_SNAPSHOT_BOARD_FAST=1 uses those observations while composing --json.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -286,6 +297,7 @@ EOF
 OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
+  --board-observe) OUTPUT_MODE=board-observe ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
   -h|--help) usage; exit 0 ;;
@@ -601,6 +613,148 @@ snapshot_mark_optional_present() {  # <source> <destination>
   : > "$destination"
 }
 
+board_observation_stamp() {  # <meta> <status>
+  local meta=$1 status=$2 meta_sum status_sum
+  meta_sum=$(cksum < "$meta") || return 1
+  if [ -f "$status" ]; then status_sum=$(cksum < "$status") || return 1; else status_sum=absent; fi
+  meta_sum=${meta_sum// /:}
+  status_sum=${status_sum// /:}
+  printf '%s|%s\n' "$meta_sum" "$status_sum"
+}
+
+board_generation_changed() {  # <id>
+  local id=$1
+  rm -f -- "$SNAPSHOT_TASK_DIR/$id.status" "$SNAPSHOT_TASK_DIR/$id.report" \
+    "$SNAPSHOT_TASK_DIR/$id.freshness" "$SNAPSHOT_TASK_DIR/$id.observed-status"
+  jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
+    > "$SNAPSHOT_TASK_DIR/$id.json" || return 1
+  printf 'endpoint_exists=null\nagent_alive=unknown\n' > "$SNAPSHOT_TASK_DIR/$id.endpoint"
+}
+
+board_status_extends() {  # <observed-status> <status>
+  local observed=$1 status=$2 size
+  size=$(wc -c < "$observed") || return 1
+  size=${size//[!0-9]/}
+  [ "$size" -eq 0 ] && return 0
+  [ -f "$status" ] || return 1
+  [ "$(head -c "$size" "$status" | cksum)" = "$(cksum < "$observed")" ]
+}
+
+board_cached_observation() {  # <captured-meta> <id>
+  local meta=$1 id=$2
+  board_cached_observation_read "$meta" "$id" || return 1
+  snapshot_task_generation_is_current "$meta" "$id" || board_generation_changed "$id"
+}
+
+board_cached_observation_read() {  # <captured-meta> <id>
+  local meta=$1 id=$2 status record stamp stored='' observed='' generation='' freshness
+  status="$SNAPSHOT_TASK_DIR/$id.status"
+  record="$SNAPSHOT_TASK_DIR/$id.record"
+  snapshot_task_generation_is_current "$meta" "$id" || return 0
+  snapshot_capture_optional "$STATE/$id.status" "$status" || return 1
+  snapshot_mark_optional_present "$DATA/$id/report.md" "$SNAPSHOT_TASK_DIR/$id.report" || return 1
+  stamp=$(board_observation_stamp "$meta" "$status") || return 1
+  if cp -- "$BOARD_OBSERVATIONS/$id.json" "$record" 2>/dev/null &&
+     { read -r stored; read -r observed; read -r generation; } \
+       < <(jq -r '.stamp // "", (.observed_epoch // "" | tostring), (.spawn_gen // "")' "$record" 2>/dev/null) &&
+     [ "$generation" = "$(meta_value "$meta" spawn_gen)" ]; then
+    case "$observed" in ''|*[!0-9]*) ;; *)
+      jq '.current' "$record" > "$SNAPSHOT_TASK_DIR/$id.json" || return 1
+      jq -r '"endpoint_exists=\(.endpoint_exists)\nagent_alive=\(.agent_alive)"' "$record" \
+        > "$SNAPSHOT_TASK_DIR/$id.endpoint" || return 1
+      if [ "$stored" = "$stamp" ]; then
+        freshness=fresh
+      else
+        freshness=stale
+        jq -j '.status // ""' "$record" > "$SNAPSHOT_TASK_DIR/$id.observed-status" || return 1
+        board_status_extends "$SNAPSHOT_TASK_DIR/$id.observed-status" "$status" || {
+          rm -f -- "$SNAPSHOT_TASK_DIR/$id.observed-status"
+          observed=''
+        }
+      fi
+      if [ -n "$observed" ]; then
+        printf '%s %s %s\n' "$freshness" "$observed" \
+          "$(( SNAPSHOT_EPOCH > observed ? SNAPSHOT_EPOCH - observed : 0 ))" > "$SNAPSHOT_TASK_DIR/$id.freshness"
+        return
+      fi
+    esac
+  fi
+  jq -n '{state:"unknown",source:"none",detail:"live observation pending",raw:""}' > "$SNAPSHOT_TASK_DIR/$id.json" || return 1
+  printf 'endpoint_exists=null\nagent_alive=not_checked\n' > "$SNAPSHOT_TASK_DIR/$id.endpoint"
+}
+
+board_observe_one() {  # <meta> <id> <stamp>
+  local meta=$1 id=$2 stamp=$3 tmp next="$BOARD_OBSERVATIONS/$2.json.tmp.$$" rc=0 status_arg
+  tmp=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-board-observe.XXXXXX") || return 1
+  SNAPSHOT_TASK_DIR=$tmp
+  if cp -- "$meta" "$tmp/$id.meta" && prefetch_task_observations "$tmp/$id.meta" "$id"; then
+    if [ "$(board_observation_stamp "$meta" "$STATE/$id.status")" = "$stamp" ] &&
+       snapshot_task_generation_is_current "$tmp/$id.meta" "$id"; then
+      status_arg=(--argjson status null)
+      [ -f "$tmp/$id.status" ] && status_arg=(--rawfile status "$tmp/$id.status")
+      { jq -n --arg stamp "$stamp" --argjson observed_epoch "$(date +%s)" \
+          --slurpfile current "$tmp/$id.json" "${status_arg[@]}" \
+          --arg spawn_gen "$(meta_value "$tmp/$id.meta" spawn_gen)" \
+          --arg endpoint_exists "$(sed -n 's/^endpoint_exists=//p' "$tmp/$id.endpoint")" \
+          --arg agent_alive "$(sed -n 's/^agent_alive=//p' "$tmp/$id.endpoint")" \
+          '{stamp:$stamp,observed_epoch:$observed_epoch,spawn_gen:$spawn_gen,current:$current[0],
+            endpoint_exists:$endpoint_exists,agent_alive:$agent_alive,status:$status}' > "$next" &&
+        mv -f -- "$next" "$BOARD_OBSERVATIONS/$id.json"; } || rc=1
+    fi
+  else
+    rc=1
+  fi
+  rm -rf -- "$tmp"
+  rm -f -- "$next"
+  return "$rc"
+}
+
+board_prune_observations() {
+  local entry name
+  for entry in "$BOARD_OBSERVATIONS"/*; do
+    [ -e "$entry" ] || continue
+    name=${entry##*/}
+    case "$name" in
+      *.json.tmp.*) name=${name%.json.tmp.*} ;;
+      *.json) name=${name%.json} ;;
+      *) rm -f -- "$entry"; continue ;;
+    esac
+    [ -f "$STATE/$name.meta" ] || rm -f -- "$entry"
+  done
+}
+
+board_observe_all() {
+  local meta id stamp stored age active=0 rc=0
+  local -a pids=()
+  mkdir -p -- "$BOARD_OBSERVATIONS" || return 1
+  board_prune_observations
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    stamp=$(board_observation_stamp "$meta" "$STATE/$id.status") || return 1
+    if [ -f "$BOARD_OBSERVATIONS/$id.json" ]; then
+      stored=''; age=''
+      { read -r stored; read -r age; } < <(jq -r '.stamp // "", (.observed_epoch // "" | tostring)' "$BOARD_OBSERVATIONS/$id.json" 2>/dev/null) || :
+      if [ "$stored" = "$stamp" ]; then
+        case "$age" in
+          ''|*[!0-9]*) ;;
+          *) [ "$((SNAPSHOT_EPOCH - age))" -lt 30 ] && continue ;;
+        esac
+      fi
+    fi
+    board_observe_one "$meta" "$id" "$stamp" &
+    pids[active]=$!
+    active=$((active + 1))
+    if [ "$active" -ge "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY" ]; then
+      snapshot_wait_current_reads "${pids[@]}" || rc=1
+      pids=()
+      active=0
+    fi
+  done
+  if [ "$active" -gt 0 ]; then snapshot_wait_current_reads "${pids[@]}" || rc=1; fi
+  return "$rc"
+}
+
 snapshot_task_generation_is_current() {  # <captured-meta> <id>
   local captured_meta=$1 id=$2 current_meta captured_gen current_gen captured_contents current_contents
   current_meta="$STATE/$id.meta"
@@ -711,7 +865,11 @@ prefetch_task_current_states() {
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
     id=$(basename "$meta" .meta)
-    prefetch_task_observations "$meta" "$id" &
+    if [ "$FM_SNAPSHOT_BOARD_FAST" = 1 ]; then
+      board_cached_observation "$meta" "$id" &
+    else
+      prefetch_task_observations "$meta" "$id" &
+    fi
     pids[active]=$!
     active=$((active + 1))
     index=$((index + 1))
@@ -730,16 +888,15 @@ prefetch_task_current_states() {
   fi
 }
 
-task_json_lines() {
+task_json_one() {  # <captured-meta>
   local meta original_meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
-  local remote_host remote_root current_file endpoint_file observation_line index=0
+  local remote_host remote_root current_file endpoint_file observation_line
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json phase_tsv phase_name phase_note
+  local folded_decisions_tsv open_decisions_tsv open_decisions_json phase_tsv phase_name phase_note
+  local freshness=fresh observed_at=$SNAPSHOT_NOW age_seconds=null observed_epoch observed_decisions unobserved_decisions decision
 
-  while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
-    meta=${SNAPSHOT_TASK_METAS[index]}
-    index=$((index + 1))
+    meta=$1
     id=$(basename "$meta" .meta)
     original_meta="$STATE/$id.meta"
     kind=$(meta_value "$meta" kind)
@@ -777,7 +934,6 @@ task_json_lines() {
 
     current_file="$SNAPSHOT_TASK_DIR/$id.json"
     current_json=$(<"$current_file") || {
-      snapshot_task_cleanup
       return 1
     }
     event_json=$(status_event_json "$status_log" "$STATE/$id.status")
@@ -785,6 +941,10 @@ task_json_lines() {
     read -r current_state current_source < <(
       printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
     )
+    if [ -f "$SNAPSHOT_TASK_DIR/$id.freshness" ]; then
+      read -r freshness observed_epoch age_seconds < "$SNAPSHOT_TASK_DIR/$id.freshness" || return 1
+      observed_at=$(jq -nr --argjson epoch "$observed_epoch" '$epoch | todate') || return 1
+    fi
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -803,16 +963,44 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    phase_tsv=$(status_current_phase "$status_log" "$kind")
-    phase_name=${phase_tsv%%$'\t'*}
-    phase_note=${phase_tsv#*$'\t'}
-    open_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
+    folded_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
+    open_decisions_tsv=$folded_decisions_tsv
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
          || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
-      open_decisions_tsv=""
+      if [ "$freshness" = stale ]; then
+        observed_decisions=$(status_open_decisions "$SNAPSHOT_TASK_DIR/$id.observed-status" "$kind")
+        # Accumulate in the current shell: stock Bash 3.2 cannot parse a case
+        # statement's unbalanced ')' patterns inside a $( ) substitution.
+        unobserved_decisions=""
+        while IFS= read -r decision; do
+          [ -n "$decision" ] || continue
+          case $'\n'"$observed_decisions"$'\n' in
+            *$'\n'"$decision"$'\n'*) ;;
+            *) unobserved_decisions="$unobserved_decisions$decision"$'\n' ;;
+          esac
+        done <<< "$open_decisions_tsv"
+        open_decisions_tsv=${unobserved_decisions%$'\n'}
+      else
+        open_decisions_tsv=""
+      fi
     fi
+    # The phase folds the same reconciled set, so a decision the lifecycle cleared
+    # never keeps the board's phase on it; when the log itself still ends on that
+    # decision, the live state the crew moved on to stands in its place.
+    phase_tsv=$(status_current_phase "$status_log" "$kind" "$open_decisions_tsv")
+    phase_name=${phase_tsv%%$'\t'*}
+    phase_note=${phase_tsv#*$'\t'}
+    case "$phase_name" in
+      needs-decision|blocked)
+        case $'\n'"$open_decisions_tsv" in
+          *$'\n'*$'\t'"$phase_name"$'\t'*) ;;
+          *) if [ "$folded_decisions_tsv" != "$open_decisions_tsv" ]; then
+               phase_name=$current_state; phase_note=''
+             fi ;;
+        esac ;;
+    esac
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
       [ splits("\n") | select(length > 0)
         | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
@@ -829,7 +1017,6 @@ task_json_lines() {
         agent_alive=*) agent_alive=${observation_line#*=} ;;
       esac
     done < "$endpoint_file" || {
-      snapshot_task_cleanup
       return 1
     }
     [ -f "$report_path" ] && report_present=1 || report_present=0
@@ -870,7 +1057,9 @@ task_json_lines() {
       --arg pr_source "$pr_source" \
       --arg pr_head "$(meta_value "$meta" pr_head)" \
       --arg agent_alive "$agent_alive" \
-      --arg observed_at "$SNAPSHOT_NOW" \
+      --arg observed_at "$observed_at" \
+      --arg freshness "$freshness" \
+      --argjson age_seconds "$age_seconds" \
       --arg phase_name "$phase_name" \
       --argjson meta_path "$meta_json" \
       --argjson report "$report_json" \
@@ -900,13 +1089,13 @@ task_json_lines() {
           report:$report
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
-        current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        current_state:($current_state + {observed_at:$observed_at,freshness:$freshness,age_seconds:$age_seconds}),
         phase:{name:$phase_name,note:$phase_note},
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
-          observed_at:$observed_at,freshness:"fresh"},
+          observed_at:$observed_at,freshness:$freshness,age_seconds:$age_seconds},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source,head:($pr_head | if . == "" then null else . end)},
         hints:{
           pending_decision:$pending_decision,
@@ -926,6 +1115,29 @@ task_json_lines() {
              return_channel_note:null}
           end)
       }'
+}
+
+task_json_lines() {
+  local index=0 active=0 rc=0 pid row
+  local -a pids=()
+  while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
+    row="$SNAPSHOT_TASK_DIR/row.$index.json"
+    task_json_one "${SNAPSHOT_TASK_METAS[index]}" > "$row" &
+    pids[active]=$!
+    active=$((active + 1))
+    index=$((index + 1))
+    if [ "$active" -ge "$FM_SNAPSHOT_LOCAL_READ_CONCURRENCY" ]; then
+      snapshot_wait_current_reads "${pids[@]}" || rc=1
+      pids=()
+      active=0
+    fi
+  done
+  if [ "$active" -gt 0 ]; then
+    snapshot_wait_current_reads "${pids[@]}" || rc=1
+  fi
+  [ "$rc" -eq 0 ] || return 1
+  for ((index=0; index<SNAPSHOT_TASK_META_COUNT; index++)); do
+    cat "$SNAPSHOT_TASK_DIR/row.$index.json" || return 1
   done | jq -s 'sort_by(.id)'
 }
 
@@ -1981,6 +2193,11 @@ scout_report_lines() {
     done \
     | jq -s 'sort_by(.id)'
 }
+
+if [ "$OUTPUT_MODE" = board-observe ]; then
+  board_observe_all
+  exit $?
+fi
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
 contribution_tasks_json() {

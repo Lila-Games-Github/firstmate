@@ -61,7 +61,7 @@ sleeper_in() { (cd "$1" && exec sleep 60) >/dev/null 2>&1 & printf '%s\n' "$!"; 
 tool_path() {  # <dir>
   local dir=$1 tool resolved
   mkdir -p "$dir"
-  for tool in awk bash basename cat chmod cp cut date dirname env expr find grep head id jq \
+  for tool in awk bash basename cat chmod cksum cp cut date dirname env expr find grep head id jq \
     kill ln mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sleep sort stat tail \
     timeout touch tr uname wc xargs
   do
@@ -1407,6 +1407,167 @@ test_worker_runtimes_name_harness_and_model() {
   pass 'worker runtimes name the harness and model in plain words'
 }
 
+test_thirty_worker_refresh_budget() {
+  local home id worker start elapsed attempts stamps
+  home=$(make_home thirty_workers)
+  rm -f "$home/state/alpha.meta" "$home/state/alpha.status" "$home/state/beta.meta" "$home/state/beta.status"
+  printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
+  for ((id=1; id<=30; id++)); do
+    printf -v worker 'worker-%02d' "$id"
+    printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\n' > "$home/state/$worker.meta"
+    printf 'phase: fixing - work\n' > "$home/state/$worker.status"
+    printf -- '- [ ] %s - Work %s (repo: widget) (kind: ship) (since 2026-10-19)\n' "$worker" "$id" >> "$home/data/backlog.md"
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  start=$(python3 -c 'import time; print(time.monotonic())')
+  run_board "$home" refresh >/dev/null || fail '30-worker refresh failed'
+  elapsed=$(python3 -c 'import sys,time; print(time.monotonic()-float(sys.argv[1]))' "$start")
+  assert_equals 30 "$(jq '.rows | length' "$home/state/crew-board.json")" '30-worker row count'
+  python3 -c 'import sys; assert float(sys.argv[1]) < 7, "refresh exceeded seven seconds: " + sys.argv[1]' "$elapsed" \
+    || fail '30-worker refresh exceeded the budget beneath the eight-second TUI timeout'
+  for ((attempts=0; attempts<100; attempts++)); do
+    stamps=$(find "$home/state/crew-board-observations" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)
+    [ "$stamps" -eq 30 ] && break
+    sleep 0.1
+  done
+  assert_equals 30 "$stamps" '30-worker background observation count'
+  pass '30-worker refresh completes before the TUI timeout'
+}
+
+# Seeds the observer's persisted record for <id> as if it had observed the task
+# while its status log held only <observed-status>.
+seed_board_observation() {  # <home> <id> <observed-status> <current-json>
+  local home=$1 id=$2 observed=$3 current=$4 meta_sum status_sum
+  mkdir -p "$home/state/crew-board-observations"
+  meta_sum=$(cksum < "$home/state/$id.meta"); status_sum=$(printf '%s' "$observed" | cksum)
+  jq -n --arg stamp "${meta_sum// /:}|${status_sum// /:}" --argjson observed_epoch "$(( $(date +%s) - 40 ))" \
+    --arg spawn_gen "$(sed -n 's/^spawn_gen=//p' "$home/state/$id.meta")" \
+    --arg status "$observed" --argjson current "$current" \
+    '{stamp:$stamp,observed_epoch:$observed_epoch,spawn_gen:$spawn_gen,current:$current,endpoint_exists:"true",agent_alive:"not_checked",status:$status}' \
+    > "$home/state/crew-board-observations/$id.json"
+}
+
+wait_board_observer() {  # <home>
+  local attempts
+  for ((attempts=0; attempts<100; attempts++)); do
+    [ -d "$1/state/.crew-board-observe.lock" ] || return 0
+    sleep 0.1
+  done
+}
+
+test_new_status_line_keeps_stale_observation() {
+  local home merger asker raiser snapshot
+  home=$(make_home stale_observation)
+  rm -f "$home/state/alpha.meta" "$home/state/alpha.status" "$home/state/beta.meta" "$home/state/beta.status"
+  printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
+  for id in merger asker raiser; do
+    printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\n' > "$home/state/$id.meta"
+    printf -- '- [ ] %s - Work %s (repo: widget) (kind: ship) (since 2026-10-19)\n' "$id" "$id" >> "$home/data/backlog.md"
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  merger=$'phase: ready-to-merge - https://github.com/o/r/pull/8\n'
+  asker=$'needs-decision: [key=old-q] pick A or B\n'
+  raiser=$'phase: building - wiring\n'
+  seed_board_observation "$home" merger "$merger" '{"state":"done","source":"run-step","detail":"checks green","raw":""}'
+  seed_board_observation "$home" asker "$asker" '{"state":"working","source":"run-step","detail":"building","raw":""}'
+  seed_board_observation "$home" raiser "$raiser" '{"state":"working","source":"run-step","detail":"wiring","raw":""}'
+  printf '%sphase: ready-to-merge - waiting on the merge call\n' "$merger" > "$home/state/merger.status"
+  printf '%sphase: building - resumed past the gate\n' "$asker" > "$home/state/asker.status"
+  printf '%sneeds-decision: [key=new-q] choose the palette\n' "$raiser" > "$home/state/raiser.status"
+
+  snapshot="$home/snapshot.json"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_SNAPSHOT_BOARD_FAST=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$snapshot" || fail 'fast snapshot failed'
+  assert_equals 'stale done' "$(jq -r '.tasks[] | select(.id == "merger") | "\(.current_state.freshness) \(.current_state.state)"' "$snapshot")" \
+    'a new status line keeps the earlier live observation, marked stale'
+  jq -e '.tasks[] | select(.id == "merger") | .current_state.age_seconds >= 40' "$snapshot" >/dev/null \
+    || fail 'a stale observation reports its age'
+  assert_equals '[]' "$(jq -c '.tasks[] | select(.id == "asker") | .hints.open_decisions' "$snapshot")" \
+    'a cleared decision stays cleared across a new status line'
+  assert_equals 'new-q' "$(jq -r '.tasks[] | select(.id == "raiser") | [.hints.open_decisions[].key] | join(",")' "$snapshot")" \
+    'a decision raised after the stale observation stays open'
+
+  run_board "$home" refresh >/dev/null || fail 'refresh with stale observations failed'
+  wait_board_observer "$home"
+  assert_equals 'https://github.com/o/r/pull/8' \
+    "$(jq -r '.panels.ready[] | select(.id == "merger") | .link' "$home/state/crew-board.json")" \
+    'a merge-ready PR stays in the ready list across a new status line'
+  assert_equals 'raiser: decision not yet raised with you' \
+    "$(jq -r '.panels.alerts[] | select(.id == "raiser") | .title' "$home/state/crew-board.json")" \
+    'a decision raised after the stale observation still surfaces'
+  assert_equals '' "$(jq -r '.panels.alerts[] | select(.id == "asker") | .title' "$home/state/crew-board.json")" \
+    'a cleared decision raises no alert across a new status line'
+  case "$(jq -r '.panels.worker_tags.asker // ""' "$home/state/crew-board.json")" in
+    'WAITING ON YOU'*) fail 'a cleared decision leaves the worker row waiting on you across a new status line' ;;
+  esac
+  pass 'a new status line keeps the last live observation, marked stale, until the observer replaces it'
+}
+
+test_metadata_write_keeps_stale_observation() {
+  local home snapshot
+  home=$(make_home stale_metadata)
+  rm -f "$home/state/alpha.meta" "$home/state/alpha.status" "$home/state/beta.meta" "$home/state/beta.status"
+  printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
+  for id in merger asker; do
+    printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\nspawn_gen=g1\n' > "$home/state/$id.meta"
+    printf -- '- [ ] %s - Work %s (repo: widget) (kind: ship) (since 2026-10-19)\n' "$id" "$id" >> "$home/data/backlog.md"
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  printf 'phase: ready-to-merge - checks green\n' > "$home/state/merger.status"
+  printf 'needs-decision: [key=old-q] pick A or B\n' > "$home/state/asker.status"
+  seed_board_observation "$home" merger "$(cat "$home/state/merger.status")"$'\n' '{"state":"done","source":"run-step","detail":"checks green","raw":""}'
+  seed_board_observation "$home" asker "$(cat "$home/state/asker.status")"$'\n' '{"state":"working","source":"run-step","detail":"building","raw":""}'
+  printf 'pr=https://github.com/o/r/pull/9\npr_head=abc123\n' >> "$home/state/merger.meta"
+  printf 'decisions_reviewed=1\ndecision_keys=old-q\n' >> "$home/state/asker.meta"
+
+  snapshot="$home/snapshot.json"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_SNAPSHOT_BOARD_FAST=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$snapshot" || fail 'fast snapshot failed'
+  assert_equals 'stale done' "$(jq -r '.tasks[] | select(.id == "merger") | "\(.current_state.freshness) \(.current_state.state)"' "$snapshot")" \
+    'a metadata write keeps the earlier live observation, marked stale'
+  assert_equals '[]' "$(jq -c '.tasks[] | select(.id == "asker") | .hints.open_decisions' "$snapshot")" \
+    'a cleared decision stays cleared across a metadata write'
+
+  run_board "$home" refresh >/dev/null || fail 'refresh after a metadata write failed'
+  wait_board_observer "$home"
+  assert_equals 'https://github.com/o/r/pull/9' \
+    "$(jq -r '.panels.ready[] | select(.id == "merger") | .link' "$home/state/crew-board.json")" \
+    'a merge-ready PR stays in the ready list across a metadata pr= write'
+  assert_equals '' "$(jq -r '.panels.alerts[] | select(.id == "asker") | .title' "$home/state/crew-board.json")" \
+    'a cleared decision raises no alert across a metadata write'
+  case "$(jq -r '.panels.worker_tags.asker // ""' "$home/state/crew-board.json")" in
+    'WAITING ON YOU'*) fail 'a cleared decision leaves the worker row waiting on you across a metadata write' ;;
+  esac
+  pass 'a metadata write keeps the last live observation, marked stale, until the observer replaces it'
+}
+
+test_relaunch_drops_previous_observation() {
+  local home snapshot
+  home=$(make_home relaunch_observation)
+  printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\nspawn_gen=g1\n' > "$home/state/alpha.meta"
+  seed_board_observation "$home" alpha "$(cat "$home/state/alpha.status")"$'\n' '{"state":"done","source":"run-step","detail":"checks green","raw":""}'
+  printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\nspawn_gen=g2\n' > "$home/state/alpha.meta"
+  snapshot="$home/snapshot.json"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_SNAPSHOT_BOARD_FAST=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$snapshot" || fail 'fast snapshot failed'
+  assert_equals 'unknown' "$(jq -r '.tasks[] | select(.id == "alpha") | .current_state.state' "$snapshot")" \
+    'a relaunched task never inherits the previous generation observation'
+  pass 'a relaunched task drops the previous generation observation'
+}
+
+test_board_observer_prunes_closed_tasks() {
+  local home
+  home=$(make_home observer_prune)
+  seed_board_observation "$home" alpha 'phase: testing - suite' '{"state":"working","source":"run-step","detail":"","raw":""}'
+  cp "$home/state/crew-board-observations/alpha.json" "$home/state/crew-board-observations/closed.json"
+  : > "$home/state/crew-board-observations/closed.json.tmp.123"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --board-observe || fail 'board observer failed'
+  assert_equals 'alpha.json beta.json' "$(cd "$home/state/crew-board-observations" && echo *)" \
+    'the observer prunes records for tasks without metadata'
+  pass 'the board observer prunes observations of closed tasks'
+}
+
 
 test_refresh_and_gone
 test_tui_render_and_note
@@ -1441,3 +1602,8 @@ test_worker_tags_from_live_evidence
 test_worker_tags_name_the_state
 test_worker_tags_flag_pr_waiting_for_merge
 test_worker_runtimes_name_harness_and_model
+test_thirty_worker_refresh_budget
+test_new_status_line_keeps_stale_observation
+test_board_observer_prunes_closed_tasks
+test_metadata_write_keeps_stale_observation
+test_relaunch_drops_previous_observation
