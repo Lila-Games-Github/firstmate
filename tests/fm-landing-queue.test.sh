@@ -49,6 +49,64 @@ expect_field() {
 wake_payloads() { cut -f5 "$CASE/home/state/.wake-queue"; }
 wake_count() { if [ -f "$CASE/home/state/.wake-queue" ]; then wc -l < "$CASE/home/state/.wake-queue" | tr -d ' '; else echo 0; fi; }
 
+make_case required-gate
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+EOF
+car a main; join a >/dev/null; prepare a
+out=$(receipt a)
+expect_field "$out" status needs-gate
+expect_field "$out" reason 'missing landing gate: real-phone'
+[ "$(wake_count)" = 0 ] || fail 'suite green with missing landing gate emitted readiness'
+old_head=$(head_of a)
+printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$old_head" "$BASE" > "$CASE/gate.receipt"
+out=$(queue gate a --gate real-phone --head "$old_head" --target "$BASE" --receipt "$CASE/gate.receipt")
+expect_field "$out" status ready-to-land
+[ "$(wake_count)" = 1 ] || fail 'suite and gate did not emit readiness'
+git -C "$CASE/a" commit -qm update --allow-empty
+out=$(queue status a)
+expect_field "$out" status needs-final
+receipt a > "$CASE/new-suite.out"
+expect_field "$(cat "$CASE/new-suite.out")" status needs-gate
+[ "$(wake_count)" = 1 ] || fail 'old-head gate pass emitted new-head readiness'
+if queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --receipt "$CASE/gate.receipt" > "$CASE/stale-gate.out" 2>&1; then
+  fail 'old-head gate receipt was accepted for new head'
+fi
+printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$CASE/gate.receipt"
+out=$(queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --receipt "$CASE/gate.receipt")
+expect_field "$out" status ready-to-land
+[ "$(wake_count)" = 2 ] || fail 'current suite and gate did not emit renewed readiness'
+git -C "$CASE/project" merge -q --ff-only "$old_head"
+expect_field "$(queue status a)" status needs-rebase
+queue ready a --branch fm/a --head "$(head_of a)" --target "$old_head" >/dev/null
+out=$(receipt a)
+expect_field "$out" status needs-gate
+expect_field "$out" reason 'missing landing gate: real-phone'
+if queue gate a --gate real-phone --head "$(head_of a)" --target "$old_head" \
+  --receipt "$CASE/gate.receipt" > "$CASE/old-target-gate.out" 2>&1; then
+  fail 'old-target gate receipt was accepted for new target'
+fi
+[ "$(wake_count)" = 2 ] || fail 'old-target gate pass emitted readiness'
+printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$(head_of a)" "$old_head" > "$CASE/gate.receipt"
+expect_field "$(queue gate a --gate real-phone --head "$(head_of a)" --target "$old_head" --receipt "$CASE/gate.receipt")" status ready-to-land
+pass 'declared gate holds suite green, invalidates on head or target change, and permits matching readiness'
+
+make_case multiple-gates
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone","device-review"]}
+EOF
+car a main; join a >/dev/null; prepare a; receipt a >/dev/null
+for gate in real-phone device-review; do
+  expect_field "$(queue status a)" reason "missing landing gate: $gate"
+  printf 'schema=fm-landing-gate.v1\ngate=%s\nsha=%s\ntarget=%s\n' "$gate" "$(head_of a)" "$BASE" > "$CASE/$gate.receipt"
+  out=$(queue gate a --gate "$gate" --head "$(head_of a)" --target "$BASE" --receipt "$CASE/$gate.receipt")
+done
+expect_field "$out" status ready-to-land
+[ "$(wake_count)" = 1 ] || fail 'all-gates readiness did not emit one wake'
+pass 'every configured gate must pass before readiness'
+
 make_case three-cars
 for id in a b c; do car "$id" main; join "$id" > "$CASE/$id.out"; done
 expect_field "$(cat "$CASE/a.out")" place 1

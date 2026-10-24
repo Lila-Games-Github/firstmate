@@ -14,6 +14,7 @@ metadata:
 Load this on any `check: landing-queue <status> task=<id> ...` wake.
 `bin/fm-landing-queue.sh`'s header and `--help` own the queue protocol, statuses, and receipt format; this skill owns only what firstmate does with its wakes.
 Workers own admission, rebasing, suite runs, and receipts, so never message a worker about its place, target, rebase, or suite timing, and never edit queue files by hand.
+Workers also record configured landing-gate passes through the queue tool; a missing gate remains their work and emits no readiness wake.
 
 ## Recheck
 
