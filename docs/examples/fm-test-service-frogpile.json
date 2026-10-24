@@ -30,6 +30,9 @@
     "RZ8N71EC9ZB"
   ],
   "landing_branch": "proto/godot/frog-pile",
+  "landing_gates": [
+    "real-phone"
+  ],
   "repos": [
     "frogpile",
     "FrogPile",

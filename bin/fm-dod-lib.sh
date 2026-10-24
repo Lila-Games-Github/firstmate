@@ -348,6 +348,8 @@ landing_queue() {
    Resolve rebase conflicts yourself; do not merge or keep commits from a failed lower car.
 3. At \`needs-final\`, run the task's full suite on exactly that committed head and create its receipt using the format owned by \`$root/bin/fm-landing-health-lib.sh\`.
    Submit with \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
+   For each required landing gate shown by this project's test-service configuration, complete that check on the same head and target, write the four-line \`fm-landing-gate.v1\` receipt from the queue tool's \`--help\`, and submit \`landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
+   At \`needs-gate\`, read the missing gate in \`reason\` and submit its pass after the check succeeds; status becomes ready only when all declared gates pass.
    A changed head or target refuses the receipt: read status, prepare the new target, and rerun the suite on the new head.
    If your car fails, record \`landing_queue fail --reason <failure>\` before reporting \`failed:\` and stopping.
    At \`red-receipt\`, do not rerun the suite on the same head: fix the failures its \`reason\` names in a new commit and finalize again, or record the failure as above.

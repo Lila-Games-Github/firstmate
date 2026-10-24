@@ -13,6 +13,8 @@ The service keeps a private copy of each submitted commit so removing a worker's
 
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
 The file names the suite and device executable argv arrays relative to the tested checkout, the ordered phone serials, named scenario argument arrays, and the landing branch.
+Optional `landing_gates` names checks the worker must record for the exact head and queue target before the local landing queue announces readiness.
+FrogPile's example requires `real-phone`, which the worker records after the real-phone end-to-end check passes.
 `max_concurrent` limits active requests for that project; it defaults to one and may be set from one to sixteen.
 An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
 A ship brief for a repository that matches exactly one configuration names that project in its test-service gate.

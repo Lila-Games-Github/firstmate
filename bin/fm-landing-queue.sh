@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Worker-owned local landing train. Never merges, rebases, pushes, or runs tests.
-# Usage: fm-landing-queue.sh <ready|status|receipt|fail|baseline> <task-id>
+# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
-#          [--receipt <file>] [--reason <text>]
+#          [--receipt <file>] [--gate <name>] [--reason <text>]
 # FM_HOME must explicitly select the owning home; FM_STATE_OVERRIDE and
 # FM_DATA_OVERRIDE optionally select its state and data directories.
 # Without --landing-branch, use this task's recorded landing_branch, else the
@@ -22,6 +22,12 @@
 # receipt requires --head, --target and --receipt. It snapshots an fm-full-suite.v1
 # receipt (parser: fm-landing-health-lib.sh) only for the current head and target.
 # A target/head race refuses the submission; status then supplies the new work.
+# gate requires --gate, --head, --target, and --receipt for a configured landing
+# gate. Its receipt is exactly four lines: schema=fm-landing-gate.v1,
+# gate=<name>, sha=<full head SHA>, target=<full target SHA>. The worker submits
+# it only after that check passes. The queue snapshots the claim and accepts it
+# only for the current head and target. A missing gate yields needs-gate with
+# the gate name in reason; it never emits a readiness wake.
 # fail removes a car from the active train with --reason, a single line without
 # control characters other than '-', recorded for later status calls; it cannot silently
 # rejoin. Start a new task id after resolving a failed car. Landed ids also stay
@@ -47,9 +53,10 @@
 # merge gate does. A red bottom receipt is needs-baseline when the live tip has
 # no recorded baseline, or red-receipt when it names failures outside that
 # baseline; neither demands another suite run on the same head. Once firstmate
-# records the baseline, the car becomes ready-to-land or red-receipt.
+# records the baseline, the car becomes ready-to-land, needs-gate, or red-receipt.
 # red-receipt is the worker's to fix on a new head or fail.
-# Only ready-to-land (bottom, acceptable receipt, fast-forward of the live tip),
+# Only ready-to-land (bottom, acceptable receipt, every configured gate passed,
+# fast-forward of the live tip),
 # needs-baseline, and failed transitions append durable `check: landing-queue`
 # wakes, deduplicated per event. A wake is an event: firstmate rechecks status
 # before acting, following the landing-queue agent skill.
@@ -65,10 +72,10 @@ die() { echo "error: $*" >&2; exit 1; }
 [ "$#" -ge 2 ] || { usage >&2; exit 2; }
 ACTION=$1 ID=$2
 shift 2
-case "$ACTION" in ready|status|receipt|fail|baseline) ;; *) die "unknown queue command $ACTION" ;; esac
+case "$ACTION" in ready|status|receipt|gate|fail|baseline) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
-PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON=''
+PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE=''
 while [ "$#" -gt 0 ]; do
   [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 requires a value"
   case "$1" in
@@ -79,6 +86,7 @@ while [ "$#" -gt 0 ]; do
     --target) TARGET=$2 ;;
     --receipt) RECEIPT=$2 ;;
     --reason) REASON=$2 ;;
+    --gate) GATE=$2 ;;
     *) die "unknown queue option $1" ;;
   esac
   shift 2
@@ -92,6 +100,11 @@ COMMON=$(cd "$COMMON" && pwd -P)
 PRIMARY=$(git -C "$PROJECT" worktree list --porcelain | sed -n '1s/^worktree //p')
 [ -n "$PRIMARY" ] || die 'cannot identify the primary checkout'
 PRIMARY=$(cd "$PRIMARY" && pwd -P)
+REPO_NAME=${PRIMARY##*/}
+GATES_OUTPUT=$(FM_HOME="$FM_HOME" python3 "$SCRIPT_DIR/fm-test-service.py" landing-gates-for-repo "$REPO_NAME") \
+  || die "cannot read landing gates for $REPO_NAME"
+mapfile -t GATES <<< "$GATES_OUTPUT"
+[ -n "$GATES_OUTPUT" ] || GATES=()
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 if [ -z "$LANDING" ] && [ -f "$STATE/$ID.meta" ]; then
@@ -125,6 +138,15 @@ mkdir -p "$DIR"
 LOCK="$STATE/.landing-queue-$KEY.lock"
 HEALTH_LOCK="$STATE/.landing-health-$HEALTH_KEY.lock"
 TMP='' WAKE_HELD=0 HEALTH_HELD=0
+gate_receipt_read() { # <path> <gate> <head> <target>
+  local path=$1 gate=$2 head=$3 target=$4 lines=()
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  mapfile -t lines < "$path"
+  [ "${#lines[@]}" -eq 4 ] && [ "${lines[0]}" = schema=fm-landing-gate.v1 ] \
+    && [ "${lines[1]}" = "gate=$gate" ] && [ "${lines[2]}" = "sha=$head" ] \
+    && [ "${lines[3]}" = "target=$target" ]
+}
+gate_receipt_path() { printf '%s/gate-%s-%s-%s-%s.receipt' "$DIR" "$1" "$2" "$3" "$4"; }
 cleanup() {
   trap '' TERM INT HUP
   [ -z "$TMP" ] || rm -f -- "$TMP"
@@ -281,6 +303,22 @@ case "$ACTION" in
     TMP=
     receipts[found]="$digest.receipt" targets[found]=$TARGET
     ;;
+  gate)
+    [ "${states[found]}" = active ] || die 'only active cars can submit gate receipts'
+    [[ "$GATE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'gate requires a safe --gate name'
+    configured=0
+    for gate_name in "${GATES[@]}"; do [ "$gate_name" != "$GATE" ] || configured=1; done
+    [ "$configured" -eq 1 ] || die "landing gate is not configured: $GATE"
+    [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
+      && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
+    git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" || die 'head is not a fast-forward of the assigned target'
+    [ -n "$RECEIPT" ] || die 'gate requires --receipt'
+    TMP=$(mktemp "$DIR/.gate.XXXXXX")
+    cp -- "$RECEIPT" "$TMP" || die 'cannot stage gate receipt'
+    gate_receipt_read "$TMP" "$GATE" "$HEAD" "$TARGET" || die 'invalid exact-head and target gate receipt'
+    mv -f -- "$TMP" "$(gate_receipt_path "$ID" "$GATE" "$HEAD" "$TARGET")"
+    TMP=
+    ;;
   fail)
     [ -n "$REASON" ] || die 'fail requires --reason'
     [ "${states[found]}" != landed ] || die 'cannot fail a landed car'
@@ -323,6 +361,19 @@ for ((i=0; i<count; i++)); do
       fi
     fi
   fi
+done
+
+# A passing suite still waits for every declared project landing gate.
+for ((i=0; i<count; i++)); do
+  case "${statuses[i]}" in ready-to-land|waiting-to-land) ;; *) continue ;; esac
+  for gate_name in "${GATES[@]}"; do
+    if ! gate_receipt_read "$(gate_receipt_path "${ids[i]}" "$gate_name" "${heads[i]}" "${target_shas[i]}")" \
+      "$gate_name" "${heads[i]}" "${target_shas[i]}"; then
+      statuses[i]=needs-gate
+      reasons[i]="missing landing gate: $gate_name"
+      break
+    fi
+  done
 done
 
 # Persist queue and wake publication under the wake lock. Repeated status calls

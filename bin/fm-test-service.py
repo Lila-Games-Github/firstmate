@@ -4,7 +4,7 @@
 Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--device-gate SERIAL|any]
        [--scenario NAME]... [--harness PATH]... [--receipt PATH] [--retest-on-move]
        fm-test-service.py serve | status [--json] | wait ID | cancel ID
-       fm-test-service.py install-unit | project-for-repo REPO
+       fm-test-service.py install-unit | project-for-repo REPO | landing-gates-for-repo REPO
 Configuration: FM_HOME/config/test-service/PROJECT.json (see docs/test-service.md).
 State: FM_TEST_SERVICE_STATE or ~/.local/state/firstmate-test-service.
 """
@@ -61,6 +61,12 @@ def config(project):
     if "repos" in data and (not isinstance(data["repos"], list)
                             or not all(isinstance(repo, str) and repo for repo in data["repos"])):
         raise ValueError("repos must be a list of repository names")
+    gates = data.get("landing_gates", [])
+    if not isinstance(gates, list) or len(gates) != len(set(map(str, gates))) or any(
+        not isinstance(gate, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", gate)
+        for gate in gates
+    ):
+        raise ValueError("landing_gates must be unique safe names")
     limit = data.get("max_concurrent", 1)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 16:
         raise ValueError("max_concurrent must be an integer from 1 to 16")
@@ -85,6 +91,23 @@ def project_for_repo(repo):
     if len(names) != 1:
         return None
     return names[0]
+
+
+def landing_gates_for_repo(repo):
+    matches = []
+    for path in sorted((HOME / "config/test-service").glob("*.json")):
+        if repo != path.stem:
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            repos = data.get("repos") if isinstance(data, dict) else None
+            if not isinstance(repos, list) or repo not in repos:
+                continue
+        matches.append(config(path.stem))
+    if len(matches) > 1:
+        raise ValueError("multiple test-service projects match repository " + repo)
+    return matches[0].get("landing_gates", []) if matches else []
 
 
 def connection():
@@ -671,6 +694,7 @@ def main():
     s = sub.add_parser("cancel"); s.add_argument("id")
     sub.add_parser("serve"); sub.add_parser("install-unit")
     s = sub.add_parser("project-for-repo"); s.add_argument("repo")
+    s = sub.add_parser("landing-gates-for-repo"); s.add_argument("repo")
     args = p.parse_args()
     if args.cmd == "submit":
         submit(args)
@@ -681,6 +705,9 @@ def main():
         if not project:
             return 1
         print(project)
+    elif args.cmd == "landing-gates-for-repo":
+        for gate in landing_gates_for_repo(args.repo):
+            print(gate)
     elif args.cmd == "install-unit":
         unit = Path.home() / ".config/systemd/user/fm-test-service.service"
         unit.parent.mkdir(parents=True, exist_ok=True)

@@ -1767,6 +1767,7 @@ test_worker_owned_finalization() {
     brief="$home/data/$id/brief.md"
     assert_grep 'Use the queue tool for your place, rebase target, and final receipt' "$brief" 'brief omitted queue handoff'
     assert_grep 'landing_queue receipt --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted exact-head receipt submission'
+    assert_grep 'landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted landing gate submission'
     assert_grep 'keep checking status every 30 seconds' "$brief" 'waiting worker cannot discover changed targets'
     assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
     assert_grep 'git rebase --onto <target_sha> <rebase_from>' "$brief" 'brief cannot remove a failed lower car'
