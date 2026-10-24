@@ -64,6 +64,18 @@ FM_TEST_COVERAGE ok total=227 parallel=24 parallel_max_ms=366068 parallel_imbala
 [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_parallel_lanes_stay_duration_balanced`, requires every parallel member to have a hint and the largest and smallest lane sums to differ by no more than five percent of the larger sum.
 Its scheduling regressions also check stored parallel lane order and preserve serial-weight scheduling for other selections.
 These checks do not detect a script outgrowing an existing hint or establish measured job headroom.
+Use `bin/fm-test-run.sh --headroom-report` after downloading portable shard timing artifacts to compare successful per-script durations with the retained hints and to find the current lane with the least modeled headroom.
+Pass the parallel and serial job caps in milliseconds from [the CI workflow](../.github/workflows/ci.yml), followed by the largest observed setup and cleanup overhead in milliseconds from the same runner cohort, then the individual shard JSON artifacts.
+For the current 10-minute parallel and 30-minute serial caps, a report using an observed 18-second overhead is:
+
+```sh
+bin/fm-test-run.sh --headroom-report 600000 1800000 18000 /tmp/fm-timing/fm-test-timing-portable-*.json
+```
+
+The report prints the tightest current lane's summed hints, an estimate that raises any script with a larger completed measurement to that measurement, overhead, cap, and remaining milliseconds, plus at most five largest measured minus hinted script drifts.
+It also names lanes without a complete successful artifact from the supplied cohort; a capability gate-skip with exit 0 still counts as covered but contributes no measurement. Use a complete green run before treating the measured drift ranking as comprehensive.
+The estimate uses current memberships and hints, so use artifacts from the same revision when deciding whether to refresh hints.
+Neither the report nor a positive estimate proves a future run will fit under the cap; refresh hints from several successful runs and review observed job spans before a cap or lane-count decision.
 Refresh `portable_parallel_weight_hints` with the slowest completed `duration_ms` per script from several green CI runs' `fm-test-timing-portable-parallel-*` artifacts whenever the parallel set gains scripts or a member grows materially.
 
 ## Portable serial remainder

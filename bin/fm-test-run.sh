@@ -27,6 +27,14 @@
 #
 # Aggregation (no suite execution):
 #   fm-test-run.sh --aggregate-json <out.json> <lane.json> [more lane.json...]
+#   fm-test-run.sh --headroom-report <parallel-cap-ms> <serial-cap-ms> <setup-ms> <lane.json> [more lane.json...]
+#                   compare successful uploaded script timings with current
+#                   hints, then report the worst current portable lane's hint
+#                   sum raised by any larger completed measurements, plus
+#                   observed setup/cleanup overhead against its CI cap.
+#                   Print at most five largest drifts and name lanes lacking a
+#                   complete successful artifact. Inputs do not change caps or
+#                   lane membership; docs/fm-test-portable-shards.md owns use.
 #
 # Options:
 #   --json <path>   write a deterministic timing artifact after the run. Each
@@ -169,6 +177,7 @@ LIST_CONCURRENT_SAFE_FAMILIES=0
 LIST_LANES=0
 CHECK_COVERAGE=0
 AGGREGATE_OUT=
+HEADROOM_REPORT=0
 FAMILY=
 LANE=
 BASE_REF=origin/main
@@ -1226,6 +1235,79 @@ print(f"FM_TEST_AGGREGATE lanes={len(lanes)} total={total} failed={failed} skipp
 PY
 }
 
+headroom_report() {
+  local parallel_cap=$1 serial_cap=$2 setup_ms=$3
+  shift 3
+  command -v python3 >/dev/null 2>&1 || die "--headroom-report requires python3"
+  python3 - "$ROOT/bin/fm-test-run.sh" "$parallel_cap" "$serial_cap" "$setup_ms" \
+    <(portable_parallel_weight_hints) <(portable_serial_weight_hints) \
+    "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS" "$PORTABLE_SERIAL_SHARDS" "$@" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+runner, parallel_cap, serial_cap, setup_ms, parallel_file, serial_file, default_ms, shard_count, *files = sys.argv[1:]
+parallel_cap, serial_cap, setup_ms, default_ms, shard_count = map(
+    int, (parallel_cap, serial_cap, setup_ms, default_ms, shard_count)
+)
+
+def hints(path):
+    return {name: int(ms) for name, ms in (line.split() for line in Path(path).read_text().splitlines())}
+
+parallel_hints = hints(parallel_file)
+serial_hints = hints(serial_file)
+lanes = [f"portable-parallel-{n}" for n in (1, 2, 3)]
+lanes += [f"portable-serial-{n}of{shard_count}" for n in range(1, shard_count + 1)]
+members = {}
+for lane in lanes:
+    output = subprocess.check_output([runner, "--list", "--lane", lane], text=True)
+    members[lane] = set(output.splitlines())
+
+measurements = {}
+complete = set()
+for filename in files:
+    doc = json.loads(Path(filename).read_text(encoding="utf-8"))
+    selection = doc.get("selection", "")
+    if not selection.startswith("lane="):
+        raise ValueError(f"{filename}: expected a portable lane timing artifact")
+    lane = selection.removeprefix("lane=").split(";", 1)[0]
+    if lane not in members:
+        raise ValueError(f"{filename}: unknown portable lane {lane}")
+    rows = doc.get("scripts", [])
+    if {row["path"] for row in rows} == members[lane] and all(row.get("exit") == 0 for row in rows):
+        complete.add(lane)
+    for row in rows:
+        if row.get("exit") != 0 or row.get("gate_skip") or row["path"] not in members[lane]:
+            continue
+        key = (lane, row["path"])
+        measurements[key] = max(measurements.get(key, 0), int(row["duration_ms"]))
+
+ranked = []
+drift = []
+for lane in lanes:
+    parallel = lane.startswith("portable-parallel-")
+    table = parallel_hints if parallel else serial_hints
+    cap = parallel_cap if parallel else serial_cap
+    hint_sum = sum(table.get(path, serial_hints.get(path, default_ms)) for path in members[lane])
+    estimate = sum(max(table.get(path, serial_hints.get(path, default_ms)), measurements.get((lane, path), 0)) for path in members[lane])
+    headroom = cap - estimate - setup_ms
+    ranked.append((headroom, lane, hint_sum, estimate, cap))
+    for path in members[lane]:
+        measured = measurements.get((lane, path))
+        if measured is not None:
+            hint = table.get(path, serial_hints.get(path, default_ms))
+            drift.append((measured - hint, lane, path, hint, measured))
+
+headroom, lane, hint_sum, estimate, cap = min(ranked)
+print(f"FM_TEST_HEADROOM worst_lane={lane} hint_sum_ms={hint_sum} estimate_ms={estimate} setup_ms={setup_ms} cap_ms={cap} headroom_ms={headroom} complete_artifacts={len(complete)}/{len(lanes)}")
+for delta, lane, path, hint, measured in sorted(drift, reverse=True)[:5]:
+    print(f"FM_TEST_DRIFT lane={lane} script={path} hint_ms={hint} measured_ms={measured} delta_ms={delta}")
+if len(complete) != len(lanes):
+    print("FM_TEST_HEADROOM_INCOMPLETE lanes=" + ",".join(sorted(set(lanes) - complete)))
+PY
+}
+
 all_repo_tests() {
   # Deterministic lexical order (same as bash glob expansion under LC_ALL=C).
   local f
@@ -2013,6 +2095,16 @@ while [ "$#" -gt 0 ]; do
       # For aggregation we accept only input JSON paths as free args after this.
       MODE=aggregate
       ;;
+    --headroom-report)
+      [ -z "$MODE" ] || die "only one selection mode is allowed"
+      [ "$#" -gt 4 ] || die "--headroom-report requires parallel cap, serial cap, setup overhead, and timing artifacts"
+      MODE=headroom
+      HEADROOM_REPORT=1
+      PARALLEL_CAP_MS=$2
+      SERIAL_CAP_MS=$3
+      SETUP_OVERHEAD_MS=$4
+      shift 4
+      ;;
     --exclude-family)
       [ "$#" -gt 1 ] || die "--exclude-family requires a name"
       EXCLUDE_FAMILIES+=("$2")
@@ -2046,7 +2138,7 @@ while [ "$#" -gt 0 ]; do
       die "unknown option: $1"
       ;;
     *)
-      if [ "${MODE:-}" = "aggregate" ]; then
+      if [ "${MODE:-}" = "aggregate" ] || [ "${MODE:-}" = "headroom" ]; then
         SCRIPTS+=("$1")
       elif [ -z "$MODE" ] || [ "$MODE" = scripts ]; then
         MODE=scripts
@@ -2086,6 +2178,19 @@ if [ "${MODE:-}" = "aggregate" ]; then
     [ -f "$s" ] || die "aggregate input not found: $s"
   done
   aggregate_timing_json "$AGGREGATE_OUT" "${SCRIPTS[@]}"
+  exit 0
+fi
+
+if [ "$HEADROOM_REPORT" -eq 1 ]; then
+  for value in "$PARALLEL_CAP_MS" "$SERIAL_CAP_MS" "$SETUP_OVERHEAD_MS"; do
+    case "$value" in ''|*[!0-9]*) die "headroom inputs must be whole milliseconds" ;; esac
+  done
+  [ "$PARALLEL_CAP_MS" -gt 0 ] && [ "$SERIAL_CAP_MS" -gt 0 ] || die "headroom caps must be positive"
+  [ "${#SCRIPTS[@]}" -gt 0 ] || die "--headroom-report requires timing artifacts"
+  for s in "${SCRIPTS[@]}"; do
+    [ -f "$s" ] || die "headroom input not found: $s"
+  done
+  headroom_report "$PARALLEL_CAP_MS" "$SERIAL_CAP_MS" "$SETUP_OVERHEAD_MS" "${SCRIPTS[@]}"
   exit 0
 fi
 

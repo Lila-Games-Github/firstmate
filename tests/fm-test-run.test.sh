@@ -1737,6 +1737,58 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_headroom_report() {
+  local tmp out script
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-headroom.XXXXXX")
+  script=$("$RUNNER" --list --lane portable-parallel-1 | head -n 1)
+  python3 - "$tmp/lane.json" "$script" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump({"selection": "lane=portable-parallel-1", "scripts": [
+        {"path": sys.argv[2], "duration_ms": 9000000, "exit": 0, "gate_skip": False}
+    ]}, output)
+PY
+  out=$("$RUNNER" --headroom-report 600000 1800000 18000 "$tmp/lane.json") \
+    || { rm -rf "$tmp"; fail "headroom report failed"; }
+  assert_contains "$out" "FM_TEST_HEADROOM worst_lane=" "headroom report names the tightest lane"
+  assert_contains "$out" "worst_lane=portable-parallel-1" "a large completed measurement changes the worst-lane projection"
+  assert_contains "$out" "setup_ms=18000" "headroom report includes observed setup time"
+  assert_contains "$out" "FM_TEST_DRIFT" "headroom report compares artifact duration to a hint"
+  assert_contains "$out" "measured_ms=9000000" "headroom report uses the completed timing record"
+  assert_contains "$out" "FM_TEST_HEADROOM_INCOMPLETE" "partial artifacts cannot imply full measured coverage"
+  rm -rf "$tmp"
+  pass "headroom report uses current memberships, timing records, and cap inputs"
+}
+
+test_headroom_report_gate_skip_is_complete() {
+  local tmp out lane skipped
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-headroom-skip.XXXXXX")
+  lane=portable-parallel-2
+  "$RUNNER" --list --lane "$lane" >"$tmp/members"
+  skipped=$(head -n 1 "$tmp/members")
+  python3 - "$tmp/lane.json" "$lane" "$skipped" "$tmp/members" <<'PY'
+import json, sys
+out, lane, skipped, members = sys.argv[1:]
+rows = []
+for path in open(members, encoding="utf-8").read().split():
+    if path == skipped:
+        rows.append({"path": path, "duration_ms": 9000000, "exit": 0, "gate_skip": True})
+    else:
+        rows.append({"path": path, "duration_ms": 1, "exit": 0, "gate_skip": False})
+with open(out, "w", encoding="utf-8") as output:
+    json.dump({"selection": f"lane={lane}", "scripts": rows}, output)
+PY
+  out=$("$RUNNER" --headroom-report 600000 1800000 18000 "$tmp/lane.json") \
+    || { rm -rf "$tmp"; fail "headroom report failed with a gate-skipped row"; }
+  assert_contains "$out" "complete_artifacts=1/" "a green lane with a gate-skipped script counts as complete"
+  case "$out" in
+    *"FM_TEST_HEADROOM_INCOMPLETE"*"$lane"*) rm -rf "$tmp"; fail "gate-skipped green lane reported incomplete: $out" ;;
+    *"measured_ms=9000000"*) rm -rf "$tmp"; fail "gate-skipped duration must not count as a measurement: $out" ;;
+  esac
+  rm -rf "$tmp"
+  pass "headroom report treats gate-skipped green rows as covered but unmeasured"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1776,3 +1828,5 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_headroom_report
+test_headroom_report_gate_skip_is_complete
