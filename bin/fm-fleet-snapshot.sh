@@ -61,6 +61,8 @@
 #     whole status log by fm-classify-lib.sh's status_current_phase, which owns
 #     the vocabulary and the fold; it is what the worker said, never a
 #     current-state verdict, and the crew board (bin/fm-crew-board.sh) renders it.
+#     It folds the reconciled hints.open_decisions set below, so a decision the
+#     live state moved past never holds the phase on needs-decision or blocked.
 #     hints.open_decisions is the keyed open-decision set returned by
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
@@ -891,7 +893,7 @@ task_json_one() {  # <captured-meta>
   local remote_host remote_root current_file endpoint_file observation_line
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json phase_tsv phase_name phase_note
+  local folded_decisions_tsv open_decisions_tsv open_decisions_json phase_tsv phase_name phase_note
   local freshness=fresh observed_at=$SNAPSHOT_NOW age_seconds=null observed_epoch observed_decisions decision
 
     meta=$1
@@ -961,10 +963,8 @@ task_json_one() {  # <captured-meta>
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    phase_tsv=$(status_current_phase "$status_log" "$kind")
-    phase_name=${phase_tsv%%$'\t'*}
-    phase_note=${phase_tsv#*$'\t'}
-    open_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
+    folded_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
+    open_decisions_tsv=$folded_decisions_tsv
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
@@ -981,6 +981,21 @@ task_json_one() {  # <captured-meta>
         open_decisions_tsv=""
       fi
     fi
+    # The phase folds the same reconciled set, so a decision the lifecycle cleared
+    # never keeps the board's phase on it; when the log itself still ends on that
+    # decision, the live state the crew moved on to stands in its place.
+    phase_tsv=$(status_current_phase "$status_log" "$kind" "$open_decisions_tsv")
+    phase_name=${phase_tsv%%$'\t'*}
+    phase_note=${phase_tsv#*$'\t'}
+    case "$phase_name" in
+      needs-decision|blocked)
+        case $'\n'"$open_decisions_tsv" in
+          *$'\n'*$'\t'"$phase_name"$'\t'*) ;;
+          *) if [ "$folded_decisions_tsv" != "$open_decisions_tsv" ]; then
+               phase_name=$current_state; phase_note=''
+             fi ;;
+        esac ;;
+    esac
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
       [ splits("\n") | select(length > 0)
         | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)

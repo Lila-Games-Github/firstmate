@@ -338,8 +338,9 @@ status_line_phase_note() {  # <status-line>
 # reported phase, so later work without a new phase line shows as plain working
 # and a later done shows as done. A decision the keyed fold still holds open
 # outranks everything after it, exactly as status_current_line reads it. An
-# absent or empty log is `starting`.
-status_current_phase() {  # <status-file> [<kind>]
+# absent or empty log is `starting`. A caller that has already reconciled the
+# fold's open set passes it as <open-set> so only that set outranks the log.
+status_current_phase() {  # <status-file> [<kind>] [<open-set>]
   local f=$1 kind=${2:-} line verb phase='' worker='' note='' word open key ov onote
   local pause resolve held
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || { printf 'starting\t\n'; return 0; }
@@ -363,7 +364,7 @@ status_current_phase() {  # <status-file> [<kind>]
     esac
     note=$(status_line_note "$line")
   done < "$f"
-  open=$(status_open_decisions "$f" "$kind")
+  if [ "$#" -ge 3 ]; then open=$3; else open=$(status_open_decisions "$f" "$kind"); fi
   while IFS=$'\t' read -r key ov onote; do
     [ -n "$ov" ] || continue
     phase=$ov; note=$onote

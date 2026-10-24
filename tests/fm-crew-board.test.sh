@@ -1495,6 +1495,11 @@ test_new_status_line_keeps_stale_observation() {
   assert_equals 'raiser: decision not yet raised with you' \
     "$(jq -r '.panels.alerts[] | select(.id == "raiser") | .title' "$home/state/crew-board.json")" \
     'a decision raised after the stale observation still surfaces'
+  assert_equals '' "$(jq -r '.panels.alerts[] | select(.id == "asker") | .title' "$home/state/crew-board.json")" \
+    'a cleared decision raises no alert across a new status line'
+  case "$(jq -r '.panels.worker_tags.asker // ""' "$home/state/crew-board.json")" in
+    'WAITING ON YOU'*) fail 'a cleared decision leaves the worker row waiting on you across a new status line' ;;
+  esac
   pass 'a new status line keeps the last live observation, marked stale, until the observer replaces it'
 }
 
@@ -1528,6 +1533,11 @@ test_metadata_write_keeps_stale_observation() {
   assert_equals 'https://github.com/o/r/pull/9' \
     "$(jq -r '.panels.ready[] | select(.id == "merger") | .link' "$home/state/crew-board.json")" \
     'a merge-ready PR stays in the ready list across a metadata pr= write'
+  assert_equals '' "$(jq -r '.panels.alerts[] | select(.id == "asker") | .title' "$home/state/crew-board.json")" \
+    'a cleared decision raises no alert across a metadata write'
+  case "$(jq -r '.panels.worker_tags.asker // ""' "$home/state/crew-board.json")" in
+    'WAITING ON YOU'*) fail 'a cleared decision leaves the worker row waiting on you across a metadata write' ;;
+  esac
   pass 'a metadata write keeps the last live observation, marked stale, until the observer replaces it'
 }
 
