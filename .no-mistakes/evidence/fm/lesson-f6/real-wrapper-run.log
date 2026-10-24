@@ -1,0 +1,124 @@
+stock Bash timeout mechanism: timeout
+::group::shell parse sweep
+::endgroup::
+::notice title=Stock Bash consumer passed::shell parse sweep emitted 0 expected assertions
+::group::fleet snapshot and view
+ok - empty fleet snapshot and view use explicit absence markers
+ok - fixture snapshot covers task rows, backlog rows, pointers, and stable ordering
+ok - home-summary excludes kind=secondmate from unowned_current and terminal_in_flight
+ok - undated captain holds age after a configurable threshold, decided only from structured fields
+ok - captain-hold buckets are total, mutually exclusive, and never decided by prose
+ok - main_inventory discloses orphan/unstructured and clears when inventory is consistent
+ok - backlog normalization preserves strict roles and resolves every blocker compatibly
+ok - snapshot event hints follow reconciled current state
+ok - durable fold keeps an open decision past a later unrelated event
+ok - a live secondmate endpoint preserves unrelated open decisions
+ok - durable captain-held transfer closes the duplicate live status decision
+ok - durable fold clears a decision only on a keyed resolution
+ok - a completed scout's stale decision surfaces as a report pointer, not pending
+ok - a scout still parked at a decision stays pending (terminal clear does not over-fire)
+ok - snapshot includes durable scout reports after teardown
+ok - snapshot parses tasks-axi rows and respects operational overrides
+ok - fleet view renders the snapshot without secondmate peek guidance
+ok - fleet view renders secondmate agent liveness
+::endgroup::
+::notice title=Stock Bash consumer passed::fleet snapshot and view emitted 18 expected assertions
+::group::Bearings snapshot
+ok - task teardown during metadata capture is omitted without aborting the snapshot
+ok - current state and decision hints share one captured status observation
+ok - reused live state is discarded when task generation changes
+ok - large local snapshot overlaps local reads with byte-identical serial and concurrent projections
+ok - remote ledgers collect concurrently under one budget, reuse aged cache, and cancel wedged collectors
+ok - a missing remote ledger stays explicitly unreadable without remote summary computation
+ok - Domain Alpha structured state overrides a stale parent Phase 7 event
+ok - GNU stat file reads select -c without BSD filesystem-report pollution
+ok - parent activity evidence is bounded and disclosed
+ok - Bearings excludes a status-only child decision
+ok - a structured child captain hold reaches Captain's Call
+ok - missing, invalid, unreadable, malformed, and unavailable-child homes stay explicit unknowns
+ok - oversized ledgers stay strict unknown
+ok - secondmate and per-home child counts are bounded, disclosed, and explicitly expandable
+ok - parent decisions remain untrusted contradiction evidence
+ok - parent evidence reconciliation distinguishes matching holds, blocks, and decisions
+ok - nonprogressing child states are explicit and inconsistent terminal rows invalidate
+ok - registry unavailability and bounded truncation remain explicit
+ok - repeated snapshots keep the same current landed baseline and ignore prior reports
+ok - default output is bounded, local-only, and marks omitted surfaces
+ok - TOON and JSON are parity representations of the same model
+ok - landed includes secondmate-managed merges alongside main-home merges
+ok - landed accepts only kind-owned delivery artifacts while answered questions stay out
+ok - kind fallback matches tasks-axi word boundaries and preserves scout deliveries
+ok - kindless v1 summaries retain report artifacts from fresh and cached ledgers
+ok - default landed selection balances one dominant home with sparse homes
+ok - landed selection refills capacity after sparse homes exhaust
+ok - landed selection uses deterministic home order when homes exceed the cap
+ok - landed selection preserves deterministic home and internal tie ordering
+ok - landed selection handles no landed items
+ok - --all-landed keeps the complete global landed output
+ok - landed stays bounded with per-home + overall caps and omitted[] disclosure
+ok - Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work
+ok - action-free items (working/done/queued/landed) do not leak into Captain's Call
+ok - main orphan in-flight stays out of Underway and is disclosed in omitted/gates
+ok - main unstructured current is disclosed while structured siblings still project
+ok - counterfactual meta clears main inventory warning and projects the live task
+ok - working captain holds retain main and secondmate bucket surfaces
+ok - active children reach Underway independently of a home captain hold
+ok - blank legacy summary names use their durable identifier
+ok - newest filed gates are selected before snapshot bounds
+ok - Underway rows carry the durable task name and gates carry their filed date
+ok - mixed secondmate roles, partial state, and captain readiness project independently
+ok - main and secondmate captain actionability use the same blocker readiness
+ok - a completed scout with decision-like report prose is a pointer, not pending
+ok - an authoritative captain hold surfaces end-to-end
+ok - current report pointers surface
+ok - queued body prose never hides an item from the board
+ok - --include-prs is the only path that fetches, and it enriches correctly
+ok - a partial GitHub failure degrades gracefully
+ok - Perl fallback bounds stalled GitHub calls without coreutils timeout
+ok - all fleet-sized sections are capped with counted opt-in expansion
+ok - captain-held tasks of any kind reach Captain's Call, deferral is honored, and landed excludes answered calls
+ok - structured hold buckets decide Captain's Call, Charted Next, and the reveal
+ok - a blocked deferred hold stays gated when its date arrives and is revealed by --all-decisions
+ok - revealed deferred holds display their deferral reason while live calls stay unannotated
+ok - live PR enrichment caps repositories with counted expansion
+ok - per-repository open-PR caps are disclosed with an expansion knob
+ok - projection and TOON rendering failures exit nonzero with diagnostics
+::endgroup::
+::notice title=Stock Bash consumer passed::Bearings snapshot emitted 59 expected assertions
+::group::Bearings oversized parsed-backlog route
+ok - parsed backlogs above MAX_ARG_STRLEN survive fleet, Bearings, and secondmate summary routes
+::endgroup::
+::notice title=Stock Bash consumer passed::Bearings oversized parsed-backlog route emitted 1 expected assertions
+::group::public-followup empty-lock register
+ok - first register succeeds with an empty lock list under /bin/bash
+::endgroup::
+::notice title=Stock Bash consumer passed::public-followup empty-lock register emitted 1 expected assertions
+::group::watcher churn deferral
+ok - a churning turn-end inside an already-open deferral window is absorbed without re-marking
+::endgroup::
+::notice title=Stock Bash consumer passed::watcher churn deferral emitted 1 expected assertions
+::group::PR 18 learning-candidate NUL enumeration
+LEARNING CANDIDATES: 1 unresolved
+- lc-80d3b268460f020f564a8abc [firstmate/workflow-gap-blocker] an absent compatibility verdict can hide shipped shell failures
+ok - learning-candidate summary consumes NUL-delimited enumeration
+::endgroup::
+::notice title=Stock Bash consumer passed::PR 18 learning-candidate NUL enumeration emitted 1 expected assertions
+::group::PR 19 local-merge branch resolution
+ok - recorded non-default landing branch is merged and the default branch is untouched
+ok - absent landing_branch keeps default-branch fast-forward behavior
+ok - unresolved recorded landing branch refuses without default fallback
+ok - branch and clean-tree guards apply to the resolved landing target
+ok - diverged task branch still refuses against the resolved landing target
+ok - lane task lands the branch checked out in its recorded worktree
+ok - recorded lane branch takes precedence over the live worktree branch
+ok - recorded lane branch lands after the worktree is retired
+ok - a lane task whose identity never recorded a delivery mode refuses instead of guessing local-only
+ok - detached lane worktree refuses without falling back to fm/task-x1
+ok - lane worktree branch missing from project refuses
+ok - known-red work lands and creates or reopens exactly one make-it-green task
+ok - candidate with a new failure refuses without moving the landing tip
+ok - missing and mismatched-SHA receipts refuse
+all fm-merge-local tests passed
+::endgroup::
+::notice title=Stock Bash consumer passed::PR 19 local-merge branch resolution emitted 14 expected assertions
+rc=0 elapsed=227s

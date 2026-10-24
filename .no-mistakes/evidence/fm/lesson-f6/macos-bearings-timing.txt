@@ -1,0 +1,5 @@
+Bearings (59 cases, oversized skipped) wall time on macos-latest stock /bin/bash, from main CI logs (fleet last ok -> Bearings output flush):
+run 39975212905: 15:05:50 -> 15:10:08 = 258s
+run 39965781561: 14:00:14 -> 14:06:03 = 349s
+run 39982947478: 15:59:59 -> 16:03:50 = 231s
+bin/fm-stock-bash-compat.sh default FM_STOCK_BASH_BEARINGS_TIMEOUT=180s
