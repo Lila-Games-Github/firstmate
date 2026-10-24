@@ -559,6 +559,42 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_green_final_head_names_service_receipt() {
+  local home brief plain
+  home="$TMP_ROOT/green-receipt-home"
+  mkdir -p "$home/data" "$home/config/test-service"
+  cp "$ROOT/docs/examples/fm-test-service-frogpile.json" "$home/config/test-service/some-proj.json"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" green-receipt some-proj --mode local-only --green-final-head >/dev/null \
+    || fail "green-final-head brief did not scaffold"
+  brief="$home/data/green-receipt/brief.md"
+  assert_grep "Final-head health: green" "$brief" "green brief lost its health marker"
+  assert_grep "$home/data/green-receipt/suite.receipt" "$brief" "green brief omitted its task receipt path"
+  assert_grep "fm-test-service.py submit some-proj" "$brief" "green brief omitted the configured pass-record producer"
+  assert_grep "--task 'green-receipt' --suite --device-gate any --receipt" "$brief" "green brief omitted service receipt arguments"
+  assert_grep "fm-test-service.py wait <request-id>" "$brief" "green brief omitted the service result check"
+  assert_grep "schema=fm-full-suite.v1" "$brief" "green brief omitted the service receipt form"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-receipt some-proj --mode local-only >/dev/null \
+    || fail "ordinary brief did not scaffold"
+  plain="$home/data/ordinary-receipt/brief.md"
+  assert_no_grep "Final-head health: green" "$plain" "ordinary brief gained final-head instructions"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" unconfigured-receipt other-proj --mode local-only --green-final-head >/dev/null \
+    || fail "unconfigured green-final-head brief did not scaffold"
+  assert_grep "No test-service project is configured" "$home/data/unconfigured-receipt/brief.md" \
+    "unconfigured green brief omitted its configuration blocker"
+  python3 - "$home/data/unconfigured-receipt/brief.md" "$home/data/unconfigured-receipt/suite.receipt" "$ROOT/bin/fm-test-service.py" <<'PY' \
+    || fail "unconfigured green brief omitted its receipt form or sanctioned producer"
+from pathlib import Path
+import sys
+brief = Path(sys.argv[1]).read_text()
+assert f"`{sys.argv[2]}`" in brief
+assert f"`{sys.argv[3]}`" in brief
+assert "schema=fm-full-suite.v1\nsha=<full tested SHA>\nfailures=0\n" in brief
+assert "fm-test-service.py submit" not in brief
+PY
+  pass "fm-brief.sh: green-final-head brief names its task receipt and sanctioned producer"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -1730,6 +1766,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_green_final_head_names_service_receipt
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

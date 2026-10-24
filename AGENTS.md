@@ -571,6 +571,12 @@ Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions t
 When a brief depends on a path or symbol that must already exist on its base, or on an external tool or service, declare it with the marker lines `bin/fm-dispatch-preflight-lib.sh` defines so the spawn refuses a stale brief or an uncallable tool before any worker starts.
 `bin/fm-dod-lib.sh` owns intent authoring without added speaker labels or direct address, its provenance markers, what a no-mistakes worker may pass as `--intent`, and the string's self-sufficiency rule.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
+When a change removes a runtime fallback whose reachability depends on mutable fleet state, supply the live lane records and worktree inventory in the brief and require reviewers to check reachability against them.
+For every Godot visual brief, name the authorized project CLI evidence path, including the project path check, ResourceLoader/ResourceSaver workflow, and capture harness; FrogPile's entry point is `scripts/godot-automation.sh`.
+For a multi-file tooling build, require each script to process real input and report a named output record count, and give each validator a known-bad fixture it must reject.
+For an MCP sign-in blocker, ask the owner to authenticate directly inside the worker session first; an OAuth link relayed later may expire after five minutes.
+When a no-mistakes gate contains several actionable findings, retain the complete outstanding set before answering, include every authorized repair in one response, and escalate any finding left without an authorized response before the gate advances.
+For a `--green-final-head` ship task, use the task-specific `data/<task-id>/suite.receipt` produced by `bin/fm-test-service.py`; `bin/fm-landing-health-lib.sh` owns its three-line `fm-full-suite.v1` form (`schema=`, full-head `sha=`, `failures=0`).
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
