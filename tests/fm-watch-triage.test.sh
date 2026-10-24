@@ -10,9 +10,9 @@
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # terminal-looking stale status lines overridden by an active run, the heartbeat
 # backstop fail-safe, and afk coherence (no double-triage while the away-mode
-# daemon owns supervision). The fixture's own reap bound and the watcher's stop
-# path - the two halves of the ~1000s serial-shard stalls CI recorded - are
-# pinned here too, since neither is a triage decision.
+# daemon owns supervision). The fixture's own reap bound and the watcher's
+# existing in-flight stop contract are pinned here too, since neither is a
+# triage decision.
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
