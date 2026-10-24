@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,26 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
+
+func TestFailedRefreshRetriesOnNextTick(t *testing.T) {
+	m := fixtureApp(t)
+	m.refreshing = true
+	m.lastRefresh = time.Now().Add(-9 * time.Second)
+	m.update(refreshedMsg{err: errors.New("refresh killed")})
+	if m.refreshing || m.data.Rows[0].ID != "alpha" {
+		t.Fatal("failed refresh did not release the in-flight state or preserve the visible board")
+	}
+	_, cmd := m.update(tickMsg(time.Now()))
+	if !m.refreshing || cmd == nil {
+		t.Fatal("next tick did not schedule a retry")
+	}
+	fresh := m.data
+	fresh.Rows[0].ID = "new-worker"
+	m.update(refreshedMsg{data: fresh})
+	if m.refreshing || m.data.Rows[0].ID != "new-worker" {
+		t.Fatal("successful retry did not replace the stale board")
+	}
+}
 
 func fixtureApp(t *testing.T) *app {
 	t.Helper()

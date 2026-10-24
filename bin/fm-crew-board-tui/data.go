@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -163,6 +164,11 @@ func (p paths) refresh() (board, []item, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(p.Code, "bin", "fm-crew-board.sh"), "refresh")
 	cmd.Env = p.env()
+	// Refresh starts snapshot and panel readers. Stop the whole group on timeout
+	// so its children cannot keep the command pending or publish an old payload.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+	cmd.WaitDelay = time.Second
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return board{}, nil, fmt.Errorf("refresh: %s: %w", strings.TrimSpace(string(output)), err)
 	}

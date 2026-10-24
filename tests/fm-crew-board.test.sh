@@ -61,7 +61,7 @@ sleeper_in() { (cd "$1" && exec sleep 60) >/dev/null 2>&1 & printf '%s\n' "$!"; 
 tool_path() {  # <dir>
   local dir=$1 tool resolved
   mkdir -p "$dir"
-  for tool in awk bash basename cat chmod cp cut date dirname env expr find grep head id jq \
+  for tool in awk bash basename cat chmod cksum cp cut date dirname env expr find grep head id jq \
     kill ln mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sleep sort stat tail \
     timeout touch tr uname wc xargs
   do
@@ -1407,6 +1407,33 @@ test_worker_runtimes_name_harness_and_model() {
   pass 'worker runtimes name the harness and model in plain words'
 }
 
+test_thirty_worker_refresh_budget() {
+  local home id worker start elapsed attempts stamps
+  home=$(make_home thirty_workers)
+  rm -f "$home/state/alpha.meta" "$home/state/alpha.status" "$home/state/beta.meta" "$home/state/beta.status"
+  printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
+  for ((id=1; id<=30; id++)); do
+    printf -v worker 'worker-%02d' "$id"
+    printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\n' > "$home/state/$worker.meta"
+    printf 'phase: fixing - work\n' > "$home/state/$worker.status"
+    printf -- '- [ ] %s - Work %s (repo: widget) (kind: ship) (since 2026-10-19)\n' "$worker" "$id" >> "$home/data/backlog.md"
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  start=$(python3 -c 'import time; print(time.monotonic())')
+  run_board "$home" refresh >/dev/null || fail '30-worker refresh failed'
+  elapsed=$(python3 -c 'import sys,time; print(time.monotonic()-float(sys.argv[1]))' "$start")
+  assert_equals 30 "$(jq '.rows | length' "$home/state/crew-board.json")" '30-worker row count'
+  python3 -c 'import sys; assert float(sys.argv[1]) < 7, "refresh exceeded seven seconds: " + sys.argv[1]' "$elapsed" \
+    || fail '30-worker refresh exceeded the budget beneath the eight-second TUI timeout'
+  for ((attempts=0; attempts<100; attempts++)); do
+    stamps=$(find "$home/state/crew-board-observations" -maxdepth 1 -name '*.stamp' 2>/dev/null | wc -l)
+    [ "$stamps" -eq 30 ] && break
+    sleep 0.1
+  done
+  assert_equals 30 "$stamps" '30-worker background observation count'
+  pass '30-worker refresh completes before the TUI timeout'
+}
+
 
 test_refresh_and_gone
 test_tui_render_and_note
@@ -1441,3 +1468,4 @@ test_worker_tags_from_live_evidence
 test_worker_tags_name_the_state
 test_worker_tags_flag_pr_waiting_for_merge
 test_worker_runtimes_name_harness_and_model
+test_thirty_worker_refresh_budget

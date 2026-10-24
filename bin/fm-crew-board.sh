@@ -114,6 +114,23 @@ validate_payload() {
   ' "$1" >/dev/null
 }
 
+start_board_observer() {
+  local lock="$STATE/.crew-board-observe.lock" pid=''
+  if [ -d "$lock" ]; then
+    [ -f "$lock/pid" ] && read -r pid < "$lock/pid"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+    rm -f -- "$lock/pid"
+    rmdir -- "$lock" 2>/dev/null || return 0
+  fi
+  mkdir -- "$lock" 2>/dev/null || return 0
+  (
+    trap 'rm -f -- "$lock/pid"; rmdir -- "$lock" 2>/dev/null || :' EXIT
+    printf '%s\n' "$BASHPID" > "$lock/pid"
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-fleet-snapshot.sh" --board-observe
+  ) </dev/null >/dev/null 2>&1 &
+}
+
 command_refresh() {
   local work snap prev mtimes panels next now keep changed=1
   command -v jq >/dev/null 2>&1 || fail "jq is required"
@@ -123,7 +140,8 @@ command_refresh() {
   # shellcheck disable=SC2064
   trap "rm -rf -- '$work'" EXIT
   snap="$work/snapshot.json"; prev="$work/previous.json"; mtimes="$work/mtimes.json"; panels="$work/panels.json"; next="$work/next.json"
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json > "$snap" 2>/dev/null \
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SNAPSHOT_BOARD_FAST=1 \
+    "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json > "$snap" 2>/dev/null \
     || ! jq -e '.tasks | type == "array"' "$snap" >/dev/null 2>&1; then
     fail "cannot read the fleet snapshot for this home"
   fi
@@ -151,6 +169,7 @@ command_refresh() {
     printf 'unchanged\n'
   fi
   rm -rf -- "$work"
+  start_board_observer
 }
 
 command_show() {
