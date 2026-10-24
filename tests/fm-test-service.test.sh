@@ -38,7 +38,7 @@ esac
 ADB
 chmod +x "$tmp/bin/adb"
 $svc install-unit > "$tmp/unit-path"
-rg -q '^ExecStart=".*/bin/fm-test-service.py" serve$' "$(cat "$tmp/unit-path")"
+grep -q '^ExecStart=".*/bin/fm-test-service.py" serve$' "$(cat "$tmp/unit-path")"
 cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
 {"prepare":["prepare.sh"],"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"any_device":["phone.sh","--serial","any"],"phones":["S22","S21","M31"],"any_phones":["S22","S21"],"equivalent_phones":{"S22":["S21"],"S21":["S22"]},"landing_branch":"main","scenarios":{"smoke":["--smoke"]}}
 JSON
@@ -89,11 +89,11 @@ $svc wait "$request" | grep -q "^passed $sha1"
 # Preparation finishes before the suite and phone enter their queues.
 [ "$(sed -n '1p' "$EVENTS")" = prepare-v1 ]
 [ "$(sed -n '2p' "$EVENTS")" = suite-start-v1 ] || [ "$(sed -n '2p' "$EVENTS")" = phone-start-v1:S22:--smoke ]
-[ "$(rg -n 'suite-end' "$EVENTS" | cut -d: -f1)" -gt "$(rg -n 'phone-start' "$EVENTS" | cut -d: -f1)" ]
+[ "$(grep -n 'suite-end' "$EVENTS" | cut -d: -f1)" -gt "$(grep -n 'phone-start' "$EVENTS" | cut -d: -f1)" ]
 [ "$(tail -1 "$EVENTS")" = benchmark-v1 ]
 [ "$(cat "$tmp/pass.receipt")" = "$(printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0' "$sha1")" ]
 # The same parser used by fm-merge-local accepts the output.
-( source "$root/bin/fm-landing-health-lib.sh"; fm_health_receipt_read "$tmp/pass.receipt" "$sha1"; [ "$FM_HEALTH_COUNT" = 0 ] )
+bash -c 'source "$1"; fm_health_receipt_read "$2" "$3"; [ "$FM_HEALTH_COUNT" = 0 ]' _ "$root/bin/fm-landing-health-lib.sh" "$tmp/pass.receipt" "$sha1"
 python3 - "$FM_TEST_SERVICE_STATE/status.json" "$request" <<'PY'
 import json,sys
 s=json.load(open(sys.argv[1]))
@@ -104,7 +104,7 @@ assert {step['name'] for step in row['steps']}=={'prepare','suite','device','pho
 assert all(step['state']=='passed' for step in row['steps'])
 PY
 git checkout -q -- suite.sh
-# A changed landing branch triggers a fresh test of the new exact SHA.
+# A landing branch that already contains the submitted commit stops retests and frees its copy.
 cat > suite.sh <<'FAIL'
 #!/usr/bin/env bash
 echo 'FAIL fake-suite-test: expected green' >&2
@@ -114,48 +114,64 @@ chmod +x suite.sh
 git add suite.sh && git commit -qm v2
 sha2=$(git rev-parse HEAD)
 for i in $(seq 1 300); do
-  if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$request" "$sha2" 2>/dev/null <<'PY'
+  if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$request" "$sha1" 2>/dev/null <<'PY'
 import json,sys
-s=json.load(open(sys.argv[1]))
-assert any(r['id']==sys.argv[2] and r['sha']==sys.argv[3] and r['generation']==1 and r['state']=='failed' for r in s['requests'])
+row=next(r for r in json.load(open(sys.argv[1]))['requests'] if r['id']==sys.argv[2])
+assert row['options']['retest_on_move'] is False
+assert row['sha']==sys.argv[3] and row['generation']==0 and row['state']=='passed'
 PY
   then break; fi
   sleep .2
 done
-[ -f "$FM_TEST_SERVICE_STATE/results/$request/$sha2.failure.json" ]
-rg -q 'fake-suite-test' "$FM_TEST_SERVICE_STATE/results/$request/$sha2.failure.json"
-$svc cancel "$request"
+[ "$i" -lt 300 ]
+[ ! -e "$FM_TEST_SERVICE_STATE/repos/$request" ]
+[ ! -e "$FM_TEST_SERVICE_STATE/runs/$request" ]
+[ ! -e "$FM_TEST_SERVICE_STATE/rebase/$request" ]
+# A failing suite records its first failing test and message for that exact SHA.
+failing=$($svc submit fake "$PWD" "$sha2" --suite)
+$svc wait "$failing" > "$tmp/failing.out" && exit 1 || true
+[ -f "$FM_TEST_SERVICE_STATE/results/$failing/$sha2.failure.json" ]
+grep -q 'fake-suite-test' "$FM_TEST_SERVICE_STATE/results/$failing/$sha2.failure.json"
 # A locked phone with no configured PIN fails clearly.
 touch "$HOME/locked-S22"
 rm -f "$HOME/unlocked-S22"
 locked=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$locked" > "$tmp/locked.out" && exit 1 || true
-rg -q 'phone-locked: add S22' "$tmp/locked.out"
+grep -q 'phone-locked: add S22' "$tmp/locked.out"
 # A private per-phone PIN unlocks the fake device without recording the secret.
 printf 'S22=1234\n' > "$HOME/.config/firstmate/test-device-pins"
 chmod 644 "$HOME/.config/firstmate/test-device-pins"
 insecure=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$insecure" > "$tmp/insecure.out" && exit 1 || true
-rg -q 'mode-600 private file' "$tmp/insecure.out"
+grep -q 'mode-600 private file' "$tmp/insecure.out"
 chmod 600 "$HOME/.config/firstmate/test-device-pins"
 unlocked=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$unlocked" | grep -q '^passed '
 [ -e "$HOME/unlocked-S22" ]
-if rg -q '1234' "$FM_TEST_SERVICE_STATE/status.json" "$FM_TEST_SERVICE_STATE"/logs/*; then exit 1; fi
+# A finished request without landing retests keeps its logs and results but no test copies.
+for i in $(seq 1 100); do
+  [ -e "$FM_TEST_SERVICE_STATE/repos/$unlocked" ] || [ -e "$FM_TEST_SERVICE_STATE/runs/$unlocked" ] || break
+  sleep .1
+done
+[ ! -e "$FM_TEST_SERVICE_STATE/repos/$unlocked" ]
+[ ! -e "$FM_TEST_SERVICE_STATE/runs/$unlocked" ]
+[ -f "$FM_TEST_SERVICE_STATE/results/$unlocked/$sha1.receipt" ]
+ls "$FM_TEST_SERVICE_STATE/logs/$unlocked"-0-suite.log > /dev/null
+if grep -q '1234' "$FM_TEST_SERVICE_STATE/status.json" "$FM_TEST_SERVICE_STATE"/logs/*; then exit 1; fi
 any_phone=$($svc submit fake "$PWD" "$sha1" --suite --device-gate any)
 $svc wait "$any_phone" | grep -q '^passed '
-rg -q '^phone-start-v1:S22:$' "$EVENTS"
+grep -q '^phone-start-v1:S22:$' "$EVENTS"
 printf 'S21\nM31\n' > "$HOME/online-devices"
 fallback=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$fallback" | grep -q '^passed '
-rg -q '^phone-start-v1:S21:$' "$EVENTS"
+grep -q '^phone-start-v1:S21:$' "$EVENTS"
 printf 'S22\nS21\n' > "$HOME/online-devices"
 touch "$HOME/slow-phone"
-before_s22=$(rg -c '^phone-start-v1:S22:$' "$EVENTS")
-before_s21=$(rg -c '^phone-start-v1:S21:$' "$EVENTS")
+before_s22=$(grep -c '^phone-start-v1:S22:$' "$EVENTS")
+before_s21=$(grep -c '^phone-start-v1:S21:$' "$EVENTS")
 disconnect=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
 for i in $(seq 1 300); do
-  count=$(rg -c '^phone-start-v1:S22:$' "$EVENTS")
+  count=$(grep -c '^phone-start-v1:S22:$' "$EVENTS")
   [ "$count" -gt "$before_s22" ] && break
   sleep .05
 done
@@ -163,15 +179,15 @@ done
 printf 'S21\n' > "$HOME/online-devices"
 $svc wait "$disconnect" | grep -q '^passed '
 rm "$HOME/slow-phone"
-[ "$(rg -c '^phone-start-v1:S21:$' "$EVENTS")" -gt "$before_s21" ]
+[ "$(grep -c '^phone-start-v1:S21:$' "$EVENTS")" -gt "$before_s21" ]
 printf 'S21\n' > "$HOME/online-devices"
 performance=$($svc submit fake "$PWD" "$sha1" --device-gate M31)
 $svc wait "$performance" > "$tmp/performance.out" && exit 1 || true
-rg -q 'device-unavailable: M31' "$tmp/performance.out"
+grep -q 'device-unavailable: M31' "$tmp/performance.out"
 : > "$HOME/online-devices"
 offline=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$offline" > "$tmp/offline.out" && exit 1 || true
-rg -q 'device-unavailable: S22' "$tmp/offline.out"
+grep -q 'device-unavailable: S22' "$tmp/offline.out"
 python3 - "$FM_TEST_SERVICE_STATE/status.json" "$offline" <<'PY'
 import json,sys
 status=json.load(open(sys.argv[1]))
@@ -182,7 +198,7 @@ rm "$HOME/unlocked-S22"
 printf 'S22=9999\n' > "$HOME/.config/firstmate/test-device-pins"
 wrong=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$wrong" > "$tmp/wrong.out" && exit 1 || true
-rg -q 'phone-locked: could not unlock S22' "$tmp/wrong.out"
+grep -q 'phone-locked: could not unlock S22' "$tmp/wrong.out"
 printf 'S22=1234\n' > "$HOME/.config/firstmate/test-device-pins"
 # Requests enter the one runner in submission order.
 first=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
@@ -200,12 +216,17 @@ assert rows[sys.argv[2]]['finished'] <= rows[sys.argv[3]]['started']
 PY
 # A queued cancellation remains terminal.
 $svc wait "$queue" > "$tmp/cancel.out" && exit 1 || true
-rg -q '^cancelled ' "$tmp/cancel.out"
+grep -q '^cancelled ' "$tmp/cancel.out"
+for i in $(seq 1 150); do
+  [ -e "$FM_TEST_SERVICE_STATE/repos/$queue" ] || break
+  sleep .1
+done
+[ ! -e "$FM_TEST_SERVICE_STATE/repos/$queue" ]
 # A killed daemon leaves a running request to rerun on restart.
-before=$(rg -c 'suite-start-v1' "$EVENTS")
+before=$(grep -c 'suite-start-v1' "$EVENTS")
 restart=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 for i in $(seq 1 300); do
-  count=$(rg -c 'suite-start-v1' "$EVENTS")
+  count=$(grep -c 'suite-start-v1' "$EVENTS")
   [ "$count" -ge "$((before + 1))" ] && break
   sleep .05
 done
@@ -237,7 +258,7 @@ now=next(r['run_seconds'] for r in json.load(open(sys.argv[1]))['requests'] if r
 assert now > float(sys.argv[3])+1
 PY
 $svc wait "$restart" | grep -q '^passed '
-[ "$(rg -c 'suite-start-v1' "$EVENTS")" -ge "$((before + 2))" ]
+[ "$(grep -c 'suite-start-v1' "$EVENTS")" -ge "$((before + 2))" ]
 # A divergent edit to the same committed file reports a rebase conflict.
 git clone --no-local -q "$tmp/project" "$tmp/conflict-project"
 cd "$tmp/conflict-project"
@@ -293,7 +314,21 @@ done
 [ -n "$rebased_sha" ]
 [ "$(cat "$tmp/worker.receipt")" = "$(printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0' "$worker_sha")" ]
 [ "$(cat "$FM_TEST_SERVICE_STATE/results/$retested/$rebased_sha.receipt")" = "$(printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0' "$rebased_sha")" ]
-$svc cancel "$retested"
+[ -d "$FM_TEST_SERVICE_STATE/repos/$retested" ]
+# Landing the worker's change as a new commit stops further retests.
+git cherry-pick "$worker_sha" > /dev/null
+for i in $(seq 1 300); do
+  if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$retested" "$rebased_sha" 2>/dev/null <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))['requests'] if r['id']==sys.argv[2])
+assert row['options']['retest_on_move'] is False
+assert row['generation']==1 and row['sha']==sys.argv[3] and row['state']=='passed'
+PY
+  then break; fi
+  sleep .2
+done
+[ "$i" -lt 300 ]
+[ ! -e "$FM_TEST_SERVICE_STATE/repos/$retested" ]
 # Four clean copies run their full suites at once; the fifth waits for a slot.
 cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
 {"prepare":["prepare.sh"],"suite":["suite.sh"],"max_concurrent":4,"device":["phone.sh","--serial","{serial}"],"phones":["S22","S21"],"landing_branch":"main"}
@@ -333,7 +368,7 @@ assert len({path for _,path in starts})==5
 assert starts[3][0] < ends[0] < starts[4][0]
 PY
 # A restart requeues every in-flight parallel request from its pinned copy.
-before_parallel=$(rg -c '^parallel-start:' "$EVENTS")
+before_parallel=$(grep -c '^parallel-start:' "$EVENTS")
 parallel_restart=()
 for n in 1 2 3 4; do
   parallel_restart+=("$($svc submit fake "$PWD" "$sha1" --task "restart-parallel-$n" --suite)")
@@ -350,7 +385,7 @@ PY
 done
 [ "$count" -eq 4 ]
 for i in $(seq 1 300); do
-  started=$(rg -c '^parallel-start:' "$EVENTS")
+  started=$(grep -c '^parallel-start:' "$EVENTS")
   [ "$started" -ge "$((before_parallel + 4))" ] && break
   sleep .05
 done
@@ -362,7 +397,7 @@ server=
 for id in "${parallel_restart[@]}"; do
   $svc wait "$id" | grep -q "^passed $sha1"
 done
-[ "$(rg -c '^parallel-start:' "$EVENTS")" -ge "$((before_parallel + 8))" ]
+[ "$(grep -c '^parallel-start:' "$EVENTS")" -ge "$((before_parallel + 8))" ]
 # A project's concurrency comes only from its configuration, never from its name.
 cat > "$FM_HOME/config/test-service/frogpile.json" <<'JSON'
 {"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"phones":["S22"],"landing_branch":"main"}
@@ -396,5 +431,5 @@ git add suite.sh && git commit -qm v3
 sha3=$(git rev-parse HEAD)
 script_error=$($svc submit fake "$PWD" "$sha3" --task parallel-error --suite)
 $svc wait "$script_error" > "$tmp/script-error.out" && exit 1 || true
-rg -q 'SCRIPT ERROR: fake parse failure' "$FM_TEST_SERVICE_STATE/results/$script_error/$sha3.failure.json"
+grep -q 'SCRIPT ERROR: fake parse failure' "$FM_TEST_SERVICE_STATE/results/$script_error/$sha3.failure.json"
 echo 'ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites'

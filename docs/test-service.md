@@ -52,6 +52,7 @@ bin/fm-test-service.py wait "$request"
 `status --json` prints the same JSON published at the status path; `cancel ID` cancels a queued request, asks the runner to stop a running one, or stops future retests of a completed one.
 A request with `--suite` writes a success receipt with exactly the three lines accepted by `fm-merge-local.sh`; a failed run writes `results/ID/SHA.failure.json` with its first failing step and message.
 Per-step logs stay under the service state directory.
+Once a request finishes, the service deletes its test checkout and scratch copy, and deletes its pinned commit copy unless the request still retests on landing-branch moves.
 
 `--retest-on-move` watches the configured landing branch after the first run.
 When it changes, the service rebases the original commit onto the new tip in a scratch copy and queues the resulting SHA for a fresh run.
@@ -59,6 +60,7 @@ A rebase conflict becomes a `conflict` result and is never guessed through.
 The updated tested SHA and its receipt appear in status and under `results/ID/`.
 A retest of a rebased SHA never writes the `--receipt` path, so that receipt always names the submitted commit.
 The original commit copy remains available for later branch moves.
+When the landing branch already contains the submitted commit, or its change rebases to nothing new, retests stop and the copy is deleted.
 
 Before every phone run, the service wakes the selected phone, sets `stay_on_while_plugged_in` to `2` if needed, and checks the keyguard.
 If locked, it reads `~/.config/firstmate/test-device-pins` only when the file is a regular non-symlink file with no group or other permissions.

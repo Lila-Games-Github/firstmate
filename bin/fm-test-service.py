@@ -490,6 +490,27 @@ def current_tip(repo, source, branch, old_tip):
     return tip
 
 
+def reclaim(row):
+    shutil.rmtree(ROOT / "runs" / row["id"], ignore_errors=True)
+    shutil.rmtree(ROOT / "rebase" / row["id"], ignore_errors=True)
+    if row["state"] == "cancelled" or row["cancel_requested"] or not json.loads(row["options"])["retest_on_move"]:
+        shutil.rmtree(ROOT / "repos" / row["id"], ignore_errors=True)
+
+
+def reclaim_finished(db, active):
+    states = ",".join("'" + state + "'" for state in sorted(TERMINAL))
+    for row in db.execute("SELECT * FROM requests WHERE state IN (" + states + ") ORDER BY seq").fetchall():
+        if row["id"] not in active:
+            reclaim(row)
+
+
+def settle(db, row, opts, tip):
+    opts["retest_on_move"] = False
+    db.execute("UPDATE requests SET options=?,branch_tip=? WHERE id=?", (json.dumps(opts), tip, row["id"]))
+    snapshot(db)
+    reclaim(db.execute("SELECT * FROM requests WHERE id=?", (row["id"],)).fetchone())
+
+
 def recover_preparing(db):
     for row in db.execute("SELECT * FROM requests WHERE state='preparing' ORDER BY seq").fetchall():
         repo = ROOT / "repos" / row["id"]
@@ -521,6 +542,9 @@ def retest_moved(db):
             tip = current_tip(repo, cfg.get("landing_repo", opts.get("branch_source", row["source"])), cfg["landing_branch"], row["branch_tip"])
             if not tip or tip == row["branch_tip"]:
                 continue
+            if run(["git", "-C", str(repo), "merge-base", "--is-ancestor", row["original_sha"], tip]).returncode == 0:
+                settle(db, row, opts, tip)
+                continue
             db.execute("UPDATE requests SET branch_tip=? WHERE id=?", (tip, row["id"]))
             scratch = ROOT / "rebase" / row["id"]
             shutil.rmtree(scratch, ignore_errors=True)
@@ -541,6 +565,9 @@ def retest_moved(db):
                 snapshot(db)
                 continue
             sha = run(["git", "-C", str(scratch), "rev-parse", "HEAD"]).stdout.strip()
+            if sha == tip:
+                settle(db, row, opts, tip)
+                continue
             fetched = run(["git", "-C", str(repo), "fetch", "--quiet", str(scratch), sha])
             if fetched.returncode:
                 raise RuntimeError("cannot preserve rebased commit")
@@ -550,6 +577,8 @@ def retest_moved(db):
         except Exception as exc:
             db.execute("UPDATE requests SET state='conflict',error=?,finished=? WHERE id=?", (str(exc), time.time(), row["id"]))
             snapshot(db)
+        finally:
+            shutil.rmtree(ROOT / "rebase" / row["id"], ignore_errors=True)
 
 
 def serve():
@@ -588,6 +617,9 @@ def serve():
                 state, error = "failed", "service error: " + str(exc)
             if not STOP:
                 complete(worker_db, row, state, error)
+                reclaim(worker_db.execute("SELECT * FROM requests WHERE id=?", (row["id"],)).fetchone())
+            else:
+                shutil.rmtree(ROOT / "runs" / row["id"], ignore_errors=True)
         finally:
             worker_db.close()
     while not STOP:
@@ -614,6 +646,7 @@ def serve():
             thread.start()
         if time.time() - last_retest > 5:
             retest_moved(db)
+            reclaim_finished(db, active)
             last_retest = time.time()
         time.sleep(.2)
     for thread, _project in active.values():
