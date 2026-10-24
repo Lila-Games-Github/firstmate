@@ -273,10 +273,8 @@ SH
 # A stop has to land while a poll is IN FLIGHT, not only between polls: the
 # watcher runs each *.check.sh as a foreground child, so a supervisor's stop
 # arrives while bash is waiting on that child. The contract is that the watcher
-# still terminates on that first TERM and takes the check down with it - its stop
-# handler must not be swapped out or deferred for the length of the check. A
-# watcher that had to be forced would say so on reap's named line, which is
-# exactly what a reintroduced dropped-TERM window fails here.
+# terminates on that first TERM and takes the check down with it. A watcher that
+# had to be forced would say so on reap's named line.
 test_stop_terminates_a_poll_in_flight() {
   local dir state fakebin out pid checkpid i
   dir=$(make_case stop-in-flight); state="$dir/state"; fakebin="$dir/fakebin"

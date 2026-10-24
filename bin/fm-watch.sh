@@ -1691,34 +1691,7 @@ FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=
 FM_CHECK_RESULT=
-# The watcher's ONE stop path. A single handler stays installed for the whole
-# runtime and is never swapped out or re-armed, so there is no window in which a
-# stop signal finds any other disposition: a stop terminates immediately, except
-# inside the short window where bash must finish recording a check's process
-# group before an exit could still stop that check (see run_check_capture).
-# Inside that window the SAME handler records the request instead, and the frame
-# that opened the window honors it at its next safe point. The previous shape
-# installed a second, non-stopping handler across that window, so a TERM
-# delivered there was acted on only when the interrupted frame happened to reach
-# one specific check - a re-entrant contract that a stop signal must not depend
-# on. Re-entrancy is safe here under the firstmate-coding-guidelines rule for a
-# handler whose body is a flag store plus `exit`: it publishes nothing, appends
-# nothing, takes no lock, and stops no child.
-FM_WATCH_STOP_DEFERRED=0
-FM_WATCH_STOP_PENDING=0
-watcher_stop() {
-  if [ "$FM_WATCH_STOP_DEFERRED" -eq 1 ]; then
-    FM_WATCH_STOP_PENDING=1
-    return 0
-  fi
-  exit 1
-}
-
-# 0 when a stop arrived inside a deferred window, so its caller must stop at its
-# own next safe point instead of the handler having exited mid-handoff.
-watcher_stop_pending() {
-  [ "$FM_WATCH_STOP_PENDING" -eq 1 ]
-}
+FM_CHECK_SIGNAL_PENDING=
 
 fm_check_output_cleanup() {
   [ -z "$FM_CHECK_OUTPUT" ] || rm -f -- "$FM_CHECK_OUTPUT"
@@ -1756,26 +1729,21 @@ run_check_capture() {
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
-  # Defer only until the check's process group is recorded (watcher_stop above):
-  # an exit before FM_ACTIVE_CHECK_PID/PGID name it would leave the check
-  # running with nothing left to stop it. The stop handler itself is NOT
-  # replaced for this window - it stays the same handler and records the
-  # request, which the check below honors.
-  FM_WATCH_STOP_PENDING=0
-  FM_WATCH_STOP_DEFERRED=1
+  FM_CHECK_SIGNAL_PENDING=
+  trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
   set -m
   ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  FM_WATCH_STOP_DEFERRED=0
+  trap 'exit 1' HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
     return 1
   fi
-  watcher_stop_pending && exit 1
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
@@ -2140,7 +2108,7 @@ watcher_cleanup() {
   return "$cleanup_status"
 }
 trap watcher_cleanup EXIT
-trap watcher_stop HUP INT TERM
+trap 'exit 1' HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
