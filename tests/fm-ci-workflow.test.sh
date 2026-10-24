@@ -149,7 +149,7 @@ tests-portable-serial 30
 tests-herdr 75
 macos-stock-bash 25
 CAPS
-  pass "the already-measured lane bounds are unchanged"
+  pass "the measured lane bounds include stock Bash consumer headroom"
 }
 
 test_ci_matrices_match_executable_partitions() {
