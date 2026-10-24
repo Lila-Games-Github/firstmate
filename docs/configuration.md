@@ -6,6 +6,12 @@ The files and environment variables you set to operate firstmate.
 
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it like any prompt when the fleet is empty, or dispatch shared-repo edits to a crewmate while tasks are in flight.
 
+## Test service
+
+Per-project test commands and phones live in gitignored `config/test-service/<project>.json` under the effective `FM_HOME`.
+The private phone PIN file is `~/.config/firstmate/test-device-pins`, with mode 600 and no PIN in the repository.
+[`docs/test-service.md`](test-service.md) owns setup, worker usage, status output, and the full configuration example.
+
 ## Operational home layout and state
 
 This section is the single owner of the top-level operational-home layout; producer script headers and their help own exact child-file fields and mutation contracts.

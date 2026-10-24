@@ -1,0 +1,50 @@
+{
+  "prepare": [
+    "scripts/godot-automation.sh",
+    "--headless",
+    "--editor",
+    "--path",
+    "prototype-game",
+    "--quit"
+  ],
+  "suite": [
+    "prototype-game/tests/run_suite.sh"
+  ],
+  "max_concurrent": 4,
+  "device": [
+    "prototype-game/tests/e2e/run_device_flow.sh",
+    "--serial",
+    "{serial}"
+  ],
+  "scenarios": {
+    "expedition-overhaul": [
+      "--expedition-overhaul"
+    ],
+    "expedition-finale": [
+      "--expedition-finale"
+    ]
+  },
+  "phones": [
+    "R5CT32HRVNM",
+    "RZCX224VH4T",
+    "RZ8N71EC9ZB"
+  ],
+  "landing_branch": "proto/godot/frog-pile",
+  "repos": [
+    "frogpile",
+    "FrogPile",
+    "ProjectWhite"
+  ],
+  "any_phones": [
+    "R5CT32HRVNM",
+    "RZCX224VH4T"
+  ],
+  "equivalent_phones": {
+    "R5CT32HRVNM": [
+      "RZCX224VH4T"
+    ],
+    "RZCX224VH4T": [
+      "R5CT32HRVNM"
+    ]
+  }
+}
