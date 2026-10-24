@@ -1,0 +1,146 @@
+=== Both workers join the train (no firstmate message) ===
+$ fm-landing-queue.sh ready a --branch fm/a --head b656a46766402db494301bfd5c028c1c461e22a9
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=a
+    branch=fm/a
+    head=b656a46766402db494301bfd5c028c1c461e22a9
+    landing_branch=main
+    tip=eef09178073423dcbc05b8fde87cb769d450c063
+    place=1
+    target_ref=refs/heads/main
+    target_sha=eef09178073423dcbc05b8fde87cb769d450c063
+    rebase_from=eef09178073423dcbc05b8fde87cb769d450c063
+    status=needs-final
+    receipt=-
+    reason=-
+$ fm-landing-queue.sh ready b --branch fm/b --head c3371e5d2beaccec2ac5e3080542f6982228cd77
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=b
+    branch=fm/b
+    head=c3371e5d2beaccec2ac5e3080542f6982228cd77
+    landing_branch=main
+    tip=eef09178073423dcbc05b8fde87cb769d450c063
+    place=2
+    target_ref=refs/heads/fm/a
+    target_sha=b656a46766402db494301bfd5c028c1c461e22a9
+    rebase_from=eef09178073423dcbc05b8fde87cb769d450c063
+    status=needs-rebase
+    receipt=-
+    reason=-
+--- firstmate wake queue:
+    (empty)
+=== Worker b reads its own target and rebases onto car a ===
+$ fm-landing-queue.sh ready b --branch fm/b --head 12ce6b7eb4f2f7c3431be81fbcd5612b911f069c --target b656a46766402db494301bfd5c028c1c461e22a9
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=b
+    branch=fm/b
+    head=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c
+    landing_branch=main
+    tip=eef09178073423dcbc05b8fde87cb769d450c063
+    place=2
+    target_ref=refs/heads/fm/a
+    target_sha=b656a46766402db494301bfd5c028c1c461e22a9
+    rebase_from=b656a46766402db494301bfd5c028c1c461e22a9
+    status=needs-final
+    receipt=-
+    reason=-
+=== Worker b finishes its suite first: it waits, no wake ===
+$ fm-landing-queue.sh receipt b --head 12ce6b7eb4f2f7c3431be81fbcd5612b911f069c --target b656a46766402db494301bfd5c028c1c461e22a9 --receipt /tmp/tmp.a3Ni8JZlZY/b.r
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=b
+    branch=fm/b
+    head=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c
+    landing_branch=main
+    tip=eef09178073423dcbc05b8fde87cb769d450c063
+    place=2
+    target_ref=refs/heads/fm/a
+    target_sha=b656a46766402db494301bfd5c028c1c461e22a9
+    rebase_from=b656a46766402db494301bfd5c028c1c461e22a9
+    status=waiting-to-land
+    receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/ebd3922de5f985549d450e97dfb2ed72662bf80d.receipt
+    reason=-
+--- firstmate wake queue:
+    (empty)
+=== Worker a (bottom car) submits receipt: one ready-to-land wake ===
+$ fm-landing-queue.sh receipt a --head b656a46766402db494301bfd5c028c1c461e22a9 --target eef09178073423dcbc05b8fde87cb769d450c063 --receipt /tmp/tmp.a3Ni8JZlZY/a.r
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=a
+    branch=fm/a
+    head=b656a46766402db494301bfd5c028c1c461e22a9
+    landing_branch=main
+    tip=eef09178073423dcbc05b8fde87cb769d450c063
+    place=1
+    target_ref=refs/heads/main
+    target_sha=eef09178073423dcbc05b8fde87cb769d450c063
+    rebase_from=eef09178073423dcbc05b8fde87cb769d450c063
+    status=ready-to-land
+    receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/33657f56be7216bc57e990405812cd7ae2c903e4.receipt
+    reason=-
+--- firstmate wake queue:
+    check: landing-queue ready-to-land task=a project=/tmp/tmp.a3Ni8JZlZY/project landing=main tip=eef09178073423dcbc05b8fde87cb769d450c063 head=b656a46766402db494301bfd5c028c1c461e22a9 receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/33657f56be7216bc57e990405812cd7ae2c903e4.receipt reason=-
+=== Firstmate fast-forwards main to a (simulating fm-merge-local) and tears down a ===
+$ fm-landing-queue.sh status a
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=a
+    branch=fm/a
+    head=b656a46766402db494301bfd5c028c1c461e22a9
+    landing_branch=main
+    tip=b656a46766402db494301bfd5c028c1c461e22a9
+    place=0
+    target_ref=-
+    target_sha=-
+    rebase_from=eef09178073423dcbc05b8fde87cb769d450c063
+    status=landed
+    receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/33657f56be7216bc57e990405812cd7ae2c903e4.receipt
+    reason=-
+$ fm-landing-queue.sh status b
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=b
+    branch=fm/b
+    head=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c
+    landing_branch=main
+    tip=b656a46766402db494301bfd5c028c1c461e22a9
+    place=1
+    target_ref=refs/heads/main
+    target_sha=b656a46766402db494301bfd5c028c1c461e22a9
+    rebase_from=b656a46766402db494301bfd5c028c1c461e22a9
+    status=ready-to-land
+    receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/ebd3922de5f985549d450e97dfb2ed72662bf80d.receipt
+    reason=-
+--- firstmate wake queue:
+    check: landing-queue ready-to-land task=a project=/tmp/tmp.a3Ni8JZlZY/project landing=main tip=eef09178073423dcbc05b8fde87cb769d450c063 head=b656a46766402db494301bfd5c028c1c461e22a9 receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/33657f56be7216bc57e990405812cd7ae2c903e4.receipt reason=-
+    check: landing-queue ready-to-land task=b project=/tmp/tmp.a3Ni8JZlZY/project landing=main tip=b656a46766402db494301bfd5c028c1c461e22a9 head=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/ebd3922de5f985549d450e97dfb2ed72662bf80d.receipt reason=-
+=== Firstmate lands b; b observes landed ===
+$ fm-landing-queue.sh status b
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=b
+    branch=fm/b
+    head=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c
+    landing_branch=main
+    tip=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c
+    place=0
+    target_ref=-
+    target_sha=-
+    rebase_from=b656a46766402db494301bfd5c028c1c461e22a9
+    status=landed
+    receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/ebd3922de5f985549d450e97dfb2ed72662bf80d.receipt
+    reason=-
+=== Failure handoff: supervisor fails car c, worker c reads reason in a separate call ===
+$ fm-landing-queue.sh status c
+    queue=7f33d184af1473eaaf2153faf0fd651972eef295
+    task=c
+    branch=fm/c
+    head=9bd10a293bd328ebb2488a18463652149101ea53
+    landing_branch=main
+    tip=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c
+    place=0
+    target_ref=-
+    target_sha=-
+    rebase_from=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c
+    status=failed
+    receipt=-
+    reason=new-red: suite.x regressed
+--- firstmate wake queue:
+    check: landing-queue ready-to-land task=a project=/tmp/tmp.a3Ni8JZlZY/project landing=main tip=eef09178073423dcbc05b8fde87cb769d450c063 head=b656a46766402db494301bfd5c028c1c461e22a9 receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/33657f56be7216bc57e990405812cd7ae2c903e4.receipt reason=-
+    check: landing-queue ready-to-land task=b project=/tmp/tmp.a3Ni8JZlZY/project landing=main tip=b656a46766402db494301bfd5c028c1c461e22a9 head=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/ebd3922de5f985549d450e97dfb2ed72662bf80d.receipt reason=-
+    check: landing-queue failed task=c project=/tmp/tmp.a3Ni8JZlZY/project landing=main tip=12ce6b7eb4f2f7c3431be81fbcd5612b911f069c head=9bd10a293bd328ebb2488a18463652149101ea53 receipt=/tmp/tmp.a3Ni8JZlZY/home/data/landing-queue/7f33d184af1473eaaf2153faf0fd651972eef295/- reason=new-red: suite.x regressed
