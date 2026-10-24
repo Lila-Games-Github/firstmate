@@ -1,0 +1,4 @@
+ok - codex codex-cli 0.164.0 still publishes the hook feature flag firstmate disables
+ok - codex codex-cli 0.164.0 runs a firstmate crewmate launch with its hook layer disabled
+ok - codex codex-cli 0.164.0 runs a firstmate crewmate launch with the startup update prompt suppressed
+# all fm-codex-hook-layer-live-e2e tests passed

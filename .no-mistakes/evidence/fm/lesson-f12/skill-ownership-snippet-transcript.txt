@@ -1,0 +1,14 @@
+== task owned  (meta worktree=$SCRATCH/alias/wtA) ==
+pid=3413792
+raw_proc_cwd=$SCRATCH/real/wtA
+observed=$SCRATCH/real/wtA
+recorded=$SCRATCH/real/wtA
+(exit=0)
+== task foreign  (meta worktree=$SCRATCH/alias/wtA) ==
+pid=3413810
+raw_proc_cwd=$SCRATCH/real/wtB
+observed=$SCRATCH/real/wtB
+recorded=$SCRATCH/real/wtA
+(exit=0)
+== task bareshell  (meta worktree=$SCRATCH/alias/wtA) ==
+(exit=0)
