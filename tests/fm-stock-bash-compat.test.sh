@@ -100,6 +100,9 @@ case " $* " in
   *" FM_BEARINGS_TEST_ONLY=oversized-parsed-backlog "*)
     printf '%s\n' "$3" > "$FM_TEST_TIMEOUT_RECORD"
     ;;
+  *" FM_BEARINGS_TEST_SKIP_OVERSIZED=1 "*)
+    printf '%s\n' "$3" > "$FM_TEST_TIMEOUT_RECORD.suite"
+    ;;
 esac
 shift 3
 "$@"
@@ -120,6 +123,9 @@ SH
   assert_present "$record" "default oversized route did not receive a timeout bound"
   [ "$(cat "$record")" = 180 ] \
     || fail "default oversized route needs the proven 180s Bearings runner bound, got $(cat "$record")s"
+  assert_present "$record.suite" "default Bearings snapshot suite did not receive a timeout bound"
+  [ "$(cat "$record.suite")" = 420 ] \
+    || fail "default Bearings snapshot suite needs the 420s bound above its 231-349s macOS CI runtime, got $(cat "$record.suite")s"
   pass "stock Bash compatibility: oversized route uses the proven Bearings runner bound"
 }
 
