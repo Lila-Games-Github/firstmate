@@ -46,6 +46,7 @@ expect_field() {
   actual=$(printf '%s\n' "$output" | field "$key")
   [ "$actual" = "$expected" ] || fail "$key: expected $expected, got $actual"
 }
+wake_payloads() { cut -f5 "$CASE/home/state/.wake-queue"; }
 wake_count() { if [ -f "$CASE/home/state/.wake-queue" ]; then wc -l < "$CASE/home/state/.wake-queue" | tr -d ' '; else echo 0; fi; }
 
 make_case three-cars
@@ -184,7 +185,8 @@ out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/re
 expect_field "$out" status ready-to-land
 printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=new-red\n' "$(head_of a)" > "$CASE/new-red.receipt"
 out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/new-red.receipt")
-expect_field "$out" status needs-final
+expect_field "$out" status red-receipt
+expect_field "$out" reason 'receipt names failures outside the landing-health baseline'
 [ "$(wake_count)" = 1 ] || fail 'new failures emitted readiness'
 out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
 expect_field "$out" status ready-to-land
@@ -221,3 +223,66 @@ expect_code 143 "$rc" 'signal barrage must preserve the protected shutdown resul
 expect_field "$(queue status a)" status needs-final
 if find "$CASE/home/data/landing-queue" -name '.queue.*' | grep -q .; then fail 'signal left a snapshot publisher temp'; fi
 pass 'repeated shutdown signals preserve the snapshot and release both locks for the next worker'
+
+make_case red-without-baseline
+car a main; join a >/dev/null; prepare a
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$(head_of a)" > "$CASE/red.receipt"
+out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
+expect_field "$out" status needs-baseline
+expect_field "$out" reason 'landing tip has no recorded landing-health baseline'
+for id in a a; do queue status "$id" >/dev/null; done
+[ "$(wake_count)" = 1 ] || fail 'missing baseline did not emit exactly one wake'
+case "$(wake_payloads)" in
+  "check: landing-queue needs-baseline task=a "*"tip=$BASE "*) ;;
+  *) fail "unexpected baseline wake: $(wake_payloads)" ;;
+esac
+health_key=$(printf '%s\n%s\n' "$CASE/project" main | git hash-object --stdin)
+mkdir -p "$CASE/home/data/landing-health"
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" \
+  > "$CASE/home/data/landing-health/$health_key.receipt"
+expect_field "$(queue status a)" status ready-to-land
+[ "$(wake_count)" = 2 ] || fail 'recorded baseline did not ring readiness'
+pass 'a red receipt on an unrecorded red tip wakes firstmate once instead of demanding reruns'
+
+make_case red-receipt-fix
+car a main; join a >/dev/null; prepare a
+health_key=$(printf '%s\n%s\n' "$CASE/project" main | git hash-object --stdin)
+mkdir -p "$CASE/home/data/landing-health"
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$BASE" > "$CASE/home/data/landing-health/$health_key.receipt"
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=new-red\n' "$(head_of a)" > "$CASE/red.receipt"
+out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
+expect_field "$out" status red-receipt
+expect_field "$(queue status a)" status red-receipt
+[ "$(wake_count)" = 0 ] || fail 'a worker-owned regression woke firstmate'
+git -C "$CASE/a" commit -qm fix --allow-empty
+expect_field "$(queue status a)" status needs-final
+receipt a >/dev/null
+expect_field "$(queue status a)" status ready-to-land
+pass 'a regression receipt stays with the worker until a fixed head is finalized'
+
+make_case landed-then-deleted
+car a main; join a >/dev/null; prepare a; receipt a >/dev/null
+git -C "$CASE/project" merge -q --ff-only fm/a
+git -C "$CASE/project" worktree remove "$CASE/a"
+git -C "$CASE/project" branch -D fm/a >/dev/null
+out=$(queue status a)
+expect_field "$out" status landed
+expect_field "$out" reason -
+[ "$(wake_count)" = 1 ] || fail 'a landed and deleted branch emitted a failure wake'
+pass 'a branch deleted after landing reconciles as landed rather than failed'
+
+make_case distinct-reasons
+car a main; join a >/dev/null
+car b main; join b >/dev/null
+git -C "$CASE/project" worktree remove "$CASE/b"
+git -C "$CASE/project" branch -D fm/b >/dev/null
+out=$(queue fail a --reason 'suite failed')
+expect_field "$out" status failed
+expect_field "$out" reason 'suite failed'
+expect_field "$(queue status b)" status failed
+[ "$(wake_count)" = 2 ] || fail 'expected one failure wake per car'
+wake_payloads | grep -qx 'check: landing-queue failed task=a .* reason=suite failed' \
+  || fail "explicit failure reason missing: $(wake_payloads)"
+wake_payloads | grep -qx 'check: landing-queue failed task=b .* reason=local branch missing' \
+  || fail "missing-branch reason misattributed: $(wake_payloads)"
+pass 'one invocation attributes explicit and missing-branch failure reasons to their own cars'

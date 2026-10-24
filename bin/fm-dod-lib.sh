@@ -350,9 +350,11 @@ landing_queue() {
    Submit with \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
    A changed head or target refuses the receipt: read status, prepare the new target, and rerun the suite on the new head.
    If your car fails, record \`landing_queue fail --reason <failure>\` before reporting \`failed:\` and stopping.
-4. At \`waiting-to-land\` or \`ready-to-land\`, keep checking status every 30 seconds and read your steering inbox at those checkpoints.
-   The tool emits the readiness wake only for the bottom car with a valid receipt; do not add a ready \`done:\` or ask firstmate to coordinate the queue.
-   Firstmate rechecks queue status, applies the existing merge authority, runs \`bin/fm-merge-local.sh\` with the current receipt, and pushes when authorized.
+   At \`red-receipt\`, do not rerun the suite on the same head: fix the failures its \`reason\` names in a new commit and finalize again, or record the failure as above.
+   At \`failed\`, report \`failed:\` with the status \`reason\` and stop.
+4. At \`waiting-to-land\`, \`ready-to-land\`, or \`needs-baseline\`, keep checking status every 30 seconds and read your steering inbox at those checkpoints.
+   The tool emits the readiness or baseline wake only for the bottom car with a valid receipt; do not add a ready \`done:\` or ask firstmate to coordinate the queue.
+   Firstmate handles those wakes under the existing merge authority; \`$root/.agents/skills/landing-queue/SKILL.md\` owns that procedure.
    A changed target returns you to preparation; at \`landed\`, append \`done: landed {branch} at {head}\` and stop.
 EOF
 }

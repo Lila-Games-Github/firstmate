@@ -13,7 +13,8 @@
 # After rebasing, repeat ready with --target from status to acknowledge the new
 # base. The target must still be current and an ancestor of the submitted head.
 # status reconciles the whole queue and prints this car as key=value lines:
-# place (bottom=1), target_ref, target_sha, rebase_from, head, status, receipt.
+# place (bottom=1), target_ref, target_sha, rebase_from, head, status, receipt,
+# and reason (this invocation's failure or red-receipt reason, else '-').
 # Use git rebase --onto <target_sha> <rebase_from> when the base changes, retaining
 # only this car's commits, then ready --target before the exact-head suite.
 # receipt requires --head, --target and --receipt. It snapshots an fm-full-suite.v1
@@ -21,7 +22,8 @@
 # A target/head race refuses the submission; status then supplies the new work.
 # fail removes a car from the active train with --reason; it cannot silently
 # rejoin. Start a new task id after resolving a failed car. Landed ids also stay
-# terminal. Missing branches become failed cars on reconciliation.
+# terminal. A missing branch whose recorded head is in the landing tip is landed;
+# any other missing branch becomes a failed car on reconciliation.
 #
 # Durable format: data/landing-queue/<hash>/queue is a versioned TSV snapshot,
 # identified by the canonical common Git directory and landing branch. Rows in
@@ -33,10 +35,15 @@
 # and invalidates receipts after head/target changes. Landing an unchanged lower
 # car preserves the next car's exact-SHA receipt. Failed cars are skipped; their
 # successors retain rebase_from so they can drop the failed car's commits.
-# Only ready-to-land (bottom, acceptable receipt, fast-forward of the live tip)
-# and failed transitions append durable check wakes, deduplicated per event.
 # Known-red acceptance uses the current landing-health baseline, as the local
-# merge gate does. A wake is an event: firstmate rechecks status before acting.
+# merge gate does. A red bottom receipt is needs-baseline when the live tip has
+# no recorded baseline, or red-receipt when it names failures outside that
+# baseline; neither demands another suite run on the same head. red-receipt is
+# the worker's to fix on a new head or fail.
+# Only ready-to-land (bottom, acceptable receipt, fast-forward of the live tip),
+# needs-baseline, and failed transitions append durable `check: landing-queue`
+# wakes, deduplicated per event. A wake is an event: firstmate rechecks status
+# before acting, following the landing-queue agent skill.
 # Only firstmate invokes fm-merge-local.sh and pushes, subject
 # to the existing merge authority. Workers keep checking status while waiting;
 # this tool has no daemon and never sends steering messages.
@@ -116,7 +123,7 @@ trap cleanup EXIT
 trap 'trap "" TERM INT HUP; exit 143' TERM INT HUP
 fm_lock_acquire_wait "$LOCK"
 FILE="$DIR/queue"
-ids=() branches=() heads=() states=() bases=() receipts=() targets=() notified=()
+ids=() branches=() heads=() states=() bases=() receipts=() targets=() notified=() reasons=()
 count=0 found=-1 joined=0
 if [ -e "$FILE" ]; then
   [ -f "$FILE" ] && [ ! -L "$FILE" ] || die 'invalid queue snapshot'
@@ -140,6 +147,7 @@ if [ -e "$FILE" ]; then
       done
       ids[count]=$row_id branches[count]=$row_branch heads[count]=$row_head states[count]=$row_state
       bases[count]=$row_base receipts[count]=$row_receipt targets[count]=$row_target notified[count]=$row_notified
+      reasons[count]=-
       if [ "$row_id" = "$ID" ]; then found=$count; fi
       count=$((count + 1))
     done
@@ -167,7 +175,14 @@ refresh() {
   TIP=$(resolve "$LANDING") || die "landing branch disappeared: $LANDING"
   for ((i=0; i<count; i++)); do
     [ "${states[i]}" = active ] || continue
-    live=$(resolve "${branches[i]}") || { states[i]=failed; continue; }
+    if ! live=$(resolve "${branches[i]}"); then
+      if git -C "$PROJECT" merge-base --is-ancestor "${heads[i]}" "$TIP"; then
+        states[i]=landed
+      else
+        states[i]=failed reasons[i]='local branch missing' receipts[i]=- targets[i]=-
+      fi
+      continue
+    fi
     if [ "$live" != "${heads[i]}" ]; then receipts[i]=-; targets[i]=-; fi
     heads[i]=$live
     if git -C "$PROJECT" merge-base --is-ancestor "$live" "$TIP"; then states[i]=landed; fi
@@ -185,7 +200,7 @@ if [ "$ACTION" = ready ]; then
     found=$count
     ids[count]=$ID branches[count]=$BRANCH heads[count]=$HEAD states[count]=active
     bases[count]=$(git -C "$PROJECT" merge-base "$HEAD" "$TIP") || die 'task and landing branch have no common base'
-    receipts[count]=- targets[count]=- notified[count]=-
+    receipts[count]=- targets[count]=- notified[count]=- reasons[count]=-
     count=$((count + 1))
     joined=1
   else
@@ -248,7 +263,7 @@ case "$ACTION" in
   fail)
     [ -n "$REASON" ] || die 'fail requires --reason'
     [ "${states[found]}" != landed ] || die 'cannot fail a landed car'
-    states[found]=failed
+    states[found]=failed reasons[found]=$REASON
     receipts[found]=- targets[found]=-
     ;;
 esac
@@ -261,9 +276,10 @@ for ((i=0; i<count; i++)); do
     fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}"
     if [ "$FM_HEALTH_COUNT" -gt 0 ]; then
       incoming=$FM_HEALTH_SET
-      if ! fm_health_receipt_read "$DATA/landing-health/$HEALTH_KEY.receipt" "$TIP" >/dev/null 2>&1 \
-        || [ -n "$(LC_ALL=C comm -23 <(printf '%s\n' "$incoming") <(printf '%s\n' "$FM_HEALTH_SET"))" ]; then
-        statuses[i]=needs-final
+      if ! fm_health_receipt_read "$DATA/landing-health/$HEALTH_KEY.receipt" "$TIP" >/dev/null 2>&1; then
+        statuses[i]=needs-baseline reasons[i]='landing tip has no recorded landing-health baseline'
+      elif [ -n "$(LC_ALL=C comm -23 <(printf '%s\n' "$incoming") <(printf '%s\n' "$FM_HEALTH_SET"))" ]; then
+        statuses[i]=red-receipt reasons[i]='receipt names failures outside the landing-health baseline'
       fi
     fi
   fi
@@ -275,18 +291,16 @@ fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=1
 for ((i=0; i<count; i++)); do
   case "${statuses[i]}" in
-    ready-to-land|failed) ;;
+    ready-to-land|needs-baseline|failed) ;;
     landed) continue ;;
     *) notified[i]=-; continue ;;
   esac
   event_tip=-
-  [ "${statuses[i]}" != ready-to-land ] || event_tip=$TIP
-  event=$(printf '%s\n' "${ids[i]}" "${statuses[i]}" "${heads[i]}" "$event_tip" | git hash-object --stdin)
+  [ "${statuses[i]}" = failed ] || event_tip=$TIP
+  event=$(printf '%s\n' "${ids[i]}" "${statuses[i]}" "${heads[i]}" "$event_tip" "${receipts[i]}" | git hash-object --stdin)
   if [ "${notified[i]}" != "$event" ]; then
-    event_reason=$REASON
-    if [ "${statuses[i]}" = failed ] && [ -z "$event_reason" ]; then event_reason='local branch missing'; fi
     fm_wake_append_locked check "landing-queue-$KEY" \
-      "landing-queue ${statuses[i]} task=${ids[i]} project=$PRIMARY landing=$LANDING head=${heads[i]} receipt=$DIR/${receipts[i]} reason=$event_reason"
+      "check: landing-queue ${statuses[i]} task=${ids[i]} project=$PRIMARY landing=$LANDING tip=$TIP head=${heads[i]} receipt=$DIR/${receipts[i]} reason=${reasons[i]}"
     notified[i]=$event
   fi
 done
@@ -298,3 +312,4 @@ printf 'queue=%s\ntask=%s\nbranch=%s\nhead=%s\nlanding_branch=%s\ntip=%s\nplace=
   "$KEY" "$ID" "${branches[found]}" "${heads[found]}" "$LANDING" "$TIP" "${places[found]}" \
   "${target_refs[found]}" "${target_shas[found]}" "${bases[found]}" "${statuses[found]}"
 if [ "${receipts[found]}" = - ]; then printf 'receipt=-\n'; else printf 'receipt=%s/%s\n' "$DIR" "${receipts[found]}"; fi
+printf 'reason=%s\n' "${reasons[found]}"
