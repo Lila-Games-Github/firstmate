@@ -66,11 +66,14 @@ fm_control_harnesses() {
 }
 
 fm_control_harness_supported() {  # <harness>
-  local harness
+  # Read the whole list before answering: returning mid-loop closes the pipe
+  # while the producer may still be writing, which races a "Broken pipe" error
+  # onto stderr.
+  local harness found=1
   while read -r harness; do
-    [ "$harness" = "${1-}" ] && return 0
+    [ "$harness" = "${1-}" ] && found=0
   done < <(fm_control_harnesses)
-  return 1
+  return "$found"
 }
 
 # The verified adapter a RECORDED harness value belongs to. Every table below
