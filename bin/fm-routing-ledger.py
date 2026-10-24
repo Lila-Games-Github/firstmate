@@ -2,10 +2,12 @@
 """Append task routing evidence and summarize it. See docs/configuration.md."""
 
 import argparse
+from contextlib import closing
 import datetime as dt
 import json
 import os
 from pathlib import Path
+import sqlite3
 import statistics
 
 if os.name == "nt":
@@ -16,6 +18,7 @@ else:
 
 ROOT = Path(__file__).resolve().parent.parent
 PRICES = ROOT / "bin" / "fm-routing-prices.json"
+SIGNALS = {"captain-correction": "captain_corrected", "review-rejection": "captain_rejected"}
 
 
 def fields(path):
@@ -50,14 +53,88 @@ def unlock_ledger(stream):
 def event_counts(path):
     lines = path.read_text(errors="replace").splitlines() if path.is_file() else []
     return {
-        "validation_rounds": sum("validation" in x.lower() and "round" in x.lower() for x in lines),
-        "failed_rounds": sum("failed" in x.lower() and ("test" in x.lower() or "validation" in x.lower()) for x in lines),
         "needs_decision_count": sum(x.startswith("needs-decision") for x in lines),
         "blocked_count": sum(x.startswith("blocked:") for x in lines),
         "stale_wake_count": sum("stale wake" in x.lower() for x in lines),
-        "captain_rejection_count": sum("captain rejected" in x.lower() for x in lines),
-        "captain_correction_count": sum("captain correction" in x.lower() for x in lines),
     }
+
+
+def learning_candidates(state):
+    """Map each origin task to its captured candidate ids and signal types."""
+    directory = Path(state) / "learning-candidates"
+    tasks = {}
+    unreadable = 0
+    if not directory.is_dir():
+        return tasks, "learning-candidate store absent"
+    for path in directory.glob("*.json"):
+        try:
+            item = json.loads(path.read_text())
+        except (OSError, ValueError):
+            unreadable += 1
+            continue
+        if not isinstance(item, dict):
+            unreadable += 1
+            continue
+        incident = item.get("incident") if isinstance(item.get("incident"), dict) else {}
+        task = incident.get("origin_task") or item.get("origin_task")
+        if not isinstance(task, str):
+            unreadable += 1
+            continue
+        entry = tasks.setdefault(task, {"ids": set(), "signals": set()})
+        entry["ids"].add(item.get("id", path.name.split(".", 1)[0]))
+        if incident.get("signal_type"):
+            entry["signals"].add(incident["signal_type"])
+    return tasks, ("%d learning-candidate record(s) unreadable" % unreadable if unreadable else None)
+
+
+def signal_outcome(entry, store_reason):
+    signals = entry["signals"] if entry else set()
+    result = {}
+    for signal, key in SIGNALS.items():
+        if signal in signals:
+            result[key] = True
+        else:
+            result[key] = None
+            result[key + "_reason"] = store_reason or ("no %s learning candidate captured for task" % signal)
+    return result
+
+
+def pipeline_rounds(meta, task_id, started):
+    """Count review/fix rounds and failed steps from no-mistakes run records."""
+    unknown = lambda reason: {"validation_runs": None, "validation_rounds": None, "failed_rounds": None,
+                              "pipeline": {"run_ids": [], "reason": reason}}
+    if started is None:
+        return unknown("start time absent from legacy metadata")
+    project = meta.get("project")
+    if not project:
+        return unknown("project absent from task metadata")
+    root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
+    database = root / "state.sqlite"
+    if not database.is_file():
+        return unknown("no-mistakes run records absent")
+    try:
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            repos = [row[0] for row in db.execute("SELECT id, working_path FROM repos")
+                     if os.path.realpath(row[1]) == os.path.realpath(project)]
+            if not repos:
+                return unknown("project has no no-mistakes repository record")
+            marks = ",".join("?" * len(repos))
+            runs = [row[0] for row in db.execute(
+                "SELECT id FROM runs WHERE repo_id IN (%s) AND branch = ? AND created_at >= ? "
+                "ORDER BY created_at, id" % marks, (*repos, "fm/" + task_id, int(started)))]
+            if not runs:
+                return unknown("no no-mistakes run recorded for the task branch")
+            marks = ",".join("?" * len(runs))
+            fixes = db.execute(
+                "SELECT COUNT(*) FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id "
+                "WHERE s.run_id IN (%s) AND r.trigger_type = 'auto_fix'" % marks, runs).fetchone()[0]
+            failed = db.execute(
+                "SELECT COUNT(*) FROM step_results WHERE run_id IN (%s) AND status = 'failed'" % marks,
+                runs).fetchone()[0]
+    except sqlite3.Error as error:
+        return unknown("no-mistakes run records unreadable: %s" % error)
+    return {"validation_runs": len(runs), "validation_rounds": fixes, "failed_rounds": failed,
+            "pipeline": {"run_ids": runs, "reason": None}}
 
 
 def session_paths(meta, started, harness):
@@ -250,16 +327,8 @@ def record(args):
     state = Path(args.state)
     data = Path(args.data)
     status = event_counts(state / (args.id + ".status"))
-    candidate_dir = state / "learning-candidates"
-    candidates = []
-    if candidate_dir.is_dir():
-        for path in candidate_dir.glob("*.json"):
-            try:
-                item = json.loads(path.read_text())
-                if item.get("origin_task") == args.id or (item.get("incident") or {}).get("origin_task") == args.id:
-                    candidates.append(item.get("id", path.stem))
-            except (OSError, ValueError):
-                pass
+    candidates, store_reason = learning_candidates(state)
+    entry = candidates.get(args.id)
     row = {
         "schema": 1, "task_id": args.id, "instance_id": meta.get("routing_instance_id", meta.get("spawn_gen")),
         "project": meta.get("project"),
@@ -272,10 +341,9 @@ def record(args):
         "started_at": iso(start) if start is not None else None,
         "ended_at": iso(end), "wall_seconds": round(end - start, 3) if start is not None else None,
         "outcome": {"landed": args.outcome == "landed", "method": args.method,
-                    "captain_rejected": status.pop("captain_rejection_count") > 0,
-                    "captain_corrected": status.pop("captain_correction_count") > 0},
-        **status, "relaunches": int(meta.get("routing_relaunches", "0")),
-        "learning_candidates": sorted(candidates),
+                    **signal_outcome(entry, store_reason)},
+        **status, **pipeline_rounds(meta, args.id, start), "relaunches": int(meta.get("routing_relaunches", "0")),
+        "learning_candidates": sorted(entry["ids"]) if entry else [],
         "cost": cost(meta, start) if start is not None else
         {"sessions": [], "usd_estimate": None, "reason": "start time absent from legacy metadata"},
     }
@@ -299,20 +367,26 @@ def record(args):
 
 def summary(args):
     ledger = Path(args.data) / "routing-ledger.jsonl"
+    candidates, _ = learning_candidates(args.state) if args.state else ({}, None)
     groups = {}
     if ledger.is_file():
         for line in ledger.read_text().splitlines():
             row = json.loads(line)
             if args.from_date <= row["ended_at"][:10] <= args.to_date:
                 groups.setdefault(row["routing"]["rule"], []).append(row)
-    print("rule\ttasks\tlanded_share\tmedian_rounds\tcost_coverage\tmedian_cost_usd\tcost_per_landing_usd")
+    print("rule\ttasks\tlanded_share\tmedian_rounds\trejected_or_corrected\tcost_coverage\tmedian_cost_usd\tcost_per_landing_usd")
     for rule, rows in sorted(groups.items()):
         landed = sum(x["outcome"]["landed"] for x in rows)
         costs = [x["cost"]["usd_estimate"] for x in rows]
         known = [x for x in costs if x is not None]
+        rounds = [x.get("validation_rounds") for x in rows if isinstance(x.get("validation_rounds"), int)]
+        flagged = 0
+        for x in rows:
+            later = signal_outcome(candidates.get(x["task_id"]), None)
+            flagged += any(x["outcome"].get(key) is True or later[key] is True for key in SIGNALS.values())
         median = lambda values: format(statistics.median(values), "g") if values else "null"
         per_landing = str(round(sum(known) / landed, 8)) if landed and len(known) == len(rows) else "null"
-        print(f"{rule}\t{len(rows)}\t{landed / len(rows):.3f}\t{median([x['validation_rounds'] for x in rows])}\t{len(known)}/{len(rows)}\t{median(known)}\t{per_landing}")
+        print(f"{rule}\t{len(rows)}\t{landed / len(rows):.3f}\t{median(rounds)}\t{flagged}\t{len(known)}/{len(rows)}\t{median(known)}\t{per_landing}")
 
 
 def main():
@@ -325,6 +399,7 @@ def main():
     write.add_argument("--method", choices=("pr-merge", "local-landing", "scout-report", "secondmate-retired", "discarded", "unknown"), required=True)
     view = sub.add_parser("summary")
     view.add_argument("--data", required=True)
+    view.add_argument("--state")
     view.add_argument("--from", dest="from_date", required=True)
     view.add_argument("--to", dest="to_date", required=True)
     args = parser.parse_args()

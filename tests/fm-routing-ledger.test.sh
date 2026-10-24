@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Behavioral usage fixtures for Pi, Codex, Claude, missing usage, and summary.
+# Behavioral usage fixtures for Pi, Codex, Claude, missing usage, outcome
+# producers (learning candidates and no-mistakes run records), and summary.
 set -eu
 
 # shellcheck source=tests/lib.sh
@@ -8,8 +9,9 @@ set -eu
 LAB=$(fm_test_tmproot fm-routing-ledger)
 trap 'rm -rf "$LAB"' EXIT
 TOOL="$ROOT/bin/fm-routing-ledger.py"
-mkdir -p "$LAB/state" "$LAB/data" "$LAB/wt"
+mkdir -p "$LAB/state" "$LAB/data" "$LAB/wt" "$LAB/project" "$LAB/nm"
 STAMP=$(date +%s)
+export NM_HOME="$LAB/nm"
 
 make_meta() {
   local task=$1 harness=$2 usage=$3 model=$4
@@ -52,15 +54,43 @@ working: stale wake recovered
 working: captain correction recorded
 EOF
 mkdir -p "$LAB/state/learning-candidates"
-printf '%s\n' '{"id":"lc-example","incident":{"origin_task":"pi-task"}}' > "$LAB/state/learning-candidates/lc-example.unresolved.json"
+printf '%s\n' '{"id":"lc-example","incident":{"origin_task":"pi-task","signal_type":"captain-correction"}}' > "$LAB/state/learning-candidates/lc-example.unresolved.json"
+python3 - "$LAB/nm/state.sqlite" "$LAB/project" "$STAMP" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+project, stamp = sys.argv[2], int(sys.argv[3])
+db.executescript("""
+CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT);
+CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT, branch TEXT, created_at INTEGER);
+CREATE TABLE step_results (id TEXT PRIMARY KEY, run_id TEXT, step_name TEXT, status TEXT);
+CREATE TABLE step_rounds (id TEXT PRIMARY KEY, step_result_id TEXT, round INTEGER, trigger_type TEXT);
+""")
+db.execute("INSERT INTO repos VALUES ('repo', ?)", (project,))
+db.executemany("INSERT INTO runs VALUES (?, 'repo', ?, ?)", [
+    ("old", "fm/pi-task", stamp - 100), ("r1", "fm/pi-task", stamp + 1),
+    ("r2", "fm/pi-task", stamp + 2), ("other", "fm/codex-task", stamp + 1)])
+db.executemany("INSERT INTO step_results VALUES (?, ?, ?, ?)", [
+    ("s-old", "old", "review", "failed"), ("s1", "r1", "review", "completed"),
+    ("s2", "r1", "test", "failed"), ("s3", "r2", "review", "completed"),
+    ("s4", "other", "test", "failed")])
+db.executemany("INSERT INTO step_rounds VALUES (?, ?, ?, ?)", [
+    ("o1", "s-old", 2, "auto_fix"), ("x1", "s1", 1, "initial"), ("x2", "s1", 2, "auto_fix"),
+    ("x3", "s1", 3, "auto_fix"), ("x4", "s3", 1, "initial"), ("x5", "s4", 2, "auto_fix")])
+db.commit()
+PY
 record pi-task
 jq -e '.cost.usd_estimate == 0.006 and .cost.sessions[0].raw.dollars == 0.006
-  and .validation_rounds == 1 and .failed_rounds == 1 and .needs_decision_count == 1
+  and .needs_decision_count == 1
   and .blocked_count == 1 and .stale_wake_count == 1
   and .wall_seconds >= 0
   and .outcome.captain_corrected == true and .learning_candidates == ["lc-example"]' \
   "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "Pi runtime dollars missing"
-pass "Pi dollar usage survives in ledger"
+jq -e '.outcome.captain_rejected == null and .outcome.captain_rejected_reason != null' \
+  "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "an uncaptured review rejection was recorded as known"
+jq -e '.validation_runs == 2 and .validation_rounds == 2 and .failed_rounds == 1
+  and .pipeline.run_ids == ["r1","r2"] and .pipeline.reason == null' \
+  "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "pipeline run records were not counted for the task incarnation"
+pass "Pi dollar usage, captured corrections, and pipeline rounds survive in ledger"
 
 cat > "$LAB/codex.jsonl" <<EOF
 {"type":"session_meta","payload":{"cwd":"$LAB/wt"}}
@@ -111,6 +141,18 @@ record missing-task
 record missing-task
 jq -es 'map(select(.task_id == "missing-task")) | length == 1 and .[0].cost.usd_estimate == null and .[0].cost.reason != null' \
   "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "unreadable usage was omitted or duplicated"
+jq -es 'map(select(.task_id == "missing-task")) | .[0] |
+  .outcome.captain_corrected == null and .outcome.captain_rejected == null
+  and .outcome.captain_corrected_reason != null and .learning_candidates == []
+  and .validation_rounds == null and .failed_rounds == null and .validation_runs == null
+  and .pipeline.reason == "no no-mistakes run recorded for the task branch"' \
+  "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "absent outcome producers were recorded as a guessed value"
+NM_HOME="$LAB/no-nm" python3 "$TOOL" record --meta "$LAB/state/missing-task.meta" --state "$LAB/no-state" \
+  --data "$LAB/data-absent" --id missing-task --outcome not-landed --method unknown
+jq -e '.outcome.captain_corrected == null
+  and .outcome.captain_corrected_reason == "learning-candidate store absent"
+  and .validation_rounds == null and .pipeline.reason == "no-mistakes run records absent"' \
+  "$LAB/data-absent/routing-ledger.jsonl" >/dev/null || fail "unreadable outcome producers lacked a null reason"
 printf '%s\n' 'routing_instance_id=second' >> "$LAB/state/missing-task.meta"
 record missing-task
 jq -es 'map(select(.task_id == "missing-task")) | length == 2' \
@@ -126,6 +168,15 @@ jq -e 'select(.task_id == "rerun-task") |
 pass "Missing relaunch usage prevents a complete cost estimate"
 
 out=$(python3 "$TOOL" summary --data "$LAB/data" --from 2026-01-01 --to 2027-01-01)
-printf '%s\n' "$out" | grep -F $'rule_1\t8\t1.000\t0\t5/8\t0.00662\tnull' >/dev/null \
-  || fail "summary treated missing usage as zero cost"
+printf '%s\n' "$out" | grep -F $'rule_1\t8\t1.000\t1.5\t1\t5/8\t0.00662\tnull' >/dev/null \
+  || fail "summary treated missing usage as zero cost: $out"
 pass "Summary groups by rule and preserves incomplete cost"
+
+printf '%s\n' '{"id":"lc-later","incident":{"origin_task":"codex-task","signal_type":"review-rejection"}}' \
+  > "$LAB/state/learning-candidates/lc-later.dismissed.json"
+out=$(python3 "$TOOL" summary --data "$LAB/data" --state "$LAB/state" --from 2026-01-01 --to 2027-01-01)
+printf '%s\n' "$out" | grep -F $'rule_1\t8\t1.000\t1.5\t2\t5/8\t0.00662\tnull' >/dev/null \
+  || fail "summary did not join a correction captured after teardown: $out"
+jq -es 'map(select(.task_id == "codex-task")) | .[0].outcome.captain_rejected == null' \
+  "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "summary rewrote the teardown snapshot"
+pass "Summary joins later learning candidates by task id without rewriting the ledger"
