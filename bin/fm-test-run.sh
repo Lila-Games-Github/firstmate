@@ -1275,7 +1275,7 @@ for filename in files:
     if lane not in members:
         raise ValueError(f"{filename}: unknown portable lane {lane}")
     rows = doc.get("scripts", [])
-    if {row["path"] for row in rows} == members[lane] and all(row.get("exit") == 0 and not row.get("gate_skip") for row in rows):
+    if {row["path"] for row in rows} == members[lane] and all(row.get("exit") == 0 for row in rows):
         complete.add(lane)
     for row in rows:
         if row.get("exit") != 0 or row.get("gate_skip") or row["path"] not in members[lane]:

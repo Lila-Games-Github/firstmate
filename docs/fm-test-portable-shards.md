@@ -73,7 +73,7 @@ bin/fm-test-run.sh --headroom-report 600000 1800000 18000 /tmp/fm-timing/fm-test
 ```
 
 The report prints the tightest current lane's summed hints, an estimate that raises any script with a larger completed measurement to that measurement, overhead, cap, and remaining milliseconds, plus at most five largest measured minus hinted script drifts.
-It also names lanes without a complete successful artifact from the supplied cohort; use a complete green run before treating the measured drift ranking as comprehensive.
+It also names lanes without a complete successful artifact from the supplied cohort; a capability gate-skip with exit 0 still counts as covered but contributes no measurement. Use a complete green run before treating the measured drift ranking as comprehensive.
 The estimate uses current memberships and hints, so use artifacts from the same revision when deciding whether to refresh hints.
 Neither the report nor a positive estimate proves a future run will fit under the cap; refresh hints from several successful runs and review observed job spans before a cap or lane-count decision.
 Refresh `portable_parallel_weight_hints` with the slowest completed `duration_ms` per script from several green CI runs' `fm-test-timing-portable-parallel-*` artifacts whenever the parallel set gains scripts or a member grows materially.

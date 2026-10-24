@@ -1760,6 +1760,35 @@ PY
   pass "headroom report uses current memberships, timing records, and cap inputs"
 }
 
+test_headroom_report_gate_skip_is_complete() {
+  local tmp out lane skipped
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-headroom-skip.XXXXXX")
+  lane=portable-parallel-2
+  "$RUNNER" --list --lane "$lane" >"$tmp/members"
+  skipped=$(head -n 1 "$tmp/members")
+  python3 - "$tmp/lane.json" "$lane" "$skipped" "$tmp/members" <<'PY'
+import json, sys
+out, lane, skipped, members = sys.argv[1:]
+rows = []
+for path in open(members, encoding="utf-8").read().split():
+    if path == skipped:
+        rows.append({"path": path, "duration_ms": 9000000, "exit": 0, "gate_skip": True})
+    else:
+        rows.append({"path": path, "duration_ms": 1, "exit": 0, "gate_skip": False})
+with open(out, "w", encoding="utf-8") as output:
+    json.dump({"selection": f"lane={lane}", "scripts": rows}, output)
+PY
+  out=$("$RUNNER" --headroom-report 600000 1800000 18000 "$tmp/lane.json") \
+    || { rm -rf "$tmp"; fail "headroom report failed with a gate-skipped row"; }
+  assert_contains "$out" "complete_artifacts=1/" "a green lane with a gate-skipped script counts as complete"
+  case "$out" in
+    *"FM_TEST_HEADROOM_INCOMPLETE"*"$lane"*) rm -rf "$tmp"; fail "gate-skipped green lane reported incomplete: $out" ;;
+    *"measured_ms=9000000"*) rm -rf "$tmp"; fail "gate-skipped duration must not count as a measurement: $out" ;;
+  esac
+  rm -rf "$tmp"
+  pass "headroom report treats gate-skipped green rows as covered but unmeasured"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1800,3 +1829,4 @@ test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
 test_headroom_report
+test_headroom_report_gate_skip_is_complete
