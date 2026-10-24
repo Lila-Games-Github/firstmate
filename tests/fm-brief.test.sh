@@ -559,6 +559,27 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_green_final_head_names_service_receipt() {
+  local home brief plain
+  home="$TMP_ROOT/green-receipt-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" green-receipt some-proj --mode local-only --green-final-head >/dev/null \
+    || fail "green-final-head brief did not scaffold"
+  brief="$home/data/green-receipt/brief.md"
+  assert_grep "Final-head health: green" "$brief" "green brief lost its health marker"
+  assert_grep "$home/data/green-receipt/suite.receipt" "$brief" "green brief omitted its task receipt path"
+  assert_grep "fm-test-service.py' submit" "$brief" "green brief omitted the sanctioned pass-record producer"
+  assert_grep "--task 'green-receipt' --suite --receipt" "$brief" "green brief omitted service receipt arguments"
+  assert_grep "fm-test-service.py' wait <request-id>" "$brief" "green brief omitted the service result check"
+  assert_grep "do not hand-write a pass record" "$brief" "green brief permitted a second receipt format"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-receipt some-proj --mode local-only >/dev/null \
+    || fail "ordinary brief did not scaffold"
+  plain="$home/data/ordinary-receipt/brief.md"
+  assert_no_grep "suite.receipt" "$plain" "ordinary brief gained final-head receipt instructions"
+  pass "fm-brief.sh: green-final-head brief names its task receipt and sanctioned producer"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -1730,6 +1751,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_green_final_head_names_service_receipt
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

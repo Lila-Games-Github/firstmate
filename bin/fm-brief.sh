@@ -20,7 +20,8 @@
 #   --green-final-head marks a ship task whose definition of done requires a
 #   green full-suite receipt on its final head. The marker is consumed by
 #   fm-spawn.sh, which requires a zero-failure receipt on the selected landing
-#   base before dispatch. The marker is preserved in the worker brief.
+#   base before dispatch. The brief names its task-specific receipt and the
+#   bin/fm-test-service.py producer; bin/fm-merge-local.sh owns the form.
 #   A ship brief for a project whose data/projects.md entry declares an open
 #   design-question register (bin/fm-project-mode.sh owns the declaration, matched
 #   by the project's registry name or its clone path) always gets an
@@ -896,10 +897,18 @@ See \`$FM_ROOT/docs/test-service.md\` for the full contract.
 "
 fi
 HEALTH_MARKER=
-[ "$GREEN_FINAL_HEAD" -eq 0 ] || HEALTH_MARKER='Final-head health: green'
 # The durable long-suite and evidence snapshot contract is rendered into every
 # ship brief; its text and its supervision counterpart are owned elsewhere.
 LONG_SUITE_SECTION=$(fm_long_suite_block)
+if [ "$GREEN_FINAL_HEAD" -eq 1 ]; then
+  RECEIPT_PATH=$(shell_quote "$DATA/$ID/suite.receipt")
+  SERVICE_CMD=$(shell_quote "$FM_ROOT/bin/fm-test-service.py")
+  HEALTH_MARKER="Final-head health: green
+The final-head suite receipt belongs at \`$DATA/$ID/suite.receipt\`.
+After committing the final head, set PROJECT to this task's configured test-service project and run \`FM_HOME=$(shell_quote "$FM_HOME") $SERVICE_CMD submit \"\$PROJECT\" \"\$PWD\" \"\$(git rev-parse HEAD)\" --task $(shell_quote "$ID") --suite --receipt $RECEIPT_PATH\`.
+Capture the returned request ID and run \`$SERVICE_CMD wait <request-id>\` before reporting done; \`bin/fm-test-service.py\` writes the receipt accepted by \`bin/fm-merge-local.sh --receipt\`.
+The receipt format is owned by \`bin/fm-merge-local.sh\`; do not hand-write a pass record."
+fi
 OPEN_QUESTIONS_SECTION=
 if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
   OPEN_QUESTIONS_SECTION="# Open-question dependencies
@@ -981,6 +990,11 @@ If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.
 Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
 
 $LONG_SUITE_SECTION
+
+# Evidence and access
+Before answering a no-mistakes gate, account for its complete outstanding finding set and include every authorized repair in one response; if no gate remains for a known finding, report it to firstmate instead of editing during a run.
+For an MCP OAuth sign-in blocker, ask firstmate to have the owner authenticate in this worker session first; a relayed link can expire after five minutes.
+FrogPile's \`tests/task_evidence/*.log\` files are gitignored; when this task requires one, add it with \`git add -f\` and confirm it appears in \`git ls-files\` before reporting done.
 
 $DOD
 EOF
