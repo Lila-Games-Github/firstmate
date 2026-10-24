@@ -29,6 +29,12 @@ So crewmate and scout launches disable Codex's hook layer outright (`bin/fm-spaw
 A crewmate loses nothing: its turn-end signal is the `-c notify=` program on the same launch, and the Firstmate hooks in a project's `.codex/hooks.json` are primary-session infrastructure that stands down in a child worktree.
 A secondmate is a primary in its own home and keeps its hooks, so an unanswerable modal there is still possible and is the operator's own hook review to settle.
 
+## Startup update prompt
+
+Codex draws an interactive "Update available! ... Press enter to continue" prompt at startup once a newer release exists on the machine, which parks an unattended worker.
+Every Codex launch `bin/fm-spawn.sh` builds, crewmate, scout and secondmate alike, passes `-c check_for_update_on_startup=false`, so it covers a fresh spawn and `bin/fm-control.sh relaunch`; a session Herdr resumes natively does not go through that template and is not covered.
+The evidence and its refresh command are in [`docs/verification/runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#codex-startup-update-prompt).
+
 ## Skill popup
 
 A `$<skill>` invocation opens a `$` autocomplete popup.
