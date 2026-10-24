@@ -1,0 +1,32 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│FIRSTMATE  //  mc-head   ▲ 3 NEW: Monitoring status unavailable   02:23:03   WORKERS 2                                                  │
+│ 1 NOW    2 PLANNING    3 QUESTIONS    4 TESTING                                                                                        │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────╮╭──────────────────────────────────────────╮
+│ WORKERS   READY FOR YOU   FEED                                                           ││INFORMATION                               │
+│WORKERS  BUILDING 1  READY-TO-MERGE 1                                                     ││NOTIFICATIONS                             │
+│PR READY TO MERGE  1 worker                                                               ││  NEW Monitoring status unavailable       │
+│    ▸ no-mistakes / Work merger                         Claude  <1m  PR #8 READY TO MERGE ││    No watcher heartbeat was found, so it…│
+│NO-MISTAKES  1 worker                                                                     ││  NEW Phone R5CT32HRVNM no permissions    │
+│  ⠸ ▸ no-mistakes / Work asker                         Claude  <1m  RESUMED PAST THE GATE ││    adb reports no permissions, so the ph…│
+│                                                                                          ││  NEW Phone RZ8N71EC9ZB no permissions    │
+│                                                                                          ││    adb reports no permissions, so the ph…│
+│                                                                                          ││                                          │
+│                                                                                          ││TEST QUEUE                                │
+│                                                                                          ││  EDITOR: 0 running, 2 waiting            │
+│                                                                                          ││  NEXT: ProjectWhite · waiting 24m        │
+│                                                                                          ││  #2: ProjectWhite · waiting 18m          │
+│                                                                                          ││                                          │
+│                                                                                          ││LATEST BUILDS                             │
+│                                                                                          ││  none                                    │
+│                                                                                          ││                                          │
+│                                                                                          ││DAILY ROUTINES                            │
+│                                                                                          ││  none                                    │
+│                                                                                          ││                                          │
+│                                                                                          ││n next new · Ctrl-n/p scroll · s expand   │
+╰──────────────────────────────────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────╯
+
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│NOTE [all] i: message firstmate  > Type note; Enter sends                                                                               │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit

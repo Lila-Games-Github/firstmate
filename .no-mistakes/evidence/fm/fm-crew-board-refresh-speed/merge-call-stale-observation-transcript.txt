@@ -1,0 +1,27 @@
+# Observer last saw (40s ago): merger=done (PR #8 green), asker=working past decision old-q
+# Then the workers write again, before the observer's next pass:
++ merger.status  <<  phase: ready-to-merge - waiting on the merge call
++ merger.meta    <<  pr=https://github.com/Lila-Games-Github/no-mistakes/pull/8 / pr_head=abc123   (fm-pr-check style write)
++ asker.status   <<  phase: building - resumed past the gate
++ asker.meta     <<  decisions_reviewed=1 / decision_keys=old-q
+
+$ fm-crew-board.sh refresh
+changed
+
+# snapshot current_state (what the board was built from):
+  asker: state=working freshness=stale age=40s phase=building open_decisions=0
+  merger: state=done freshness=stale age=40s phase=ready-to-merge open_decisions=0
+
+# crew-board.json panels.ready (the merge call):
+{"id":"merger","link":"https://github.com/Lila-Games-Github/no-mistakes/pull/8","title":"Work merger"}
+
+# crew-board.json panels.alerts for asker (should be none):
+[]
+
+# worker tags:
+{"asker":"RESUMED PAST THE GATE","merger":"PR #8 READY TO MERGE"}
+
+$ fm-crew-board.sh show
+crew board mc-head - built 2026-10-24T20:52:23Z
+asker	building	for <1m	no-mistakes	Work asker	resumed past the gate	
+merger	ready-to-merge	for <1m	no-mistakes	Work merger	waiting on the merge call	https://github.com/Lila-Games-Github/no-mistakes/pull/8

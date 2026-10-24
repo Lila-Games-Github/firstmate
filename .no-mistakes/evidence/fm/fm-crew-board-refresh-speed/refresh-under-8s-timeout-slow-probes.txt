@@ -1,0 +1,10 @@
+== base commit: 19 workers, each tmux pane probe ~2.5s, refresh run under the TUI's 8s timeout
+refresh #1:  8.00s exit=124 rows=none <- KILLED at 8s (TUI timeout); crew-board.json not updated
+refresh #2:  8.00s exit=124 rows=none <- KILLED at 8s (TUI timeout); crew-board.json not updated
+refresh #3:  8.01s exit=124 rows=none <- KILLED at 8s (TUI timeout); crew-board.json not updated
+== head commit: 19 workers, each tmux pane probe ~2.5s, refresh run under the TUI's 8s timeout
+refresh #1:  1.05s exit=0   rows=19   
+refresh #2:  1.47s exit=0   rows=19   
+            background observer has cached 19 live observations
+refresh #3:  1.76s exit=0   rows=19   
+            background observer has cached 19 live observations
