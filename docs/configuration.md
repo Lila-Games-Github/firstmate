@@ -25,6 +25,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
 That header includes the optional `landing_branch=` field, which `bin/fm-landing-branch.sh` records or corrects on an existing task, `bin/fm-promote.sh --landing-branch` records on a promoted scout, `bin/fm-dod-lib.sh` hands to no-mistakes as the run's target branch and to direct-PR workers as the required PR base, `bin/fm-merge-local.sh` consumes as the local merge target, and `bin/fm-teardown.sh` consumes for its landed-work test.
 The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
+Worker-owned landing trains and immutable suite receipts live under `data/landing-queue/`; [`bin/fm-landing-queue.sh`](../bin/fm-landing-queue.sh) owns their format, per-repository/branch identity, locking, commands, and wake publication.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.

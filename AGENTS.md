@@ -358,7 +358,7 @@ The path's worker, automated gates, and captain approval remain authoritative:
 
 - **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
 - **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
-- **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
+- **local-only** has the worker finalize itself through the self-service landing train in `bin/fm-landing-queue.sh`, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and `yolo` are orthogonal.
 `yolo` governs merge authority only: with it off, the captain approves every PR merge and every local-only landing; with it on, firstmate merges green, in-scope work itself.
@@ -371,7 +371,7 @@ After an autonomous merge, give the captain a one-line full-URL or local-branch 
 
 ### Validate
 
-For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+For a no-mistakes ship, the worker starts validation itself after its implementation commit under the delivery contract in `bin/fm-dod-lib.sh`; do not send a separate start-validation message.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
@@ -614,6 +614,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `captain-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any `RECORD DIVERGENCE` line from the wake drain.
 - `process-event-sources` - load before arming a long-polling source, before registering a deterministic condition->action watch (do X as soon as Y is true), on any `procevent <adapter> <source-id> <sequence>` check wake, and on any `process-event source stranded` or `process-event source failed to start` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
+- `landing-queue` - load on any `landing-queue ready-to-land`, `landing-queue needs-baseline`, or `landing-queue failed` `check:` wake.
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.

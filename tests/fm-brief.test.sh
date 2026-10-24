@@ -360,7 +360,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "start /no-mistakes yourself" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -414,7 +414,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "local-only brief does not keep the worker on its recorded landing branch"
   assert_no_grep "in \`state/$id.meta\`" "$brief" \
     "local-only brief still points the worker at a meta path relative to firstmate's home"
-  assert_grep "If that landing branch has advanced, rebase onto it so the eventual merge stays a fast-forward." "$brief" \
+  assert_grep "Use the queue's current assigned target below when rebasing." "$brief" \
     "local-only brief lost the landing-branch rebase instruction"
   assert_no_grep "if \`main\` has advanced, rebase onto it" "$brief" \
     "local-only brief still steers the worker back onto main"
@@ -1222,7 +1222,7 @@ test_lane_brief_declares_its_delivery_contract_prominently() {
   assert_grep "Never run /no-mistakes on this task." \
     "$home/data/lane-contract-direct-PR/brief.md" \
     "direct-PR lane brief does not forbid the pipeline prominently"
-  assert_grep "firstmate tells you when to run /no-mistakes" \
+  assert_grep "start /no-mistakes yourself" \
     "$home/data/lane-contract-no-mistakes/brief.md" \
     "no-mistakes lane brief does not say who starts the pipeline"
   pass "fm-brief.sh: a lane brief declares its delivery contract prominently and keeps one authority"
@@ -1245,8 +1245,8 @@ test_lane_branch_name_is_stated_in_every_branch_instruction() {
     "named lane brief does not state the branch in rule 1"
   assert_grep "complete only when committed on your workspace branch \`task/lane-named-2026-09-04\`" "$brief" \
     "named lane brief does not state the branch in its definition of done"
-  assert_grep "append \`done: ready in branch task/lane-named-2026-09-04\` to the status file" "$brief" \
-    "named lane brief does not report readiness on its workspace branch"
+  assert_grep 'follow the self-service landing train below through landing' "$brief" \
+    "named lane brief does not use the worker-owned landing train"
   assert_no_grep "ready in branch fm/" "$brief" \
     "named lane brief still reports readiness on an fm/ branch"
 
@@ -1293,8 +1293,9 @@ test_lane_without_a_branch_name_stays_coherent() {
     "unnamed lane brief lost branch ownership in rule 1"
   assert_grep "complete only when committed on the branch your workspace was created on" "$brief" \
     "unnamed lane brief lost branch ownership in its definition of done"
-  assert_grep "append \`done: ready in branch {your workspace branch}\` to the status file" "$brief" \
-    "unnamed lane brief does not have the worker name its own branch when reporting ready"
+  # shellcheck disable=SC2016 # Literal command in the generated brief.
+  assert_grep 'landing_queue ready --branch "$(git branch --show-current)"' "$brief" \
+    "unnamed lane brief does not register its actual workspace branch"
   assert_no_grep "fm/lane-unnamed" "$brief" \
     "unnamed lane brief fell back to the crewmate branch convention"
   pass "fm-brief.sh: a lane brief without a branch name stays coherent"
@@ -1745,6 +1746,50 @@ PY
 }
 
 
+test_worker_owned_finalization() {
+  local home project id brief out helper lane
+  home="$TMP_ROOT/queue's home"
+  project="$TMP_ROOT/queue-project"
+  mkdir -p "$home/state"
+  git init -qb main "$project"
+  git -C "$project" commit -qm base --allow-empty
+  git -C "$project" branch proto/landing
+  for lane in ordinary lane; do
+    id="queue-$lane"
+    printf 'landing_branch=proto/landing\n' > "$home/state/$id.meta"
+    if [ "$lane" = ordinary ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" any-project --mode local-only >/dev/null \
+        || fail 'ordinary queue brief failed'
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" any-project --mode local-only --lane --landing-branch proto/landing >/dev/null \
+        || fail 'lane queue brief failed'
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep 'Use the queue tool for your place, rebase target, and final receipt' "$brief" 'brief omitted queue handoff'
+    assert_grep 'landing_queue receipt --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted exact-head receipt submission'
+    assert_grep 'keep checking status every 30 seconds' "$brief" 'waiting worker cannot discover changed targets'
+    assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
+    assert_grep 'git rebase --onto <target_sha> <rebase_from>' "$brief" 'brief cannot remove a failed lower car'
+    # Execute the generated shell helper, including an apostrophe in FM_HOME.
+    helper="$home/$id-helper.sh"
+    awk '/^landing_queue\(\) \{/ { emit=1 } emit { print } emit && /^\}$/ { exit }' "$brief" > "$helper"
+    # shellcheck disable=SC1090 # Execute the generated helper being tested.
+    . "$helper"
+    git -C "$project" checkout -qb "fm/$id" proto/landing
+    git -C "$project" commit -qm "$id" --allow-empty
+    out=$(cd "$project" && landing_queue ready --branch "fm/$id" --head "$(git rev-parse HEAD)") \
+      || fail 'generated queue helper did not execute'
+    assert_contains "$out" 'landing_branch=proto/landing' 'generated helper selected the wrong landing branch'
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" queue-validation any-project --mode no-mistakes >/dev/null
+  brief="$home/data/queue-validation/brief.md"
+  assert_grep 'Once your implementation is committed, start /no-mistakes yourself' "$brief" 'implementation still waits for a validation steer'
+  assert_no_grep 'Firstmate will then instruct you' "$brief" 'brief retains a manual validation start'
+  assert_no_grep 'Self-service landing train' "$brief" 'PR mode received a local merge queue'
+  pass 'generated ordinary and lane briefs execute worker-owned queue updates; validation starts after commit'
+}
+
+test_worker_owned_finalization
 test_recorded_direct_pr_base
 test_recorded_no_mistakes_target
 test_open_question_dependencies_gate_dispatch
