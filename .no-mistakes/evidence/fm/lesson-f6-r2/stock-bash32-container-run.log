@@ -1,0 +1,46 @@
+GNU bash, version 3.2.57(1)-release (x86_64-pc-linux-musl)
+stock Bash timeout mechanism: timeout
+::group::shell parse sweep
+::endgroup::
+::notice title=Stock Bash consumer passed::shell parse sweep emitted 0 expected assertions
+::group::fleet snapshot and view
+skip: jq not found
+::endgroup::
+::error title=Stock Bash consumer incomplete::fleet snapshot and view emitted 0 of 18 expected assertions
+::group::Bearings snapshot
+skip: jq not found
+::endgroup::
+::error title=Stock Bash consumer incomplete::Bearings snapshot emitted 0 of 59 expected assertions
+::group::Bearings oversized parsed-backlog route
+skip: jq not found
+::endgroup::
+::error title=Stock Bash consumer incomplete::Bearings oversized parsed-backlog route emitted 0 of 1 expected assertions
+::group::public-followup empty-lock register
+skip: jq not found
+::endgroup::
+::error title=Stock Bash consumer incomplete::public-followup empty-lock register emitted 0 of 1 expected assertions
+::group::watcher churn deferral
+ok - a churning turn-end inside an already-open deferral window is absorbed without re-marking
+::endgroup::
+::notice title=Stock Bash consumer passed::watcher churn deferral emitted 1 expected assertions
+::group::PR 18 learning-candidate NUL enumeration
+skip: jq not found
+::endgroup::
+::error title=Stock Bash consumer incomplete::PR 18 learning-candidate NUL enumeration emitted 0 of 1 expected assertions
+::group::PR 19 local-merge branch resolution
+/w/tests/fm-merge-local.test.sh: line 35: git: command not found
+/w/tests/fm-merge-local.test.sh: line 36: git: command not found
+/w/tests/fm-merge-local.test.sh: line 186: git: command not found
+/w/tests/fm-merge-local.test.sh: line 51: git: command not found
+/w/tests/fm-merge-local.test.sh: line 52: git: command not found
+/w/tests/fm-merge-local.test.sh: line 53: /tmp/fm-merge-local-tests.akonLe/recorded-target/task-wt/task.txt: No such file or directory
+/w/tests/fm-merge-local.test.sh: line 54: git: command not found
+/w/tests/fm-merge-local.test.sh: line 55: git: command not found
+/w/tests/fm-merge-local.test.sh: line 189: git: command not found
+/w/tests/fm-merge-local.test.sh: line 190: git: command not found
+/w/tests/fm-merge-local.test.sh: line 191: git: command not found
+not ok - recorded-target: merge into proto/dev failed
+::endgroup::
+::error title=Stock Bash consumer failed::PR 19 local-merge branch resolution exited 1
+::error::one or more stock macOS Bash consumers failed or did not return a verdict
+aggregate rc=1
