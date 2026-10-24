@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>] [--base-health-receipt <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>] [--base-health-receipt <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--routing-rule <matched-rule>|--routing-reason <manual-override-reason>] [--routing-provider <provider>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--routing-rule <matched-rule>|--routing-reason <manual-override-reason>] [--routing-provider <provider>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--routing-reason <manual-selection-reason>] [--routing-provider <provider>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -605,6 +605,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-codex-catalog-lib.sh
 . "$SCRIPT_DIR/fm-codex-catalog-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-dispatch-preflight-lib.sh
 . "$SCRIPT_DIR/fm-dispatch-preflight-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
@@ -624,6 +626,9 @@ YOLO=
 LANDING_BRANCH=
 BASE_HEALTH_RECEIPT=
 TRACEPARENT_ARG=
+ROUTING_RULE=
+ROUTING_REASON=
+ROUTING_PROVIDER=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -681,6 +686,9 @@ for a in "$@"; do
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
       ;;
+    routing-rule) ROUTING_RULE=$a ;;
+    routing-reason) ROUTING_REASON=$a ;;
+    routing-provider) ROUTING_PROVIDER=$a ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
       exit 1
@@ -744,6 +752,12 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --routing-rule) want_value=routing-rule ;;
+  --routing-rule=*) ROUTING_RULE=${a#--routing-rule=} ;;
+  --routing-reason) want_value=routing-reason ;;
+  --routing-reason=*) ROUTING_REASON=${a#--routing-reason=} ;;
+  --routing-provider) want_value=routing-provider ;;
+  --routing-provider=*) ROUTING_PROVIDER=${a#--routing-provider=} ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -793,6 +807,22 @@ fi
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+if [ -n "$ROUTING_RULE" ] && [ -n "$ROUTING_REASON" ]; then
+  echo "error: --routing-rule and --routing-reason are mutually exclusive" >&2
+  exit 1
+fi
+for routing_value in "$ROUTING_RULE" "$ROUTING_REASON" "$ROUTING_PROVIDER"; do
+  case "$routing_value" in
+  *$'\n'* | *$'\r'* | *$'\t'*)
+    echo "error: routing arguments must be single-line values" >&2
+    exit 1
+    ;;
+  esac
+done
+if [ "$RELAUNCH" -eq 1 ] && { [ -n "$ROUTING_RULE" ] || [ -n "$ROUTING_REASON" ] || [ -n "$ROUTING_PROVIDER" ]; }; then
+  echo "error: relaunch preserves the original routing decision" >&2
+  exit 1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1457,6 +1487,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$ROUTING_RULE" ] || shared_args+=(--routing-rule "$ROUTING_RULE")
+  [ -z "$ROUTING_REASON" ] || shared_args+=(--routing-reason "$ROUTING_REASON")
+  [ -z "$ROUTING_PROVIDER" ] || shared_args+=(--routing-provider "$ROUTING_PROVIDER")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -4665,7 +4698,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo landing_branch tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo landing_branch tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx routing_relaunches routing_harness_history", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4684,6 +4717,47 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ "$RELAUNCH" -eq 0 ]; then
+    if [ -z "$ROUTING_PROVIDER" ]; then
+      ROUTING_PROVIDER=$(fm_quota_single_provider_for_harness "$HARNESS" 2>/dev/null || true)
+    fi
+    echo "routing_rule=${ROUTING_RULE:-manual}"
+    if [ -n "$ROUTING_RULE" ]; then
+      echo "routing_reason="
+    else
+      echo "routing_reason=${ROUTING_REASON:-reason-not-recorded}"
+    fi
+    echo "routing_provider=$ROUTING_PROVIDER"
+    echo "routing_harness=$HARNESS"
+    echo "routing_harness_history=$HARNESS"
+    echo "routing_model=${MODEL:-default}"
+    echo "routing_effort=${EFFORT:-default}"
+    echo "routing_started_at=$(date +%s)"
+    echo "routing_instance_id=$SPAWN_GEN"
+    ROUTING_QUOTA_REASON='quota-axi-unavailable'
+    if [ -z "$ROUTING_PROVIDER" ]; then
+      ROUTING_QUOTA_REASON='provider-unresolved'
+    elif command -v quota-axi >/dev/null 2>&1; then
+      ROUTING_QUOTA_ALL=$(quota-axi --json 2>/dev/null || true)
+      if [ -n "$ROUTING_QUOTA_ALL" ] && printf '%s' "$ROUTING_QUOTA_ALL" | fm_quota_json_valid >/dev/null 2>&1; then
+        ROUTING_QUOTA=$(printf '%s' "$ROUTING_QUOTA_ALL" | jq -c --arg provider "$ROUTING_PROVIDER" '.providers[]? | select(.provider == $provider)' 2>/dev/null | head -1)
+        if [ -n "$ROUTING_QUOTA" ]; then
+          echo "routing_quota=$ROUTING_QUOTA"
+          ROUTING_QUOTA_REASON=
+        else
+          ROUTING_QUOTA_REASON='provider-absent-from-snapshot'
+        fi
+      else
+        ROUTING_QUOTA_REASON='snapshot-unreadable'
+      fi
+    fi
+    echo "routing_quota_reason=$ROUTING_QUOTA_REASON"
+    echo "routing_relaunches=0"
+  else
+    echo "routing_relaunches=$(($(fm_meta_get "$RELAUNCH_META" routing_relaunches 2>/dev/null || echo 0) + 1))"
+    ROUTING_HISTORY=$(fm_meta_get "$RELAUNCH_META" routing_harness_history 2>/dev/null || true)
+    echo "routing_harness_history=${ROUTING_HISTORY:+$ROUTING_HISTORY,}$HARNESS"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.

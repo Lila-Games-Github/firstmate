@@ -1099,6 +1099,11 @@ remote_secondmate_teardown() {
     status_retire_presentation_task "$STATE" "$ID" || status=1
   fi
   if [ "$status" -eq 0 ]; then
+    python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$STATE/$ID.meta" \
+      --state "$STATE" --data "$DATA" --id "$ID" --outcome not-landed \
+      --method "$([ "$FORCE" = --force ] && echo discarded || echo secondmate-retired)" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
     fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || status=1
   fi
   if [ "$status" -eq 0 ]; then
@@ -1248,6 +1253,9 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
   fi
   remove_pr_poll_artifacts_locked "$STATE" "$ID" retain || exit 1
   status_retire_presentation_task "$STATE" "$ID" || exit 1
+  python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
+    --id "$ID" --outcome "$([ -n "$LANDED_VIA" ] && echo landed || echo not-landed)" \
+    --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || exit 1
   remove_task_runtime_files "$STATE" "$ID" || exit 1
   if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     LANE_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
@@ -4006,6 +4014,24 @@ if [ "$KIND" != secondmate ]; then
 fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+ROUTING_OUTCOME=landed
+ROUTING_METHOD=unknown
+if [ "$FORCE" = --force ]; then
+  ROUTING_OUTCOME=not-landed
+  ROUTING_METHOD=discarded
+elif [ "$KIND" = scout ]; then
+  ROUTING_OUTCOME=not-landed
+  ROUTING_METHOD=scout-report
+elif [ "$KIND" = secondmate ]; then
+  ROUTING_OUTCOME=not-landed
+  ROUTING_METHOD=secondmate-retired
+elif [ "$MODE" = local-only ]; then
+  ROUTING_METHOD=local-landing
+elif [ -n "$PR_URL" ]; then
+  ROUTING_METHOD=pr-merge
+fi
+python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
+  --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || exit 1
 remove_task_runtime_files "$STATE" "$ID" || exit 1
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
