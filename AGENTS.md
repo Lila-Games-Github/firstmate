@@ -576,7 +576,7 @@ For every Godot visual brief, name the authorized project CLI evidence path, inc
 For a multi-file tooling build, require each script to process real input and report a named output record count, and give each validator a known-bad fixture it must reject.
 For an MCP sign-in blocker, ask the owner to authenticate directly inside the worker session first; an OAuth link relayed later may expire after five minutes.
 When a no-mistakes gate contains several actionable findings, retain the complete outstanding set before answering, include every authorized repair in one response, and escalate any finding left without an authorized response before the gate advances.
-For a `--green-final-head` ship task, use the task-specific `data/<task-id>/suite.receipt` produced by `bin/fm-test-service.py`; `bin/fm-merge-local.sh` owns its three-line `fm-full-suite.v1` form (`schema=`, full-head `sha=`, `failures=0`).
+For a `--green-final-head` ship task, use the task-specific `data/<task-id>/suite.receipt` produced by `bin/fm-test-service.py`; `bin/fm-landing-health-lib.sh` owns its three-line `fm-full-suite.v1` form (`schema=`, full-head `sha=`, `failures=0`).
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.

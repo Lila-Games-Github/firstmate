@@ -21,7 +21,7 @@
 #   green full-suite receipt on its final head. The marker is consumed by
 #   fm-spawn.sh, which requires a zero-failure receipt on the selected landing
 #   base before dispatch. The brief names its task-specific receipt and the
-#   bin/fm-test-service.py producer; bin/fm-merge-local.sh owns the form.
+#   bin/fm-test-service.py producer; bin/fm-landing-health-lib.sh owns the form.
 #   A ship brief for a project whose data/projects.md entry declares an open
 #   design-question register (bin/fm-project-mode.sh owns the declaration, matched
 #   by the project's registry name or its clone path) always gets an
