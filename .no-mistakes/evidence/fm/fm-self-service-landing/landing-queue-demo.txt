@@ -1,0 +1,84 @@
+## Two workers join the train themselves (no firstmate message)
+$ fm-landing-queue.sh ready a --branch fm/a --head 5a640b375429bff08954f7a9b6b7e8318a3b69a7
+    task=a
+    branch=fm/a
+    head=5a640b375429bff08954f7a9b6b7e8318a3b69a7
+    tip=d149ee50460fed2cce92c4ff84c4219d7b056573
+    place=1
+    target_ref=refs/heads/main
+    target_sha=d149ee50460fed2cce92c4ff84c4219d7b056573
+    rebase_from=d149ee50460fed2cce92c4ff84c4219d7b056573
+    status=needs-final
+    receipt=-
+    reason=-
+$ fm-landing-queue.sh ready b --branch fm/b --head 46f191b2bd899134780397e61ed44383a38d7572
+    task=b
+    branch=fm/b
+    head=46f191b2bd899134780397e61ed44383a38d7572
+    tip=d149ee50460fed2cce92c4ff84c4219d7b056573
+    place=2
+    target_ref=refs/heads/fm/a
+    target_sha=5a640b375429bff08954f7a9b6b7e8318a3b69a7
+    rebase_from=d149ee50460fed2cce92c4ff84c4219d7b056573
+    status=needs-rebase
+    receipt=-
+    reason=-
+## Worker b reads its own target and rebases onto car a
+$ fm-landing-queue.sh ready b --branch fm/b --head 508f3a7b3c30380768b7bf5ea69b5db78acbd3f0 --target 5a640b375429bff08954f7a9b6b7e8318a3b69a7
+    task=b
+    branch=fm/b
+    head=508f3a7b3c30380768b7bf5ea69b5db78acbd3f0
+    tip=d149ee50460fed2cce92c4ff84c4219d7b056573
+    place=2
+    target_ref=refs/heads/fm/a
+    target_sha=5a640b375429bff08954f7a9b6b7e8318a3b69a7
+    rebase_from=5a640b375429bff08954f7a9b6b7e8318a3b69a7
+    status=needs-final
+    receipt=-
+    reason=-
+## Empty car refused at admission
+$ fm-landing-queue.sh ready empty --branch fm/empty --head d149ee50460fed2cce92c4ff84c4219d7b056573
+    error: nothing to land: head is already in the landing branch
+## Worker a submits a red receipt on an unrecorded red tip -> needs-baseline
+$ fm-landing-queue.sh receipt a --head 5a640b375429bff08954f7a9b6b7e8318a3b69a7 --target d149ee50460fed2cce92c4ff84c4219d7b056573 --receipt <tmp>/c/a.receipt
+    task=a
+    branch=fm/a
+    head=5a640b375429bff08954f7a9b6b7e8318a3b69a7
+    tip=d149ee50460fed2cce92c4ff84c4219d7b056573
+    place=1
+    target_ref=refs/heads/main
+    target_sha=d149ee50460fed2cce92c4ff84c4219d7b056573
+    rebase_from=d149ee50460fed2cce92c4ff84c4219d7b056573
+    status=needs-baseline
+    receipt=<tmp>/c/home/data/landing-queue/710688dda67506306db5d6f1b60f846a315d84dc/1154b92c531be4c4738eebf1b23c962a62c2fc94.receipt
+    reason=landing tip has no recorded landing-health baseline
+## Firstmate records the tip baseline without landing -> red-receipt stays with worker a
+$ fm-landing-queue.sh baseline a --receipt <tmp>/c/tip.receipt
+    task=a
+    branch=fm/a
+    head=5a640b375429bff08954f7a9b6b7e8318a3b69a7
+    tip=d149ee50460fed2cce92c4ff84c4219d7b056573
+    place=1
+    target_ref=refs/heads/main
+    target_sha=d149ee50460fed2cce92c4ff84c4219d7b056573
+    rebase_from=d149ee50460fed2cce92c4ff84c4219d7b056573
+    status=red-receipt
+    receipt=<tmp>/c/home/data/landing-queue/710688dda67506306db5d6f1b60f846a315d84dc/1154b92c531be4c4738eebf1b23c962a62c2fc94.receipt
+    reason=receipt names failures outside the landing-health baseline
+main still at base: yes
+## Worker a fixes on a new head and finalizes again under the same task id
+$ fm-landing-queue.sh receipt a --head a2e879e3f827f25194b5cd766aab2fe13285e82b --target d149ee50460fed2cce92c4ff84c4219d7b056573 --receipt <tmp>/c/a2.receipt
+    task=a
+    branch=fm/a
+    head=a2e879e3f827f25194b5cd766aab2fe13285e82b
+    tip=d149ee50460fed2cce92c4ff84c4219d7b056573
+    place=1
+    target_ref=refs/heads/main
+    target_sha=d149ee50460fed2cce92c4ff84c4219d7b056573
+    rebase_from=d149ee50460fed2cce92c4ff84c4219d7b056573
+    status=ready-to-land
+    receipt=<tmp>/c/home/data/landing-queue/710688dda67506306db5d6f1b60f846a315d84dc/39a6d03df66b9d7f3b80723036b28ec403600923.receipt
+    reason=-
+## Durable wakes delivered to firstmate
+check: landing-queue needs-baseline task=a project=<tmp>/c/project landing=main tip=d149ee50460fed2cce92c4ff84c4219d7b056573 head=5a640b375429bff08954f7a9b6b7e8318a3b69a7 receipt=<tmp>/c/home/data/landing-queue/710688dda67506306db5d6f1b60f846a315d84dc/1154b92c531be4c4738eebf1b23c962a62c2fc94.receipt reason=landing tip has no recorded landing-health baseline
+check: landing-queue ready-to-land task=a project=<tmp>/c/project landing=main tip=d149ee50460fed2cce92c4ff84c4219d7b056573 head=a2e879e3f827f25194b5cd766aab2fe13285e82b receipt=<tmp>/c/home/data/landing-queue/710688dda67506306db5d6f1b60f846a315d84dc/39a6d03df66b9d7f3b80723036b28ec403600923.receipt reason=-
