@@ -1,0 +1,8 @@
+ok - stock Bash compatibility: oversized route uses the proven Bearings runner bound
+ok - stock Bash compatibility: every hung consumer is named, streamed, and independently bounded
+ok - stock Bash compatibility: failed PR 18 summary is named and later consumers run
+ok - stock Bash compatibility: incomplete consumer has one verdict and later consumers run
+
+real	0m9.378s
+user	0m0.527s
+sys	0m0.975s
