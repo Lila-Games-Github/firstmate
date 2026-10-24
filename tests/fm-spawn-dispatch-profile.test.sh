@@ -530,12 +530,12 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   pass "a codex secondmate keeps the project hook layer its primary session runs on"
 }
 
-# A codex pane that comes back after a host restart parks on codex's interactive
+# A codex worker started after a codex upgrade parks on codex's interactive
 # "Update available!" prompt unless the launch turns the startup update check
 # off, and an unattended worker never answers a modal. Both kinds carry the
-# override: a secondmate is resumed the same way, and bin/fm-control.sh relaunch
-# drives this same launch template through bin/fm-spawn.sh --relaunch, so a
-# relaunch is exactly the case it protects.
+# override, and bin/fm-control.sh relaunch drives this same launch template
+# through bin/fm-spawn.sh --relaunch, so a relaunch carries it too. A session
+# Herdr resumes natively does not go through this template and is not covered.
 # tests/fm-codex-hook-layer-live-e2e.test.sh proves the installed codex still
 # honors the key; this case pins that fm-spawn actually emits it.
 test_codex_launches_suppress_the_startup_update_prompt() {

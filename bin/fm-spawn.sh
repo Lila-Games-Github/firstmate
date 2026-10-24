@@ -1894,15 +1894,15 @@ launch_template() {
   # -c check_for_update_on_startup=false suppresses the interactive
   # "Update available! ... Press enter to continue" prompt codex draws at startup
   # when a newer release exists on the machine. An unattended worker never
-  # answers an interactive modal, so every pane Herdr resumed after a host reboot
-  # that followed a codex upgrade came back parked on it with nobody to press
-  # enter, and a firstmate steer meant for one of those parked tasks was
-  # delivered into another task's window (2026-09-03). The override is per launch
-  # and never written to the operator's ~/.codex/config.toml, exactly like the
-  # model and effort overrides above. It rides both kinds because a secondmate is
-  # resumed the same way, and because bin/fm-control.sh relaunch drives this same
-  # template through bin/fm-spawn.sh --relaunch - a resumed worker is the case
-  # this protects.
+  # answers an interactive modal, so a codex worker started after a codex upgrade
+  # parks on it with nobody to press enter. The override is per launch and never
+  # written to the operator's ~/.codex/config.toml, exactly like the model and
+  # effort overrides above, so it covers only the codex processes firstmate
+  # itself starts: a fresh spawn of either kind, and bin/fm-control.sh relaunch,
+  # which drives this same template through bin/fm-spawn.sh --relaunch - the path
+  # every codex worker was restarted through after the 2026-10-24 host restart.
+  # A codex session Herdr resumes natively is not launched through this template
+  # and is not covered.
   # tests/fm-codex-hook-layer-live-e2e.test.sh proves the installed codex still
   # honors the key through `codex doctor --json`, so a release that renames it
   # fails that guard naming the harness and version rather than silently

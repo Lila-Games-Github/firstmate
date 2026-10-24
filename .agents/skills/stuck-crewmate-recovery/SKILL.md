@@ -74,14 +74,20 @@ Read it once before the first steer to any worker whose pane was restored by a h
 Run this from the firstmate repo root:
 
 ```sh
-bash -c '. bin/fm-backend.sh; fm_backend_agent_process "$(fm_backend_of_meta <home>/state/<id>.meta)" "$(fm_backend_target_of_meta <home>/state/<id>.meta)"'
+bash -c '. bin/fm-backend.sh; . bin/fm-slot-record-lib.sh; m=<home>/state/<id>.meta
+  line=$(fm_backend_agent_process "$(fm_backend_of_meta "$m")" "$(fm_backend_target_of_meta "$m")") || exit 0
+  echo "pid=${line%%[[:space:]]*}"
+  echo "observed=$(fm_slot_canonical_dir "${line#*[[:space:]]}")"
+  echo "recorded=$(fm_slot_canonical_dir "$(fm_meta_get "$m" worktree)")"'
 ```
 
-- Inside the task's recorded `worktree=`, the pane is owned: steer normally.
-- Any other directory refuses the steer, and this is not a warning to weigh against a pending instruction.
+Compare only the resolved `observed=` and `recorded=` lines, never the raw process directory against the raw `worktree=` value: `/proc` always reports the physical path, while the record may spell the same copy through a symlinked prefix (Fedora's `/home -> /var/home`), and `fm_slot_canonical_dir` is the same `pwd -P` canonicalisation `crew_cwd_reconcile` applies to both sides.
+
+- `observed=` equal to `recorded=`, or inside it, means the pane is owned: steer normally.
+- Any other resolved directory refuses the steer, and this is not a warning to weigh against a pending instruction.
   Nothing downstream can tell the message was misrouted, so whatever session the pane actually hosts will act on instructions written for another task.
   Report the task `blocked:` or `failed:` with the recorded copy, the observed directory, and the pid, then reconcile the pane through `bin/fm-control.sh <task-id> relaunch --note '<progress so far>'` from the escalation ladder below, which returns the task to its own copy.
-- A reading that says nothing - no endpoint, no harness process in the pane, an unreadable directory, or a backend with no process view - is not evidence of a foreign session.
+- A reading that says nothing - no output, no endpoint, no harness process in the pane, an empty `observed=` or `recorded=`, or a backend with no process view - is not evidence of a foreign session.
   Continue through the escalation ladder and leave that verdict to the endpoint-liveness owners.
 
 ## Live-endpoint escalation

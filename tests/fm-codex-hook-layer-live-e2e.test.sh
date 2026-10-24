@@ -12,8 +12,9 @@
 # template owns the flag).
 # Codex likewise draws an interactive "Update available! ... Press enter to
 # continue" prompt at its startup when a newer release exists on the machine,
-# which parks a resumed worker no human is there to answer, so the launch turns
-# the startup update check off the same way.
+# which parks a worker no human is there to answer, so the launch turns the
+# startup update check off the same way. That covers firstmate's own launch and
+# bin/fm-control.sh relaunch only, not a session Herdr resumes natively.
 #
 # The guard replays the REAL launch flags fm-spawn builds - captured from a
 # spawn driven through a fake pane - against the installed codex and asks codex
@@ -91,7 +92,7 @@ test_installed_codex_suppresses_the_update_prompt_for_the_captured_crewmate_laun
 
   off=$(codex_update_check_state "$flags")
   [ "$off" = false ] \
-    || fail "codex $CODEX_VERSION left the startup update check on for firstmate's crewmate launch flags (got '$off'), so a host restart can park a resumed worker on the interactive update prompt"
+    || fail "codex $CODEX_VERSION left the startup update check on for firstmate's crewmate launch flags (got '$off'), so a firstmate launch or relaunch can park the worker on the interactive update prompt"
 
   printf 'ok - codex %s runs a firstmate crewmate launch with the startup update prompt suppressed\n' "$CODEX_VERSION"
 }

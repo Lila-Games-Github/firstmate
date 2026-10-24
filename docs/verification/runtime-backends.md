@@ -570,7 +570,9 @@ The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the
 Verified 2026-10-25 on codex-cli 0.164.0, Fedora Linux, against the flag set `bin/fm-spawn.sh` builds for a codex launch.
 
 Codex draws an interactive `Update available! ... Press enter to continue` prompt at its startup once a newer release than the installed one exists on the machine.
-An unattended worker never answers it, so a host restart that resumed the fleet after a codex upgrade brought every pane back parked on it.
+An unattended worker never answers it, so a codex worker started after a codex upgrade parks on it.
+The override covers the codex processes firstmate itself starts: a fresh `bin/fm-spawn.sh` launch and `bin/fm-control.sh relaunch`, which is how every codex worker was restarted after the 2026-10-24 host restart, when Herdr brought each pane back as a bare shell.
+A codex session Herdr resumes natively is not launched through that template and is not covered.
 
 `codex --help` lists no flag for that check, but it is codex's own configuration key, and `codex doctor --json` reports the effective value codex resolves for it:
 
