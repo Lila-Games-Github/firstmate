@@ -71,8 +71,8 @@
 #     without a probe, and other tasks use "not_checked".
 #     FM_SNAPSHOT_BOARD_FAST=1 composes board rows from captured files and the
 #     last live observation of the same task generation; --board-observe refreshes
-#     those observations. One taken before the newest status line is reported with
-#     freshness "stale" and its age_seconds until the observer replaces it.
+#     those observations. One taken before the newest status or metadata write is
+#     reported with freshness "stale" and its age_seconds until the observer replaces it.
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -645,7 +645,7 @@ board_cached_observation() {  # <captured-meta> <id>
 }
 
 board_cached_observation_read() {  # <captured-meta> <id>
-  local meta=$1 id=$2 status record stamp stored='' observed='' freshness
+  local meta=$1 id=$2 status record stamp stored='' observed='' generation='' freshness
   status="$SNAPSHOT_TASK_DIR/$id.status"
   record="$SNAPSHOT_TASK_DIR/$id.record"
   snapshot_task_generation_is_current "$meta" "$id" || return 0
@@ -653,8 +653,9 @@ board_cached_observation_read() {  # <captured-meta> <id>
   snapshot_mark_optional_present "$DATA/$id/report.md" "$SNAPSHOT_TASK_DIR/$id.report" || return 1
   stamp=$(board_observation_stamp "$meta" "$status") || return 1
   if cp -- "$BOARD_OBSERVATIONS/$id.json" "$record" 2>/dev/null &&
-     { read -r stored; read -r observed; } < <(jq -r '.stamp // "", (.observed_epoch // "" | tostring)' "$record" 2>/dev/null) &&
-     [ "${stored%%|*}" = "${stamp%%|*}" ]; then
+     { read -r stored; read -r observed; read -r generation; } \
+       < <(jq -r '.stamp // "", (.observed_epoch // "" | tostring), (.spawn_gen // "")' "$record" 2>/dev/null) &&
+     [ "$generation" = "$(meta_value "$meta" spawn_gen)" ]; then
     case "$observed" in ''|*[!0-9]*) ;; *)
       jq '.current' "$record" > "$SNAPSHOT_TASK_DIR/$id.json" || return 1
       jq -r '"endpoint_exists=\(.endpoint_exists)\nagent_alive=\(.agent_alive)"' "$record" \
@@ -691,9 +692,10 @@ board_observe_one() {  # <meta> <id> <stamp>
       [ -f "$tmp/$id.status" ] && status_arg=(--rawfile status "$tmp/$id.status")
       { jq -n --arg stamp "$stamp" --argjson observed_epoch "$(date +%s)" \
           --slurpfile current "$tmp/$id.json" "${status_arg[@]}" \
+          --arg spawn_gen "$(meta_value "$tmp/$id.meta" spawn_gen)" \
           --arg endpoint_exists "$(sed -n 's/^endpoint_exists=//p' "$tmp/$id.endpoint")" \
           --arg agent_alive "$(sed -n 's/^agent_alive=//p' "$tmp/$id.endpoint")" \
-          '{stamp:$stamp,observed_epoch:$observed_epoch,current:$current[0],
+          '{stamp:$stamp,observed_epoch:$observed_epoch,spawn_gen:$spawn_gen,current:$current[0],
             endpoint_exists:$endpoint_exists,agent_alive:$agent_alive,status:$status}' > "$next" &&
         mv -f -- "$next" "$BOARD_OBSERVATIONS/$id.json"; } || rc=1
     fi

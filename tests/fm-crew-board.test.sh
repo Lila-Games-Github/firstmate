@@ -1441,8 +1441,9 @@ seed_board_observation() {  # <home> <id> <observed-status> <current-json>
   mkdir -p "$home/state/crew-board-observations"
   meta_sum=$(cksum < "$home/state/$id.meta"); status_sum=$(printf '%s' "$observed" | cksum)
   jq -n --arg stamp "${meta_sum// /:}|${status_sum// /:}" --argjson observed_epoch "$(( $(date +%s) - 40 ))" \
+    --arg spawn_gen "$(sed -n 's/^spawn_gen=//p' "$home/state/$id.meta")" \
     --arg status "$observed" --argjson current "$current" \
-    '{stamp:$stamp,observed_epoch:$observed_epoch,current:$current,endpoint_exists:"true",agent_alive:"not_checked",status:$status}' \
+    '{stamp:$stamp,observed_epoch:$observed_epoch,spawn_gen:$spawn_gen,current:$current,endpoint_exists:"true",agent_alive:"not_checked",status:$status}' \
     > "$home/state/crew-board-observations/$id.json"
 }
 
@@ -1497,6 +1498,53 @@ test_new_status_line_keeps_stale_observation() {
   pass 'a new status line keeps the last live observation, marked stale, until the observer replaces it'
 }
 
+test_metadata_write_keeps_stale_observation() {
+  local home snapshot
+  home=$(make_home stale_metadata)
+  rm -f "$home/state/alpha.meta" "$home/state/alpha.status" "$home/state/beta.meta" "$home/state/beta.status"
+  printf '# Backlog\n\n## In flight\n' > "$home/data/backlog.md"
+  for id in merger asker; do
+    printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\nspawn_gen=g1\n' > "$home/state/$id.meta"
+    printf -- '- [ ] %s - Work %s (repo: widget) (kind: ship) (since 2026-10-19)\n' "$id" "$id" >> "$home/data/backlog.md"
+  done
+  printf '\n## Queued\n\n## Done\n' >> "$home/data/backlog.md"
+  printf 'phase: ready-to-merge - checks green\n' > "$home/state/merger.status"
+  printf 'needs-decision: [key=old-q] pick A or B\n' > "$home/state/asker.status"
+  seed_board_observation "$home" merger "$(cat "$home/state/merger.status")"$'\n' '{"state":"done","source":"run-step","detail":"checks green","raw":""}'
+  seed_board_observation "$home" asker "$(cat "$home/state/asker.status")"$'\n' '{"state":"working","source":"run-step","detail":"building","raw":""}'
+  printf 'pr=https://github.com/o/r/pull/9\npr_head=abc123\n' >> "$home/state/merger.meta"
+  printf 'decisions_reviewed=1\ndecision_keys=old-q\n' >> "$home/state/asker.meta"
+
+  snapshot="$home/snapshot.json"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_SNAPSHOT_BOARD_FAST=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$snapshot" || fail 'fast snapshot failed'
+  assert_equals 'stale done' "$(jq -r '.tasks[] | select(.id == "merger") | "\(.current_state.freshness) \(.current_state.state)"' "$snapshot")" \
+    'a metadata write keeps the earlier live observation, marked stale'
+  assert_equals '[]' "$(jq -c '.tasks[] | select(.id == "asker") | .hints.open_decisions' "$snapshot")" \
+    'a cleared decision stays cleared across a metadata write'
+
+  run_board "$home" refresh >/dev/null || fail 'refresh after a metadata write failed'
+  wait_board_observer "$home"
+  assert_equals 'https://github.com/o/r/pull/9' \
+    "$(jq -r '.panels.ready[] | select(.id == "merger") | .link' "$home/state/crew-board.json")" \
+    'a merge-ready PR stays in the ready list across a metadata pr= write'
+  pass 'a metadata write keeps the last live observation, marked stale, until the observer replaces it'
+}
+
+test_relaunch_drops_previous_observation() {
+  local home snapshot
+  home=$(make_home relaunch_observation)
+  printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\nspawn_gen=g1\n' > "$home/state/alpha.meta"
+  seed_board_observation "$home" alpha "$(cat "$home/state/alpha.status")"$'\n' '{"state":"done","source":"run-step","detail":"checks green","raw":""}'
+  printf 'kind=ship\nproject=/x/projects/widget\nharness=claude\nspawn_gen=g2\n' > "$home/state/alpha.meta"
+  snapshot="$home/snapshot.json"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_SNAPSHOT_BOARD_FAST=1 \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json > "$snapshot" || fail 'fast snapshot failed'
+  assert_equals 'unknown' "$(jq -r '.tasks[] | select(.id == "alpha") | .current_state.state' "$snapshot")" \
+    'a relaunched task never inherits the previous generation observation'
+  pass 'a relaunched task drops the previous generation observation'
+}
+
 test_board_observer_prunes_closed_tasks() {
   local home
   home=$(make_home observer_prune)
@@ -1547,3 +1595,5 @@ test_worker_runtimes_name_harness_and_model
 test_thirty_worker_refresh_budget
 test_new_status_line_keeps_stale_observation
 test_board_observer_prunes_closed_tasks
+test_metadata_write_keeps_stale_observation
+test_relaunch_drops_previous_observation
