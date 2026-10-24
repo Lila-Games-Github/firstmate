@@ -96,9 +96,15 @@ def project_for_repo(repo):
 def landing_gates_for_repo(repo):
     matches = []
     for path in sorted((HOME / "config/test-service").glob("*.json")):
-        data = json.loads(path.read_text())
-        if repo == path.stem or repo in data.get("repos", []):
-            matches.append(config(path.stem))
+        if repo != path.stem:
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            repos = data.get("repos") if isinstance(data, dict) else None
+            if not isinstance(repos, list) or repo not in repos:
+                continue
+        matches.append(config(path.stem))
     if len(matches) > 1:
         raise ValueError("multiple test-service projects match repository " + repo)
     return matches[0].get("landing_gates", []) if matches else []

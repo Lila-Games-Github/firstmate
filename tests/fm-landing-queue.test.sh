@@ -107,6 +107,24 @@ expect_field "$out" status ready-to-land
 [ "$(wake_count)" = 1 ] || fail 'all-gates readiness did not emit one wake'
 pass 'every configured gate must pass before readiness'
 
+make_case unrelated-malformed-gate-config
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+EOF
+printf '{"half-edited":' > "$CASE/home/config/test-service/other.json"
+printf '[]\n' > "$CASE/home/config/test-service/listed.json"
+car a main; join a >/dev/null; prepare a
+out=$(receipt a)
+expect_field "$out" status needs-gate
+expect_field "$out" reason 'missing landing gate: real-phone'
+printf '{"half-edited":' > "$CASE/home/config/test-service/project.json"
+if queue status a > "$CASE/malformed.out" 2>&1; then
+  fail 'malformed matching gate config did not fail closed'
+fi
+grep -q 'cannot read landing gates for project' "$CASE/malformed.out" || fail 'malformed matching config error was not reported'
+pass 'unrelated malformed configs are skipped while a malformed matching config fails closed'
+
 make_case three-cars
 for id in a b c; do car "$id" main; join "$id" > "$CASE/$id.out"; done
 expect_field "$(cat "$CASE/a.out")" place 1
