@@ -1,38 +1,37 @@
-$ fm-test-service.py submit frogpile $PWD bee1f21858ec30d246e9bb782d25cbde8b5032a8 --task demo-pass --suite --device-gate any --receipt $FM_HOME/data/demo-pass/suite.receipt
-fb704dfb4a5746a7
-$ fm-test-service.py submit frogpile $PWD 9bb465e14492259f81a480aed26f6346d0956e7b --task demo-fail --suite --device-gate any
-b9223427b92a4073
-$ fm-test-service.py status --json  (while first is running; max_concurrent defaults to 1 even for project 'frogpile')
-{
- "queue": [
-  "b9223427b92a4073"
- ],
- "running": "fb704dfb4a5746a7",
- "running_tasks": [
-  "demo-pass"
- ],
- "waiting_tasks": [
-  "demo-fail"
- ]
-}
-$ fm-test-service.py wait fb704dfb4a5746a7
-passed bee1f21858ec30d246e9bb782d25cbde8b5032a8 
-$ cat $FM_HOME/data/demo-pass/suite.receipt
+$ fm-test-service.py submit demo $PWD 89dea2e1c7778229a155c8a1d80a3c51038b0409 --suite --device-gate S22 --receipt receipt
+dc7d5bda3f7b4f3c
+$ fm-test-service.py wait dc7d5bda3f7b4f3c
+passed 89dea2e1c7778229a155c8a1d80a3c51038b0409 
+$ cat receipt
 schema=fm-full-suite.v1
-sha=bee1f21858ec30d246e9bb782d25cbde8b5032a8
+sha=89dea2e1c7778229a155c8a1d80a3c51038b0409
 failures=0
 
-$ fm-test-service.py wait b9223427b92a4073
-failed 9bb465e14492259f81a480aed26f6346d0956e7b suite: FAIL: test_beta expected 3 got 4
-$ cat $FM_TEST_SERVICE_STATE/results/b9223427b92a4073/9bb465e14492259f81a480aed26f6346d0956e7b.failure.json
+$ fm-test-service.py wait 9acedfd7d01641d8
+failed 2850e4d5e222fdcc886eadbbf94dfa20df5e09fc suite: FAIL test_jump: expected 3 got 2
+$ cat results/9acedfd7d01641d8/2850e4d5e222fdcc886eadbbf94dfa20df5e09fc.failure.json
 {
-  "sha": "9bb465e14492259f81a480aed26f6346d0956e7b",
-  "first_failure": "suite: FAIL: test_beta expected 3 got 4"
+  "sha": "2850e4d5e222fdcc886eadbbf94dfa20df5e09fc",
+  "first_failure": "suite: FAIL test_jump: expected 3 got 2"
 }
 
-$ fm-test-service.py submit frogpile $PWD 9bb465e --suite   (short SHA)
-error: sha must be a full commit SHA
-exit=2
-$ fm-test-service.py submit frogpile $PWD bee1f21858ec30d246e9bb782d25cbde8b5032a8 --device-gate RZ0000000   (unknown phone)
-error: phone is not configured for this project
-exit=2
+$ fm-test-service.py status --json (excerpt)
+{
+ "schema": "fm-test-service.v1",
+ "requests": [
+  {
+   "id": "dc7d5bda3f7b4f3c",
+   "project": "demo",
+   "sha": "89dea2e1c7778229a155c8a1d80a3c51038b0409",
+   "state": "passed",
+   "error": null
+  },
+  {
+   "id": "9acedfd7d01641d8",
+   "project": "demo",
+   "sha": "2850e4d5e222fdcc886eadbbf94dfa20df5e09fc",
+   "state": "failed",
+   "error": "suite: FAIL test_jump: expected 3 got 2"
+  }
+ ]
+}

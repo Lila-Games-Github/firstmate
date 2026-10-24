@@ -1,5 +1,5 @@
 ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites
 
-real	1m37.905s
-user	0m8.244s
-sys	0m4.566s
+real	1m41.659s
+user	0m8.024s
+sys	0m4.364s

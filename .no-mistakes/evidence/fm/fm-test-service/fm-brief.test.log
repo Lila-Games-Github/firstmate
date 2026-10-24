@@ -8,7 +8,7 @@ ok - no-mistakes target contract quotes only the command for metacharacter branc
 ok - fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract
 ok - fm-brief: ship and scout briefs carry a working phase command the classifier reads back; charters do not
 ok - fm-brief.sh: bash -n succeeds
-/tmp/fm-brief.uqUMiJ/heredoc-in-substitution.sh:2
+/tmp/fm-brief.hwmS9B/heredoc-in-substitution.sh:2
 ok - fm-brief.sh: no heredoc is nested inside a command substitution (Bash 3.2 parse-safe)
 ok - fm-brief.sh: --help renders the complete header
 ok - fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly
