@@ -27,10 +27,11 @@ const element = () => ({hidden: false, className: '', textContent: '', children:
 const document = {documentElement: element(), getElementById: id => nodes[id] ??= element(),
   createElement: () => element()};
 const fetched = [];
-const location = {pathname, search: '', hash: '', replaced: null, replace(url) { this.replaced = url; }};
-const fetch = async url => { fetched.push(url); return {ok: true, json: async () => board}; };
-new Function('document', 'location', 'fetch', 'setInterval', source)(document, location, fetch, () => 0);
-setTimeout(() => console.log(JSON.stringify({replaced: location.replaced, fetched,
+const location = {pathname, search: '', hash: ''};
+const history = {replaceState(_state, _title, url) { location.pathname = new URL(url, 'https://host' + location.pathname).pathname; }};
+const fetch = async url => { fetched.push(new URL(url, 'https://host' + location.pathname).pathname); return {ok: true, json: async () => board}; };
+new Function('document', 'location', 'history', 'fetch', 'setInterval', source)(document, location, history, fetch, () => 0);
+setTimeout(() => console.log(JSON.stringify({pathname: location.pathname, fetched,
   needs: (nodes.needs?.children ?? []).length, moreNeedsHidden: nodes['more-needs']?.hidden ?? null})), 20);
 """
 
@@ -142,12 +143,13 @@ with tempfile.TemporaryDirectory() as temporary:
         if NODE:
             page = html.decode()
             board = json.loads(status(base + "/api/board", OWNER)[1])
-            assert run_page(page, "/crew-board", board)["replaced"] == "/crew-board/"
-            assert run_page(page, "/crew-board/details/", board)["replaced"] == "/crew-board/details"
-            overview = run_page(page, "/crew-board/", board)
-            assert overview["replaced"] is None and overview["fetched"] == ["api/board"], overview
+            for entry in ("/crew-board", "/crew-board/"):
+                overview = run_page(page, entry, board)
+                assert overview["pathname"] == "/crew-board/", overview
+                assert overview["fetched"] == ["/crew-board/api/board"], overview
+            assert run_page(page, "/crew-board/details/", board)["pathname"] == "/crew-board/details"
             assert overview["moreNeedsHidden"] is True, overview
-            assert run_page(page, "/crew-board/details", board)["replaced"] is None
+            assert run_page(page, "/crew-board/details", board)["fetched"] == ["/crew-board/api/board"]
             many = dict(board, needs=[{"title": f"Merge {n}", "status": "Merge ready", "kind": "merge",
                                        "link": "https://github.com/example/repo/pull/1"} for n in range(6)])
             crowded = run_page(page, "/crew-board/", many)
