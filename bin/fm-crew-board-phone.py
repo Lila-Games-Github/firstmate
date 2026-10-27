@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only phone view of the published crew board.
+"""Owner-only phone view of the published crew board and open questions.
 
 Usage: FM_HOME=/path/to/home bin/fm-crew-board-phone.py [--port 8765]
        bin/fm-crew-board-phone.py --bind 127.0.0.1 --port 8765
@@ -17,6 +17,7 @@ Do not use tailscale funnel. The host operator applies the Serve rule.
 import argparse
 import json
 import os
+import subprocess
 from pathlib import Path
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +33,39 @@ PATH = re.compile(r"(?<!\w)(?:/(?:[^\s/]+/?)+|[A-Za-z]:\\(?:[^\s\\]+\\?)+)")
 SECRET = re.compile(r"(?i)\b(?:pin|password|secret|api[_ -]?key|token)(?:\s*[:=]\s*\S+|\s+(?=\S*\d)\S+)")
 INTERNAL = re.compile(r"\[key=[^\]]+\]|\bfm-[a-z0-9-]{8,}\b", re.I)
 URL = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/[0-9]+/?$")
+QUESTION = re.compile(r"^\*\*([A-Za-z0-9]+)\.\s+(.+?)\*\*\s*(.*)$")
+OPTION = re.compile(r"\(([a-z])\)\s*(.*?)(?=;\s*\([a-z]\)|\.\s+Recommendation|$)", re.S)
+MAX_BODY = 4096
+
+
+def questions(source):
+    """Read the human register without requiring optional option syntax."""
+    cards = []
+    section = "Open questions"
+    current = None
+    for line in source.splitlines():
+        if line.startswith("## "):
+            section = line[3:].strip()
+            current = None
+            continue
+        match = QUESTION.match(line)
+        if match:
+            current = {"section": section, "label": match[1], "title": match[2],
+                       "body": match[3].strip(), "options": [], "recommendation": "",
+                       "replies": []}
+            cards.append(current)
+        elif current and line.strip() != "---":
+            current["body"] += ("\n" if current["body"] else "") + line.rstrip()
+    for card in cards:
+        body = card["body"].strip()
+        card["body"] = body
+        options = body.split("Options:", 1)[1].split("Recommendation", 1)[0] if "Options:" in body else ""
+        card["options"] = [{"key": key, "text": desc.strip().rstrip(". ;")}
+                           for key, desc in OPTION.findall(options)]
+        recommendation = re.search(r"Recommendation(?: now)?:\s*\(([a-z])\)", body)
+        card["recommendation"] = recommendation.group(1) if recommendation else ""
+        card["replies"] = re.findall(r'"(' + re.escape(card["label"]) + r': [^"\n]+)"', body)
+    return cards
 
 
 def clean(value, limit=120):
@@ -162,14 +196,37 @@ class LoopbackServer(ThreadingHTTPServer):
         if not isinstance(owner, str) or not owner.strip():
             raise ValueError("phone board needs the product owner's Tailscale login")
         self.owner = owner.strip().casefold()
+        self.home = HERE.parent
+        self.state = self.home / "state"
+        self.questions = self.home / "data" / "captain-questions.md"
         super().__init__(address, handler)
 
 
 class Handler(BaseHTTPRequestHandler):
+    def respond(self, code, payload, mime="application/json; charset=utf-8"):
+        body = json.dumps(payload).encode("utf-8") if isinstance(payload, dict) else payload
+        self.send_response(code)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def owner_ok(self):
+        return self.headers.get(OWNER_HEADER, "").strip().casefold() == self.server.owner
+
+    def same_origin(self):
+        origin = self.headers.get("Origin", "")
+        parsed = urlsplit(origin)
+        return (parsed.scheme in ("https", "http") and parsed.netloc.lower() ==
+                self.headers.get("Host", "").lower() and not parsed.path and
+                not parsed.query and not parsed.fragment)
+
     def do_GET(self):
         route = urlsplit(self.path).path.rstrip("/") or "/"
-        login = self.headers.get(OWNER_HEADER, "").strip().casefold()
-        if login != self.server.owner:
+        if not self.owner_ok():
             if route == "/api/board":
                 body, mime = b'{"error":"Forbidden"}', "application/json; charset=utf-8"
             else:
@@ -188,16 +245,71 @@ class Handler(BaseHTTPRequestHandler):
                 body = b'{"error":"Crew board unavailable"}'
                 code = 503
             mime = "application/json; charset=utf-8"
+        elif route == "/api/decisions":
+            try:
+                cards = questions(self.server.questions.read_text(encoding="utf-8"))
+                body = json.dumps({"cards": cards}).encode("utf-8")
+                code = 200
+            except OSError:
+                body, code = b'{"error":"Questions unavailable"}', 503
+            mime = "application/json; charset=utf-8"
+        elif route == "/api/phone-mode":
+            try:
+                enabled = (self.server.state / "crew-board-phone-mode").read_text().strip() == "on"
+            except OSError:
+                enabled = False
+            body, code, mime = json.dumps({"enabled": enabled}).encode(), 200, "application/json; charset=utf-8"
         else:
             body, mime, code = b"Not found", "text/plain; charset=utf-8", 404
-        self.send_response(code)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'")
-        self.end_headers()
-        self.wfile.write(body)
+        self.respond(code, body, mime)
+
+    def do_POST(self):
+        route = urlsplit(self.path).path.rstrip("/")
+        if not self.owner_ok():
+            return self.respond(403, {"error": "Forbidden"})
+        if route not in ("/api/answer", "/api/phone-mode"):
+            return self.respond(404, {"error": "Not found"})
+        if not self.same_origin():
+            return self.respond(403, {"error": "Origin rejected"})
+        try:
+            size = int(self.headers.get("Content-Length", ""))
+            if size < 1 or size > MAX_BODY or self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
+                raise ValueError()
+            data = json.loads(self.rfile.read(size))
+            if not isinstance(data, dict):
+                raise ValueError()
+        except (ValueError, json.JSONDecodeError):
+            return self.respond(400, {"error": "Invalid request"})
+        if route == "/api/phone-mode":
+            if type(data.get("enabled")) is not bool:
+                return self.respond(400, {"error": "Invalid phone mode"})
+            path = self.server.state / "crew-board-phone-mode"
+            try:
+                temp = path.with_suffix(".tmp")
+                temp.write_text("on\n" if data["enabled"] else "off\n")
+                temp.replace(path)
+            except OSError:
+                return self.respond(503, {"error": "Phone mode unavailable"})
+            return self.respond(200, {"enabled": data["enabled"]})
+        label, answer = data.get("label"), data.get("answer")
+        if not isinstance(label, str) or not isinstance(answer, str) or not answer.strip() or len(answer) > 500 or "\n" in answer:
+            return self.respond(400, {"error": "Invalid answer"})
+        try:
+            known = {card["label"] for card in questions(self.server.questions.read_text(encoding="utf-8"))}
+        except OSError:
+            return self.respond(503, {"error": "Questions unavailable"})
+        if label not in known:
+            return self.respond(400, {"error": "Unknown question"})
+        body = f"{label}: {answer.strip()}"
+        try:
+            env = dict(os.environ, FM_HOME=str(self.server.home))
+            result = subprocess.run([str(HERE / "fm-inbox.sh"), "note", body], env=env,
+                                    capture_output=True, timeout=10, check=False)
+            if result.returncode:
+                raise OSError("inbox note failed")
+        except (OSError, subprocess.TimeoutExpired):
+            return self.respond(503, {"error": "Could not send answer"})
+        self.respond(200, {"sent": True})
 
 
 def main():
@@ -213,6 +325,9 @@ def main():
     except ValueError as error:
         parser.exit(2, f"fm-crew-board-phone: {error}\n")
     server.board = state / "crew-board.json"
+    server.home = home
+    server.state = state
+    server.questions = home / "data" / "captain-questions.md"
     print(f"Crew board phone page on http://127.0.0.1:{server.server_port}/", flush=True)
     server.serve_forever()
 
