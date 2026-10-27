@@ -435,6 +435,9 @@ test_relaunch_preserves_durable_task_metadata() {
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   {
+    printf '%s\n' 'routing_rule=review-work' 'routing_provider=anthropic'
+    printf '%s\n' 'routing_harness=claude' 'routing_model=opus' 'routing_effort=high'
+    printf '%s\n' 'routing_started_at=1760000000' 'routing_instance_id=original'
     printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
     printf '%s\n' 'pr_head=feature/relaunch'
     printf '%s\n' 'x_request=request-19'
@@ -451,6 +454,14 @@ test_relaunch_preserves_durable_task_metadata() {
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
+  for field in routing_rule=review-work routing_provider=anthropic routing_harness=claude \
+    routing_model=opus routing_effort=high routing_started_at=1760000000 \
+    routing_instance_id=original; do
+    [ "$(grep -Fxc "$field" "$dir/home/state/rl19.meta")" = 1 ] \
+      || fail "the original routing fact $field must survive relaunch exactly once"
+  done
+  [ "$(meta_field "$dir" rl19 routing_relaunches)" = 1 ] \
+    || fail "the routing relaunch count must advance"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 

@@ -25,6 +25,8 @@
 # the one site where --force overrides it, and bin/fm-backend.sh's
 # fm_backend_kill owns what each backend can prove about its own close - an
 # already-exited endpoint is not a failure and stays silent.
+# Cleanup warns, without refusing, when the task metadata lacks the routing
+# facts needed for a complete routing-ledger row; the row names the gap.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -515,6 +517,24 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+# A task without its original routing facts still cleans up, but the gap is
+# reported here and the ledger row names it instead of attributing the task to
+# manual routing.
+ROUTING_MISSING=
+for ROUTING_KEY in routing_rule routing_provider routing_harness routing_model \
+  routing_effort routing_started_at routing_instance_id; do
+  if grep -q "^${ROUTING_KEY}=" "$META"; then
+    ROUTING_VALUE=$(fm_meta_get "$META" "$ROUTING_KEY")
+    case "$ROUTING_KEY:$ROUTING_VALUE" in
+      routing_rule:|routing_started_at:|routing_started_at:*[!0-9]*) ;;
+      *) continue ;;
+    esac
+  fi
+  ROUTING_MISSING="${ROUTING_MISSING:+$ROUTING_MISSING }$ROUTING_KEY"
+done
+if [ -n "$ROUTING_MISSING" ]; then
+  echo "WARNING: task $ID has no complete routing record (missing: $ROUTING_MISSING); cleanup proceeds and the routing ledger records the gap" >&2
+fi
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 if [ -n "$LANDED_VIA" ] && [ "$TEARDOWN_META_KIND" != lane ]; then
