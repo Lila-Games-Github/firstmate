@@ -1,0 +1,14 @@
+$ cat state/legacy1.meta
+window=fm:legacy
+endpoint_task_id=legacy1
+project=/tmp/p
+kind=ship
+mode=no-mistakes
+harness=claude
+model=opus
+effort=high
+$ fm-routing-ledger.py record --id legacy1 (no routing facts)
+$ fm-routing-ledger.py record --id new1 (complete routing facts after a relaunch)
+$ jq .routing,.started_at data/routing-ledger.jsonl
+{"task_id":"legacy1","routing":{"rule":"unrecorded","missing_reason":"routing record incomplete in task metadata: missing routing_rule, routing_provider, routing_harness, routing_model, routing_effort, routing_started_at, routing_instance_id"},"started_at":null}
+{"task_id":"new1","routing":{"rule":"review-work","missing_reason":null},"started_at":"2025-10-26T17:33:20+00:00"}

@@ -1,0 +1,5 @@
+ok - a legacy record without routing facts cleans up, warns, and ledgers the missing-routing reason
+WARNING: task task-x1 has no complete routing record (missing: routing_rule routing_provider routing_harness routing_model routing_effort routing_started_at routing_instance_id); cleanup proceeds and the routing ledger records the gap
+ok - a landed legacy record with a dead endpoint tears down and logs its accepted incarnation
+ok - a record predating spawn_gen refuses teardown until --legacy-record is passed
+ok - local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed
