@@ -33,38 +33,73 @@ PATH = re.compile(r"(?<!\w)(?:/(?:[^\s/]+/?)+|[A-Za-z]:\\(?:[^\s\\]+\\?)+)")
 SECRET = re.compile(r"(?i)\b(?:pin|password|secret|api[_ -]?key|token)(?:\s*[:=]\s*\S+|\s+(?=\S*\d)\S+)")
 INTERNAL = re.compile(r"\[key=[^\]]+\]|\bfm-[a-z0-9-]{8,}\b", re.I)
 URL = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/[0-9]+/?$")
-QUESTION = re.compile(r"^\*\*([A-Za-z0-9]+)\.\s+(.+?)\*\*\s*(.*)$")
-OPTION = re.compile(r"\(([a-z])\)\s*(.*?)(?=;\s*\([a-z]\)|\.\s+Recommendation|$)", re.S)
+BOLD = re.compile(r"^\*\*(.+?)\*\*\s*(.*)$")
+LABELED = re.compile(r"^([A-Za-z0-9]+)\.\s+(.+)$")
+OPTION = re.compile(r"\(([a-z])\)\s*(.*?)(?=[;\n]\s*(?:[-*]\s*)?\([a-z]\)|\.\s+Recommendation|\n\s*Recommendation|$)", re.S)
 MAX_BODY = 4096
+
+
+def question_lines(source):
+    """Split the register into (section, lines) entries the way the crew board does."""
+    entries = []
+    entry = []
+    section = "Open questions"
+    options_open = False
+
+    def flush():
+        nonlocal options_open
+        options_open = False
+        if entry:
+            entries.append((section, list(entry)))
+            entry.clear()
+
+    for line in source.splitlines():
+        if line.startswith("## "):
+            flush()
+            section = line[3:].strip()
+            continue
+        if line.strip() == "---":
+            flush()
+            continue
+        if BOLD.match(line):
+            flush()
+            entry.append(line.strip())
+            options_open = True
+            continue
+        if line.startswith("- ") or line.startswith("* "):
+            if options_open and not BOLD.match(line[2:].strip()):
+                entry.append(line.strip())
+                continue
+            flush()
+            entry.append(line[2:].strip())
+            options_open = bool(BOLD.match(line[2:].strip()))
+        elif entry:
+            if not line.strip():
+                options_open = False
+            entry.append(line.strip())
+    flush()
+    return entries
 
 
 def questions(source):
     """Read the human register without requiring optional option syntax."""
     cards = []
-    section = "Open questions"
-    current = None
-    for line in source.splitlines():
-        if line.startswith("## "):
-            section = line[3:].strip()
-            current = None
-            continue
-        match = QUESTION.match(line)
-        if match:
-            current = {"section": section, "label": match[1], "title": match[2],
-                       "body": match[3].strip(), "options": [], "recommendation": "",
-                       "replies": []}
-            cards.append(current)
-        elif current and line.strip() != "---":
-            current["body"] += ("\n" if current["body"] else "") + line.rstrip()
-    for card in cards:
-        body = card["body"].strip()
-        card["body"] = body
+    for section, lines in question_lines(source):
+        first = re.sub(r"^\[[ xX]\]\s*", "", lines[0]).strip()
+        bold = BOLD.match(first)
+        heading, rest = (bold[1].strip(), bold[2].strip()) if bold else (first, "")
+        labeled = LABELED.match(heading)
+        label, title = (labeled[1], labeled[2]) if labeled else ("", heading)
+        body = "\n".join([rest] + lines[1:]).strip()
         options = body.split("Options:", 1)[1].split("Recommendation", 1)[0] if "Options:" in body else ""
-        card["options"] = [{"key": key, "text": desc.strip().rstrip(". ;")}
-                           for key, desc in OPTION.findall(options)]
         recommendation = re.search(r"Recommendation(?: now)?:\s*\(([a-z])\)", body)
-        card["recommendation"] = recommendation.group(1) if recommendation else ""
-        card["replies"] = re.findall(r'"(' + re.escape(card["label"]) + r': [^"\n]+)"', body)
+        cards.append({
+            "section": section, "label": label, "title": title, "body": body,
+            "options": [{"key": key, "text": " ".join(desc.split()).rstrip(". ;")}
+                        for key, desc in OPTION.findall(options)],
+            "recommendation": recommendation.group(1) if recommendation else "",
+            "replies": re.findall(r'"(' + re.escape(label) + r': [^"\n]+)"', body) if label else [],
+        })
     return cards
 
 
@@ -295,7 +330,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(label, str) or not isinstance(answer, str) or not answer.strip() or len(answer) > 500 or "\n" in answer:
             return self.respond(400, {"error": "Invalid answer"})
         try:
-            known = {card["label"] for card in questions(self.server.questions.read_text(encoding="utf-8"))}
+            known = {card["label"] for card in questions(self.server.questions.read_text(encoding="utf-8")) if card["label"]}
         except OSError:
             return self.respond(503, {"error": "Questions unavailable"})
         if label not in known:

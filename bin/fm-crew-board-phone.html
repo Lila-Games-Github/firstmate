@@ -96,8 +96,11 @@
     boardView.hidden = show; decisionView.hidden = !show;
     document.getElementById('board-tab').setAttribute('aria-selected', String(!show));
     document.getElementById('decisions-tab').setAttribute('aria-selected', String(show));
+    decisionsShown = show;
     if (show) loadDecisions();
   }
+  let decisionsShown = false, shownCards = '';
+  const sent = new Map();
   document.getElementById('board-tab').onclick = () => showDecisions(false);
   document.getElementById('decisions-tab').onclick = () => showDecisions(true);
   const mode = document.getElementById('phone-mode'), modeStatus = document.getElementById('mode-status');
@@ -107,10 +110,15 @@
     catch (_) { mode.checked = !wanted; modeStatus.textContent = 'Could not change phone mode'; }
     mode.disabled = false;
   };
-  async function send(card, answer, result) {
-    result.textContent = 'Sending…';
-    try { await post('api/answer', {label:card.label, answer}); result.textContent = 'Sent to Firstmate'; }
-    catch (_) { result.textContent = 'Could not send. Try again.'; }
+  function lock(box) { for (const control of box.querySelectorAll('.answer button, .answer input')) control.disabled = true; }
+  async function send(card, answer, result, box) {
+    if (sent.has(card.label)) return;
+    lock(box); result.textContent = 'Sending…';
+    try { await post('api/answer', {label:card.label, answer}); sent.set(card.label, answer); result.textContent = 'Sent to Firstmate'; }
+    catch (_) {
+      for (const control of box.querySelectorAll('.answer button, .answer input')) control.disabled = false;
+      result.textContent = 'Could not send. Try again.';
+    }
   }
   async function forward(card, result) {
     const message = `${card.label}. ${card.title}\n${card.body}`;
@@ -126,7 +134,13 @@
       const [questions, phone] = await Promise.all([fetch('api/decisions', {cache:'no-store'}), fetch('api/phone-mode', {cache:'no-store'})]);
       if (!questions.ok || !phone.ok) throw Error('unavailable');
       const cards = (await questions.json()).cards;
-      mode.checked = (await phone.json()).enabled; modeStatus.textContent = mode.checked ? 'On' : 'Off';
+      const enabled = (await phone.json()).enabled;
+      if (!mode.disabled) { mode.checked = enabled; modeStatus.textContent = enabled ? 'On' : 'Off'; }
+      const snapshot = JSON.stringify(cards);
+      if (snapshot === shownCards) return;
+      shownCards = snapshot;
+      const labels = new Set(cards.map(card => card.label));
+      for (const label of [...sent.keys()]) if (!labels.has(label)) sent.delete(label);
       target.replaceChildren();
       if (!cards.length) { target.append(text('p', 'No open questions.')); return; }
       let section = '', stack;
@@ -139,26 +153,32 @@
         const box = document.createElement('article'); box.className = 'question';
         box.append(text('h3', `${card.label}. ${card.title}`), text('p', card.body));
         const result = text('p', ''); result.className = 'result'; result.setAttribute('role', 'status');
-        if (card.options.length) {
+        const answer = document.createElement('div'); answer.className = 'answer';
+        if (!card.label) answer.append(text('p', 'No question label, so answer this one from the terminal.'));
+        if (card.label && card.options.length) {
           const choices = document.createElement('div'); choices.className = 'choices';
           for (const option of card.options) {
             const button = text('button', `${option.key.toUpperCase()}: ${option.text}`);
             button.type = 'button'; button.className = 'action' + (option.key === card.recommendation ? ' recommended' : '');
-            button.onclick = () => send(card, option.key, result); choices.append(button);
+            button.onclick = () => send(card, option.key, result, box); choices.append(button);
           }
-          box.append(choices);
+          answer.append(choices);
         }
+        if (card.label) {
         const form = document.createElement('form');
         const input = document.createElement('input'); input.type = 'text'; input.maxLength = 500; input.required = true; input.placeholder = 'Short reply'; input.setAttribute('aria-label', `Reply to ${card.label}`);
         const submit = text('button', 'Send'); submit.className = 'action'; submit.type = 'submit';
-        form.append(input, submit); form.onsubmit = event => { event.preventDefault(); if (input.value.trim()) send(card, input.value.trim(), result); };
-        box.append(form);
-        if (/^For (UI|Design|Art)/.test(card.section)) {
+        form.append(input, submit); form.onsubmit = event => { event.preventDefault(); if (input.value.trim()) send(card, input.value.trim(), result, box); };
+        answer.append(form);
+        }
+        box.append(answer);
+        if (/^For /.test(card.section)) {
           const share = text('button', 'Forward'); share.type = 'button'; share.className = 'action'; share.onclick = () => forward(card, result); box.append(share);
         }
         box.append(result); stack.append(box);
+        if (card.label && sent.has(card.label)) { lock(box); result.textContent = 'Sent to Firstmate'; }
       }
-    } catch (_) { target.replaceChildren(text('p', 'Questions unavailable. Try again.')); }
+    } catch (_) { shownCards = ''; target.replaceChildren(text('p', 'Questions unavailable. Try again.')); }
   }
   function render(id, list, empty, attention=false, limit=Infinity) {
     const target = document.getElementById(id); target.replaceChildren();
@@ -202,6 +222,7 @@
       }
     } catch (_) { failed = true; }
     age();
+    if (decisionsShown) loadDecisions();
   }
   refresh(); setInterval(refresh, 5000); setInterval(age, 1000);
 })();

@@ -657,9 +657,9 @@ Before starting it, write the product owner's Tailscale login (for example `owne
 Every page and JSON request must carry a `Tailscale-User-Login` header equal to that login, which `tailscale serve` adds for tailnet users; a missing or different login gets 403.
 The owner-only tailnet mount command is `tailscale serve --bg --set-path /crew-board http://127.0.0.1:8765` after confirming the tailnet ACL restricts access to the product owner.
 This adds `/crew-board` alongside the existing `/` proxy and does not use Funnel.
-The Decisions tab shows every open question as a card, including UI, Design, and Art items that can be forwarded through the phone's share sheet or copied to the clipboard.
-An option tap or short reply sends a labeled note through `bin/fm-inbox.sh note` for firstmate to handle; the card remains until firstmate removes its entry.
-The phone mode switch stores `on` or `off` in `state/crew-board-phone-mode`, with absence meaning off; firstmate reads this state to decide whether to push when adding questions.
+The Decisions tab shows every open question as a card, and every card under a `For …` section (such as UI, Design, or Art) can be forwarded through the phone's share sheet or copied to the clipboard.
+An option tap or short reply sends a labeled note through `bin/fm-inbox.sh note` for firstmate to handle; the card remains until firstmate removes its entry. Questions without a label still show as cards but are answered from the terminal.
+The phone mode switch stores `on` or `off` in `state/crew-board-phone-mode`, with absence meaning off; it is the switch a supervising firstmate reads when adding a question, and this phone tool sends no push itself.
 The server's owner-only POST endpoints also require a same-origin request.
 `tests/fixtures/crew-board-phone/capture.py` regenerates the `tests/assets/crew-board-phone-*.png` screenshots from the fixture board and its fixture owner login, using Python Playwright with an installed Chromium.
 
