@@ -1,0 +1,15 @@
+GET api/decisions without Tailscale login -> HTTP Error 403: Forbidden
+{"h": "FL1. Choose the flash build.", "buttons": ["A: keep full flash", "B: local flash only [RECOMMENDED]", "Send"], "reply": true}
+{"h": "R2. Which release channel?", "buttons": ["A: Play internal [RECOMMENDED]", "B: App Store TestFlight", "Send"], "reply": true}
+{"h": ". Which test phone should we keep?", "buttons": [], "reply": false}
+{"h": "D2. Update the economy workbook.", "buttons": ["Send", "Forward"], "reply": true}
+{"h": "U1. Shop button size.", "buttons": ["A: 48px", "B: 56px [RECOMMENDED]", "Send", "Forward"], "reply": true}
+{"h": "A3. Hero palette.", "buttons": ["Send", "Forward"], "reply": true}
+Art card forward result: Copied to clipboard
+clipboard: 'A3. Hero palette.\nWarm or cool palette for the hero banner?'
+FL1 buttons disabled after send: True
+phone-mode state file: 'on\n'
+inbox note 1793105863-8NuUdG.note: 'id=1793105863-8NuUdG\nat=2026-10-27T12:57:43Z\nsource=text\n--\nU1: 56px but test on small phones'
+inbox note 1793105863-hjR4GX.note: 'id=1793105863-hjR4GX\nat=2026-10-27T12:57:43Z\nsource=text\n--\nFL1: b'
+FL1 card disappeared after entry deleted (auto-refresh, no tab tap)
+phone-mode state file after off: 'off\n'
