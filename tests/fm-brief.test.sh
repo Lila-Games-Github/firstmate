@@ -476,6 +476,12 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must require a self-sufficient --intent string"
   assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
     "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
+  assert_grep "Every gate fix must be a descendant commit on top of the current head." "$brief" \
+    "no-mistakes DOD must require descendant commits for gate fixes"
+  assert_grep "Folding, amending, squashing, and rebasing are unsupported while a run is active." "$brief" \
+    "no-mistakes DOD must forbid history rewriting during a run"
+  assert_grep "For a commit-message or history finding, use the finding's own non-rewriting fallback first." "$brief" \
+    "no-mistakes DOD must direct history findings to a non-rewriting fallback"
 
   # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
   # claim an enforcement the tool does not provide: this is instruction only.
