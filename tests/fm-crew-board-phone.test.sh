@@ -43,10 +43,14 @@ def run_page(html, pathname, board):
     return json.loads(result.stdout)
 
 
-def status(url, login=None):
+def status(url, login=None, data=None, origin=None):
     headers = {} if login is None else {"Tailscale-User-Login": login}
+    if origin is not None:
+        headers["Origin"] = origin
+    if data is not None:
+        headers["Content-Type"] = "application/json"
     try:
-        response = urlopen(Request(url, headers=headers), timeout=3)
+        response = urlopen(Request(url, headers=headers, data=json.dumps(data).encode() if data is not None else None), timeout=3)
         return response.status, response.read()
     except HTTPError as error:
         return error.code, error.read()
@@ -56,6 +60,13 @@ root = Path(sys.argv[1])
 with tempfile.TemporaryDirectory() as temporary:
     home = Path(temporary)
     (home / "state").mkdir()
+    (home / "data").mkdir()
+    (home / "data" / "captain-questions.md").write_text("""# Open questions
+## Your decisions
+**FL1. Choose the flash.** A full flash slows the phone. Options: (a) keep it; (b) local flash. Recommendation: (b). "FL1: a" or "FL1: b".
+## For Design
+**D2. Update the workbook.** Please refresh it.
+""")
     payload = {
         "schema": "fm-crew-board.v1", "generated_epoch": int(time.time()),
         "rows": [{"id": "fm-internal-worker", "title": "Ship phone view", "phase": "building",
@@ -98,6 +109,9 @@ with tempfile.TemporaryDirectory() as temporary:
     from threading import Thread
     server = module.LoopbackServer(("127.0.0.1", 0), module.Handler, OWNER)
     server.board = home / "state" / "crew-board.json"
+    server.home = home
+    server.state = home / "state"
+    server.questions = home / "data" / "captain-questions.md"
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -120,6 +134,45 @@ with tempfile.TemporaryDirectory() as temporary:
         html = status(base + "/", OWNER)[1]
         assert b"Needs you" in html
         assert b"Recent landings" in status(base + "/details", OWNER)[1]
+        cards = json.loads(status(base + "/api/decisions", OWNER)[1])["cards"]
+        assert len(cards) == 2 and cards[0]["recommendation"] == "b", cards
+        assert cards[0]["replies"] == ["FL1: a", "FL1: b"], cards
+        assert cards[1]["options"] == [] and cards[1]["section"] == "For Design", cards
+        original = server.questions.read_text()
+        server.questions.write_text("## Bad\n**unfinished\n### odd\n**X. Safe.** plain\n")
+        malformed = json.loads(status(base + "/api/decisions", OWNER)[1])["cards"]
+        assert len(malformed) == 1 and malformed[0]["label"] == "X", malformed
+        server.questions.write_text("""## Your decisions
+- **A. Which release?** Pick one. Options:
+- (a) Play
+- (b) App Store
+Recommendation: (b).
+
+- [ ] Which phone?
+---
+**C. Ship it?** Options: (a) yes; (b) no. Recommendation: (a).
+## For Tarun
+- **T1. Check the build.** Please look.
+- Which phone build?
+""")
+        bulleted = json.loads(status(base + "/api/decisions", OWNER)[1])["cards"]
+        assert [(card["section"], card["label"], card["title"]) for card in bulleted] == [
+            ("Your decisions", "A", "Which release?"), ("Your decisions", "", "Which phone?"),
+            ("Your decisions", "C", "Ship it?"), ("For Tarun", "T1", "Check the build."), ("For Tarun", "", "Which phone build?")], bulleted
+        assert bulleted[0]["options"] == [{"key": "a", "text": "Play"}, {"key": "b", "text": "App Store"}], bulleted
+        assert bulleted[0]["recommendation"] == "b" and bulleted[1]["body"] == "", bulleted
+        assert bulleted[2]["options"] == [{"key": "a", "text": "yes"}, {"key": "b", "text": "no"}], bulleted
+        assert status(base + "/api/answer", OWNER, {"label": "", "answer": "b"}, base)[0] == 400
+        server.questions.write_text(original)
+        assert json.loads(status(base + "/api/phone-mode", OWNER)[1]) == {"enabled": False}
+        assert status(base + "/api/answer", None, {"label":"FL1", "answer":"b"}, base)[0] == 403
+        assert status(base + "/api/answer", OWNER, {"label":"FL1", "answer":"b"}, "https://evil.example")[0] == 403
+        assert status(base + "/api/answer", OWNER, {"label":"FL1", "answer":"b"}, base)[0] == 200
+        notes = list((home / "state" / "inbox").glob("*.note"))
+        assert len(notes) == 1 and "FL1: b" in notes[0].read_text(), notes
+        assert status(base + "/api/phone-mode", OWNER, {"enabled":True}, base)[0] == 200
+        assert json.loads(status(base + "/api/phone-mode", OWNER)[1]) == {"enabled": True}
+        assert (home / "state" / "crew-board-phone-mode").read_text() == "on\n"
 
         held_board = dict(payload)
         held_board["panels"] = {

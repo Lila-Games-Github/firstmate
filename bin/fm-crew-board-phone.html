@@ -33,12 +33,30 @@
     .subgroup { margin:15px 0 8px; font-size:.73rem; color:var(--muted); text-transform:uppercase; letter-spacing:.09em; font-weight:700; }
     .more { display:inline-block; margin-top:10px; color:var(--accent); font-size:.83rem; font-weight:600; text-decoration:none; }
     .more:hover { text-decoration:underline; }
+    .tabs { display:flex; gap:8px; margin:-8px 0 22px; }
+    .tabs button, .action { background:var(--card); color:var(--accent); border:1px solid var(--line); border-radius:9px; padding:9px 12px; font:inherit; font-weight:600; cursor:pointer; }
+    .tabs button[aria-selected="true"], .action.recommended { border-color:var(--accent); background:var(--attention); }
+    .question { padding:15px; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow-wrap:anywhere; }
+    .question h3 { margin:0 0 8px; font-size:1rem; }
+    .question p { margin:0 0 12px; white-space:pre-wrap; font-size:.88rem; line-height:1.4; }
+    .question .choices { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+    .question .choices button { text-align:left; max-width:100%; }
+    .question form { display:flex; gap:8px; }
+    .question input { min-width:0; flex:1; background:var(--bg); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:9px; font:inherit; }
+    .question .result { min-height:1.3em; margin:8px 0 0; }
+    .mode { display:flex; align-items:center; gap:9px; margin-bottom:22px; }
     @media (max-width:400px) { main { padding:17px 14px 36px; } .row { padding:11px; } h1 { font-size:1.5rem; } }
   </style>
 </head>
 <body>
 <main>
   <header><div><p class="eyebrow">Firstmate</p><h1>Crew board</h1><p id="age" class="meta" role="status">Loading board…</p></div><button id="theme" class="theme" type="button" aria-label="Toggle color theme">Theme</button></header>
+  <nav class="tabs" aria-label="Phone views"><button id="board-tab" type="button" aria-selected="true">Board</button><button id="decisions-tab" type="button" aria-selected="false">Decisions</button></nav>
+  <div id="decision-view" hidden>
+    <label class="mode"><input id="phone-mode" type="checkbox"> Phone mode <span id="mode-status" class="meta" role="status"></span></label>
+    <div id="question-sections"></div>
+  </div>
+  <div id="board-view">
   <div id="overview">
     <section><h2>Needs you</h2><div id="needs" class="stack"></div><a id="more-needs" class="more" href="details#decisions" hidden>All that needs you</a></section>
     <section><h2>Active workers</h2><div id="workers" class="stack"></div><a class="more" href="details#workers-detail">All workers</a></section>
@@ -52,6 +70,7 @@
     <section id="workers-detail"><h2>All workers</h2><div id="all-workers" class="stack"></div></section>
     <section id="landing-detail"><h2>Landing queue</h2><div id="all-landing" class="stack"></div></section>
     <section><h2>Recent landings</h2><div id="recent-landings" class="stack"></div></section>
+  </div>
   </div>
 </main>
 <script>
@@ -67,6 +86,100 @@
   if (chosen === 'light' || chosen === 'dark') root.dataset.theme = chosen;
   document.getElementById('theme').onclick = () => { root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark'; };
   const text = (tag, value) => { const node = document.createElement(tag); node.textContent = value; return node; };
+  const boardView = document.getElementById('board-view'), decisionView = document.getElementById('decision-view');
+  async function post(route, payload) {
+    const response = await fetch(route, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    if (!response.ok) throw Error('Request failed');
+    return response.json();
+  }
+  function showDecisions(show) {
+    boardView.hidden = show; decisionView.hidden = !show;
+    document.getElementById('board-tab').setAttribute('aria-selected', String(!show));
+    document.getElementById('decisions-tab').setAttribute('aria-selected', String(show));
+    decisionsShown = show;
+    if (show) loadDecisions();
+  }
+  let decisionsShown = false, shownCards = '';
+  const sent = new Map();
+  document.getElementById('board-tab').onclick = () => showDecisions(false);
+  document.getElementById('decisions-tab').onclick = () => showDecisions(true);
+  const mode = document.getElementById('phone-mode'), modeStatus = document.getElementById('mode-status');
+  mode.onchange = async () => {
+    const wanted = mode.checked; mode.disabled = true;
+    try { await post('api/phone-mode', {enabled:wanted}); modeStatus.textContent = wanted ? 'On' : 'Off'; }
+    catch (_) { mode.checked = !wanted; modeStatus.textContent = 'Could not change phone mode'; }
+    mode.disabled = false;
+  };
+  function lock(box) { for (const control of box.querySelectorAll('.answer button, .answer input')) control.disabled = true; }
+  async function send(card, answer, result, box) {
+    if (sent.has(card.label)) return;
+    lock(box); result.textContent = 'Sending…';
+    try { await post('api/answer', {label:card.label, answer}); sent.set(card.label, answer); result.textContent = 'Sent to Firstmate'; }
+    catch (_) {
+      for (const control of box.querySelectorAll('.answer button, .answer input')) control.disabled = false;
+      result.textContent = 'Could not send. Try again.';
+    }
+  }
+  async function forward(card, result) {
+    const message = `${card.label ? card.label + '. ' : ''}${card.title}\n${card.body}`;
+    try {
+      if (navigator.share) await navigator.share({text:message});
+      else await navigator.clipboard.writeText(message);
+      result.textContent = navigator.share ? 'Shared' : 'Copied to clipboard';
+    } catch (_) { result.textContent = 'Could not share or copy'; }
+  }
+  async function loadDecisions() {
+    const target = document.getElementById('question-sections');
+    try {
+      const [questions, phone] = await Promise.all([fetch('api/decisions', {cache:'no-store'}), fetch('api/phone-mode', {cache:'no-store'})]);
+      if (!questions.ok || !phone.ok) throw Error('unavailable');
+      const cards = (await questions.json()).cards;
+      const enabled = (await phone.json()).enabled;
+      if (!mode.disabled) { mode.checked = enabled; modeStatus.textContent = enabled ? 'On' : 'Off'; }
+      const snapshot = JSON.stringify(cards);
+      if (snapshot === shownCards) return;
+      shownCards = snapshot;
+      const labels = new Set(cards.map(card => card.label));
+      for (const label of [...sent.keys()]) if (!labels.has(label)) sent.delete(label);
+      target.replaceChildren();
+      if (!cards.length) { target.append(text('p', 'No open questions.')); return; }
+      let section = '', stack;
+      for (const card of cards) {
+        if (card.section !== section) {
+          section = card.section;
+          const group = document.createElement('section'); group.append(text('h2', section));
+          stack = document.createElement('div'); stack.className = 'stack'; group.append(stack); target.append(group);
+        }
+        const box = document.createElement('article'); box.className = 'question';
+        box.append(text('h3', `${card.label}. ${card.title}`), text('p', card.body));
+        const result = text('p', ''); result.className = 'result'; result.setAttribute('role', 'status');
+        const answer = document.createElement('div'); answer.className = 'answer';
+        if (!card.label) answer.append(text('p', 'No question label, so answer this one from the terminal.'));
+        if (card.label && card.options.length) {
+          const choices = document.createElement('div'); choices.className = 'choices';
+          for (const option of card.options) {
+            const button = text('button', `${option.key.toUpperCase()}: ${option.text}`);
+            button.type = 'button'; button.className = 'action' + (option.key === card.recommendation ? ' recommended' : '');
+            button.onclick = () => send(card, option.key, result, box); choices.append(button);
+          }
+          answer.append(choices);
+        }
+        if (card.label) {
+        const form = document.createElement('form');
+        const input = document.createElement('input'); input.type = 'text'; input.maxLength = 500; input.required = true; input.placeholder = 'Short reply'; input.setAttribute('aria-label', `Reply to ${card.label}`);
+        const submit = text('button', 'Send'); submit.className = 'action'; submit.type = 'submit';
+        form.append(input, submit); form.onsubmit = event => { event.preventDefault(); if (input.value.trim()) send(card, input.value.trim(), result, box); };
+        answer.append(form);
+        }
+        box.append(answer);
+        if (/^For /.test(card.section)) {
+          const share = text('button', 'Forward'); share.type = 'button'; share.className = 'action'; share.onclick = () => forward(card, result); box.append(share);
+        }
+        box.append(result); stack.append(box);
+        if (card.label && sent.has(card.label)) { lock(box); result.textContent = 'Sent to Firstmate'; }
+      }
+    } catch (_) { shownCards = ''; target.replaceChildren(text('p', 'Questions unavailable. Try again.')); }
+  }
   function render(id, list, empty, attention=false, limit=Infinity) {
     const target = document.getElementById(id); target.replaceChildren();
     if (!list.length) { target.append(text('p', empty)); target.firstChild.className = 'empty'; return; }
@@ -109,6 +222,7 @@
       }
     } catch (_) { failed = true; }
     age();
+    if (decisionsShown) loadDecisions();
   }
   refresh(); setInterval(refresh, 5000); setInterval(age, 1000);
 })();
