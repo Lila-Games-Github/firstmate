@@ -153,11 +153,12 @@ Recommendation: (b).
 **C. Ship it?** Options: (a) yes; (b) no. Recommendation: (a).
 ## For Tarun
 - **T1. Check the build.** Please look.
+- Which phone build?
 """)
         bulleted = json.loads(status(base + "/api/decisions", OWNER)[1])["cards"]
         assert [(card["section"], card["label"], card["title"]) for card in bulleted] == [
             ("Your decisions", "A", "Which release?"), ("Your decisions", "", "Which phone?"),
-            ("Your decisions", "C", "Ship it?"), ("For Tarun", "T1", "Check the build.")], bulleted
+            ("Your decisions", "C", "Ship it?"), ("For Tarun", "T1", "Check the build."), ("For Tarun", "", "Which phone build?")], bulleted
         assert bulleted[0]["options"] == [{"key": "a", "text": "Play"}, {"key": "b", "text": "App Store"}], bulleted
         assert bulleted[0]["recommendation"] == "b" and bulleted[1]["body"] == "", bulleted
         assert bulleted[2]["options"] == [{"key": "a", "text": "yes"}, {"key": "b", "text": "no"}], bulleted

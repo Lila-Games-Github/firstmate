@@ -34,6 +34,7 @@ SECRET = re.compile(r"(?i)\b(?:pin|password|secret|api[_ -]?key|token)(?:\s*[:=]
 INTERNAL = re.compile(r"\[key=[^\]]+\]|\bfm-[a-z0-9-]{8,}\b", re.I)
 URL = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/[0-9]+/?$")
 BOLD = re.compile(r"^\*\*(.+?)\*\*\s*(.*)$")
+OPTION_BULLET = re.compile(r"^\([a-z]\)")
 LABELED = re.compile(r"^([A-Za-z0-9]+)\.\s+(.+)$")
 OPTION = re.compile(r"\(([a-z])\)\s*(.*?)(?=[;\n]\s*(?:[-*]\s*)?\([a-z]\)|\.\s+Recommendation|\n\s*Recommendation|$)", re.S)
 MAX_BODY = 4096
@@ -45,10 +46,11 @@ def question_lines(source):
     entry = []
     section = "Open questions"
     options_open = False
+    bulleted = False
 
     def flush():
-        nonlocal options_open
-        options_open = False
+        nonlocal options_open, bulleted
+        options_open = bulleted = False
         if entry:
             entries.append((section, list(entry)))
             entry.clear()
@@ -67,12 +69,13 @@ def question_lines(source):
             options_open = True
             continue
         if line.startswith("- ") or line.startswith("* "):
-            if options_open and not BOLD.match(line[2:].strip()):
+            bullet = line[2:].strip()
+            if options_open and not BOLD.match(bullet) and (not bulleted or OPTION_BULLET.match(bullet)):
                 entry.append(line.strip())
                 continue
             flush()
-            entry.append(line[2:].strip())
-            options_open = bool(BOLD.match(line[2:].strip()))
+            entry.append(bullet)
+            options_open = bulleted = bool(BOLD.match(bullet))
         elif entry:
             if not line.strip():
                 options_open = False

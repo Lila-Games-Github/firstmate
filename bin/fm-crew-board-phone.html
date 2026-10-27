@@ -121,7 +121,7 @@
     }
   }
   async function forward(card, result) {
-    const message = `${card.label}. ${card.title}\n${card.body}`;
+    const message = `${card.label ? card.label + '. ' : ''}${card.title}\n${card.body}`;
     try {
       if (navigator.share) await navigator.share({text:message});
       else await navigator.clipboard.writeText(message);
