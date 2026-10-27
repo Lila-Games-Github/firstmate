@@ -1,0 +1,11 @@
+$ FM_HOME=<tmp> bin/fm-brief.sh evidence-f18 some-proj --mode no-mistakes
+$ grep -n -B1 -A3 "Do not hand-edit" <tmp>/data/evidence-f18/brief.md
+138-This replaces the no-mistakes skill's advice to enrich `--intent` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
+139:Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
+140-Every gate fix must be a descendant commit on top of the current head.
+141-Folding, amending, squashing, and rebasing are unsupported while a run is active.
+142-For a commit-message or history finding, use the finding's own non-rewriting fallback first.
+
+--- direct-PR / local-only briefs (clause must be absent) ---
+direct-PR: descendant-clause matches=0
+local-only: descendant-clause matches=0
