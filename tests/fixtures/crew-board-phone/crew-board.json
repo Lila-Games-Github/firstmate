@@ -1,0 +1,74 @@
+{
+  "schema": "fm-crew-board.v1",
+  "generated_epoch": 1793084637,
+  "rows": [
+    {
+      "id": "sample-a",
+      "title": "Ship mobile dashboard",
+      "phase": "validating",
+      "gone": false
+    },
+    {
+      "id": "sample-b",
+      "title": "Review account sync",
+      "phase": "investigating",
+      "gone": false
+    },
+    {
+      "id": "sample-c",
+      "title": "Check overnight tests",
+      "phase": "testing",
+      "gone": false
+    }
+  ],
+  "panels": {
+    "full_questions": [
+      {
+        "title": "Choose a release window",
+        "status": "decision",
+        "detail": "Tuesday or Thursday?"
+      }
+    ],
+    "full_backlog": [],
+    "merge_waiting": {
+      "sample-a": "https://github.com/example/firstmate/pull/42"
+    },
+    "ready": [
+      {
+        "title": "Ship mobile dashboard",
+        "status": "merge?",
+        "link": "https://github.com/example/firstmate/pull/42"
+      },
+      {
+        "title": "Approve the local release branch",
+        "status": "land?"
+      }
+    ],
+    "phones": [
+      {
+        "title": "Galaxy S22",
+        "status": "idle"
+      },
+      {
+        "title": "Galaxy M31",
+        "status": "busy"
+      }
+    ],
+    "allowance": [
+      {
+        "title": "Codex",
+        "status": "64% remaining"
+      },
+      {
+        "title": "Claude",
+        "status": "38% remaining"
+      }
+    ],
+    "landings": [
+      {
+        "title": "Upgrade test harness",
+        "status": "landed"
+      }
+    ]
+  }
+}

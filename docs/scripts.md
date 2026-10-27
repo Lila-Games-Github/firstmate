@@ -20,6 +20,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-crew-board.sh`       | Open the live terminal crew board, refresh its worker records, show them as text, or stop the dashboard |
+| `fm-crew-board-phone.py` | Serve a read-only loopback phone view of the published crew board; see [phone setup](configuration.md#phone-view) |
 | `fm-monitoring-verdict.sh` | Print whether this home's supervision is genuinely down, using the guards' own predicate and grace, for the crew board's monitoring alert |
 | `fm-install-firstmate-cli.sh` | Install the `firstmate` terminal launcher into a directory on PATH without replacing another executable |
 | `fm-lavish-board-lib.sh` | Shared proof that a board's Lavish session is live and its answer listener is running |

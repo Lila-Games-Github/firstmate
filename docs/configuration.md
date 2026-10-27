@@ -647,6 +647,19 @@ No adapter writes an advisory to a task's status file, because a `note:` line th
 
 ## Live crew board
 
+### Phone view
+
+Run `FM_HOME=/path/to/home bin/fm-crew-board-phone.py --port 8765` to serve the read-only phone view from the crew board's already published `state/crew-board.json`.
+Keep `bin/fm-crew-board.sh refresh` running through the existing terminal board or another operator-managed schedule; the phone server does not collect fleet data itself.
+The server binds loopback only, refreshes the browser every five seconds, and marks the published payload stale after 30 seconds without a change.
+Its JSON endpoint is a short allowlist of plain titles, states, owner actions, phone status, and allowance; task IDs, paths, notes, logs, and secrets are excluded.
+Before starting it, write the product owner's Tailscale login (for example `owner@example.com`) to gitignored `config/crew-board-phone-owner`, or to that file under `FM_CONFIG_OVERRIDE`; the server refuses to start without it.
+Every page and JSON request must carry a `Tailscale-User-Login` header equal to that login, which `tailscale serve` adds for tailnet users; a missing or different login gets 403.
+The owner-only tailnet mount command is `tailscale serve --bg --set-path /crew-board http://127.0.0.1:8765` after confirming the tailnet ACL restricts access to the product owner.
+This adds `/crew-board` alongside the existing `/` proxy and does not use Funnel.
+The phone page is separate from the terminal board and has no merge, decision, or reply controls.
+`tests/fixtures/crew-board-phone/capture.py` regenerates the `tests/assets/crew-board-phone-*.png` screenshots from the fixture board and its fixture owner login, using Python Playwright with an installed Chromium.
+
 Run `bin/fm-install-firstmate-cli.sh` to link `bin/firstmate` into `~/.local/bin`, then run `firstmate` from any working directory with that directory on `PATH`.
 Set `FM_HOME` when opening another firstmate home; the launcher otherwise uses the checkout containing its target.
 The terminal dashboard needs Go 1.27.2 or newer for its first build, plus `jq`, Python 3, and the existing fleet commands used by `bin/fm-crew-board.sh refresh`.

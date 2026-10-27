@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Crew board</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, sans-serif; color-scheme: light dark; --bg:#f5f7fa; --ink:#17243a; --muted:#536579; --card:#fff; --line:#dbe2e9; --accent:#225ac7; --attention:#fff3df; --attention-line:#de9c33; }
+    @media (prefers-color-scheme: dark) { :root { --bg:#111923; --ink:#eaf0f8; --muted:#a7b7c8; --card:#1d2936; --line:#334455; --accent:#9dbdff; --attention:#3a2c1c; --attention-line:#d19a47; } }
+    :root[data-theme="dark"] { color-scheme:dark; --bg:#111923; --ink:#eaf0f8; --muted:#a7b7c8; --card:#1d2936; --line:#334455; --accent:#9dbdff; --attention:#3a2c1c; --attention-line:#d19a47; }
+    :root[data-theme="light"] { color-scheme:light; --bg:#f5f7fa; --ink:#17243a; --muted:#536579; --card:#fff; --line:#dbe2e9; --accent:#225ac7; --attention:#fff3df; --attention-line:#de9c33; }
+    * { box-sizing:border-box; }
+    [hidden] { display:none !important; }
+    body { margin:0; background:var(--bg); color:var(--ink); }
+    main { width:min(100%, 620px); margin:auto; padding:20px 16px 48px; }
+    header { display:flex; justify-content:space-between; align-items:start; gap:12px; margin-bottom:26px; }
+    .eyebrow { margin:0 0 4px; color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.12em; font-weight:700; }
+    h1 { margin:0; font-size:1.65rem; letter-spacing:-.035em; }
+    h2 { font-size:1.07rem; letter-spacing:-.015em; margin:0 0 10px; }
+    section { margin:0 0 27px; }
+    .meta { margin:7px 0 0; font-size:.79rem; color:var(--muted); }
+    .stale { color:#a13c1d; font-weight:700; }
+    .theme { background:var(--card); color:var(--ink); border:1px solid var(--line); border-radius:10px; padding:8px 10px; font:inherit; font-size:.78rem; cursor:pointer; }
+    .stack { display:grid; gap:8px; }
+    .row { display:flex; align-items:baseline; justify-content:space-between; gap:10px; padding:12px 13px; background:var(--card); border:1px solid var(--line); border-radius:12px; min-width:0; }
+    .row strong { font-size:.91rem; font-weight:600; overflow-wrap:anywhere; min-width:0; }
+    .row span { font-size:.79rem; color:var(--muted); white-space:nowrap; }
+    .row a { color:var(--accent); text-decoration:none; font-size:.8rem; font-weight:600; flex-shrink:0; }
+    .row a:hover { text-decoration:underline; }
+    .attention { background:var(--attention); border-left:4px solid var(--attention-line); }
+    .empty { color:var(--muted); font-size:.88rem; padding:11px 1px; margin:0; }
+    .subgroup { margin:15px 0 8px; font-size:.73rem; color:var(--muted); text-transform:uppercase; letter-spacing:.09em; font-weight:700; }
+    .more { display:inline-block; margin-top:10px; color:var(--accent); font-size:.83rem; font-weight:600; text-decoration:none; }
+    .more:hover { text-decoration:underline; }
+    @media (max-width:400px) { main { padding:17px 14px 36px; } .row { padding:11px; } h1 { font-size:1.5rem; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><div><p class="eyebrow">Firstmate</p><h1>Crew board</h1><p id="age" class="meta" role="status">Loading board…</p></div><button id="theme" class="theme" type="button" aria-label="Toggle color theme">Theme</button></header>
+  <div id="overview">
+    <section><h2>Needs you</h2><div id="needs" class="stack"></div><a id="more-needs" class="more" href="details#decisions" hidden>All that needs you</a></section>
+    <section><h2>Active workers</h2><div id="workers" class="stack"></div><a class="more" href="details#workers-detail">All workers</a></section>
+    <section><h2>Landing queue</h2><div id="landing" class="stack"></div><a class="more" href="details#landing-detail">Full queue and recent landings</a></section>
+    <section><h2>Phone status</h2><div id="phones" class="stack"></div></section>
+    <section><h2>Allowance</h2><div id="allowance" class="stack"></div></section>
+  </div>
+  <div id="detail" hidden>
+    <a class="more" href="./">← Overview</a>
+    <section id="decisions"><h2>Needs you</h2><div id="all-decisions" class="stack"></div></section>
+    <section id="workers-detail"><h2>All workers</h2><div id="all-workers" class="stack"></div></section>
+    <section id="landing-detail"><h2>Landing queue</h2><div id="all-landing" class="stack"></div></section>
+    <section><h2>Recent landings</h2><div id="recent-landings" class="stack"></div></section>
+  </div>
+</main>
+<script>
+(() => {
+  const path = location.pathname;
+  const detail = path.replace(/\/+$/, '').endsWith('/details');
+  const normal = detail ? path.replace(/\/+$/, '') : path.replace(/\/*$/, '/');
+  if (normal !== path) { location.replace(normal + location.search + location.hash); return; }
+  document.getElementById('overview').hidden = detail;
+  document.getElementById('detail').hidden = !detail;
+  const root = document.documentElement;
+  const chosen = new URLSearchParams(location.search).get('theme');
+  if (chosen === 'light' || chosen === 'dark') root.dataset.theme = chosen;
+  document.getElementById('theme').onclick = () => { root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark'; };
+  const text = (tag, value) => { const node = document.createElement(tag); node.textContent = value; return node; };
+  function render(id, list, empty, attention=false, limit=Infinity) {
+    const target = document.getElementById(id); target.replaceChildren();
+    if (!list.length) { target.append(text('p', empty)); target.firstChild.className = 'empty'; return; }
+    for (const item of list.slice(0, limit)) {
+      const row = document.createElement('div'); row.className = 'row' + (attention ? ' attention' : '');
+      row.append(text('strong', item.title));
+      if (item.state || item.status) row.append(text('span', item.state || item.status));
+      if (item.link) {
+        const a = text('a', item.kind === 'merge' ? 'View PR ↗' : 'View →'); a.href = item.link;
+        if (item.link.startsWith('https://')) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }
+        row.append(a);
+      }
+      target.append(row);
+    }
+  }
+  let updated = 0, failed = false;
+  function age() {
+    const el = document.getElementById('age');
+    const seconds = updated ? Math.max(0, Math.floor(Date.now()/1000) - updated) : 0;
+    const stale = !updated || failed || seconds > 30;
+    el.textContent = stale ? `Stale · last update ${updated ? seconds + 's ago' : 'unavailable'}` : `Updated ${seconds}s ago · refreshes every 5s`;
+    el.className = 'meta' + (stale ? ' stale' : '');
+  }
+  async function refresh() {
+    try {
+      const response = await fetch('api/board', {cache:'no-store'});
+      if (!response.ok) throw Error('board unavailable');
+      const data = await response.json(); updated = data.updated; failed = false;
+      render('needs', data.needs, 'Nothing needs you right now.', true, 5);
+      document.getElementById('more-needs').hidden = data.needs.length <= 5;
+      render('workers', data.workers, 'No active workers.');
+      render('landing', data.landing, 'No work waiting to land.', false, 3);
+      render('phones', data.phones, 'No phone status available.');
+      render('allowance', data.allowance, 'No allowance data available.');
+      if (detail) {
+        render('all-decisions', data.needs, 'Nothing needs you right now.', true);
+        render('all-workers', data.workers, 'No active workers.');
+        render('all-landing', data.landing, 'No work waiting to land.');
+        render('recent-landings', data.recent_landings, 'No recent landings.');
+      }
+    } catch (_) { failed = true; }
+    age();
+  }
+  refresh(); setInterval(refresh, 5000); setInterval(age, 1000);
+})();
+</script>
+</body>
+</html>
