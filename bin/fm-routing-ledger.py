@@ -18,6 +18,8 @@ else:
 
 ROOT = Path(__file__).resolve().parent.parent
 PRICES = ROOT / "bin" / "fm-routing-prices.json"
+ROUTING_KEYS = ("routing_rule", "routing_provider", "routing_harness", "routing_model",
+                "routing_effort", "routing_started_at", "routing_instance_id")
 SIGNALS = {"captain-correction": "captain_corrected", "review-rejection": "captain_rejected"}
 
 
@@ -344,10 +346,19 @@ def cost(meta, started):
     }
 
 
+def routing_missing(meta):
+    missing = [key for key in ROUTING_KEYS if key not in meta]
+    if "routing_rule" in meta and not meta["routing_rule"]:
+        missing.append("routing_rule")
+    if "routing_started_at" in meta and not meta["routing_started_at"].isdigit():
+        missing.append("routing_started_at")
+    return sorted(missing, key=ROUTING_KEYS.index)
+
+
 def record(args):
     meta = fields(Path(args.meta))
-    start_value = meta.get("routing_started_at")
-    start = float(start_value) if start_value else None
+    missing = routing_missing(meta)
+    start = None if "routing_started_at" in missing else float(meta["routing_started_at"])
     end = dt.datetime.now(dt.timezone.utc).timestamp()
     state = Path(args.state)
     data = Path(args.data)
@@ -358,11 +369,13 @@ def record(args):
         "schema": 1, "task_id": args.id, "instance_id": meta.get("routing_instance_id", meta.get("spawn_gen")),
         "project": meta.get("project"),
         "kind": meta.get("kind"), "delivery_mode": meta.get("mode"),
-        "routing": {"rule": meta.get("routing_rule", "manual"), "override_reason": meta.get("routing_reason"),
+        "routing": {"rule": meta.get("routing_rule") or "unrecorded", "override_reason": meta.get("routing_reason"),
                     "provider": meta.get("routing_provider"), "harness": meta.get("routing_harness", meta.get("harness")),
                     "model": meta.get("routing_model", meta.get("model")), "effort": meta.get("routing_effort", meta.get("effort")),
                     "quota_snapshot": json.loads(meta["routing_quota"]) if meta.get("routing_quota") else None,
-                    "quota_reason": meta.get("routing_quota_reason")},
+                    "quota_reason": meta.get("routing_quota_reason"),
+                    "missing_reason": "routing record incomplete in task metadata: missing " + ", ".join(missing)
+                    if missing else None},
         "started_at": iso(start) if start is not None else None,
         "ended_at": iso(end), "wall_seconds": round(end - start, 3) if start is not None else None,
         "outcome": {"landed": args.outcome == "landed", "method": args.method,

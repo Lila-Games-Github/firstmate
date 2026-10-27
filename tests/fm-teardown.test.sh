@@ -220,21 +220,6 @@ write_meta() {
     "routing_instance_id=teardown-test-task-x1"
 }
 
-test_missing_routing_record_refuses_before_cleanup() {
-  local case_dir rc=0
-  case_dir=$(make_case missing-routing-record)
-  write_meta "$case_dir" local-only ship
-  sed '/^routing_/d' "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
-  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail "missing routing record was silently accepted at cleanup"
-  assert_grep 'routing record' "$case_dir/stderr" "missing routing record was not reported"
-  assert_present "$case_dir/state/task-x1.meta" "missing routing record removed task metadata"
-  assert_present "$case_dir/wt" "missing routing record returned the worktree"
-  assert_absent "$case_dir/data/routing-ledger.jsonl" "missing routing record wrote a false ledger row"
-  pass "teardown refuses a task without routing evidence before cleanup"
-}
-
 # Commit something on the worktree's task branch. Args: case_dir [message]
 wt_commit() {
   local case_dir=$1 msg=${2:-wt work}
@@ -1452,14 +1437,7 @@ write_legacy_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode" \
-    "harness=codex" \
-    "routing_rule=legacy-test-route" \
-    "routing_provider=codex" \
-    "routing_harness=codex" \
-    "routing_model=default" \
-    "routing_effort=default" \
-    "routing_started_at=1760000000" \
-    "routing_instance_id=legacy-test-task-x1"
+    "harness=codex"
 }
 
 # Count spawn_gen fields in the task's meta, so a refusal can prove it left the
@@ -1530,6 +1508,29 @@ test_legacy_record_teardown_completes_when_landed_and_endpoint_dead() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "legacy-allow: teardown left the task record behind"
   pass "a landed legacy record with a dead endpoint tears down and logs its accepted incarnation"
+}
+
+test_legacy_record_without_routing_cleans_up_and_ledgers_the_gap() {
+  local case_dir
+  case_dir=$(make_case legacy-no-routing)
+  write_legacy_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  wt_commit "$case_dir" "landed legacy work"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "legacy-no-routing: teardown refused a legacy record without routing facts: $(cat "$case_dir/stderr")"
+  assert_grep 'WARNING: task task-x1 has no complete routing record (missing: routing_rule routing_provider routing_harness routing_model routing_effort routing_started_at routing_instance_id)' \
+    "$case_dir/stderr" "legacy-no-routing: teardown did not warn about the missing routing record"
+  assert_absent "$case_dir/state/task-x1.meta" "legacy-no-routing: teardown left the task record behind"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "legacy-no-routing: teardown returned success with its backlog item still open"
+  jq -e -s 'length == 1 and (.[0] | .task_id == "task-x1"
+    and .routing.rule == "unrecorded" and .started_at == null
+    and (.routing.missing_reason | contains("routing_rule") and contains("routing_started_at")))' \
+    "$case_dir/data/routing-ledger.jsonl" >/dev/null \
+    || fail "legacy-no-routing: the ledger row did not record the missing-routing reason: $(cat "$case_dir/data/routing-ledger.jsonl" 2>/dev/null)"
+  pass "a legacy record without routing facts cleans up, warns, and ledgers the missing-routing reason"
 }
 
 test_legacy_record_teardown_refuses_unlanded_work() {
@@ -4167,7 +4168,6 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
-test_missing_routing_record_refuses_before_cleanup
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -4221,6 +4221,7 @@ test_gh_error_and_content_absent_refuses
 test_persisted_steal_chain_refuses_at_depth_limit
 test_legacy_record_without_the_flag_refuses
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
+test_legacy_record_without_routing_cleans_up_and_ledgers_the_gap
 test_legacy_record_teardown_refuses_unlanded_work
 test_legacy_record_teardown_refuses_an_ambiguous_endpoint
 test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails
