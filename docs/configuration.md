@@ -507,7 +507,7 @@ The `profile:` line from `bin/fm-dispatch-resolve.sh` includes `--routing-rule` 
 An omitted rule is recorded as `manual` with `reason-not-recorded`, so legacy callers are visible in the review instead of being attributed to a rule.
 Relaunches preserve the original routing facts and increment `routing_relaunches` while retaining the harness history used to find rerun sessions.
 Teardown appends one JSON object per task incarnation to `data/routing-ledger.jsonl` before removing task runtime records, including when usage cannot be read.
-When a required routing fact is missing, teardown prints a `WARNING:` naming the missing keys and still cleans up; the ledger row records `rule: unrecorded` and a `missing_reason` instead of attributing the task to `manual`.
+When a required routing fact is missing, teardown prints a `WARNING:` naming the missing keys and still cleans up; the ledger row names them in `missing_reason`, and a missing rule is recorded as `unrecorded` rather than attributed to `manual`.
 The writer and weekly summary require Python 3, which bootstrap checks as a required local tool.
 The append is locked and a retry recognizes the task id and start time, preventing a duplicate line.
 The `schema: 1` object has `task_id`, `instance_id` (the original spawn generation), `project`, `kind`, `delivery_mode`, `routing`, `started_at`, `ended_at`, `wall_seconds`, `outcome`, `needs_decision_count`, `blocked_count`, `stale_wake_count`, `validation_runs`, `validation_rounds`, `failed_rounds`, `pipeline`, `relaunches`, `learning_candidates`, and `cost`.
