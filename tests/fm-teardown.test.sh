@@ -210,7 +210,29 @@ write_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode" \
-    "spawn_gen=teardown-test-task-x1"
+    "spawn_gen=teardown-test-task-x1" \
+    "routing_rule=test-route" \
+    "routing_provider=test-provider" \
+    "routing_harness=claude" \
+    "routing_model=default" \
+    "routing_effort=default" \
+    "routing_started_at=1760000000" \
+    "routing_instance_id=teardown-test-task-x1"
+}
+
+test_missing_routing_record_refuses_before_cleanup() {
+  local case_dir rc=0
+  case_dir=$(make_case missing-routing-record)
+  write_meta "$case_dir" local-only ship
+  sed '/^routing_/d' "$case_dir/state/task-x1.meta" > "$case_dir/state/task-x1.meta.tmp"
+  mv "$case_dir/state/task-x1.meta.tmp" "$case_dir/state/task-x1.meta"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "missing routing record was silently accepted at cleanup"
+  assert_grep 'routing record' "$case_dir/stderr" "missing routing record was not reported"
+  assert_present "$case_dir/state/task-x1.meta" "missing routing record removed task metadata"
+  assert_present "$case_dir/wt" "missing routing record returned the worktree"
+  assert_absent "$case_dir/data/routing-ledger.jsonl" "missing routing record wrote a false ledger row"
+  pass "teardown refuses a task without routing evidence before cleanup"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -1430,7 +1452,14 @@ write_legacy_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode" \
-    "harness=codex"
+    "harness=codex" \
+    "routing_rule=legacy-test-route" \
+    "routing_provider=codex" \
+    "routing_harness=codex" \
+    "routing_model=default" \
+    "routing_effort=default" \
+    "routing_started_at=1760000000" \
+    "routing_instance_id=legacy-test-task-x1"
 }
 
 # Count spawn_gen fields in the task's meta, so a refusal can prove it left the
@@ -4138,6 +4167,7 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_missing_routing_record_refuses_before_cleanup
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

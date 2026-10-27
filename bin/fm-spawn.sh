@@ -4718,7 +4718,12 @@ preserve_relaunch_meta() {
       split("window endpoint_task_id worktree project harness kind mode yolo landing_branch tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx routing_relaunches routing_harness_history", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
-    !($1 in owned)
+    !($1 in owned) && $1 !~ /^routing_/
+  ' "$RELAUNCH_META"
+}
+preserve_relaunch_routing_meta() {
+  awk -F= '
+    $1 ~ /^routing_/ && $1 != "routing_relaunches" && $1 != "routing_harness_history"
   ' "$RELAUNCH_META"
 }
 {
@@ -4771,6 +4776,7 @@ preserve_relaunch_meta() {
     echo "routing_quota_reason=$ROUTING_QUOTA_REASON"
     echo "routing_relaunches=0"
   else
+    preserve_relaunch_routing_meta
     echo "routing_relaunches=$(($(fm_meta_get "$RELAUNCH_META" routing_relaunches 2>/dev/null || echo 0) + 1))"
     ROUTING_HISTORY=$(fm_meta_get "$RELAUNCH_META" routing_harness_history 2>/dev/null || true)
     echo "routing_harness_history=${ROUTING_HISTORY:+$ROUTING_HISTORY,}$HARNESS"

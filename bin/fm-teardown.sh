@@ -25,6 +25,8 @@
 # the one site where --force overrides it, and bin/fm-backend.sh's
 # fm_backend_kill owns what each backend can prove about its own close - an
 # already-exited endpoint is not a failure and stays silent.
+# Cleanup also refuses before touching the endpoint when the task metadata
+# lacks the routing facts needed for a trustworthy routing-ledger row.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -515,6 +517,27 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+# A task without its original routing facts cannot produce a trustworthy
+# ledger row. Refuse while the endpoint and worktree are still intact so the
+# record can be inspected instead of silently attributing it to manual routing.
+for ROUTING_KEY in routing_rule routing_provider routing_harness routing_model \
+  routing_effort routing_started_at routing_instance_id; do
+  if ! grep -q "^${ROUTING_KEY}=" "$META"; then
+    echo "REFUSED: task $ID has no complete routing record (missing $ROUTING_KEY); nothing was changed" >&2
+    exit 1
+  fi
+done
+ROUTING_RULE=$(fm_meta_get "$META" routing_rule)
+ROUTING_STARTED_AT=$(fm_meta_get "$META" routing_started_at)
+case "$ROUTING_STARTED_AT" in
+  ''|*[!0-9]*)
+    echo "REFUSED: task $ID has no complete routing record (invalid routing_started_at); nothing was changed" >&2
+    exit 1 ;;
+esac
+if [ -z "$ROUTING_RULE" ]; then
+  echo "REFUSED: task $ID has no complete routing record (empty routing_rule); nothing was changed" >&2
+  exit 1
+fi
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 if [ -n "$LANDED_VIA" ] && [ "$TEARDOWN_META_KIND" != lane ]; then
