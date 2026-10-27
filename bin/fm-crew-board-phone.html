@@ -59,7 +59,7 @@
   const path = location.pathname;
   const detail = path.replace(/\/+$/, '').endsWith('/details');
   const normal = detail ? path.replace(/\/+$/, '') : path.replace(/\/*$/, '/');
-  if (normal !== path) { location.replace(normal + location.search + location.hash); return; }
+  if (normal !== path) history.replaceState(null, '', normal + location.search + location.hash);
   document.getElementById('overview').hidden = detail;
   document.getElementById('detail').hidden = !detail;
   const root = document.documentElement;
