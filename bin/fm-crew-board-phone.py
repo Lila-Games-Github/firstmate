@@ -4,7 +4,8 @@
 Usage: FM_HOME=/path/to/home bin/fm-crew-board-phone.py [--port 8765]
        bin/fm-crew-board-phone.py --bind 127.0.0.1 --port 8765
 
-The server reads state/crew-board.json, published by fm-crew-board.sh refresh.
+The server reads state/crew-board.json, published by fm-crew-board.sh refresh,
+and data/captain-questions.md; answers go to firstmate as inbox notes.
 It never refreshes the board or reads task files. Bind is fixed to loopback.
 config/crew-board-phone-owner must name the product owner's Tailscale login;
 every request must carry a matching Tailscale-User-Login header, which
