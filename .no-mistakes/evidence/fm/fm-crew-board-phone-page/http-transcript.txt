@@ -1,0 +1,23 @@
+# Through a stand-in for tailscale serve --set-path /crew-board (adds Tailscale-User-Login); configured owner = owner@example.com
+$ GET /crew-board/api/board  (login=owner@example.com)
+HTTP 200
+{"schema": "fm-crew-board-phone.v1", "updated": 1793085288, "needs": [{"title": "Choose a release window", "status": "decision", "link": "details#decisions", "kind": "decision"}, {"title": "Ship mobile dashboard", "statu
+$ GET /crew-board/  (login=owner@example.com)
+HTTP 200
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Crew board</title>
+  <sty
+$ GET /crew-board/api/board  (login=intruder@example.com)
+HTTP 403
+{"error":"Forbidden"}
+$ GET /crew-board/  (login=intruder@example.com)
+HTTP 403
+Forbidden
+$ server started without config/crew-board-phone-owner:
+fm-crew-board-phone: set the product owner's Tailscale login in /tmp/tmp.kUsBRDlBI9/config/crew-board-phone-owner
+exit=2

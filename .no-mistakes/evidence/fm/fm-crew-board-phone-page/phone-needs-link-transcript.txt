@@ -1,0 +1,5 @@
+fixture: needs rows shown=3, api needs=3, 'All that needs you' visible=False
+fixture: no Tailscale-User-Login header -> HTTP 403
+crowded: needs rows shown=5, api needs=8, 'All that needs you' visible=True
+crowded: after tap url=<base>/details#decisions, detail decisions rows=8
+crowded: no Tailscale-User-Login header -> HTTP 403
