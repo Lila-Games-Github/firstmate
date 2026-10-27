@@ -39,7 +39,7 @@
 <main>
   <header><div><p class="eyebrow">Firstmate</p><h1>Crew board</h1><p id="age" class="meta" role="status">Loading board…</p></div><button id="theme" class="theme" type="button" aria-label="Toggle color theme">Theme</button></header>
   <div id="overview">
-    <section><h2>Needs you</h2><div id="needs" class="stack"></div></section>
+    <section><h2>Needs you</h2><div id="needs" class="stack"></div><a id="more-needs" class="more" href="details#decisions" hidden>All that needs you</a></section>
     <section><h2>Active workers</h2><div id="workers" class="stack"></div><a class="more" href="details#workers-detail">All workers</a></section>
     <section><h2>Landing queue</h2><div id="landing" class="stack"></div><a class="more" href="details#landing-detail">Full queue and recent landings</a></section>
     <section><h2>Phone status</h2><div id="phones" class="stack"></div></section>
@@ -55,7 +55,10 @@
 </main>
 <script>
 (() => {
-  const detail = location.pathname.replace(/\/$/, '').endsWith('/details');
+  const path = location.pathname;
+  const detail = path.replace(/\/+$/, '').endsWith('/details');
+  const normal = detail ? path.replace(/\/+$/, '') : path.replace(/\/*$/, '/');
+  if (normal !== path) { location.replace(normal + location.search + location.hash); return; }
   document.getElementById('overview').hidden = detail;
   document.getElementById('detail').hidden = !detail;
   const root = document.documentElement;
@@ -92,6 +95,7 @@
       if (!response.ok) throw Error('board unavailable');
       const data = await response.json(); updated = data.updated; failed = false;
       render('needs', data.needs, 'Nothing needs you right now.', true, 5);
+      document.getElementById('more-needs').hidden = data.needs.length <= 5;
       render('workers', data.workers, 'No active workers.');
       render('landing', data.landing, 'No work waiting to land.', false, 3);
       render('phones', data.phones, 'No phone status available.');

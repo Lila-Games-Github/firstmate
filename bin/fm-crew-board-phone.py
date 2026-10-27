@@ -6,6 +6,9 @@ Usage: FM_HOME=/path/to/home bin/fm-crew-board-phone.py [--port 8765]
 
 The server reads state/crew-board.json, published by fm-crew-board.sh refresh.
 It never refreshes the board or reads task files. Bind is fixed to loopback.
+config/crew-board-phone-owner must name the product owner's Tailscale login;
+every request must carry a matching Tailscale-User-Login header, which
+tailscale serve adds, or it gets 403. Startup refuses without that file.
 With an owner-only tailnet ACL, mount beside an existing / proxy using:
     tailscale serve --bg --set-path /crew-board http://127.0.0.1:8765
 Do not use tailscale funnel. The host operator applies the Serve rule.
@@ -22,9 +25,11 @@ from urllib.parse import urlsplit
 
 SCHEMA = "fm-crew-board-phone.v1"
 HERE = Path(__file__).resolve().parent
+OWNER_FILE = "crew-board-phone-owner"
+OWNER_HEADER = "Tailscale-User-Login"
 HTML = HERE / "fm-crew-board-phone.html"
 PATH = re.compile(r"(?<!\w)(?:/(?:[^\s/]+/?)+|[A-Za-z]:\\(?:[^\s\\]+\\?)+)")
-SECRET = re.compile(r"(?i)\b(?:pin|password|secret|api[_ -]?key|token)\s*(?:[:=]\s*|\s+)\S+")
+SECRET = re.compile(r"(?i)\b(?:pin|password|secret|api[_ -]?key|token)(?:\s*[:=]\s*\S+|\s+(?=\S*\d)\S+)")
 INTERNAL = re.compile(r"\[key=[^\]]+\]|\bfm-[a-z0-9-]{8,}\b", re.I)
 URL = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/pull/[0-9]+/?$")
 
@@ -83,6 +88,7 @@ def project(payload):
                 shown.update({"kind": "decision", "link": "details#decisions"})
                 needs.append(shown)
     captain_section = False
+    held_ids = set()
     for held in entries(panels.get("full_backlog")):
         if not isinstance(held, dict):
             continue
@@ -93,6 +99,8 @@ def project(payload):
             if title and not any(title.startswith(entry["title"]) for entry in needs):
                 needs.append({"title": title, "status": "Held for you", "kind": "blocker",
                               "link": "details#decisions"})
+            if title and held.get("id"):
+                held_ids.add(held["id"])
     merge_waiting = panels.get("merge_waiting") or {}
     if isinstance(merge_waiting, dict):
         by_id = {row.get("id"): row for row in rows if isinstance(row, dict)}
@@ -108,6 +116,8 @@ def project(payload):
     # Only explicit owner holds qualify. A worker's blocked phase alone does not.
     for ready in entries(panels.get("ready")):
         if not isinstance(ready, dict) or ready.get("status") not in ("land?", "preview"):
+            continue
+        if ready.get("id") and ready.get("id") in held_ids:
             continue
         shown = item(ready)
         if shown:
@@ -135,17 +145,37 @@ def project(payload):
             "allowance": allowance, "recent_landings": landings}
 
 
+def read_owner(config):
+    try:
+        owner = (config / OWNER_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        owner = ""
+    if not owner or len(owner.split()) != 1:
+        raise ValueError(f"set the product owner's Tailscale login in {config / OWNER_FILE}")
+    return owner
+
+
 class LoopbackServer(ThreadingHTTPServer):
-    def __init__(self, address, handler):
+    def __init__(self, address, handler, owner):
         if address[0] not in ("127.0.0.1", "::1"):
             raise ValueError("phone board only binds to loopback")
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("phone board needs the product owner's Tailscale login")
+        self.owner = owner.strip().casefold()
         super().__init__(address, handler)
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         route = urlsplit(self.path).path.rstrip("/") or "/"
-        if route in ("/", "/details"):
+        login = self.headers.get(OWNER_HEADER, "").strip().casefold()
+        if login != self.server.owner:
+            if route == "/api/board":
+                body, mime = b'{"error":"Forbidden"}', "application/json; charset=utf-8"
+            else:
+                body, mime = b"Forbidden", "text/plain; charset=utf-8"
+            code = 403
+        elif route in ("/", "/details"):
             body = HTML.read_bytes()
             mime = "text/html; charset=utf-8"
             code = 200
@@ -177,7 +207,11 @@ def main():
     args = parser.parse_args()
     home = Path(os.environ.get("FM_HOME", HERE.parent))
     state = Path(os.environ.get("FM_STATE_OVERRIDE", home / "state"))
-    server = LoopbackServer((args.bind, args.port), Handler)
+    config = Path(os.environ.get("FM_CONFIG_OVERRIDE", home / "config"))
+    try:
+        server = LoopbackServer((args.bind, args.port), Handler, read_owner(config))
+    except ValueError as error:
+        parser.exit(2, f"fm-crew-board-phone: {error}\n")
     server.board = state / "crew-board.json"
     print(f"Crew board phone page on http://127.0.0.1:{server.server_port}/", flush=True)
     server.serve_forever()
