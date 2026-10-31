@@ -1,0 +1,19 @@
+ok - recorded non-default landing branch is merged and the default branch is untouched
+ok - absent landing_branch keeps default-branch fast-forward behavior
+ok - unresolved recorded landing branch refuses without default fallback
+ok - branch and clean-tree guards apply to the resolved landing target
+ok - diverged task branch still refuses against the resolved landing target
+ok - lane task lands the branch checked out in its recorded worktree
+ok - recorded lane branch takes precedence over the live worktree branch
+ok - recorded lane branch lands after the worktree is retired
+ok - a lane task whose identity never recorded a delivery mode refuses instead of guessing local-only
+ok - detached lane worktree refuses without falling back to fm/task-x1
+ok - lane worktree branch missing from project refuses
+ok - known-red work lands and creates or reopens exactly one make-it-green task
+ok - candidate with a new failure refuses without moving the landing tip
+ok - missing and mismatched-SHA receipts refuse
+ok - landing a queued car steers its sleeping successor to the front once
+ok - a landing without a train creates no queue state
+ok - a landing whose receipt cannot be recorded still exits 3 and steers the next car
+all fm-merge-local tests passed
+exit=0

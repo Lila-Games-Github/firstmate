@@ -1,0 +1,4 @@
+ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites
+ok - terminal completions wake once across restarts, acknowledgements, failures, and cancellation
+ok - failed completion sends back off and stop at the retry cap with one firstmate wake, and the outbox upgrade never replays history
+exit=0
