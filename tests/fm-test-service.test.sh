@@ -589,6 +589,17 @@ with sqlite3.connect(sys.argv[1]) as db:
 PY
 await_notice "$capped" failed
 grep -q "giving up after" "$tmp/notify-server3.log"
+wake_rows() { awk -F '\t' -v key="test-service-notify:$1" '$4 == key' "$FM_STATE_OVERRIDE/.wake-queue" 2>/dev/null | wc -l | tr -d ' '; }
+[ "$(wake_rows "$capped")" = 1 ] || fail 'given-up completion did not wake firstmate once'
+awk -F '\t' -v key="test-service-notify:$capped" '$4 == key { print $5 }' "$FM_STATE_OVERRIDE/.wake-queue" \
+  | grep -q "^check: test-service completion undelivered task=capped request=$capped;" || fail 'escalation did not name the task and request'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET state='escalating',attempted=0 WHERE request_id=?",(sys.argv[2],))
+PY
+await_notice "$capped" failed
+[ "$(wake_rows "$capped")" = 1 ] || fail 'replayed escalation duplicated the firstmate wake'
 rm "$FM_STATE_OVERRIDE/capped.inbox"
 sleep 1
 [ ! -e "$FM_STATE_OVERRIDE/capped.inbox" ] || fail 'capped notification was retried'
@@ -609,4 +620,4 @@ grep -q "request=$inflight state=passed" "$FM_STATE_OVERRIDE/notify.inbox/005.ms
 [ ! -e "$FM_STATE_OVERRIDE/notify.inbox/006.msg" ] || fail 'upgrade replayed historical completions'
 echo 'ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites'
 echo 'ok - terminal completions wake once across restarts, acknowledgements, failures, and cancellation'
-echo 'ok - failed completion sends back off and stop at the retry cap, and the outbox upgrade never replays history'
+echo 'ok - failed completion sends back off and stop at the retry cap with one firstmate wake, and the outbox upgrade never replays history'

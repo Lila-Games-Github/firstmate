@@ -15,6 +15,7 @@
 #   (j) a recorded lane branch lands after Playbot retires the worktree
 #   (k) landing a queued car steers its sleeping successor to the front once,
 #       and a landing without a train creates no queue state
+#   (l) a landing whose receipt cannot be recorded still exits 3 and steers
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -472,6 +473,44 @@ TMUX
   pass 'landing a queued car steers its sleeping successor to the front once'
 }
 
+test_unrecorded_receipt_still_steers_next_queue_car() {
+  local case_dir status
+  case_dir=$(make_case queue-hook-exit3)
+  commit_task_change "$case_dir" main
+  write_meta "$case_dir" "" local-only
+  git -C "$case_dir/project" worktree add -qb fm/task-y2 "$case_dir/next-wt" fm/task-x1
+  git -C "$case_dir/next-wt" commit -q --allow-empty -m 'next change'
+  fm_write_meta "$case_dir/state/task-y2.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+  mkdir -p "$case_dir/bin"
+  cat > "$case_dir/bin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+case "$1" in
+  display-message) echo fakepane ;;
+  list-windows) echo fm-notify ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  send-keys) exit 1 ;;
+esac
+TMUX
+  chmod +x "$case_dir/bin/tmux"
+  for car in task-x1 task-y2; do
+    env PATH="$case_dir/bin:$PATH" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+      "$ROOT/bin/fm-landing-queue.sh" ready "$car" --project "$case_dir/project" \
+      --branch "fm/$car" --head "$(git -C "$case_dir/project" rev-parse "fm/$car")" >/dev/null \
+      || fail "queue-hook-exit3: $car could not join"
+  done
+  : > "$case_dir/home/data/landing-health"
+
+  status=0
+  PATH="$case_dir/bin:$PATH" run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || status=$?
+
+  [ "$status" = 3 ] || fail "queue-hook-exit3: expected exit 3, got $status: $(cat "$case_dir/stderr")"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$(git -C "$case_dir/project" rev-parse fm/task-x1)" ] \
+    || fail 'queue-hook-exit3: fast-forward did not land'
+  [ "$(find "$case_dir/state/task-y2.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" = 1 ] \
+    || fail 'queue-hook-exit3: unrecorded receipt left the next car unsteered'
+  pass 'a landing whose receipt cannot be recorded still exits 3 and steers the next car'
+}
+
 test_landing_without_train_creates_no_queue() {
   local case_dir
   case_dir=$(make_case no-train)
@@ -499,5 +538,6 @@ test_new_failure_refused
 test_receipt_missing_or_wrong_sha_refused
 test_landing_steers_next_queue_car
 test_landing_without_train_creates_no_queue
+test_unrecorded_receipt_still_steers_next_queue_car
 
 printf 'all fm-merge-local tests passed\n'

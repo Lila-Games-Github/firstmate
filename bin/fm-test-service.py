@@ -558,6 +558,9 @@ def queue_notification(db, row):
 
 def deliver_notifications(db):
     now = time.time()
+    for notice in db.execute("SELECT * FROM notifications WHERE state='escalating' AND (attempted IS NULL OR attempted<?)",
+                             (now - 5,)).fetchall():
+        escalate_notification(db, notice)
     for notice in db.execute("SELECT * FROM notifications WHERE state='pending'").fetchall():
         rid = notice["request_id"]
         if notice["attempted"] is not None and notice["attempted"] > now - min(5 * 2 ** max(notice["attempts"] - 1, 0), NOTIFY_MAX_DELAY):
@@ -575,13 +578,38 @@ def deliver_notifications(db):
                 raise RuntimeError(sent.stderr.strip() or f"fm-send exited {sent.returncode}")
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
             if notice["attempts"] + 1 >= NOTIFY_ATTEMPTS:
-                db.execute("UPDATE notifications SET state='failed',error=? WHERE request_id=?", (str(exc), rid))
+                db.execute("UPDATE notifications SET state='escalating',error=? WHERE request_id=?", (str(exc), rid))
                 print(f"notification {rid}: {exc}; giving up after {NOTIFY_ATTEMPTS} attempts", file=sys.stderr, flush=True)
+                escalate_notification(db, db.execute("SELECT * FROM notifications WHERE request_id=?", (rid,)).fetchone())
             else:
                 db.execute("UPDATE notifications SET error=? WHERE request_id=?", (str(exc), rid))
                 print(f"notification {rid}: {exc}; will retry", file=sys.stderr, flush=True)
         else:
             db.execute("UPDATE notifications SET state='delivered',error=NULL WHERE request_id=?", (rid,))
+
+
+def escalate_notification(db, notice):
+    """Publish one firstmate wake for an undeliverable completion, deduplicated by key."""
+    rid = notice["request_id"]
+    key = "test-service-notify:" + rid
+    summary = notice["message"].splitlines()[0]
+    payload = (f"check: test-service completion undelivered task={notice['task']} request={rid}; "
+               f"resume the task with this result: {summary}")
+    script = ('. "$1" || exit 1; fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1; status=0; '
+              'fm_wake_queued_keys_locked check | grep -qxF -- "$2" || fm_wake_append_locked check "$2" "$3" || status=$?; '
+              'fm_lock_release "$FM_WAKE_QUEUE_LOCK"; exit "$status"')
+    env = {k: v for k, v in os.environ.items() if k not in {"FM_WAKE_QUEUE", "FM_WAKE_QUEUE_LOCK", "STATE"}}
+    env.update(FM_HOME=notice["home"], FM_STATE_OVERRIDE=notice["state_dir"])
+    db.execute("UPDATE notifications SET attempted=? WHERE request_id=?", (time.time(), rid))
+    try:
+        woke = run(["bash", "-c", script, "fm-test-service-wake", str(CODE.with_name("fm-wake-lib.sh")), key, payload],
+                   env=env, timeout=30)
+        if woke.returncode:
+            raise RuntimeError(woke.stderr.strip() or f"wake append exited {woke.returncode}")
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"notification {rid}: firstmate wake failed: {exc}; will retry", file=sys.stderr, flush=True)
+    else:
+        db.execute("UPDATE notifications SET state='failed' WHERE request_id=?", (rid,))
 
 
 def current_tip(repo, source, branch, old_tip):

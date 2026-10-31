@@ -27,7 +27,8 @@
 # lands only when every failure is in that current tip's recorded set. Every red
 # tip gets one queued or in-flight make-it-green backlog task for its branch.
 # After landing, it runs fm-landing-queue.sh reconcile for that landing branch,
-# so the train's next car is steered to the front; a failure there only warns.
+# so the train's next car is steered to the front, including when the landed
+# receipt then fails to record and the script exits 3; a failure there only warns.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -273,17 +274,23 @@ merge_status=0
 }
 git -C "$PROJ" merge --ff-only "$INCOMING_SHA" >/dev/null || merge_status=$?
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
-fm_health_store "$MERGE_RECEIPT_STAGE" "$DATA" "$HEALTH_KEY" || {
-  echo "error: landing SUCCEEDED ($TARGET now at $INCOMING_SHA) but its full-suite receipt could not be recorded; supply --base-receipt for the next landing or re-record the receipt for this tip" >&2
-  exit 3
-}
+health_status=0
+fm_health_store "$MERGE_RECEIPT_STAGE" "$DATA" "$HEALTH_KEY" || health_status=$?
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 fm_lock_release "$MERGE_HEALTH_LOCK" || true
 MERGE_HEALTH_LOCK=
+reconcile_landing_queue() {
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-landing-queue.sh" reconcile "$ID" --project "$PROJ" --landing-branch "$TARGET" \
+    || echo "warning: landing SUCCEEDED but the $TARGET landing queue was not reconciled; run bin/fm-landing-queue.sh status for its next car" >&2
+}
+if [ "$health_status" -ne 0 ]; then
+  echo "error: landing SUCCEEDED ($TARGET now at $INCOMING_SHA) but its full-suite receipt could not be recorded; supply --base-receipt for the next landing or re-record the receipt for this tip" >&2
+  reconcile_landing_queue
+  exit 3
+fi
 after=$(git -C "$PROJ" rev-parse --short "$TARGET")
 echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"
 [ "$INCOMING_COUNT" -eq 0 ] || echo "landing tip remains red; make-it-green task $GREEN_TASK is open; baseline receipt $RECORDED_RECEIPT"
-FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-  "$SCRIPT_DIR/fm-landing-queue.sh" reconcile "$ID" --project "$PROJ" --landing-branch "$TARGET" \
-  || echo "warning: landing SUCCEEDED but the $TARGET landing queue was not reconciled; run bin/fm-landing-queue.sh status for its next car" >&2
+reconcile_landing_queue

@@ -56,7 +56,7 @@ printf 'paused: test-service request=%s\n' "$request" >> "$FM_HOME/state/$task_i
 Workers do not poll status or keep a `wait` session open for service requests.
 For requests carrying `--task`, the service delivers one durable completion message through `fm-send.sh`, with the request id, terminal state, tested SHA, receipt path when written, and first failure line.
 Delivery survives service restart and retries failed sends without duplicating the inbox message, including after the worker acknowledges it.
-A retired task is skipped and logged; a failed send is logged and retried independently of test execution, with backoff growing to five minutes, and is marked failed after 12 attempts.
+A retired task is skipped and logged; a failed send is logged and retried independently of test execution, with backoff growing to five minutes, and after 12 attempts publishes one firstmate `check:` wake naming the task and request id, then is marked failed.
 Completions recorded before a store first gained its notification outbox are settled as skipped, so an upgrade never replays history.
 The standalone `wait ID` command remains available for interactive operators and scripts.
 
