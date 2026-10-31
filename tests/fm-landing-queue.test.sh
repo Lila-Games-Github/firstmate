@@ -154,6 +154,66 @@ done
 [ "$(wake_count)" = 3 ] || fail 'landing did not wake each new bottom exactly once'
 pass 'three cars validate once each at front and land in order without repeated wakes'
 
+# Front steers use the real durable sender, with only its terminal stubbed.
+mkdir -p "$TMP_ROOT/bin"
+cat > "$TMP_ROOT/bin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+case "$1" in
+  display-message) echo fakepane ;;
+  list-windows) echo fm-notify ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  send-keys) exit 1 ;;
+esac
+TMUX
+chmod +x "$TMP_ROOT/bin/tmux"
+PATH="$TMP_ROOT/bin:$PATH"
+inbox_count() { find "$CASE/home/state/$1.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' '; }
+make_case front-steer
+mkdir -p "$CASE/home/state"
+for id in a b c; do
+  fm_write_meta "$CASE/home/state/$id.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+done
+car a main; join a >/dev/null
+car b fm/a; join b >/dev/null
+car c fm/b; join c >/dev/null
+for id in a b c; do [ "$(inbox_count "$id")" = 0 ] || fail "joining steered $id"; done
+prepare a; receipt a >/dev/null
+git -C "$CASE/project" merge -q --ff-only fm/a
+queue reconcile a > "$CASE/reconcile.out"
+[ ! -s "$CASE/reconcile.out" ] || fail 'reconcile printed per-car output'
+[ "$(inbox_count b)" = 1 ] || fail 'new bottom car was not steered once'
+[ "$(inbox_count c)" = 0 ] || fail 'upper car was steered before reaching bottom'
+grep -q 'task=b is now bottom (place=1)' "$CASE/home/state/b.inbox/"*.msg || fail 'front steer did not name the car'
+mv "$CASE/home/state/b.inbox/"*.msg "$CASE/home/state/b.inbox/handled/"
+queue reconcile a >/dev/null
+queue status c >/dev/null
+expect_field "$(queue status b)" status needs-final
+[ "$(find "$CASE/home/state/b.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] || fail 'front steer repeated'
+queue fail b --reason 'suite failed' >/dev/null
+[ "$(inbox_count c)" = 1 ] || fail 'a failed lower car did not steer its successor'
+[ "$(inbox_count a)" = 0 ] || fail 'the bottom car joining an empty train was steered'
+pass 'cars that reach bottom after waiting get exactly one durable steer from landing or failure'
+
+make_case front-steer-retry
+mkdir -p "$CASE/home/state"
+fm_write_meta "$CASE/home/state/b.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+car a main; join a >/dev/null
+car b fm/a; join b >/dev/null
+: > "$CASE/home/state/b.inbox"
+queue fail a --reason 'suite failed' > /dev/null 2> "$CASE/retry.err"
+grep -q 'could not steer b' "$CASE/retry.err" || fail 'failed front steer was not reported'
+rm "$CASE/home/state/b.inbox"
+queue reconcile a >/dev/null
+[ "$(inbox_count b)" = 1 ] || fail 'failed front steer was not retried'
+queue reconcile a >/dev/null
+[ "$(inbox_count b)" = 1 ] || fail 'retried front steer duplicated'
+pass 'a failed front steer is retried by the next invocation without duplication'
+
+make_case reconcile-without-queue
+queue reconcile a > "$CASE/none.out"
+[ ! -s "$CASE/none.out" ] && [ ! -e "$CASE/home/data/landing-queue" ] || fail 'reconcile without a queue had side effects'
+pass 'reconcile is a no-op for a landing branch without a train'
+
 make_case legacy-upper-receipt
 mkdir -p "$CASE/home/config/test-service"
 cat > "$CASE/home/config/test-service/project.json" <<'EOF'

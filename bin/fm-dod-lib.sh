@@ -345,7 +345,8 @@ landing_queue() {
 1. Once implementation is committed, join with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)"\`.
 2. Run \`landing_queue status\` before rebasing, before the exact-head full suite, after the suite, and whenever you resume waiting.
    Read its \`place\`, \`target_ref\`, \`target_sha\`, and \`rebase_from\`; these replace any earlier target, even if another car failed or landed.
-   At \`waiting-for-front\`, wait without rebasing, running the final suite or gates, or capturing final evidence, even when the target changes.
+   At \`waiting-for-front\`, do not rebase, run the final suite or gates, or capture final evidence, even when the target changes: append \`paused: landing-queue waiting-for-front\` and end your turn without polling.
+   The queue sends your steering inbox one message when your car reaches bottom; resume then with \`landing_queue status\`.
    At bottom (\`place=1\`), when the base changes, rebase your own commits with \`git rebase --onto <target_sha> <rebase_from>\`, then acknowledge the prepared head with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <target_sha>\`.
    Resolve rebase conflicts yourself; do not merge or keep commits from a failed lower car.
 3. At \`needs-final\` (bottom on the live tip), run the task's full suite on exactly that committed head and create its receipt using the format owned by \`$root/bin/fm-landing-health-lib.sh\`.
@@ -356,7 +357,7 @@ landing_queue() {
    If your car fails, record \`landing_queue fail --reason <failure>\` before reporting \`failed:\` and stopping.
    At \`red-receipt\`, do not rerun the suite on the same head: fix the failures its \`reason\` names in a new commit and finalize again, or record the failure as above.
    At \`failed\`, report \`failed:\` with the status \`reason\` and stop.
-4. At \`waiting-for-front\`, \`ready-to-land\`, or \`needs-baseline\`, keep checking queue status every 30 seconds and read your steering inbox at those checkpoints; a pending test-service request instead follows the submit-and-end-turn rule above.
+4. At \`ready-to-land\` or \`needs-baseline\`, keep checking queue status every 30 seconds and read your steering inbox at those checkpoints; a pending test-service request instead follows the submit-and-end-turn rule above.
    The tool emits the readiness or baseline wake only for the bottom car with a valid receipt; do not add a ready \`done:\` or ask firstmate to coordinate the queue.
    Firstmate handles those wakes under the existing merge authority; \`$root/.agents/skills/landing-queue/SKILL.md\` owns that procedure.
    A changed target returns you to preparation; at \`landed\`, append \`done: landed {branch} at {head}\` and stop.

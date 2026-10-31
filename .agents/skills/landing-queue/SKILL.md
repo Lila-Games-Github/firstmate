@@ -13,7 +13,7 @@ metadata:
 
 Load this on any `check: landing-queue <status> task=<id> ...` wake.
 `bin/fm-landing-queue.sh`'s header and `--help` own the queue protocol, statuses, and receipt format; this skill owns only what firstmate does with its wakes.
-Workers own admission, rebasing, suite runs, and receipts, so never message a worker about its place, target, rebase, or suite timing, and never edit queue files by hand.
+Workers own admission, rebasing, suite runs, and receipts, so never message a worker about its place, target, rebase, or suite timing, and never edit queue files by hand; the queue tool alone sends the front steer.
 Workers also record configured landing-gate passes through the queue tool; a missing gate remains their work and emits no readiness wake.
 
 ## Recheck
@@ -26,7 +26,7 @@ Act only on the status it prints now; if it changed, take no queue action, becau
 
 Apply the existing merge authority for a local-only landing, exactly as for any other local-only task.
 With authority, run `bin/fm-merge-local.sh <id> --receipt <receipt>` using the `receipt` path from the recheck, then push only when the project's delivery path authorizes it.
-The worker and the next car observe `landed` and the new target from the queue themselves.
+`fm-merge-local.sh` reconciles the queue after landing, which steers a waiting next car to the front once; the worker and that car read `landed` and the new target from the queue themselves.
 
 ## needs-baseline
 

@@ -26,6 +26,8 @@
 # its failing set is recorded once under data/landing-health/. A red candidate
 # lands only when every failure is in that current tip's recorded set. Every red
 # tip gets one queued or in-flight make-it-green backlog task for its branch.
+# After landing, it runs fm-landing-queue.sh reconcile for that landing branch,
+# so the train's next car is steered to the front; a failure there only warns.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -277,6 +279,11 @@ fm_health_store "$MERGE_RECEIPT_STAGE" "$DATA" "$HEALTH_KEY" || {
 }
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
+fm_lock_release "$MERGE_HEALTH_LOCK" || true
+MERGE_HEALTH_LOCK=
 after=$(git -C "$PROJ" rev-parse --short "$TARGET")
 echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"
 [ "$INCOMING_COUNT" -eq 0 ] || echo "landing tip remains red; make-it-green task $GREEN_TASK is open; baseline receipt $RECORDED_RECEIPT"
+FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+  "$SCRIPT_DIR/fm-landing-queue.sh" reconcile "$ID" --project "$PROJ" --landing-branch "$TARGET" \
+  || echo "warning: landing SUCCEEDED but the $TARGET landing queue was not reconciled; run bin/fm-landing-queue.sh status for its next car" >&2

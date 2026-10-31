@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Worker-owned local landing train. Never merges, rebases, pushes, or runs tests.
-# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline> <task-id>
+# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|reconcile> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--gate <name>] [--reason <text>]
@@ -20,7 +20,18 @@
 # Use git rebase --onto <target_sha> <rebase_from> when the base changes, retaining
 # only this car's commits, then ready --target before the exact-head suite.
 # Only the bottom car prepares final evidence on the live landing tip. Upper
-# cars return waiting-for-front, regardless of receipts or target movement.
+# cars return waiting-for-front, regardless of receipts or target movement, and
+# their workers pause instead of polling. When a car that was observed above
+# bottom becomes bottom, any invocation that observes it sends that task one
+# durable steering message through fm-send.sh (FM_SEND_IDEMPOTENT=1, a frozen
+# body naming the task and queue), unless that car is the invoking task, which
+# reads its own status. A per-car front-<id> marker beside the queue snapshot
+# records waiting, then sent; a failed send stays waiting and is retried by the
+# next invocation. A task without a .meta file is not steered.
+# reconcile refreshes and persists the whole queue, emitting due wakes and front
+# steers, without requiring <task-id> to be a car; it prints nothing and is a
+# no-op when the landing branch has no queue. fm-merge-local.sh runs it after
+# every landing, so a lower landing advances sleeping upper workers.
 # receipt requires --head, --target and --receipt. It snapshots an fm-full-suite.v1
 # receipt (parser: fm-landing-health-lib.sh) only for the bottom car's current
 # head and target. Upper-car receipt and gate submissions are refused.
@@ -65,8 +76,8 @@
 # wakes, deduplicated per event. A wake is an event: firstmate rechecks status
 # before acting, following the landing-queue agent skill.
 # Only firstmate invokes fm-merge-local.sh and pushes, subject
-# to the existing merge authority. Workers keep checking status while waiting;
-# this tool has no daemon and never sends steering messages.
+# to the existing merge authority. This tool has no daemon; front steers are
+# its only steering messages.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,7 +87,7 @@ die() { echo "error: $*" >&2; exit 1; }
 [ "$#" -ge 2 ] || { usage >&2; exit 2; }
 ACTION=$1 ID=$2
 shift 2
-case "$ACTION" in ready|status|receipt|gate|fail|baseline) ;; *) die "unknown queue command $ACTION" ;; esac
+case "$ACTION" in ready|status|receipt|gate|fail|baseline|reconcile) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
 PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE=''
@@ -135,6 +146,7 @@ case "$COMMON$PRIMARY$DATA$STATE" in *$'\n'*|*$'\t'*) die 'queue paths cannot co
 KEY=$(fm_health_key "$COMMON" "$LANDING")
 HEALTH_KEY=$(fm_health_key "$PRIMARY" "$LANDING")
 DIR="$DATA/landing-queue/$KEY"
+if [ "$ACTION" = reconcile ] && [ ! -e "$DIR/queue" ]; then exit 0; fi
 for path in "$DATA" "$DATA/landing-queue" "$DIR"; do
   [ ! -L "$path" ] || die "queue directory is a symlink: $path"
 done
@@ -255,7 +267,7 @@ if [ "$ACTION" = ready ]; then
     [ "${branches[found]}" = "$BRANCH" ] || die 'cannot change a queued task branch'
   fi
 fi
-[ "$found" -ge 0 ] || die 'task has not joined the landing queue; run ready first'
+[ "$found" -ge 0 ] || [ "$ACTION" = reconcile ] || die 'task has not joined the landing queue; run ready first'
 
 # Compute each live assignment from bottom to top. A receipt follows SHAs rather
 # than branch names, so a normal lower landing does not demand another suite.
@@ -408,6 +420,35 @@ done
 save
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=0
+
+for ((i=0; i<count; i++)); do
+  [ "${states[i]}" = active ] || continue
+  marker="$DIR/front-${ids[i]}"
+  [ ! -L "$marker" ] || die "front marker is a symlink: $marker"
+  front=-
+  [ ! -f "$marker" ] || front=$(cat -- "$marker")
+  if [ "${places[i]}" -gt 1 ]; then
+    [ "$front" != waiting ] || continue
+    next=waiting
+  else
+    [ "$front" = waiting ] || continue
+    if [ "${ids[i]}" != "$ID" ]; then
+      [ -f "$STATE/${ids[i]}.meta" ] || continue
+      if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${ids[i]}" \
+        "Landing queue: task=${ids[i]} is now bottom (place=1) of queue=$KEY landing=$LANDING. Run landing_queue status and finalize at bottom on the live tip." 2>&1 >/dev/null); then
+        printf 'warning: could not steer %s at the front; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
+        continue
+      fi
+    fi
+    next=sent
+  fi
+  TMP=$(mktemp "$DIR/.front.XXXXXX")
+  printf '%s\n' "$next" > "$TMP"
+  mv -f -- "$TMP" "$marker"
+  TMP=
+done
+
+[ "$ACTION" != reconcile ] || exit 0
 
 printf 'queue=%s\ntask=%s\nbranch=%s\nhead=%s\nlanding_branch=%s\ntip=%s\nplace=%s\ntarget_ref=%s\ntarget_sha=%s\nrebase_from=%s\nstatus=%s\n' \
   "$KEY" "$ID" "${branches[found]}" "${heads[found]}" "$LANDING" "$TIP" "${places[found]}" \

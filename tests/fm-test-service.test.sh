@@ -558,5 +558,55 @@ $svc wait "$other" | grep -q "^passed $sha1"
 await_notice "$other" delivered
 grep -q "request=$other state=passed" "$other_home/state/notify.inbox/001.msg"
 [ ! -e "$FM_STATE_OVERRIDE/notify.inbox/005.msg" ] || fail 'completion crossed home boundaries'
+notice_field() {
+  python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$1" "$2" <<'PY'
+import sqlite3,sys
+print(sqlite3.connect(sys.argv[1]).execute('SELECT %s FROM notifications WHERE request_id=?' % sys.argv[3],(sys.argv[2],)).fetchone()[0])
+PY
+}
+
+# Failed sends back off with each attempt and stop at the retry cap.
+fm_write_meta "$FM_STATE_OVERRIDE/capped.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+: > "$FM_STATE_OVERRIDE/capped.inbox"
+capped=$($svc submit fake "$PWD" "$sha1" --task capped --suite)
+$svc wait "$capped" | grep -q "^passed $sha1"
+for ((attempt=0; attempt<300; attempt++)); do
+  [ "$(notice_field "$capped" attempts)" -ge 1 ] && break
+  sleep .1
+done
+[ "$attempt" -lt 300 ] || fail 'capped send was never attempted'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys,time
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET attempts=3,attempted=? WHERE request_id=?",(time.time()-10,sys.argv[2]))
+PY
+sleep 1
+[ "$(notice_field "$capped" attempts)" = 3 ] || fail 'retry ignored the growing backoff'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET attempts=1000,attempted=0 WHERE request_id=?",(sys.argv[2],))
+PY
+await_notice "$capped" failed
+grep -q "giving up after" "$tmp/notify-server3.log"
+rm "$FM_STATE_OVERRIDE/capped.inbox"
+sleep 1
+[ ! -e "$FM_STATE_OVERRIDE/capped.inbox" ] || fail 'capped notification was retried'
+
+# The first service to create the outbox settles every earlier completion, so
+# an upgrade never replays history, while in-flight requests still notify.
+kill -TERM "$server"; wait "$server"; server=
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('DROP TABLE notifications')
+PY
+inflight=$($svc submit fake "$PWD" "$sha1" --task notify --suite)
+[ "$(notice_field "$notify_pass" state)" = skipped ] || fail 'historical completion was left for replay'
+"$svc" serve > "$tmp/notify-server4.log" 2>&1 & server=$!
+await_notice "$inflight" delivered
+grep -q "request=$inflight state=passed" "$FM_STATE_OVERRIDE/notify.inbox/005.msg"
+[ ! -e "$FM_STATE_OVERRIDE/notify.inbox/006.msg" ] || fail 'upgrade replayed historical completions'
 echo 'ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites'
 echo 'ok - terminal completions wake once across restarts, acknowledgements, failures, and cancellation'
+echo 'ok - failed completion sends back off and stop at the retry cap, and the outbox upgrade never replays history'

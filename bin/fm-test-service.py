@@ -34,6 +34,8 @@ DB = ROOT / "requests.sqlite3"
 STATUS = ROOT / "status.json"
 TERMINAL = {"passed", "failed", "cancelled", "conflict"}
 STOP = False
+NOTIFY_ATTEMPTS = 12
+NOTIFY_MAX_DELAY = 300
 
 
 def run(argv, **kw):
@@ -134,11 +136,26 @@ def connection():
         state TEXT NOT NULL, started REAL, finished REAL, exit_code INTEGER,
         PRIMARY KEY (request_id, generation, name)
     )""")
-    db.execute("""CREATE TABLE IF NOT EXISTS notifications (
-        request_id TEXT PRIMARY KEY, task TEXT NOT NULL, home TEXT NOT NULL,
-        state_dir TEXT NOT NULL, message TEXT NOT NULL,
-        state TEXT NOT NULL DEFAULT 'pending', attempted REAL, error TEXT
-    )""")
+    # The outbox starts with history already settled, so startup replay covers
+    # only completions published after it exists. In-flight requests stay open.
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications'").fetchone():
+            db.execute("""CREATE TABLE notifications (
+                request_id TEXT PRIMARY KEY, task TEXT NOT NULL, home TEXT NOT NULL,
+                state_dir TEXT NOT NULL, message TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending', attempted REAL, error TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0
+            )""")
+            db.execute("""INSERT INTO notifications (request_id,task,home,state_dir,message,state,error)
+                SELECT id,'','','','','skipped','completed before the notification outbox'
+                FROM requests WHERE state IN ('passed','failed','cancelled','conflict')""")
+        elif "attempts" not in {row[1] for row in db.execute("PRAGMA table_info(notifications)")}:
+            db.execute("ALTER TABLE notifications ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
     return db
 
 
@@ -540,23 +557,29 @@ def queue_notification(db, row):
 
 
 def deliver_notifications(db):
-    for notice in db.execute("SELECT * FROM notifications WHERE state='pending' AND (attempted IS NULL OR attempted<?)",
-                             (time.time() - 5,)).fetchall():
+    now = time.time()
+    for notice in db.execute("SELECT * FROM notifications WHERE state='pending'").fetchall():
         rid = notice["request_id"]
+        if notice["attempted"] is not None and notice["attempted"] > now - min(5 * 2 ** max(notice["attempts"] - 1, 0), NOTIFY_MAX_DELAY):
+            continue
         meta = Path(notice["state_dir"]) / (notice["task"] + ".meta")
         if not meta.is_file():
             db.execute("UPDATE notifications SET state='skipped',error=? WHERE request_id=?", ("task no longer exists", rid))
             print(f"notification {rid}: task no longer exists; skipped", file=sys.stderr, flush=True)
             continue
         env = dict(os.environ, FM_HOME=notice["home"], FM_STATE_OVERRIDE=notice["state_dir"], FM_SEND_IDEMPOTENT="1")
-        db.execute("UPDATE notifications SET attempted=? WHERE request_id=?", (time.time(), rid))
+        db.execute("UPDATE notifications SET attempted=?,attempts=attempts+1 WHERE request_id=?", (time.time(), rid))
         try:
             sent = run([str(CODE.with_name("fm-send.sh")), notice["task"], notice["message"]], env=env, timeout=30)
             if sent.returncode:
                 raise RuntimeError(sent.stderr.strip() or f"fm-send exited {sent.returncode}")
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            db.execute("UPDATE notifications SET error=? WHERE request_id=?", (str(exc), rid))
-            print(f"notification {rid}: {exc}; will retry", file=sys.stderr, flush=True)
+            if notice["attempts"] + 1 >= NOTIFY_ATTEMPTS:
+                db.execute("UPDATE notifications SET state='failed',error=? WHERE request_id=?", (str(exc), rid))
+                print(f"notification {rid}: {exc}; giving up after {NOTIFY_ATTEMPTS} attempts", file=sys.stderr, flush=True)
+            else:
+                db.execute("UPDATE notifications SET error=? WHERE request_id=?", (str(exc), rid))
+                print(f"notification {rid}: {exc}; will retry", file=sys.stderr, flush=True)
         else:
             db.execute("UPDATE notifications SET state='delivered',error=NULL WHERE request_id=?", (rid,))
 

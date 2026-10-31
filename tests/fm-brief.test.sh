@@ -1783,7 +1783,9 @@ test_worker_owned_finalization() {
     assert_grep 'landing_queue receipt --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted exact-head receipt submission'
     assert_grep 'landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted landing gate submission'
     assert_grep 'keep checking queue status every 30 seconds' "$brief" 'waiting worker cannot discover changed targets'
-    assert_grep 'wait without rebasing, running the final suite or gates' "$brief" 'upper worker still finalizes before reaching front'
+    assert_grep 'do not rebase, run the final suite or gates, or capture final evidence' "$brief" 'upper worker still finalizes before reaching front'
+    assert_grep "append \`paused: landing-queue waiting-for-front\` and end your turn without polling" "$brief" 'upper worker still polls for the front'
+    assert_no_grep "At \`waiting-for-front\`, \`ready-to-land\`" "$brief" 'upper worker still told to poll'
     assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
     assert_grep 'git rebase --onto <target_sha> <rebase_from>' "$brief" 'brief cannot remove a failed lower car'
     # Execute the generated shell helper, including an apostrophe in FM_HOME.

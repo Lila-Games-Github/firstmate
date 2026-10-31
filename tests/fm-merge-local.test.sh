@@ -13,6 +13,8 @@
 #   (h) a lane task whose identity never recorded a delivery mode refuses
 #   (i) a recorded lane branch takes precedence over the live worktree branch
 #   (j) a recorded lane branch lands after Playbot retires the worktree
+#   (k) landing a queued car steers its sleeping successor to the front once,
+#       and a landing without a train creates no queue state
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -431,6 +433,56 @@ test_lane_branch_missing_from_project_refuses() {
   pass "lane worktree branch missing from project refuses"
 }
 
+test_landing_steers_next_queue_car() {
+  local case_dir queue_env
+  case_dir=$(make_case queue-hook)
+  commit_task_change "$case_dir" main
+  write_meta "$case_dir" "" local-only
+  git -C "$case_dir/project" worktree add -qb fm/task-y2 "$case_dir/next-wt" fm/task-x1
+  git -C "$case_dir/next-wt" commit -q --allow-empty -m 'next change'
+  fm_write_meta "$case_dir/state/task-y2.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+  mkdir -p "$case_dir/bin"
+  cat > "$case_dir/bin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+case "$1" in
+  display-message) echo fakepane ;;
+  list-windows) echo fm-notify ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  send-keys) exit 1 ;;
+esac
+TMUX
+  chmod +x "$case_dir/bin/tmux"
+  queue_env=(env PATH="$case_dir/bin:$PATH" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state")
+  "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" ready task-x1 --project "$case_dir/project" \
+    --branch fm/task-x1 --head "$(git -C "$case_dir/project" rev-parse fm/task-x1)" >/dev/null \
+    || fail 'queue-hook: first car could not join'
+  "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" ready task-y2 --project "$case_dir/project" \
+    --branch fm/task-y2 --head "$(git -C "$case_dir/project" rev-parse fm/task-y2)" >/dev/null \
+    || fail 'queue-hook: second car could not join'
+  [ ! -e "$case_dir/state/task-y2.inbox" ] || fail 'queue-hook: waiting car was steered before landing'
+
+  PATH="$case_dir/bin:$PATH" run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "queue-hook: merge failed: $(cat "$case_dir/stderr")"
+
+  [ "$(find "$case_dir/state/task-y2.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail 'queue-hook: landing did not steer the next car exactly once'
+  grep -q 'task=task-y2 is now bottom (place=1)' "$case_dir/state/task-y2.inbox/"*.msg \
+    || fail 'queue-hook: front steer did not name the next car'
+  ! grep -q 'not reconciled' "$case_dir/stderr" || fail 'queue-hook: reconcile failed after landing'
+  pass 'landing a queued car steers its sleeping successor to the front once'
+}
+
+test_landing_without_train_creates_no_queue() {
+  local case_dir
+  case_dir=$(make_case no-train)
+  commit_task_change "$case_dir" main
+  write_meta "$case_dir" "" local-only
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || fail 'no-train: merge failed'
+  [ ! -e "$case_dir/home/data/landing-queue" ] || fail 'no-train: landing created queue state'
+  ! grep -q 'not reconciled' "$case_dir/stderr" || fail "no-train: reconcile warned: $(cat "$case_dir/stderr")"
+  pass 'a landing without a train creates no queue state'
+}
+
 test_recorded_nondefault_branch_never_merges_default
 test_absent_landing_branch_keeps_default_behavior
 test_unresolved_recorded_branch_refuses_without_fallback
@@ -445,5 +497,7 @@ test_lane_branch_missing_from_project_refuses
 test_known_red_lands_and_opens_one_green_task
 test_new_failure_refused
 test_receipt_missing_or_wrong_sha_refused
+test_landing_steers_next_queue_car
+test_landing_without_train_creates_no_queue
 
 printf 'all fm-merge-local tests passed\n'
