@@ -16,4 +16,3 @@ ok - landing a queued car steers its sleeping successor to the front once
 ok - a landing without a train creates no queue state
 ok - a landing whose receipt cannot be recorded still exits 3 and steers the next car
 all fm-merge-local tests passed
-exit=0
