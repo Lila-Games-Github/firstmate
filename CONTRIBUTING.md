@@ -104,9 +104,12 @@ Verify the same way the gate does: reach for `bin/fm-test-run.sh` with the subje
 The pipeline publishes that evidence itself, so never hand-commit `.no-mistakes/` paths onto a feature branch; CI rejects them as tracked personal fleet paths.
 
 Check and test the toolbelt before pushing:
+When a supported entrypoint starts calling a helper, add the call path as a bounded consumer with its own assertion floor in `bin/fm-stock-bash-compat.sh`; the `firstmate-coding-guidelines` skill owns this rule.
+Run the affected consumer on stock macOS Bash 3.2 (or set `FM_STOCK_BASH_BIN` to a Bash 3.2 binary) because the parse sweep, lint, and ordinary test runner do not prove minimum-runtime execution.
 
 ```sh
 while IFS= read -r script; do /bin/bash -n "$script" || exit; done < <(bin/fm-lint.sh --list-files)   # syntax-check the shell surface fm-lint.sh will cover (changed files locally, full set in CI/on main)
+/bin/bash bin/fm-stock-bash-compat.sh --consumer merge   # example: run one bounded stock Bash consumer; replace merge with the affected consumer ID
 bin/fm-lint.sh   # lint that shell surface plus GitHub workflows via pinned actionlint; the single owner CI and the no-mistakes gate both run
 bin/fm-test-run.sh tests/<subject>.test.sh   # one script (primary local focus path, timed)
 bin/fm-test-run.sh tests/<a>.test.sh tests/<b>.test.sh   # several subjects at once: bounded automatic concurrency

@@ -81,6 +81,12 @@ Mark an axis not applicable only after inspecting its integration surface, and u
 For critical safety, routing, startup, and supervision infrastructure, prefer deterministic and idempotent enforcement over relying on agent memory alone.
 Keep instructions as the authority and discovery layer, but make repeated execution converge safely and make invalid or unsafe states fail closed wherever the runtime can enforce them.
 
+### Minimum-runtime call paths
+
+When a supported entrypoint begins calling a helper, add that call path to the minimum-runtime compatibility consumer inventory in `bin/fm-stock-bash-compat.sh` as one bounded consumer with its own assertion floor.
+Run the affected consumer under the minimum supported runtime before pushing; a syntax-only parse sweep and lint cannot prove that the helper runs there.
+The script's header owns its local one-consumer invocation and log-root behavior.
+
 ### Harness-dependent checks
 
 This section is the single owner of the rule and of how to satisfy it.

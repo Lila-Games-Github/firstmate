@@ -196,7 +196,22 @@ test_incomplete_consumer_has_one_verdict_and_later_merge_runs() {
   pass "stock Bash compatibility: incomplete consumer has one verdict and later consumers run"
 }
 
+test_single_consumer_runs_with_own_temp_root() {
+  local tmp out rc
+  tmp=$(fm_test_tmproot fm-stock-bash-compat-single)
+  make_fixture "$tmp"
+  rc=0
+  out=$(cd "$tmp" && env -u RUNNER_TEMP /bin/bash bin/fm-stock-bash-compat.sh --consumer merge 2>&1) || rc=$?
+  expect_code 0 "$rc" "a single consumer runs without CI's RUNNER_TEMP"
+  assert_contains "$out" "Stock Bash consumer passed::PR 19 local-merge branch resolution emitted 17 expected assertions" \
+    "selected consumer keeps its assertion floor"
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 1 ] \
+    || fail "single-consumer selection must produce exactly one verdict"
+  pass "stock Bash compatibility: one consumer runs locally with its own temp root"
+}
+
 test_oversized_route_default_has_runner_headroom
 test_every_hung_consumer_is_named_and_streamed
 test_failed_learning_summary_is_named_and_later_merge_runs
 test_incomplete_consumer_has_one_verdict_and_later_merge_runs
+test_single_consumer_runs_with_own_temp_root
