@@ -1,0 +1,77 @@
+===== fm/state/notify.inbox/handled/001.msg
+schema=fm-task-inbox.v1
+at=2026-10-31T01:48:37Z
+--
+Test service completion: request=45fe1cd8886c4d04 state=passed sha=d537d18fcef2c300f20372ccc59e63739372ac61 receipt=<tmp>/notified.receipt
+first_failure=-
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/notify.inbox/002.msg
+schema=fm-task-inbox.v1
+at=2026-10-31T01:48:39Z
+--
+Test service completion: request=f0f13b37d49d4f53 state=failed sha=6b1980f180730631479cbd753502fda16a78f3c8 receipt=-
+first_failure=suite: SCRIPT ERROR: fake parse failure
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/notify.inbox/003.msg
+schema=fm-task-inbox.v1
+at=2026-10-31T01:49:00Z
+--
+Test service completion: request=673e22f9a7704f4d state=cancelled sha=d537d18fcef2c300f20372ccc59e63739372ac61 receipt=-
+first_failure=cancelled before start
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/notify.inbox/004.msg
+schema=fm-task-inbox.v1
+at=2026-10-31T01:49:01Z
+--
+Test service completion: request=7cb045f043fc40db state=cancelled sha=d537d18fcef2c300f20372ccc59e63739372ac61 receipt=-
+first_failure=cancelled
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/notify.inbox/005.msg
+schema=fm-task-inbox.v1
+at=2026-10-31T01:49:28Z
+--
+Test service completion: request=f383ca9c7e6143fa state=passed sha=d537d18fcef2c300f20372ccc59e63739372ac61 receipt=<tmp>/state/results/f383ca9c7e6143fa/d537d18fcef2c300f20372ccc59e63739372ac61.receipt
+first_failure=-
+Resume this request's work using this result; do not resubmit or poll it.
+===== notifications outbox (requests.sqlite3)
+request_id | task | home | state_dir | message | state | attempted | error | attempts
+298b59e8a5ca4862 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+63998ae705364c7f |  |  |  |  | skipped | None | completed before the notification outbox | 0
+630fd750f184415e |  |  |  |  | skipped | None | completed before the notification outbox | 0
+ebced53cb2ed4add |  |  |  |  | skipped | None | completed before the notification outbox | 0
+8bd92f47d9ab408c |  |  |  |  | skipped | None | completed before the notification outbox | 0
+6bc46a3cb66d4998 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+9fff7e9c5c8d4a00 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+5ba0dcd9851f4974 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+8be532b2ed1f4a73 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+925e0d4d33b94bfc |  |  |  |  | skipped | None | completed before the notification outbox | 0
+0b35882806294b2c |  |  |  |  | skipped | None | completed before the notification outbox | 0
+facc1765d1854708 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+380ff5bd921a4e98 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+e710823545294430 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+281ad2c8c7ed41ab |  |  |  |  | skipped | None | completed before the notification outbox | 0
+8f449eaff32e42e9 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+2994a97d4362408f |  |  |  |  | skipped | None | completed before the notification outbox | 0
+14402cd5e1ca4124 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+7aa56270519d495f |  |  |  |  | skipped | None | completed before the notification outbox | 0
+d555bd7540d447e3 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+191339359b034323 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+40e6c1dc92384948 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+6ba1d79d6a834908 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+5a06fee9dc8848b3 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+5a3df3a6624a48b2 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+16058537657b4740 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+dacdca55a53e495b |  |  |  |  | skipped | None | completed before the notification outbox | 0
+fec02f5abc1c4b29 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+773697371b7f44c4 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+45fe1cd8886c4d04 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+f0f13b37d49d4f53 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+5786e42db0774be8 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+ed324b6ff047401d |  |  |  |  | skipped | None | completed before the notification outbox | 0
+673e22f9a7704f4d |  |  |  |  | skipped | None | completed before the notification outbox | 0
+7cb045f043fc40db |  |  |  |  | skipped | None | completed before the notification outbox | 0
+bd72a804c7394248 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+548c1d4e51704835 |  |  |  |  | skipped | None | completed before the notification outbox | 0
+f383ca9c7e6143fa | notify | <tmp>/fm | <tmp>/fm/state | Test service completion: request=f383ca9c7e6143fa state=passed sha=d537d18fcef2c300f20372ccc59e63739372ac61 receipt=<tmp>/state/results/f383ca9c7e6143fa/d537d18fcef2c300f20372ccc59e63739372ac61.receipt
+first_failure=-
+Resume this request's work using this result; do not resubmit or poll it. | delivered | 1793411367.833566 | None | 1
