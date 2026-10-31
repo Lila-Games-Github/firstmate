@@ -108,7 +108,7 @@ run_consumer "watcher churn deferral" "$WATCH_CHURN_TIMEOUT" 1 \
 run_consumer "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIMEOUT" 1 \
   env FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
-run_consumer "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 14 \
+run_consumer "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 17 \
   "$STOCK_BASH" "$ROOT/tests/fm-merge-local.test.sh"
 [ "$compatibility_failed" -eq 0 ] || {
   echo "::error::one or more stock macOS Bash consumers failed or did not return a verdict"

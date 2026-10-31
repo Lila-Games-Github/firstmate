@@ -118,8 +118,10 @@ PRIMARY=$(cd "$PRIMARY" && pwd -P)
 REPO_NAME=${PRIMARY##*/}
 GATES_OUTPUT=$(FM_HOME="$FM_HOME" python3 "$SCRIPT_DIR/fm-test-service.py" landing-gates-for-repo "$REPO_NAME") \
   || die "cannot read landing gates for $REPO_NAME"
-mapfile -t GATES <<< "$GATES_OUTPUT"
-[ -n "$GATES_OUTPUT" ] || GATES=()
+GATES=()
+if [ -n "$GATES_OUTPUT" ]; then
+  while IFS= read -r gate_name; do GATES[${#GATES[@]}]=$gate_name; done <<< "$GATES_OUTPUT"
+fi
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 if [ -z "$LANDING" ] && [ -f "$STATE/$ID.meta" ]; then
@@ -155,9 +157,9 @@ LOCK="$STATE/.landing-queue-$KEY.lock"
 HEALTH_LOCK="$STATE/.landing-health-$HEALTH_KEY.lock"
 TMP='' WAKE_HELD=0 HEALTH_HELD=0
 gate_receipt_read() { # <path> <gate> <head> <target>
-  local path=$1 gate=$2 head=$3 target=$4 lines=()
+  local path=$1 gate=$2 head=$3 target=$4 line lines=()
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  mapfile -t lines < "$path"
+  while IFS= read -r line || [ -n "$line" ]; do lines[${#lines[@]}]=$line; done < "$path"
   [ "${#lines[@]}" -eq 4 ] && [ "${lines[0]}" = schema=fm-landing-gate.v1 ] \
     && [ "${lines[1]}" = "gate=$gate" ] && [ "${lines[2]}" = "sha=$head" ] \
     && [ "${lines[3]}" = "target=$target" ]
@@ -329,7 +331,7 @@ case "$ACTION" in
     [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
     [[ "$GATE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'gate requires a safe --gate name'
     configured=0
-    for gate_name in "${GATES[@]}"; do [ "$gate_name" != "$GATE" ] || configured=1; done
+    for gate_name in ${GATES[@]+"${GATES[@]}"}; do [ "$gate_name" != "$GATE" ] || configured=1; done
     [ "$configured" -eq 1 ] || die "landing gate is not configured: $GATE"
     [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
       && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
@@ -388,7 +390,7 @@ done
 # A passing suite still waits for every declared project landing gate.
 for ((i=0; i<count; i++)); do
   case "${statuses[i]}" in ready-to-land) ;; *) continue ;; esac
-  for gate_name in "${GATES[@]}"; do
+  for gate_name in ${GATES[@]+"${GATES[@]}"}; do
     if ! gate_receipt_read "$(gate_receipt_path "${ids[i]}" "$gate_name" "${heads[i]}" "${target_shas[i]}")" \
       "$gate_name" "${heads[i]}" "${target_shas[i]}"; then
       statuses[i]=needs-gate
