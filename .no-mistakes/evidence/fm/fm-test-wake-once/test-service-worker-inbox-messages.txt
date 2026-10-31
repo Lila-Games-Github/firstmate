@@ -1,0 +1,44 @@
+===== fm/state/notify.inbox/002.msg =====
+schema=fm-task-inbox.v1
+at=2026-10-31T02:31:12Z
+--
+Test service completion: request=6a5018206c444fba state=failed sha=f8cd961dd14b222799a64e90da291748a58c1093 receipt=-
+first_failure=suite: SCRIPT ERROR: fake parse failure
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/notify.inbox/003.msg =====
+schema=fm-task-inbox.v1
+at=2026-10-31T02:31:34Z
+--
+Test service completion: request=dee27f340b634d0e state=cancelled sha=9a63f07a611900d24e7d139e596331b56b60010b receipt=-
+first_failure=cancelled before start
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/notify.inbox/004.msg =====
+schema=fm-task-inbox.v1
+at=2026-10-31T02:31:35Z
+--
+Test service completion: request=c3986c214b1548ea state=cancelled sha=9a63f07a611900d24e7d139e596331b56b60010b receipt=-
+first_failure=cancelled
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/notify.inbox/005.msg =====
+schema=fm-task-inbox.v1
+at=2026-10-31T02:32:01Z
+--
+Test service completion: request=6f2345bc0e9f43c2 state=passed sha=9a63f07a611900d24e7d139e596331b56b60010b receipt=/tmp/fm-test-service.dD24aB/state/results/6f2345bc0e9f43c2/9a63f07a611900d24e7d139e596331b56b60010b.receipt
+first_failure=-
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/notify.inbox/handled/001.msg =====
+schema=fm-task-inbox.v1
+at=2026-10-31T02:31:11Z
+--
+Test service completion: request=becf7e8b225b49a4 state=passed sha=9a63f07a611900d24e7d139e596331b56b60010b receipt=/tmp/fm-test-service.dD24aB/notified.receipt
+first_failure=-
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/retry.inbox/001.msg =====
+schema=fm-task-inbox.v1
+at=2026-10-31T02:31:25Z
+--
+Test service completion: request=bd5322fe85874898 state=passed sha=9a63f07a611900d24e7d139e596331b56b60010b receipt=/tmp/fm-test-service.dD24aB/state/results/bd5322fe85874898/9a63f07a611900d24e7d139e596331b56b60010b.receipt
+first_failure=-
+Resume this request's work using this result; do not resubmit or poll it.
+===== fm/state/.wake-queue =====
+1793413912	1	check	test-service-notify:f7cda708bc314318	check: test-service completion undelivered task=capped request=f7cda708bc314318; resume the task with this result: Test service completion: request=f7cda708bc314318 state=passed sha=9a63f07a611900d24e7d139e596331b56b60010b receipt=/tmp/fm-test-service.dD24aB/state/results/f7cda708bc314318/9a63f07a611900d24e7d139e596331b56b60010b.receipt

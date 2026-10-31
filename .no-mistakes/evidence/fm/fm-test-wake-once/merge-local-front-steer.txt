@@ -1,0 +1,14 @@
+$ fm-merge-local.sh  # lands task-x1 while task-y2 sleeps at waiting-for-front
+merged fm/task-x1 into local main (9e072c9 -> 346114f) in /tmp/fm-merge-local-tests.Qu9nOo/queue-hook/project
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  2 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+===== task-y2 steering inbox: 001.msg =====
+schema=fm-task-inbox.v1
+at=2026-10-31T02:32:42Z
+--
+Landing queue: task=task-y2 is now bottom (place=1) of queue=f64f93a45a7a3279347834451d2b70e7cb540fe8 landing=main. Run landing_queue status and finalize at bottom on the live tip.
