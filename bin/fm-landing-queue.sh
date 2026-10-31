@@ -19,8 +19,11 @@
 # reason, else '-').
 # Use git rebase --onto <target_sha> <rebase_from> when the base changes, retaining
 # only this car's commits, then ready --target before the exact-head suite.
+# Only the bottom car prepares final evidence on the live landing tip. Upper
+# cars return waiting-for-front, regardless of receipts or target movement.
 # receipt requires --head, --target and --receipt. It snapshots an fm-full-suite.v1
-# receipt (parser: fm-landing-health-lib.sh) only for the current head and target.
+# receipt (parser: fm-landing-health-lib.sh) only for the bottom car's current
+# head and target. Upper-car receipt and gate submissions are refused.
 # A target/head race refuses the submission; status then supplies the new work.
 # gate requires --gate, --head, --target, and --receipt for a configured landing
 # gate. Its receipt is exactly four lines: schema=fm-landing-gate.v1,
@@ -55,6 +58,7 @@
 # baseline; neither demands another suite run on the same head. Once firstmate
 # records the baseline, the car becomes ready-to-land, needs-gate, or red-receipt.
 # red-receipt is the worker's to fix on a new head or fail.
+# Existing v1 rows and still-matching receipts remain readable without migration.
 # Only ready-to-land (bottom, acceptable receipt, every configured gate passed,
 # fast-forward of the live tip),
 # needs-baseline, and failed transitions append durable `check: landing-queue`
@@ -264,12 +268,16 @@ assign() {
     position=$((position + 1))
     places[i]=$position target_refs[i]=$ref target_shas[i]=$sha
     if [ "${targets[i]}" != "$sha" ]; then receipts[i]=-; targets[i]=-; fi
+    if [ "$position" -gt 1 ]; then
+      statuses[i]=waiting-for-front
+      ref="refs/heads/${branches[i]}" sha=${heads[i]}
+      continue
+    fi
     statuses[i]=needs-rebase
     if [ "${bases[i]}" = "$sha" ] && git -C "$PROJECT" merge-base --is-ancestor "$sha" "${heads[i]}"; then
       statuses[i]=needs-final
       if [ "${receipts[i]}" != - ] && fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}" >/dev/null 2>&1; then
-        statuses[i]=waiting-to-land
-        if [ "$position" -eq 1 ]; then statuses[i]=ready-to-land; fi
+        statuses[i]=ready-to-land
       else
         receipts[i]=-; targets[i]=-
       fi
@@ -292,6 +300,7 @@ case "$ACTION" in
     ;;
   receipt)
     [ "${states[found]}" = active ] || die 'only active cars can submit receipts'
+    [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
     [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
       && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
     git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" || die 'head is not a fast-forward of the assigned target'
@@ -305,6 +314,7 @@ case "$ACTION" in
     ;;
   gate)
     [ "${states[found]}" = active ] || die 'only active cars can submit gate receipts'
+    [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
     [[ "$GATE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'gate requires a safe --gate name'
     configured=0
     for gate_name in "${GATES[@]}"; do [ "$gate_name" != "$GATE" ] || configured=1; done
@@ -348,7 +358,7 @@ esac
 assign
 
 # Readiness uses the same current-tip failure-set policy as fm-merge-local.
-# Upper cars may carry red receipts while waiting for their baseline to land.
+# Legacy upper-car receipts are considered only when their car reaches front.
 for ((i=0; i<count; i++)); do
   if [ "${statuses[i]}" = ready-to-land ]; then
     fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}"
@@ -365,7 +375,7 @@ done
 
 # A passing suite still waits for every declared project landing gate.
 for ((i=0; i<count; i++)); do
-  case "${statuses[i]}" in ready-to-land|waiting-to-land) ;; *) continue ;; esac
+  case "${statuses[i]}" in ready-to-land) ;; *) continue ;; esac
   for gate_name in "${GATES[@]}"; do
     if ! gate_receipt_read "$(gate_receipt_path "${ids[i]}" "$gate_name" "${heads[i]}" "${target_shas[i]}")" \
       "$gate_name" "${heads[i]}" "${target_shas[i]}"; then

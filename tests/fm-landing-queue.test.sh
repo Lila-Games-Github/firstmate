@@ -132,28 +132,86 @@ expect_field "$(cat "$CASE/b.out")" target_ref refs/heads/fm/a
 expect_field "$(cat "$CASE/c.out")" place 3
 expect_field "$(cat "$CASE/c.out")" target_ref refs/heads/fm/b
 [ "$(wake_count)" = 0 ] || fail 'joining emitted a routine wake'
-for id in a b c; do prepare "$id"; done
-# Higher workers may finish first; only the bottom one rings readiness.
-receipt c > "$CASE/c.out"
-expect_field "$(cat "$CASE/c.out")" status waiting-to-land
-receipt b >/dev/null
+for id in b c; do
+  expect_field "$(queue status "$id")" status waiting-for-front
+  if receipt "$id" > "$CASE/upper.out" 2>&1; then fail 'upper car submitted final evidence'; fi
+  grep -q 'only the bottom car' "$CASE/upper.out" || fail 'upper receipt refusal did not name front requirement'
+done
 [ "$(wake_count)" = 0 ] || fail 'upper receipt woke firstmate'
-receipt a > "$CASE/a.out"
-expect_field "$(cat "$CASE/a.out")" status ready-to-land
-[ "$(wake_count)" = 1 ] || fail 'bottom receipt did not emit exactly one wake'
-for id in a b c a; do queue status "$id" >/dev/null; done
-[ "$(wake_count)" = 1 ] || fail 'status repeated a readiness wake'
 [ "$(git -C "$CASE/project" rev-parse main)" = "$BASE" ] || fail 'queue merged a car'
+expected_wakes=0
 for id in a b c; do
+  expect_field "$(queue status "$id")" place 1
+  prepare "$id"
+  expect_field "$(queue status "$id")" status needs-final
+  expect_field "$(receipt "$id")" status ready-to-land
+  expected_wakes=$((expected_wakes + 1))
+  for check_id in a b c; do queue status "$check_id" >/dev/null; done
+  [ "$(wake_count)" = "$expected_wakes" ] || fail 'status repeated a readiness wake'
   git -C "$CASE/project" merge -q --ff-only "fm/$id"
   expect_field "$(queue status "$id")" status landed
 done
 [ "$(wake_count)" = 3 ] || fail 'landing did not wake each new bottom exactly once'
-pass 'three cars stack and land in order without repeated wakes or receipt reruns'
+pass 'three cars validate once each at front and land in order without repeated wakes'
+
+make_case legacy-upper-receipt
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+EOF
+car a main; join a >/dev/null; prepare a
+car b fm/a; join b > "$CASE/b.out"
+old_a=$(head_of a)
+old_b=$(head_of b)
+key=$(cat "$CASE/b.out" | field queue)
+queue_dir="$CASE/home/data/landing-queue/$key"
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$old_b" > "$CASE/legacy.receipt"
+digest=$(git hash-object "$CASE/legacy.receipt")
+cp "$CASE/legacy.receipt" "$queue_dir/$digest.receipt"
+# Seed an upper receipt using the pre-upgrade v1 format. No migration is owed.
+python3 - "$queue_dir/queue" "$digest.receipt" "$old_a" <<'PY'
+from pathlib import Path
+import sys
+path=Path(sys.argv[1]); lines=path.read_text().splitlines()
+for i in range(3,len(lines)):
+    fields=lines[i].split('\t')
+    if fields[0]=='b':
+        fields[5:7]=sys.argv[2:4]
+        lines[i]='\t'.join(fields)
+path.write_text('\n'.join(lines)+'\n')
+PY
+expect_field "$(queue status b)" status waiting-for-front
+expect_field "$(queue status b)" receipt "$queue_dir/$digest.receipt"
+printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$old_b" "$old_a" > "$CASE/gate.receipt"
+if queue gate b --gate real-phone --head "$old_b" --target "$old_a" --receipt "$CASE/gate.receipt" > "$CASE/upper-gate.out" 2>&1; then
+  fail 'upper car submitted a configured gate'
+fi
+grep -q 'only the bottom car' "$CASE/upper-gate.out" || fail 'upper gate refusal did not name front requirement'
+for change in first second third; do
+  git -C "$CASE/a" commit -qm "$change" --allow-empty
+  out=$(queue status b)
+  expect_field "$out" status waiting-for-front
+  expect_field "$out" receipt -
+  expect_field "$out" head "$old_b"
+  expect_field "$out" rebase_from "$old_a"
+done
+[ "$(wake_count)" = 0 ] || fail 'stale legacy upper receipt became ready'
+receipt a >/dev/null
+printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$CASE/a-gate.receipt"
+queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a-gate.receipt" >/dev/null
+git -C "$CASE/project" merge -q --ff-only fm/a
+expect_field "$(queue status b)" status needs-rebase
+prepare b
+expect_field "$(receipt b)" status needs-gate
+if queue gate b --gate real-phone --head "$(head_of b)" --target "$(head_of a)" --receipt "$CASE/gate.receipt" > "$CASE/legacy-stale.out" 2>&1; then
+  fail 'stale legacy gate passed after reaching front'
+fi
+[ "$(wake_count)" = 1 ] || fail 'stale upper evidence emitted readiness after reaching front'
+pass 'v1 upper receipts remain readable but repeated target moves defer validation and stale gates fail closed at front'
 
 make_case changed-head
 car a main; join a >/dev/null; prepare a; receipt a >/dev/null
-car b fm/a; join b >/dev/null; prepare b; receipt b >/dev/null
+car b fm/a; join b >/dev/null
 old_a=$(head_of a)
 old_b=$(head_of b)
 printf 'amended\n' >> "$CASE/a/a.txt"
@@ -161,23 +219,24 @@ git -C "$CASE/a" commit -qam amend
 out=$(queue status b)
 expect_field "$out" target_sha "$(head_of a)"
 expect_field "$out" rebase_from "$old_a"
-expect_field "$out" status needs-rebase
+expect_field "$out" status waiting-for-front
 expect_field "$out" receipt -
 if queue receipt b --head "$old_b" --target "$old_a" --receipt "$CASE/b.receipt" > "$CASE/stale.out" 2>&1; then
   fail 'stale target receipt was accepted'
 fi
-prepare b
-receipt b >/dev/null
 expect_field "$(queue status a)" status needs-final
 [ "$(wake_count)" = 1 ] || fail 'target updates emitted routine wakes'
 receipt a >/dev/null
 [ "$(wake_count)" = 2 ] || fail 'changed bottom head did not ring again after validation'
-pass 'a lower head change invalidates its receipt and assigns the successor a fresh target'
+git -C "$CASE/project" merge -q --ff-only fm/a
+expect_field "$(queue status b)" status needs-rebase
+prepare b; receipt b >/dev/null
+pass 'a lower head change leaves upper validation deferred until the successor reaches front'
 
 make_case failed-lower
 car a main; join a >/dev/null; prepare a
-car b fm/a; join b >/dev/null; prepare b; receipt b >/dev/null
-car c fm/b; join c >/dev/null; prepare c; receipt c >/dev/null
+car b fm/a; join b >/dev/null
+car c fm/b; join c >/dev/null
 old_a=$(head_of a)
 queue fail a --reason 'suite failed' >/dev/null
 out=$(queue status b)
@@ -188,9 +247,8 @@ expect_field "$out" status needs-rebase
 prepare b
 [ ! -e "$CASE/b/a.txt" ] || fail 'rebasing the successor retained the failed car'
 [ -f "$CASE/b/b.txt" ] || fail 'rebasing the successor dropped its own change'
-expect_field "$(queue status c)" status needs-rebase
+expect_field "$(queue status c)" status waiting-for-front
 receipt b >/dev/null
-prepare c; receipt c >/dev/null
 [ "$(wake_count)" = 2 ] || fail 'expected one failure wake and one successor-ready wake'
 queue fail a --reason 'same failure' >/dev/null
 queue status a >/dev/null
@@ -198,7 +256,8 @@ queue status a >/dev/null
 if join a > "$CASE/rejoin.out" 2>&1; then fail 'failed task silently rejoined'; fi
 pass 'a failed lower car is removed from targets and successors retain only their own work'
 git -C "$CASE/project" merge -q --ff-only fm/b
-queue status c >/dev/null
+expect_field "$(queue status c)" status needs-rebase
+prepare c; receipt c >/dev/null
 [ "$(wake_count)" = 3 ] || fail 'a later landing repeated the failed car wake'
 
 make_case receipt-race

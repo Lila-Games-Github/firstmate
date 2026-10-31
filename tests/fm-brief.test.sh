@@ -235,6 +235,12 @@ test_ship_modes_generate_clean_briefs() {
       "$id: long-suite contract lost the moved-tip snapshot policy"
     assert_grep "one re-capture and re-run" "$brief" \
       "$id: long-suite contract lost its named re-capture budget"
+    assert_grep 'paused: test-service request=<request-id>' "$brief" \
+      "$id: ship brief omitted the service pause identifier"
+    assert_grep 'without polling status or holding a waiter session' "$brief" \
+      "$id: ship brief omitted the completion-driven wait contract"
+    assert_grep 'ordinary target movement while above bottom uses no re-capture budget' "$brief" \
+      "$id: ship brief charges upper-car movement against final validation"
   done
   id='brief-scout-preamble-a1'
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1; status=$?
@@ -577,7 +583,9 @@ test_green_final_head_names_service_receipt() {
   assert_grep "$home/data/green-receipt/suite.receipt" "$brief" "green brief omitted its task receipt path"
   assert_grep "fm-test-service.py submit some-proj" "$brief" "green brief omitted the configured pass-record producer"
   assert_grep "--task 'green-receipt' --suite --device-gate any --receipt" "$brief" "green brief omitted service receipt arguments"
-  assert_grep "fm-test-service.py wait <request-id>" "$brief" "green brief omitted the service result check"
+  assert_grep "FM_HOME='$home'" "$brief" "green brief omitted the explicit service home"
+  assert_grep "the service sends your steering inbox" "$brief" "green brief omitted the completion delivery"
+  assert_no_grep 'fm-test-service.py wait <request-id>' "$brief" "green brief still holds a service waiter"
   assert_grep "schema=fm-full-suite.v1" "$brief" "green brief omitted the service receipt form"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-receipt some-proj --mode local-only >/dev/null \
@@ -1774,7 +1782,8 @@ test_worker_owned_finalization() {
     assert_grep 'Use the queue tool for your place, rebase target, and final receipt' "$brief" 'brief omitted queue handoff'
     assert_grep 'landing_queue receipt --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted exact-head receipt submission'
     assert_grep 'landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted landing gate submission'
-    assert_grep 'keep checking status every 30 seconds' "$brief" 'waiting worker cannot discover changed targets'
+    assert_grep 'keep checking queue status every 30 seconds' "$brief" 'waiting worker cannot discover changed targets'
+    assert_grep 'wait without rebasing, running the final suite or gates' "$brief" 'upper worker still finalizes before reaching front'
     assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
     assert_grep 'git rebase --onto <target_sha> <rebase_from>' "$brief" 'brief cannot remove a failed lower car'
     # Execute the generated shell helper, including an apostrophe in FM_HOME.

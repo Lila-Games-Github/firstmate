@@ -7,6 +7,9 @@ Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--d
        fm-test-service.py install-unit | project-for-repo REPO | landing-gates-for-repo REPO
 Configuration: FM_HOME/config/test-service/PROJECT.json (see docs/test-service.md).
 State: FM_TEST_SERVICE_STATE or ~/.local/state/firstmate-test-service.
+Task completions use a persistent SQLite outbox and fm-send's idempotent inbox
+delivery, independently of test execution. Workers submit, pause, and resume on
+that message rather than keeping a wait command or status poll running.
 """
 import argparse
 import concurrent.futures
@@ -131,6 +134,11 @@ def connection():
         state TEXT NOT NULL, started REAL, finished REAL, exit_code INTEGER,
         PRIMARY KEY (request_id, generation, name)
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS notifications (
+        request_id TEXT PRIMARY KEY, task TEXT NOT NULL, home TEXT NOT NULL,
+        state_dir TEXT NOT NULL, message TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending', attempted REAL, error TEXT
+    )""")
     return db
 
 
@@ -213,7 +221,8 @@ def submit(args):
     branch_source = str((source / common.stdout.strip()).resolve())
     opts = {"suite": args.suite, "device_gate": args.device_gate, "scenarios": args.scenario,
             "harnesses": args.harness, "receipt": str(Path(args.receipt).resolve()) if args.receipt else None,
-            "retest_on_move": args.retest_on_move, "branch_source": branch_source, "task": args.task}
+            "retest_on_move": args.retest_on_move, "branch_source": branch_source, "task": args.task,
+            "home": str(HOME), "state_dir": str(Path(os.environ.get("FM_STATE_OVERRIDE", HOME / "state")).resolve())}
     db = connection()
     rid = uuid.uuid4().hex[:16]
     repo = ROOT / "repos" / rid
@@ -239,7 +248,7 @@ def submit(args):
             raise RuntimeError("snapshot lacks requested commit")
         db.execute("UPDATE requests SET state='queued' WHERE id=? AND state='preparing'", (rid,))
     except Exception as exc:
-        db.execute("UPDATE requests SET state='failed',error=?,finished=? WHERE id=?", (str(exc), time.time(), rid))
+        complete(db, db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone(), "failed", str(exc))
         shutil.rmtree(repo, ignore_errors=True)
         snapshot(db)
         raise
@@ -494,8 +503,62 @@ def complete(db, row, state, error):
             atomic_write(path, receipt)
     elif state == "failed":
         atomic_write(result_dir / (sha + ".failure.json"), json.dumps({"sha": sha, "first_failure": error}, indent=2) + "\n")
-    db.execute("UPDATE requests SET state=?,error=?,finished=? WHERE id=?", (state, error, time.time(), rid))
+    # Publish the verdict and its frozen outbox message together. In particular,
+    # a cancelled CLI must not leave a live service without a pending wake.
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("UPDATE requests SET state=?,error=?,finished=? WHERE id=?", (state, error, time.time(), rid))
+        queue_notification(db, db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone())
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
     snapshot(db)
+
+
+def queue_notification(db, row):
+    """Freeze one request's first terminal message, including across retests."""
+    if row["state"] not in {"passed", "failed", "cancelled"}:
+        return
+    opts = json.loads(row["options"])
+    task = opts.get("task")
+    if not task or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", task):
+        return
+    home = opts.get("home", str(HOME))
+    state_dir = opts.get("state_dir", str(Path(home) / "state"))
+    receipt = ROOT / "results" / row["id"] / (row["sha"] + ".receipt")
+    if not (row["state"] == "passed" and receipt.is_file()):
+        receipt = "-"
+    elif opts.get("receipt") and row["sha"] == row["original_sha"]:
+        receipt = opts["receipt"]
+    failure = (row["error"] or "-").splitlines()[0]
+    message = (f"Test service completion: request={row['id']} state={row['state']} "
+               f"sha={row['sha']} receipt={receipt}\nfirst_failure={failure}\n"
+               "Resume this request's work using this result; do not resubmit or poll it.")
+    db.execute("INSERT OR IGNORE INTO notifications (request_id,task,home,state_dir,message) VALUES (?,?,?,?,?)",
+               (row["id"], task, home, state_dir, message))
+
+
+def deliver_notifications(db):
+    for notice in db.execute("SELECT * FROM notifications WHERE state='pending' AND (attempted IS NULL OR attempted<?)",
+                             (time.time() - 5,)).fetchall():
+        rid = notice["request_id"]
+        meta = Path(notice["state_dir"]) / (notice["task"] + ".meta")
+        if not meta.is_file():
+            db.execute("UPDATE notifications SET state='skipped',error=? WHERE request_id=?", ("task no longer exists", rid))
+            print(f"notification {rid}: task no longer exists; skipped", file=sys.stderr, flush=True)
+            continue
+        env = dict(os.environ, FM_HOME=notice["home"], FM_STATE_OVERRIDE=notice["state_dir"], FM_SEND_IDEMPOTENT="1")
+        db.execute("UPDATE notifications SET attempted=? WHERE request_id=?", (time.time(), rid))
+        try:
+            sent = run([str(CODE.with_name("fm-send.sh")), notice["task"], notice["message"]], env=env, timeout=30)
+            if sent.returncode:
+                raise RuntimeError(sent.stderr.strip() or f"fm-send exited {sent.returncode}")
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            db.execute("UPDATE notifications SET error=? WHERE request_id=?", (str(exc), rid))
+            print(f"notification {rid}: {exc}; will retry", file=sys.stderr, flush=True)
+        else:
+            db.execute("UPDATE notifications SET state='delivered',error=NULL WHERE request_id=?", (rid,))
 
 
 def current_tip(repo, source, branch, old_tip):
@@ -550,7 +613,7 @@ def recover_preparing(db):
                 raise RuntimeError("cannot preserve requested commit after restart")
             db.execute("UPDATE requests SET state='queued' WHERE id=? AND state='preparing'", (row["id"],))
         except RuntimeError as exc:
-            db.execute("UPDATE requests SET state='failed',error=?,finished=? WHERE id=?", (str(exc), time.time(), row["id"]))
+            complete(db, row, "failed", str(exc))
         snapshot(db)
 
 
@@ -621,7 +684,24 @@ def serve():
     db.execute("UPDATE requests SET state='queued',queued_at=?,started=NULL WHERE state='running'", (time.time(),))
     db.execute("UPDATE steps SET state='retrying' WHERE state='running'")
     recover_preparing(db)
+    # Replay a crash between terminal publication and outbox insertion, including
+    # requests written by older service versions, without changing queue records.
+    for row in db.execute("SELECT * FROM requests WHERE state IN ('passed','failed','cancelled')").fetchall():
+        queue_notification(db, row)
     snapshot(db)
+    def notify():
+        notify_db = connection()
+        try:
+            while not STOP:
+                try:
+                    deliver_notifications(notify_db)
+                except (OSError, sqlite3.Error) as exc:
+                    print(f"notification outbox: {exc}", file=sys.stderr, flush=True)
+                time.sleep(.2)
+        finally:
+            notify_db.close()
+    notifier = threading.Thread(target=notify, name="test-service-notifications")
+    notifier.start()
     def publish_time():
         tick_db = connection()
         while not STOP:
@@ -674,6 +754,7 @@ def serve():
         time.sleep(.2)
     for thread, _project in active.values():
         thread.join()
+    notifier.join()
     snapshot(db)
 
 
@@ -725,11 +806,12 @@ def main():
                 for row in data["requests"]:
                     print(row["id"], row["state"], row["sha"], row["error"] or "")
         elif args.cmd == "cancel":
-            row = db.execute("SELECT state FROM requests WHERE id=?", (args.id,)).fetchone()
+            row = db.execute("SELECT * FROM requests WHERE id=?", (args.id,)).fetchone()
             if not row:
                 raise ValueError("unknown request")
             if row["state"] in ("preparing", "queued"):
-                db.execute("UPDATE requests SET state='cancelled',cancel_requested=1,finished=? WHERE id=?", (time.time(), args.id))
+                db.execute("UPDATE requests SET cancel_requested=1 WHERE id=?", (args.id,))
+                complete(db, row, "cancelled", "cancelled before start")
             elif row["state"] == "running":
                 db.execute("UPDATE requests SET cancel_requested=1 WHERE id=?", (args.id,))
             elif row["state"] in TERMINAL:

@@ -172,6 +172,22 @@ test_resend_enqueues_new_sequence() {
   pass "fm-send inbox: a re-send is a new durable record, never a retyped payload"
 }
 
+test_idempotent_producer_replay() {
+  local dir err rec
+  dir=$(setup_case producer-replay)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 'completion request=abc state=passed' || fail 'initial producer send failed'
+  rec="$dir/home/state/t1.inbox/001.msg"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 'completion request=abc state=passed' || fail 'producer replay failed'
+  [ ! -f "$dir/home/state/t1.inbox/002.msg" ] || fail 'producer replay duplicated pending completion'
+  mv "$rec" "$dir/home/state/t1.inbox/handled/"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 'completion request=abc state=passed' || fail 'handled replay failed'
+  [ ! -f "$dir/home/state/t1.inbox/002.msg" ] || fail 'producer replay duplicated acknowledged completion'
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 'completion request=def state=passed' || fail 'distinct request failed'
+  [ -f "$dir/home/state/t1.inbox/002.msg" ] || fail 'distinct completion was collapsed'
+  pass 'fm-send inbox: persistent producer replay deduplicates pending and acknowledged messages'
+}
+
 test_pending_composer_skips_ring_advisorily() {
   local dir err rc
   dir=$(setup_case pendingskip)
@@ -414,6 +430,7 @@ test_empty_message_refused() {
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
+test_idempotent_producer_replay
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
 test_harness_invocations_stay_typed

@@ -205,6 +205,10 @@
 # pane. The pause is typed-plane-only; the inbox plane, the shared submit core
 # (used by the away-mode daemon, which only needs "submitted"), and the --key
 # path do not pay it.
+# FM_SEND_IDEMPOTENT=1 opts local inbox delivery into exact-body deduplication,
+# including handled records, for durable producers replaying an uncertain send.
+# Such producers must freeze the body and include a unique logical request id;
+# ordinary repeated sends remain distinct when this option is absent.
 set -eu
 
 FM_SEND_ORIGINAL_ARGS=("$@")
