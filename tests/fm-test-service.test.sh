@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 root=$(cd "$(dirname "$0")/.." && pwd -P)
 svc=$root/bin/fm-test-service.py
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-service.XXXXXX")
@@ -8,7 +10,8 @@ cleanup() { if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; wait "
 trap cleanup EXIT
 trap 'echo "failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 export HOME=$tmp/home FM_HOME=$tmp/fm FM_TEST_SERVICE_STATE=$tmp/state EVENTS=$tmp/events
-mkdir -p "$HOME/.config/firstmate" "$FM_HOME/config/test-service" "$tmp/bin" "$tmp/project"
+export FM_STATE_OVERRIDE=$FM_HOME/state
+mkdir -p "$HOME/.config/firstmate" "$FM_HOME/config/test-service" "$FM_STATE_OVERRIDE" "$tmp/bin" "$tmp/project"
 export PATH=$tmp/bin:$PATH
 cat > "$tmp/bin/adb" <<'ADB'
 #!/usr/bin/env bash
@@ -432,4 +435,211 @@ sha3=$(git rev-parse HEAD)
 script_error=$($svc submit fake "$PWD" "$sha3" --task parallel-error --suite)
 $svc wait "$script_error" > "$tmp/script-error.out" && exit 1 || true
 grep -q 'SCRIPT ERROR: fake parse failure' "$FM_TEST_SERVICE_STATE/results/$script_error/$sha3.failure.json"
+
+# Completion wakes use the real durable sender, with only its terminal stubbed.
+# A failed terminal ring is harmless: the inbox and its normal re-ring ladder
+# are still the delivery authority for every supported harness/backend.
+cat > "$tmp/bin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+case "$1" in
+  display-message) echo fakepane ;;
+  list-windows) echo fm-notify ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  send-keys) exit 1 ;;
+esac
+TMUX
+chmod +x "$tmp/bin/tmux"
+fm_write_meta "$FM_STATE_OVERRIDE/notify.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+await_notice() {
+  local id=$1 state=$2 attempt
+  for ((attempt=0; attempt<300; attempt++)); do
+    if python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$id" "$state" <<'PY'
+import sqlite3,sys
+row=sqlite3.connect(sys.argv[1]).execute('SELECT state FROM notifications WHERE request_id=?',(sys.argv[2],)).fetchone()
+sys.exit(0 if row and row[0]==sys.argv[3] else 1)
+PY
+    then return; fi
+    sleep .1
+  done
+  fail "notification $id did not become $state"
+}
+notify_pass=$($svc submit fake "$PWD" "$sha1" --task notify --suite --receipt "$tmp/notified.receipt")
+$svc wait "$notify_pass" | grep -q "^passed $sha1"
+await_notice "$notify_pass" delivered
+notice="$FM_STATE_OVERRIDE/notify.inbox/001.msg"
+grep -q "request=$notify_pass state=passed sha=$sha1 receipt=$tmp/notified.receipt" "$notice"
+grep -q '^first_failure=-$' "$notice"
+[ -f "$tmp/notified.receipt" ]
+
+# Replay after a lost outbox acknowledgement and restart must deduplicate even
+# when the worker already moved the completion into handled/.
+mv "$notice" "$FM_STATE_OVERRIDE/notify.inbox/handled/"
+kill -TERM "$server"; wait "$server"; server=
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$notify_pass" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET state='pending',attempted=NULL WHERE request_id=?",(sys.argv[2],))
+PY
+"$svc" serve > "$tmp/notify-server.log" 2>&1 & server=$!
+await_notice "$notify_pass" delivered
+[ ! -e "$FM_STATE_OVERRIDE/notify.inbox/002.msg" ] || fail 'restart duplicated acknowledged completion'
+
+notify_fail=$($svc submit fake "$PWD" "$sha3" --task notify --suite)
+if $svc wait "$notify_fail" > "$tmp/notify-fail.out"; then fail 'known-bad suite passed'; fi
+await_notice "$notify_fail" delivered
+grep -q "request=$notify_fail state=failed sha=$sha3 receipt=-" "$FM_STATE_OVERRIDE/notify.inbox/002.msg"
+grep -q '^first_failure=suite: SCRIPT ERROR: fake parse failure$' "$FM_STATE_OVERRIDE/notify.inbox/002.msg"
+
+# A failed send must leave the run green and allow subsequent runs to finish.
+fm_write_meta "$FM_STATE_OVERRIDE/retry.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+: > "$FM_STATE_OVERRIDE/retry.inbox"
+retry=$($svc submit fake "$PWD" "$sha1" --task retry --suite)
+$svc wait "$retry" | grep -q "^passed $sha1"
+for ((attempt=0; attempt<300; attempt++)); do
+  grep -q "notification $retry:" "$tmp/notify-server.log" && break
+  sleep .1
+done
+[ "$attempt" -lt 300 ] || fail 'failed send was not logged'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$retry" <<'PY'
+import sqlite3,sys
+row=sqlite3.connect(sys.argv[1]).execute('SELECT state,error FROM notifications WHERE request_id=?',(sys.argv[2],)).fetchone()
+assert row[0]=='pending' and 'inbox record could not be written' in row[1],row
+PY
+rm "$FM_STATE_OVERRIDE/retry.inbox"
+await_notice "$retry" delivered
+[ -f "$FM_STATE_OVERRIDE/retry.inbox/001.msg" ]
+[ ! -f "$FM_STATE_OVERRIDE/retry.inbox/002.msg" ]
+
+# Missing tasks never receive a steer and never fail the request.
+missing=$($svc submit fake "$PWD" "$sha1" --task retired --suite)
+$svc wait "$missing" | grep -q "^passed $sha1"
+await_notice "$missing" skipped
+[ ! -e "$FM_STATE_OVERRIDE/retired.inbox" ]
+grep -q "notification $missing: task no longer exists; skipped" "$tmp/notify-server.log"
+
+# Cancellation while the service is stopped persists a completion for recovery.
+kill -TERM "$server"; wait "$server"; server=
+cancelled=$($svc submit fake "$PWD" "$sha1" --task notify --suite)
+$svc cancel "$cancelled"
+# Simulate an older request/crash before outbox insertion: startup must recover.
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$cancelled" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('DELETE FROM notifications WHERE request_id=?',(sys.argv[2],))
+PY
+"$svc" serve > "$tmp/notify-server2.log" 2>&1 & server=$!
+await_notice "$cancelled" delivered
+grep -q "request=$cancelled state=cancelled sha=$sha1 receipt=-" "$FM_STATE_OVERRIDE/notify.inbox/003.msg"
+$svc cancel "$cancelled"
+kill -TERM "$server"; wait "$server"; server=
+"$svc" serve > "$tmp/notify-server3.log" 2>&1 & server=$!
+await_notice "$cancelled" delivered
+[ ! -e "$FM_STATE_OVERRIDE/notify.inbox/004.msg" ] || fail 'duplicate completion sent twice'
+
+running_cancel=$($svc submit fake "$PWD" "$sha1" --task notify --suite)
+for ((attempt=0; attempt<300; attempt++)); do
+  if $svc status --json | python3 -c 'import json,sys; r=next(r for r in json.load(sys.stdin)["requests"] if r["id"]==sys.argv[1]); sys.exit(0 if r["state"]=="running" else 1)' "$running_cancel"; then break; fi
+  sleep .1
+done
+[ "$attempt" -lt 300 ] || fail 'cancellation fixture never started'
+$svc cancel "$running_cancel"
+if $svc wait "$running_cancel" > "$tmp/running-cancel.out"; then fail 'cancelled running request passed'; fi
+await_notice "$running_cancel" delivered
+grep -q "request=$running_cancel state=cancelled sha=$sha1 receipt=-" "$FM_STATE_OVERRIDE/notify.inbox/004.msg"
+
+# A shared service delivers to the submitting home, even with a same-named task
+# in the service's own home. No ambient state override may redirect the send.
+other_home="$tmp/other-home"
+mkdir -p "$other_home/config/test-service" "$other_home/state"
+cp "$FM_HOME/config/test-service/fake.json" "$other_home/config/test-service/fake.json"
+fm_write_meta "$other_home/state/notify.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+other=$(FM_HOME="$other_home" FM_STATE_OVERRIDE="$other_home/state" $svc submit fake "$PWD" "$sha1" --task notify --suite)
+$svc wait "$other" | grep -q "^passed $sha1"
+await_notice "$other" delivered
+grep -q "request=$other state=passed" "$other_home/state/notify.inbox/001.msg"
+[ ! -e "$FM_STATE_OVERRIDE/notify.inbox/005.msg" ] || fail 'completion crossed home boundaries'
+notice_field() {
+  python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$1" "$2" <<'PY'
+import sqlite3,sys
+print(sqlite3.connect(sys.argv[1]).execute('SELECT %s FROM notifications WHERE request_id=?' % sys.argv[3],(sys.argv[2],)).fetchone()[0])
+PY
+}
+
+# Failed sends back off with each attempt and stop at the retry cap.
+fm_write_meta "$FM_STATE_OVERRIDE/capped.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+: > "$FM_STATE_OVERRIDE/capped.inbox"
+capped=$($svc submit fake "$PWD" "$sha1" --task capped --suite)
+$svc wait "$capped" | grep -q "^passed $sha1"
+for ((attempt=0; attempt<300; attempt++)); do
+  [ "$(notice_field "$capped" attempts)" -ge 1 ] && break
+  sleep .1
+done
+[ "$attempt" -lt 300 ] || fail 'capped send was never attempted'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys,time
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET attempts=3,attempted=? WHERE request_id=?",(time.time()-10,sys.argv[2]))
+PY
+sleep 1
+[ "$(notice_field "$capped" attempts)" = 3 ] || fail 'retry ignored the growing backoff'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET attempts=1000,attempted=0 WHERE request_id=?",(sys.argv[2],))
+PY
+await_notice "$capped" failed
+grep -q "giving up after" "$tmp/notify-server3.log"
+wake_rows() { awk -F '\t' -v key="test-service-notify:$1" '$4 == key' "$FM_STATE_OVERRIDE/.wake-queue" 2>/dev/null | wc -l | tr -d ' '; }
+[ "$(wake_rows "$capped")" = 1 ] || fail 'given-up completion did not wake firstmate once'
+awk -F '\t' -v key="test-service-notify:$capped" '$4 == key { print $5 }' "$FM_STATE_OVERRIDE/.wake-queue" \
+  | grep -q "^check: test-service completion undelivered task=capped request=$capped;" || fail 'escalation did not name the task and request'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET state='escalating',attempted=0 WHERE request_id=?",(sys.argv[2],))
+PY
+await_notice "$capped" failed
+[ "$(wake_rows "$capped")" = 1 ] || fail 'replayed escalation duplicated the firstmate wake'
+# Firstmate consuming the row and losing the final marker must not republish,
+# and an escalation retry waits out the persisted bounded backoff.
+python3 - "$FM_STATE_OVERRIDE/.wake-queue" "test-service-notify:$capped" <<'PY'
+import sys
+path,key=sys.argv[1:]
+lines=open(path).read().splitlines(True)
+open(path,'w').writelines(line for line in lines if line.split('\t')[3:4]!=[key])
+PY
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys,time
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET state='escalating',attempts=12,attempted=? WHERE request_id=?",(time.time()-10,sys.argv[2]))
+PY
+sleep 1
+[ "$(notice_field "$capped" state)" = escalating ] || fail 'escalation retry ignored its backoff'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET attempted=0 WHERE request_id=?",(sys.argv[2],))
+PY
+await_notice "$capped" failed
+[ "$(wake_rows "$capped")" = 0 ] || fail 'consumed escalation was published again after losing its final marker'
+rm "$FM_STATE_OVERRIDE/capped.inbox"
+sleep 1
+[ ! -e "$FM_STATE_OVERRIDE/capped.inbox" ] || fail 'capped notification was retried'
+
+# The first service to create the outbox settles every earlier completion, so
+# an upgrade never replays history, while in-flight requests still notify.
+kill -TERM "$server"; wait "$server"; server=
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute('DROP TABLE notifications')
+PY
+inflight=$($svc submit fake "$PWD" "$sha1" --task notify --suite)
+[ "$(notice_field "$notify_pass" state)" = skipped ] || fail 'historical completion was left for replay'
+"$svc" serve > "$tmp/notify-server4.log" 2>&1 & server=$!
+await_notice "$inflight" delivered
+grep -q "request=$inflight state=passed" "$FM_STATE_OVERRIDE/notify.inbox/005.msg"
+[ ! -e "$FM_STATE_OVERRIDE/notify.inbox/006.msg" ] || fail 'upgrade replayed historical completions'
 echo 'ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites'
+echo 'ok - terminal completions wake once across restarts, acknowledgements, failures, and cancellation'
+echo 'ok - failed completion sends back off and stop at the retry cap with one firstmate wake, and the outbox upgrade never replays history'

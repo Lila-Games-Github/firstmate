@@ -37,7 +37,7 @@ case "${0##*/}" in
   fm-public-followup.test.sh) key=public-followup; count=1 ;;
   fm-watch-triage.test.sh) key=watch-churn; count=1 ;;
   fm-learning-candidate.test.sh) key=learning; count=1 ;;
-  fm-merge-local.test.sh) key=merge; count=14 ;;
+  fm-merge-local.test.sh) key=merge; count=17 ;;
   *) exit 2 ;;
 esac
 if [ "${FM_TEST_HANG_CONSUMER:-}" = "$key" ]; then

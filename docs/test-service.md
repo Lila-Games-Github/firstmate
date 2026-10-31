@@ -40,15 +40,25 @@ The FrogPile preparation starts Godot's editor import so class discovery works i
 The M31 remains explicitly addressable for performance requests and is excluded from the functional phone alternatives.
 The example is configuration, not a second copy of the suite or phone queue.
 
-A worker can submit the exact committed head, wait for its result, and hand the success record to `fm-merge-local.sh --receipt`:
+A worker submits the exact committed head and resumes on the completion message in its steering inbox.
+Submit final suite and gate checks for a landing train only when the queue assigns the car to bottom on the live landing tip.
+The success record is accepted by `fm-merge-local.sh --receipt`:
 For a dispatched ship task in a configured project, use the exact `data/<task-id>/suite.receipt` path printed in its brief; the service creates that receipt on success.
 
 ```sh
 task_id=frogpile-example
 sha=$(git rev-parse HEAD)
-request=$(bin/fm-test-service.py submit frogpile "$PWD" "$sha" --task "$task_id" --suite --device-gate any --receipt "$FM_HOME/data/$task_id/suite.receipt")
-bin/fm-test-service.py wait "$request"
+request=$(FM_HOME="$FM_HOME" bin/fm-test-service.py submit frogpile "$PWD" "$sha" --task "$task_id" --suite --device-gate any --receipt "$FM_HOME/data/$task_id/suite.receipt")
+printf 'paused: test-service request=%s\n' "$request" >> "$FM_HOME/state/$task_id.status"
+# End the worker turn here; resume when the completion message arrives.
 ```
+
+Workers do not poll status or keep a `wait` session open for service requests.
+For requests carrying `--task`, the service delivers one durable completion message through `fm-send.sh`, with the request id, terminal state, tested SHA, receipt path when written, and first failure line.
+Delivery survives service restart and retries failed sends without duplicating the inbox message, including after the worker acknowledges it.
+A retired task is skipped and logged; a failed send is logged and retried independently of test execution, with backoff growing to five minutes, and after 12 attempts publishes one firstmate `check:` wake naming the task and request id, then is marked failed.
+Completions recorded before a store first gained its notification outbox are settled as skipped, so an upgrade never replays history.
+The standalone `wait ID` command remains available for interactive operators and scripts.
 
 `submit` refuses a short SHA, an unavailable commit, a harness that is not committed in that commit, an unknown scenario, or a phone outside the project configuration.
 `status --json` prints the same JSON published at the status path; `cancel ID` cancels a queued request, asks the runner to stop a running one, or stops future retests of a completed one.

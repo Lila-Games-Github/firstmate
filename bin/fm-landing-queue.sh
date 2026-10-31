@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Worker-owned local landing train. Never merges, rebases, pushes, or runs tests.
-# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline> <task-id>
+# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|reconcile> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--gate <name>] [--reason <text>]
@@ -19,8 +19,25 @@
 # reason, else '-').
 # Use git rebase --onto <target_sha> <rebase_from> when the base changes, retaining
 # only this car's commits, then ready --target before the exact-head suite.
+# Only the bottom car prepares final evidence on the live landing tip. Upper
+# cars return waiting-for-front, regardless of receipts or target movement, and
+# their workers pause instead of polling, as do workers at ready-to-land and
+# needs-baseline. A per-car park-<id> marker beside the queue snapshot records
+# the parked status. When a parked car leaves parking - it reaches bottom, lands,
+# fails, or its head, target, gates, or receipt return work - and when a
+# needs-baseline car becomes ready-to-land, any invocation that observes it,
+# including one naming that same task, sends the task one durable steering
+# message through fm-send.sh (FM_SEND_IDEMPOTENT=1, a body naming the new status,
+# tip, and head), then updates or clears the marker. A failed send leaves the
+# marker for the next invocation to retry. A task without a .meta file is not
+# steered.
+# reconcile refreshes and persists the whole queue, emitting due wakes and park
+# steers, without requiring <task-id> to be a car; it prints nothing and is a
+# no-op when the landing branch has no queue. fm-merge-local.sh runs it after
+# every landing, so a landing steers its own car and advances sleeping cars.
 # receipt requires --head, --target and --receipt. It snapshots an fm-full-suite.v1
-# receipt (parser: fm-landing-health-lib.sh) only for the current head and target.
+# receipt (parser: fm-landing-health-lib.sh) only for the bottom car's current
+# head and target. Upper-car receipt and gate submissions are refused.
 # A target/head race refuses the submission; status then supplies the new work.
 # gate requires --gate, --head, --target, and --receipt for a configured landing
 # gate. Its receipt is exactly four lines: schema=fm-landing-gate.v1,
@@ -55,14 +72,15 @@
 # baseline; neither demands another suite run on the same head. Once firstmate
 # records the baseline, the car becomes ready-to-land, needs-gate, or red-receipt.
 # red-receipt is the worker's to fix on a new head or fail.
+# Existing v1 rows and still-matching receipts remain readable without migration.
 # Only ready-to-land (bottom, acceptable receipt, every configured gate passed,
 # fast-forward of the live tip),
 # needs-baseline, and failed transitions append durable `check: landing-queue`
 # wakes, deduplicated per event. A wake is an event: firstmate rechecks status
 # before acting, following the landing-queue agent skill.
 # Only firstmate invokes fm-merge-local.sh and pushes, subject
-# to the existing merge authority. Workers keep checking status while waiting;
-# this tool has no daemon and never sends steering messages.
+# to the existing merge authority. This tool has no daemon; park steers are
+# its only steering messages.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,7 +90,7 @@ die() { echo "error: $*" >&2; exit 1; }
 [ "$#" -ge 2 ] || { usage >&2; exit 2; }
 ACTION=$1 ID=$2
 shift 2
-case "$ACTION" in ready|status|receipt|gate|fail|baseline) ;; *) die "unknown queue command $ACTION" ;; esac
+case "$ACTION" in ready|status|receipt|gate|fail|baseline|reconcile) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
 PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE=''
@@ -103,8 +121,10 @@ PRIMARY=$(cd "$PRIMARY" && pwd -P)
 REPO_NAME=${PRIMARY##*/}
 GATES_OUTPUT=$(FM_HOME="$FM_HOME" python3 "$SCRIPT_DIR/fm-test-service.py" landing-gates-for-repo "$REPO_NAME") \
   || die "cannot read landing gates for $REPO_NAME"
-mapfile -t GATES <<< "$GATES_OUTPUT"
-[ -n "$GATES_OUTPUT" ] || GATES=()
+GATES=()
+if [ -n "$GATES_OUTPUT" ]; then
+  while IFS= read -r gate_name; do GATES[${#GATES[@]}]=$gate_name; done <<< "$GATES_OUTPUT"
+fi
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 if [ -z "$LANDING" ] && [ -f "$STATE/$ID.meta" ]; then
@@ -131,6 +151,7 @@ case "$COMMON$PRIMARY$DATA$STATE" in *$'\n'*|*$'\t'*) die 'queue paths cannot co
 KEY=$(fm_health_key "$COMMON" "$LANDING")
 HEALTH_KEY=$(fm_health_key "$PRIMARY" "$LANDING")
 DIR="$DATA/landing-queue/$KEY"
+if [ "$ACTION" = reconcile ] && [ ! -e "$DIR/queue" ]; then exit 0; fi
 for path in "$DATA" "$DATA/landing-queue" "$DIR"; do
   [ ! -L "$path" ] || die "queue directory is a symlink: $path"
 done
@@ -139,9 +160,9 @@ LOCK="$STATE/.landing-queue-$KEY.lock"
 HEALTH_LOCK="$STATE/.landing-health-$HEALTH_KEY.lock"
 TMP='' WAKE_HELD=0 HEALTH_HELD=0
 gate_receipt_read() { # <path> <gate> <head> <target>
-  local path=$1 gate=$2 head=$3 target=$4 lines=()
+  local path=$1 gate=$2 head=$3 target=$4 line lines=()
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  mapfile -t lines < "$path"
+  while IFS= read -r line || [ -n "$line" ]; do lines[${#lines[@]}]=$line; done < "$path"
   [ "${#lines[@]}" -eq 4 ] && [ "${lines[0]}" = schema=fm-landing-gate.v1 ] \
     && [ "${lines[1]}" = "gate=$gate" ] && [ "${lines[2]}" = "sha=$head" ] \
     && [ "${lines[3]}" = "target=$target" ]
@@ -251,7 +272,7 @@ if [ "$ACTION" = ready ]; then
     [ "${branches[found]}" = "$BRANCH" ] || die 'cannot change a queued task branch'
   fi
 fi
-[ "$found" -ge 0 ] || die 'task has not joined the landing queue; run ready first'
+[ "$found" -ge 0 ] || [ "$ACTION" = reconcile ] || die 'task has not joined the landing queue; run ready first'
 
 # Compute each live assignment from bottom to top. A receipt follows SHAs rather
 # than branch names, so a normal lower landing does not demand another suite.
@@ -264,12 +285,16 @@ assign() {
     position=$((position + 1))
     places[i]=$position target_refs[i]=$ref target_shas[i]=$sha
     if [ "${targets[i]}" != "$sha" ]; then receipts[i]=-; targets[i]=-; fi
+    if [ "$position" -gt 1 ]; then
+      statuses[i]=waiting-for-front
+      ref="refs/heads/${branches[i]}" sha=${heads[i]}
+      continue
+    fi
     statuses[i]=needs-rebase
     if [ "${bases[i]}" = "$sha" ] && git -C "$PROJECT" merge-base --is-ancestor "$sha" "${heads[i]}"; then
       statuses[i]=needs-final
       if [ "${receipts[i]}" != - ] && fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}" >/dev/null 2>&1; then
-        statuses[i]=waiting-to-land
-        if [ "$position" -eq 1 ]; then statuses[i]=ready-to-land; fi
+        statuses[i]=ready-to-land
       else
         receipts[i]=-; targets[i]=-
       fi
@@ -292,6 +317,7 @@ case "$ACTION" in
     ;;
   receipt)
     [ "${states[found]}" = active ] || die 'only active cars can submit receipts'
+    [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
     [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
       && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
     git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" || die 'head is not a fast-forward of the assigned target'
@@ -305,9 +331,10 @@ case "$ACTION" in
     ;;
   gate)
     [ "${states[found]}" = active ] || die 'only active cars can submit gate receipts'
+    [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
     [[ "$GATE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'gate requires a safe --gate name'
     configured=0
-    for gate_name in "${GATES[@]}"; do [ "$gate_name" != "$GATE" ] || configured=1; done
+    for gate_name in ${GATES[@]+"${GATES[@]}"}; do [ "$gate_name" != "$GATE" ] || configured=1; done
     [ "$configured" -eq 1 ] || die "landing gate is not configured: $GATE"
     [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
       && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
@@ -348,7 +375,7 @@ esac
 assign
 
 # Readiness uses the same current-tip failure-set policy as fm-merge-local.
-# Upper cars may carry red receipts while waiting for their baseline to land.
+# Legacy upper-car receipts are considered only when their car reaches front.
 for ((i=0; i<count; i++)); do
   if [ "${statuses[i]}" = ready-to-land ]; then
     fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}"
@@ -365,8 +392,8 @@ done
 
 # A passing suite still waits for every declared project landing gate.
 for ((i=0; i<count; i++)); do
-  case "${statuses[i]}" in ready-to-land|waiting-to-land) ;; *) continue ;; esac
-  for gate_name in "${GATES[@]}"; do
+  case "${statuses[i]}" in ready-to-land) ;; *) continue ;; esac
+  for gate_name in ${GATES[@]+"${GATES[@]}"}; do
     if ! gate_receipt_read "$(gate_receipt_path "${ids[i]}" "$gate_name" "${heads[i]}" "${target_shas[i]}")" \
       "$gate_name" "${heads[i]}" "${target_shas[i]}"; then
       statuses[i]=needs-gate
@@ -398,6 +425,43 @@ done
 save
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=0
+
+for ((i=0; i<count; i++)); do
+  marker="$DIR/park-${ids[i]}"
+  [ ! -L "$marker" ] || die "park marker is a symlink: $marker"
+  parked=-
+  [ ! -f "$marker" ] || parked=$(cat -- "$marker")
+  current=${statuses[i]}
+  case "$current" in
+    waiting-for-front|ready-to-land|needs-baseline)
+      [ "$parked" != "$current" ] || continue
+      steer=0
+      [ "$parked:$current" != needs-baseline:ready-to-land ] || steer=1
+      ;;
+    *)
+      [ "$parked" != - ] || continue
+      steer=1
+      ;;
+  esac
+  if [ "$steer" -eq 1 ] && [ -f "$STATE/${ids[i]}.meta" ]; then
+    if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${ids[i]}" \
+      "Landing queue: task=${ids[i]} status=$current (was $parked) place=${places[i]} queue=$KEY landing=$LANDING tip=$TIP head=${heads[i]}. Run landing_queue status and continue from that status." 2>&1 >/dev/null); then
+      printf 'warning: could not steer %s from %s to %s; the next queue invocation retries: %s\n' "${ids[i]}" "$parked" "$current" "$send_error" >&2
+      continue
+    fi
+  fi
+  case "$current" in
+    waiting-for-front|ready-to-land|needs-baseline)
+      TMP=$(mktemp "$DIR/.park.XXXXXX")
+      printf '%s\n' "$current" > "$TMP"
+      mv -f -- "$TMP" "$marker"
+      TMP=
+      ;;
+    *) rm -f -- "$marker" ;;
+  esac
+done
+
+[ "$ACTION" != reconcile ] || exit 0
 
 printf 'queue=%s\ntask=%s\nbranch=%s\nhead=%s\nlanding_branch=%s\ntip=%s\nplace=%s\ntarget_ref=%s\ntarget_sha=%s\nrebase_from=%s\nstatus=%s\n' \
   "$KEY" "$ID" "${branches[found]}" "${heads[found]}" "$LANDING" "$TIP" "${places[found]}" \
