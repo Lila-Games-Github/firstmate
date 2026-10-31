@@ -197,12 +197,21 @@ test_incomplete_consumer_has_one_verdict_and_later_merge_runs() {
 }
 
 test_single_consumer_runs_with_own_temp_root() {
-  local tmp out rc
+  local tmp out rc log_root
   tmp=$(fm_test_tmproot fm-stock-bash-compat-single)
   make_fixture "$tmp"
+  mkdir -p "$tmp/local-tmp"
   rc=0
-  out=$(cd "$tmp" && env -u RUNNER_TEMP /bin/bash bin/fm-stock-bash-compat.sh --consumer merge 2>&1) || rc=$?
+  out=$(cd "$tmp" && env -u RUNNER_TEMP TMPDIR="$tmp/local-tmp" /bin/bash bin/fm-stock-bash-compat.sh --consumer merge 2>&1) || rc=$?
   expect_code 0 "$rc" "a single consumer runs without CI's RUNNER_TEMP"
+  log_root=$(printf '%s\n' "$out" | sed -n 's/^stock Bash logs: //p')
+  case "$log_root" in
+    "$tmp/local-tmp/fm-stock-bash-compat."*) ;;
+    *) fail "local log root must honor TMPDIR (got: $log_root)" ;;
+  esac
+  [ -s "$log_root/stock-bash-PR-19-local-merge-branch-resolution.log" ] \
+    || fail "selected consumer must stream its log under the local temp root"
+  assert_contains "$out" "stock Bash runtime: /bin/bash " "the child runtime is reported"
   assert_contains "$out" "Stock Bash consumer passed::PR 19 local-merge branch resolution emitted 17 expected assertions" \
     "selected consumer keeps its assertion floor"
   [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 1 ] \
@@ -210,8 +219,22 @@ test_single_consumer_runs_with_own_temp_root() {
   pass "stock Bash compatibility: one consumer runs locally with its own temp root"
 }
 
+test_unknown_consumer_fails_without_running_any() {
+  local tmp out rc
+  tmp=$(fm_test_tmproot fm-stock-bash-compat-unknown)
+  make_fixture "$tmp"
+  rc=0
+  out=$(cd "$tmp" && env RUNNER_TEMP="$tmp/runner" /bin/bash bin/fm-stock-bash-compat.sh --consumer merg 2>&1) || rc=$?
+  expect_code 2 "$rc" "an unmatched consumer ID must not pass"
+  assert_contains "$out" "unknown stock Bash consumer: merg" "the unmatched consumer ID is named"
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 0 ] \
+    || fail "an unmatched consumer ID must run no consumer"
+  pass "stock Bash compatibility: an unmatched consumer ID fails instead of passing empty"
+}
+
 test_oversized_route_default_has_runner_headroom
 test_every_hung_consumer_is_named_and_streamed
 test_failed_learning_summary_is_named_and_later_merge_runs
 test_incomplete_consumer_has_one_verdict_and_later_merge_runs
 test_single_consumer_runs_with_own_temp_root
+test_unknown_consumer_fails_without_running_any

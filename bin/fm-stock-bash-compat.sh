@@ -26,10 +26,6 @@ if [ "$#" -gt 0 ]; then
     exit 2
   fi
   selected=$2
-  case "$selected" in
-    parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge) ;;
-    *) echo "unknown stock Bash consumer: $selected" >&2; exit 2 ;;
-  esac
 fi
 if [ -z "${RUNNER_TEMP:-}" ]; then
   RUNNER_TEMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-stock-bash-compat.XXXXXX")
@@ -53,7 +49,10 @@ validate_timeout FM_STOCK_BASH_MERGE_TIMEOUT "$MERGE_TIMEOUT"
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 echo "stock Bash timeout mechanism: $(fm_timeout_mechanism)"
+# shellcheck disable=SC2016 # BASH_VERSION expands in the child stock Bash.
+echo "stock Bash runtime: $STOCK_BASH $("$STOCK_BASH" -c 'echo "$BASH_VERSION"' 2>/dev/null || echo unknown)"
 compatibility_failed=0
+ran_consumer=0
 run_consumer() {
   id=$1
   label=$2
@@ -61,6 +60,7 @@ run_consumer() {
   expected=$4
   shift 4
   [ "$selected" = all ] || [ "$selected" = "$id" ] || return 0
+  ran_consumer=1
   output="$RUNNER_TEMP/stock-bash-${label//[^A-Za-z0-9]/-}.log"
   echo "::group::$label"
   set +e
@@ -128,6 +128,10 @@ run_consumer learning "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIME
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
 run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 17 \
   "$STOCK_BASH" "$ROOT/tests/fm-merge-local.test.sh"
+[ "$ran_consumer" -eq 1 ] || {
+  echo "::error::unknown stock Bash consumer: $selected" >&2
+  exit 2
+}
 [ "$compatibility_failed" -eq 0 ] || {
   echo "::error::one or more stock macOS Bash consumers failed or did not return a verdict"
   exit 1
