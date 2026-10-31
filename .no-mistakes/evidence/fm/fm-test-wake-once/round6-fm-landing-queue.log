@@ -1,0 +1,28 @@
+ok - declared gate holds suite green, invalidates on head or target change, and permits matching readiness
+ok - every configured gate must pass before readiness
+ok - unrelated malformed configs are skipped while a malformed matching config fails closed
+ok - three cars validate once each at front and land in order without repeated wakes
+ok - cars that reach bottom after waiting get exactly one durable steer from landing or failure
+ok - a failed front steer is retried by the next invocation without duplication
+ok - reconcile is a no-op for a landing branch without a train
+ok - a parked worker is steered once when its baseline resolves and once when it lands
+ok - a baseline resolving to red-receipt returns the work to its paused worker
+ok - a baseline resolving to needs-gate returns the gate check to its paused worker
+ok - a paused ready car whose target moves is steered once to prepare again
+ok - v1 upper receipts remain readable but repeated target moves defer validation and stale gates fail closed at front
+ok - a lower head change leaves upper validation deferred until the successor reaches front
+ok - a failed lower car is removed from targets and successors retain only their own work
+ok - receipts bind full current heads and worktrees share queue identity
+ok - a missing local branch fails visibly rather than silently retargeting a receipt
+ok - concurrent worker admission serializes without losing either car
+ok - landing branches have independent queues and recorded targets work from worker checkouts
+ok - queue readiness preserves the merge gate policy for existing red baselines
+ok - repeated shutdown signals preserve the snapshot and release both locks for the next worker
+ok - a red receipt on an unrecorded red tip wakes firstmate once and resolves from a recorded tip baseline
+ok - a regression found after recording a missing baseline stays with its worker under the same task id
+ok - a head already in the landing tip is refused at admission rather than reported landed
+ok - a regression receipt stays with the worker until a fixed head is finalized
+ok - a branch deleted after landing reconciles as landed rather than failed
+ok - one invocation attributes explicit and missing-branch failure reasons to their own cars
+ok - a detected missing-branch reason survives into later status calls
+ok - a supervisor-recorded failure reason reaches the worker through a later status call
