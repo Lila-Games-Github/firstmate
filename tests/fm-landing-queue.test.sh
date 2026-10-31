@@ -183,7 +183,9 @@ queue reconcile a > "$CASE/reconcile.out"
 [ ! -s "$CASE/reconcile.out" ] || fail 'reconcile printed per-car output'
 [ "$(inbox_count b)" = 1 ] || fail 'new bottom car was not steered once'
 [ "$(inbox_count c)" = 0 ] || fail 'upper car was steered before reaching bottom'
-grep -q 'task=b is now bottom (place=1)' "$CASE/home/state/b.inbox/"*.msg || fail 'front steer did not name the car'
+[ "$(inbox_count a)" = 1 ] || fail 'the landed car named by reconcile was not steered once'
+grep -q 'task=b status=needs-final (was waiting-for-front) place=1' "$CASE/home/state/b.inbox/"*.msg || fail 'front steer did not name the car'
+grep -q 'task=a status=landed (was ready-to-land)' "$CASE/home/state/a.inbox/"*.msg || fail 'landed steer did not name the car'
 mv "$CASE/home/state/b.inbox/"*.msg "$CASE/home/state/b.inbox/handled/"
 queue reconcile a >/dev/null
 queue status c >/dev/null
@@ -191,7 +193,7 @@ expect_field "$(queue status b)" status needs-final
 [ "$(find "$CASE/home/state/b.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] || fail 'front steer repeated'
 queue fail b --reason 'suite failed' >/dev/null
 [ "$(inbox_count c)" = 1 ] || fail 'a failed lower car did not steer its successor'
-[ "$(inbox_count a)" = 0 ] || fail 'the bottom car joining an empty train was steered'
+[ "$(inbox_count a)" = 1 ] || fail 'the landed car was steered again'
 pass 'cars that reach bottom after waiting get exactly one durable steer from landing or failure'
 
 make_case front-steer-retry
@@ -213,6 +215,62 @@ make_case reconcile-without-queue
 queue reconcile a > "$CASE/none.out"
 [ ! -s "$CASE/none.out" ] && [ ! -e "$CASE/home/data/landing-queue" ] || fail 'reconcile without a queue had side effects'
 pass 'reconcile is a no-op for a landing branch without a train'
+
+steer_meta() { mkdir -p "$CASE/home/state"; fm_write_meta "$CASE/home/state/$1.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'; }
+red_receipt() {
+  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=%s\n' "$(head_of a)" "$#" > "$CASE/red.receipt"
+  for failure in "$@"; do printf 'failure=%s\n' "$failure" >> "$CASE/red.receipt"; done
+  expect_field "$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")" status needs-baseline
+  [ "$(inbox_count a)" = 0 ] || fail 'parking at needs-baseline steered the worker'
+  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" > "$CASE/tip.receipt"
+}
+make_case park-baseline-ready
+steer_meta a
+car a main; join a >/dev/null; prepare a
+red_receipt known-red
+expect_field "$(queue baseline a --receipt "$CASE/tip.receipt")" status ready-to-land
+[ "$(inbox_count a)" = 1 ] || fail 'baseline resolution did not steer the car named by firstmate'
+grep -q 'task=a status=ready-to-land (was needs-baseline)' "$CASE/home/state/a.inbox/"*.msg || fail 'baseline steer did not name the new status'
+queue status a >/dev/null; queue reconcile a >/dev/null
+[ "$(inbox_count a)" = 1 ] || fail 'repeated reconciliation repeated the baseline steer'
+git -C "$CASE/project" merge -q --ff-only fm/a
+queue reconcile a >/dev/null; queue reconcile a >/dev/null
+[ "$(inbox_count a)" = 2 ] || fail 'the landed worker was not steered exactly once'
+grep -q 'task=a status=landed (was ready-to-land)' "$CASE/home/state/a.inbox/"*.msg || fail 'landed steer did not name landing'
+pass 'a parked worker is steered once when its baseline resolves and once when it lands'
+
+make_case park-baseline-red
+steer_meta a
+car a main; join a >/dev/null; prepare a
+red_receipt known-red new-red
+expect_field "$(queue baseline a --receipt "$CASE/tip.receipt")" status red-receipt
+[ "$(inbox_count a)" = 1 ] || fail 'a baseline resolving to red-receipt left the worker asleep'
+grep -q 'task=a status=red-receipt (was needs-baseline)' "$CASE/home/state/a.inbox/"*.msg || fail 'red-receipt steer did not name the status'
+pass 'a baseline resolving to red-receipt returns the work to its paused worker'
+
+make_case park-baseline-gate
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+EOF
+steer_meta a
+car a main; join a >/dev/null; prepare a
+red_receipt known-red
+expect_field "$(queue baseline a --receipt "$CASE/tip.receipt")" status needs-gate
+[ "$(inbox_count a)" = 1 ] || fail 'a baseline resolving to needs-gate left the worker asleep'
+grep -q 'task=a status=needs-gate (was needs-baseline)' "$CASE/home/state/a.inbox/"*.msg || fail 'needs-gate steer did not name the status'
+pass 'a baseline resolving to needs-gate returns the gate check to its paused worker'
+
+make_case park-ready-stale
+steer_meta a
+car a main; join a >/dev/null; prepare a
+expect_field "$(receipt a)" status ready-to-land
+[ "$(inbox_count a)" = 0 ] || fail 'parking at ready-to-land steered the worker'
+git -C "$CASE/project" commit -qm 'outside landing' --allow-empty
+queue reconcile other >/dev/null; queue reconcile other >/dev/null
+[ "$(inbox_count a)" = 1 ] || fail 'a moved target left the paused ready worker asleep'
+grep -q 'task=a status=needs-rebase (was ready-to-land)' "$CASE/home/state/a.inbox/"*.msg || fail 'stale steer did not name the returned work'
+pass 'a paused ready car whose target moves is steered once to prepare again'
 
 make_case legacy-upper-receipt
 mkdir -p "$CASE/home/config/test-service"

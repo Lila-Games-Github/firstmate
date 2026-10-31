@@ -21,17 +21,20 @@
 # only this car's commits, then ready --target before the exact-head suite.
 # Only the bottom car prepares final evidence on the live landing tip. Upper
 # cars return waiting-for-front, regardless of receipts or target movement, and
-# their workers pause instead of polling. When a car that was observed above
-# bottom becomes bottom, any invocation that observes it sends that task one
-# durable steering message through fm-send.sh (FM_SEND_IDEMPOTENT=1, a frozen
-# body naming the task and queue), unless that car is the invoking task, which
-# reads its own status. A per-car front-<id> marker beside the queue snapshot
-# records waiting, then sent; a failed send stays waiting and is retried by the
-# next invocation. A task without a .meta file is not steered.
-# reconcile refreshes and persists the whole queue, emitting due wakes and front
+# their workers pause instead of polling, as do workers at ready-to-land and
+# needs-baseline. A per-car park-<id> marker beside the queue snapshot records
+# the parked status. When a parked car leaves parking - it reaches bottom, lands,
+# fails, or its head, target, gates, or receipt return work - and when a
+# needs-baseline car becomes ready-to-land, any invocation that observes it,
+# including one naming that same task, sends the task one durable steering
+# message through fm-send.sh (FM_SEND_IDEMPOTENT=1, a body naming the new status,
+# tip, and head), then updates or clears the marker. A failed send leaves the
+# marker for the next invocation to retry. A task without a .meta file is not
+# steered.
+# reconcile refreshes and persists the whole queue, emitting due wakes and park
 # steers, without requiring <task-id> to be a car; it prints nothing and is a
 # no-op when the landing branch has no queue. fm-merge-local.sh runs it after
-# every landing, so a lower landing advances sleeping upper workers.
+# every landing, so a landing steers its own car and advances sleeping cars.
 # receipt requires --head, --target and --receipt. It snapshots an fm-full-suite.v1
 # receipt (parser: fm-landing-health-lib.sh) only for the bottom car's current
 # head and target. Upper-car receipt and gate submissions are refused.
@@ -76,7 +79,7 @@
 # wakes, deduplicated per event. A wake is an event: firstmate rechecks status
 # before acting, following the landing-queue agent skill.
 # Only firstmate invokes fm-merge-local.sh and pushes, subject
-# to the existing merge authority. This tool has no daemon; front steers are
+# to the existing merge authority. This tool has no daemon; park steers are
 # its only steering messages.
 set -eu
 
@@ -424,30 +427,38 @@ fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=0
 
 for ((i=0; i<count; i++)); do
-  [ "${states[i]}" = active ] || continue
-  marker="$DIR/front-${ids[i]}"
-  [ ! -L "$marker" ] || die "front marker is a symlink: $marker"
-  front=-
-  [ ! -f "$marker" ] || front=$(cat -- "$marker")
-  if [ "${places[i]}" -gt 1 ]; then
-    [ "$front" != waiting ] || continue
-    next=waiting
-  else
-    [ "$front" = waiting ] || continue
-    if [ "${ids[i]}" != "$ID" ]; then
-      [ -f "$STATE/${ids[i]}.meta" ] || continue
-      if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${ids[i]}" \
-        "Landing queue: task=${ids[i]} is now bottom (place=1) of queue=$KEY landing=$LANDING. Run landing_queue status and finalize at bottom on the live tip." 2>&1 >/dev/null); then
-        printf 'warning: could not steer %s at the front; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
-        continue
-      fi
+  marker="$DIR/park-${ids[i]}"
+  [ ! -L "$marker" ] || die "park marker is a symlink: $marker"
+  parked=-
+  [ ! -f "$marker" ] || parked=$(cat -- "$marker")
+  current=${statuses[i]}
+  case "$current" in
+    waiting-for-front|ready-to-land|needs-baseline)
+      [ "$parked" != "$current" ] || continue
+      steer=0
+      [ "$parked:$current" != needs-baseline:ready-to-land ] || steer=1
+      ;;
+    *)
+      [ "$parked" != - ] || continue
+      steer=1
+      ;;
+  esac
+  if [ "$steer" -eq 1 ] && [ -f "$STATE/${ids[i]}.meta" ]; then
+    if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${ids[i]}" \
+      "Landing queue: task=${ids[i]} status=$current (was $parked) place=${places[i]} queue=$KEY landing=$LANDING tip=$TIP head=${heads[i]}. Run landing_queue status and continue from that status." 2>&1 >/dev/null); then
+      printf 'warning: could not steer %s from %s to %s; the next queue invocation retries: %s\n' "${ids[i]}" "$parked" "$current" "$send_error" >&2
+      continue
     fi
-    next=sent
   fi
-  TMP=$(mktemp "$DIR/.front.XXXXXX")
-  printf '%s\n' "$next" > "$TMP"
-  mv -f -- "$TMP" "$marker"
-  TMP=
+  case "$current" in
+    waiting-for-front|ready-to-land|needs-baseline)
+      TMP=$(mktemp "$DIR/.park.XXXXXX")
+      printf '%s\n' "$current" > "$TMP"
+      mv -f -- "$TMP" "$marker"
+      TMP=
+      ;;
+    *) rm -f -- "$marker" ;;
+  esac
 done
 
 [ "$ACTION" != reconcile ] || exit 0

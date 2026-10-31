@@ -357,7 +357,8 @@ landing_queue() {
    If your car fails, record \`landing_queue fail --reason <failure>\` before reporting \`failed:\` and stopping.
    At \`red-receipt\`, do not rerun the suite on the same head: fix the failures its \`reason\` names in a new commit and finalize again, or record the failure as above.
    At \`failed\`, report \`failed:\` with the status \`reason\` and stop.
-4. At \`ready-to-land\` or \`needs-baseline\`, keep checking queue status every 30 seconds and read your steering inbox at those checkpoints; a pending test-service request instead follows the submit-and-end-turn rule above.
+4. At \`ready-to-land\` or \`needs-baseline\`, append \`paused: landing-queue <status>\` and end your turn without polling; a pending test-service request instead follows the submit-and-end-turn rule above.
+   The queue sends your steering inbox one message when your car lands, fails, its baseline resolves, or a moved head or target returns work to you; resume then with \`landing_queue status\`.
    The tool emits the readiness or baseline wake only for the bottom car with a valid receipt; do not add a ready \`done:\` or ask firstmate to coordinate the queue.
    Firstmate handles those wakes under the existing merge authority; \`$root/.agents/skills/landing-queue/SKILL.md\` owns that procedure.
    A changed target returns you to preparation; at \`landed\`, append \`done: landed {branch} at {head}\` and stop.

@@ -27,7 +27,7 @@
 # lands only when every failure is in that current tip's recorded set. Every red
 # tip gets one queued or in-flight make-it-green backlog task for its branch.
 # After landing, it runs fm-landing-queue.sh reconcile for that landing branch,
-# so the train's next car is steered to the front, including when the landed
+# so the landed car and the train's next car are steered, including when the landed
 # receipt then fails to record and the script exits 3; a failure there only warns.
 set -eu
 

@@ -467,7 +467,7 @@ TMUX
 
   [ "$(find "$case_dir/state/task-y2.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
     || fail 'queue-hook: landing did not steer the next car exactly once'
-  grep -q 'task=task-y2 is now bottom (place=1)' "$case_dir/state/task-y2.inbox/"*.msg \
+  grep -q 'task=task-y2 status=needs-final (was waiting-for-front) place=1' "$case_dir/state/task-y2.inbox/"*.msg \
     || fail 'queue-hook: front steer did not name the next car'
   ! grep -q 'not reconciled' "$case_dir/stderr" || fail 'queue-hook: reconcile failed after landing'
   pass 'landing a queued car steers its sleeping successor to the front once'

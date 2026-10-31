@@ -558,12 +558,12 @@ def queue_notification(db, row):
 
 def deliver_notifications(db):
     now = time.time()
-    for notice in db.execute("SELECT * FROM notifications WHERE state='escalating' AND (attempted IS NULL OR attempted<?)",
-                             (now - 5,)).fetchall():
-        escalate_notification(db, notice)
-    for notice in db.execute("SELECT * FROM notifications WHERE state='pending'").fetchall():
+    for notice in db.execute("SELECT * FROM notifications WHERE state IN ('pending','escalating')").fetchall():
         rid = notice["request_id"]
         if notice["attempted"] is not None and notice["attempted"] > now - min(5 * 2 ** max(notice["attempts"] - 1, 0), NOTIFY_MAX_DELAY):
+            continue
+        if notice["state"] == "escalating":
+            escalate_notification(db, notice)
             continue
         meta = Path(notice["state_dir"]) / (notice["task"] + ".meta")
         if not meta.is_file():
@@ -589,20 +589,28 @@ def deliver_notifications(db):
 
 
 def escalate_notification(db, notice):
-    """Publish one firstmate wake for an undeliverable completion, deduplicated by key."""
+    """Publish one firstmate wake for an undeliverable completion.
+
+    A publication receipt written under the wake-queue lock deduplicates replay
+    even after firstmate consumes the queued row.
+    """
     rid = notice["request_id"]
     key = "test-service-notify:" + rid
     summary = notice["message"].splitlines()[0]
     payload = (f"check: test-service completion undelivered task={notice['task']} request={rid}; "
                f"resume the task with this result: {summary}")
+    receipt = ROOT / "results" / rid / "escalation.published"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
     script = ('. "$1" || exit 1; fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1; status=0; '
-              'fm_wake_queued_keys_locked check | grep -qxF -- "$2" || fm_wake_append_locked check "$2" "$3" || status=$?; '
+              'if [ ! -e "$4" ] && ! fm_wake_queued_keys_locked check | grep -qxF -- "$2"; then '
+              'fm_wake_append_locked check "$2" "$3" || status=$?; fi; '
+              '[ "$status" -ne 0 ] || : > "$4" || status=$?; '
               'fm_lock_release "$FM_WAKE_QUEUE_LOCK"; exit "$status"')
     env = {k: v for k, v in os.environ.items() if k not in {"FM_WAKE_QUEUE", "FM_WAKE_QUEUE_LOCK", "STATE"}}
     env.update(FM_HOME=notice["home"], FM_STATE_OVERRIDE=notice["state_dir"])
-    db.execute("UPDATE notifications SET attempted=? WHERE request_id=?", (time.time(), rid))
+    db.execute("UPDATE notifications SET attempted=?,attempts=attempts+1 WHERE request_id=?", (time.time(), rid))
     try:
-        woke = run(["bash", "-c", script, "fm-test-service-wake", str(CODE.with_name("fm-wake-lib.sh")), key, payload],
+        woke = run(["bash", "-c", script, "fm-test-service-wake", str(CODE.with_name("fm-wake-lib.sh")), key, payload, str(receipt)],
                    env=env, timeout=30)
         if woke.returncode:
             raise RuntimeError(woke.stderr.strip() or f"wake append exited {woke.returncode}")

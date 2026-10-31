@@ -600,6 +600,28 @@ with sqlite3.connect(sys.argv[1]) as db:
 PY
 await_notice "$capped" failed
 [ "$(wake_rows "$capped")" = 1 ] || fail 'replayed escalation duplicated the firstmate wake'
+# Firstmate consuming the row and losing the final marker must not republish,
+# and an escalation retry waits out the persisted bounded backoff.
+python3 - "$FM_STATE_OVERRIDE/.wake-queue" "test-service-notify:$capped" <<'PY'
+import sys
+path,key=sys.argv[1:]
+lines=open(path).read().splitlines(True)
+open(path,'w').writelines(line for line in lines if line.split('\t')[3:4]!=[key])
+PY
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys,time
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET state='escalating',attempts=12,attempted=? WHERE request_id=?",(time.time()-10,sys.argv[2]))
+PY
+sleep 1
+[ "$(notice_field "$capped" state)" = escalating ] || fail 'escalation retry ignored its backoff'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$capped" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE notifications SET attempted=0 WHERE request_id=?",(sys.argv[2],))
+PY
+await_notice "$capped" failed
+[ "$(wake_rows "$capped")" = 0 ] || fail 'consumed escalation was published again after losing its final marker'
 rm "$FM_STATE_OVERRIDE/capped.inbox"
 sleep 1
 [ ! -e "$FM_STATE_OVERRIDE/capped.inbox" ] || fail 'capped notification was retried'
