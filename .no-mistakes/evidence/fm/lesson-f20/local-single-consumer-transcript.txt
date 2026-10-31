@@ -1,0 +1,22 @@
+$ env -u RUNNER_TEMP TMPDIR=$T /bin/bash bin/fm-stock-bash-compat.sh --consumer learning
+stock Bash logs: /tmp/tmp.9oDmROVBvI/fm-stock-bash-compat.e2kGzp
+stock Bash timeout mechanism: timeout
+stock Bash runtime: /bin/bash 5.3.9(1)-release
+::group::PR 18 learning-candidate NUL enumeration
+LEARNING CANDIDATES: 1 unresolved
+- lc-80d3b268460f020f564a8abc [firstmate/workflow-gap-blocker] an absent compatibility verdict can hide shipped shell failures
+ok - learning-candidate summary consumes NUL-delimited enumeration
+::endgroup::
+::notice title=Stock Bash consumer passed::PR 18 learning-candidate NUL enumeration emitted 1 expected assertions
+exit=0
+
+$ /bin/bash bin/fm-stock-bash-compat.sh --consumer bogus
+stock Bash logs: /tmp/tmp.9oDmROVBvI/fm-stock-bash-compat.WKt2Ig
+stock Bash timeout mechanism: timeout
+stock Bash runtime: /bin/bash 5.3.9(1)-release
+::error::unknown stock Bash consumer: bogus
+exit=2
+
+$ /bin/bash bin/fm-stock-bash-compat.sh --consumer
+usage: bin/fm-stock-bash-compat.sh [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge]
+exit=2
