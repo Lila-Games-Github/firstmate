@@ -49,5 +49,16 @@
     "RZCX224VH4T": [
       "R5CT32HRVNM"
     ]
+  },
+  "performance": {
+    "package": "com.lila.prototype.perfaudit20261102",
+    "isolated_package_prefixes": ["com.lila.prototype.perfaudit", "com.lila.prototype.perf"],
+    "queue": ["@service/fm-perf-phone-queue.py", "--serial", "{device}", "{worktree}/prototype-game/tests/e2e/phone_queue.py"],
+    "build": ["@service/fm-perf-frogpile.py", "build", "{worktree}", "{bundle}"],
+    "install": ["@service/fm-perf-frogpile.py", "install", "{worktree}", "{bundle}", "--device", "{device}"],
+    "drive": ["@service/fm-perf-frogpile.py", "drive", "{worktree}", "{bundle}", "--device", "{device}", "--state", "{state}", "--repeat", "{repeat}"],
+    "capture": ["@service/fm-perf-frogpile.py", "capture", "{worktree}", "{bundle}", "--device", "{device}", "--state", "{state}", "--repeat", "{repeat}", "--kind", "{kind}", "--output", "{output}"],
+    "pull": ["@service/fm-perf-frogpile.py", "pull", "{worktree}", "{bundle}", "--device", "{device}"],
+    "uninstall": ["@service/fm-perf-frogpile.py", "uninstall", "{worktree}", "{bundle}", "--device", "{device}"]
   }
 }

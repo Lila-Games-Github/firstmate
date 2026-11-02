@@ -12,6 +12,7 @@ A request marked running at service startup returns to the queue and reruns from
 The service keeps a private copy of each submitted commit so removing a worker's checkout does not change the test target.
 
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
+`FM_TEST_SERVICE_CONFIG_ROOT` can point an isolated service instance at a different configuration directory while keeping `FM_HOME` for task completion delivery.
 The file names the suite and device executable argv arrays relative to the tested checkout, the ordered phone serials, named scenario argument arrays, and the landing branch.
 Optional `landing_gates` names checks the worker must record for the exact head and queue target before the local landing queue announces readiness.
 FrogPile's example requires `real-phone`, which the worker records after the real-phone end-to-end check passes.
@@ -28,6 +29,40 @@ FrogPile's suite configuration calls `prototype-game/tests/run_suite.sh`, whose 
 The example caps FrogPile at four active requests through `max_concurrent`; these request slots include phone and preparation time.
 The service takes no separate suite or phone lock and does not stop the adb server.
 The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
+
+## Performance plans
+
+Use `submit PROJECT WORKTREE SHA --perf-plan PATH` to run an ordered performance audit on one configured phone.
+`PATH` names a JSON file committed in the tested project SHA, or `@service/PATH` for a file committed in the running Firstmate code checkout.
+The service validates the pinned file before accepting the request and stores its parsed content in the durable request.
+`--perf-plan` can be combined with `--suite`, but not with `--device-gate`, `--scenario`, `--harness`, or `--retest-on-move`.
+The [FrogPile plan](examples/fm-performance-frogpile-2026-11-02.json) selects pond, Harvesting List and Crew, and FTUE Missions from the 2026-11-02 audit.
+
+The plan schema is `fm-performance-plan.v1` with a configured `device`, nonempty ordered `states`, and optional `compare_to` request ID.
+Each state has a unique `name`, adapter `target`, distinct `measurements`, integer `repeats` from 1 to 20, and a `thresholds` map.
+Each threshold names a numeric metric and gives `min`, `max`, or both, inclusive.
+The service applies each threshold to every repeat, preserving all rows and verdicts even when a threshold fails.
+
+The project's `performance` configuration declares the isolated `package`, `isolated_package_prefixes`, and argv arrays for `queue`, `build`, `install`, `drive`, `capture`, `pull`, and `uninstall`.
+The executable in each array must be in the tested checkout; `@service/NAME` selects an executable shipped beside `fm-test-service.py` instead.
+Placeholders are `{worktree}`, `{bundle}`, `{device}`, `{state}`, `{kind}`, `{repeat}`, and `{output}`.
+`build` runs before the phone ticket; the queue command receives `--` and the service child command, and holds one lease while the child wakes the phone, clears a previous isolated app from the foreground, installs, drives each state, confirms app focus, captures, pulls, force-stops, and uninstalls.
+The adapter's capture command writes a numeric JSON metric map to `{output}`; its pull command can also place `.pftrace` files under `{bundle}`.
+The [FrogPile configuration](examples/fm-test-service-frogpile.json) uses the committed Godot audit scene and the project's phone queue through a Firstmate-owned adapter.
+Additional measurement kinds can use the same capture and pull hooks once their project harnesses are available.
+
+The result is `results/REQUEST/SHA/performance/summary.json`, alongside each raw measurement, command log, and trace.
+`summary.json` contains one row per state and repeat, pass status, and metric deltas against `compare_to` when supplied.
+When traces are present, the service calls `trace_processor query` (or the adapter's `trace_processor` executable), stores every Perfetto slice in `traces.sqlite3`, and computes per-name wallclock totals in its `wallclock` table.
+`bin/fm-test-service.py perf-query BUNDLE 'SELECT * FROM wallclock ORDER BY total_ms DESC LIMIT 20'` prints agent-queryable CSV; the same command can query `slices` directly.
+Function rows are identified by `::` or `GDScript` names and other slices are labeled zones; the raw name, category, timestamps, and durations remain in the index for deeper queries.
+`compare_to` must name one completed bundle in the same service state directory.
+
+For the historical M31 reproduction, copy the FrogPile configuration into `FM_HOME/config/test-service/frogpile.json`, then submit its audit-only commit with:
+
+```sh
+bin/fm-test-service.py submit frogpile /path/to/ProjectWhite e90ef2869c8bc8a2c9e441a69fbecec45f6be355 --perf-plan @service/docs/examples/fm-performance-frogpile-2026-11-02.json
+```
 
 For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json`.
 An `any` request chooses the first connected phone in `any_phones`, ordered with the S22 first, and enters the project's shared queue for that phone.

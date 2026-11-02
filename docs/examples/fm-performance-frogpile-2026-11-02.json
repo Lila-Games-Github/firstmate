@@ -1,0 +1,14 @@
+{
+  "schema": "fm-performance-plan.v1",
+  "device": "RZ8N71EC9ZB",
+  "states": [
+    {"name": "pond", "target": "pond_idle", "measurements": ["frame"], "repeats": 1,
+     "thresholds": {"fps": {"min": 36, "max": 44}, "p95_ms": {"max": 38}}},
+    {"name": "harvesting_list", "target": "list_working", "measurements": ["frame"], "repeats": 1,
+     "thresholds": {"fps": {"min": 42, "max": 50}, "p95_ms": {"max": 38}}},
+    {"name": "harvesting_crew", "target": "crew", "measurements": ["frame"], "repeats": 1,
+     "thresholds": {"fps": {"min": 36, "max": 44}, "p95_ms": {"max": 38}}},
+    {"name": "ftue_missions", "target": "ftue_missions", "measurements": ["frame"], "repeats": 1,
+     "thresholds": {"fps": {"min": 29, "max": 37}, "p95_ms": {"max": 39}}}
+  ]
+}

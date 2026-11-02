@@ -33,6 +33,16 @@ case "$*" in
   'settings put global stay_on_while_plugged_in 2') exit 0 ;;
   'dumpsys window')
     if [ -e "$HOME/unlocked-$serial" ] || [ ! -e "$HOME/locked-$serial" ]; then echo 'isKeyguardShowing=false'; else echo 'isKeyguardShowing=true'; fi ;;
+  'dumpsys activity activities')
+    if [ -e "$HOME/wrong-foreground" ]; then
+      echo 'topResumedActivity: ActivityRecord{1 com.other.app/.Main}'
+    elif [ -e "$HOME/stale-foreground" ]; then
+      echo 'topResumedActivity: ActivityRecord{1 com.example.oldperf/.Main}'
+    else
+      echo 'topResumedActivity: ActivityRecord{1 com.example.perftest/.Main}'
+    fi ;;
+  'am force-stop com.example.oldperf') echo stop-old >> "$EVENTS"; mv "$HOME/stale-foreground" "$HOME/stale-cleared" ;;
+  'am force-stop com.example.perftest') echo stop-own >> "$EVENTS" ;;
   '')
     input=$(cat)
     if [[ "$input" == *$'KEYCODE_1\ninput keyevent KEYCODE_2\ninput keyevent KEYCODE_3\ninput keyevent KEYCODE_4'* ]]; then touch "$HOME/unlocked-$serial"; fi ;;
@@ -643,3 +653,106 @@ grep -q "request=$inflight state=passed" "$FM_STATE_OVERRIDE/notify.inbox/005.ms
 echo 'ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites'
 echo 'ok - terminal completions wake once across restarts, acknowledgements, failures, and cancellation'
 echo 'ok - failed completion sends back off and stop at the retry cap with one firstmate wake, and the outbox upgrade never replays history'
+
+# Performance plans are validated from the pinned commit and execute all phone
+# actions in one queue child, leaving a queryable bundle and named comparison.
+cat > "$tmp/project/perf-queue.sh" <<'QUEUE'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = --serial ] && [ "$2" = M31 ] && [ "$3" = -- ]
+shift 3
+echo lease-start >> "$EVENTS"
+trap 'echo lease-end >> "$EVENTS"' EXIT
+PERF_LEASE=1 "$@"
+QUEUE
+cat > "$tmp/project/perf-action.sh" <<'ACTION'
+#!/usr/bin/env bash
+set -euo pipefail
+action=$1; shift
+if [ "$action" = build ]; then
+  [ -z "${PERF_LEASE:-}" ]
+  echo build >> "$EVENTS"
+  exit
+fi
+[ "${PERF_LEASE:-}" = 1 ]
+echo "$action" >> "$EVENTS"
+if [ "$action" = capture ]; then
+  printf '{"fps":%s,"p95_ms":%s}\n' "${PERF_FPS:-40}" 34 > "$1"
+  printf 'fixture trace\n' > "$(dirname "$1")/$(basename "$1" .json).pftrace"
+fi
+ACTION
+cat > "$tmp/bin/trace_processor" <<'PROCESSOR'
+#!/usr/bin/env bash
+[ "$1" = query ] || exit 1
+printf 'id,parent_id,name,category,ts,dur,track_id\n1,[NULL],Godot::draw,engine,100,5000000,2\n2,1,pond_zone,script,200,2000000,2\n'
+PROCESSOR
+chmod +x "$tmp/project/perf-queue.sh" "$tmp/project/perf-action.sh"
+chmod +x "$tmp/bin/trace_processor"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+p=sys.argv[1]; data=json.load(open(p))
+data['performance']={
+  'package':'com.example.perftest',
+  'isolated_package_prefixes':['com.example'],
+  'queue':['perf-queue.sh','--serial','{device}'],
+  'build':['perf-action.sh','build'],
+  'install':['perf-action.sh','install'],
+  'drive':['perf-action.sh','drive'],
+  'capture':['perf-action.sh','capture','{output}'],
+  'pull':['perf-action.sh','pull'],
+  'uninstall':['perf-action.sh','uninstall']}
+open(p,'w').write(json.dumps(data))
+PY
+cat > "$tmp/project/perf-plan.json" <<'PLAN'
+{"schema":"fm-performance-plan.v1","device":"M31","states":[{"name":"pond","target":"pond_idle","measurements":["frame"],"repeats":2,"thresholds":{"fps":{"min":39},"p95_ms":{"max":35}}},{"name":"missions","target":"ftue_missions","measurements":["frame"],"repeats":1,"thresholds":{"fps":{"min":39}}}]}
+PLAN
+git add perf-queue.sh perf-action.sh perf-plan.json && git commit -qm perf-plan
+perf_sha=$(git rev-parse HEAD)
+touch "$HOME/stale-foreground"
+perf_first=$($svc submit fake "$PWD" "$perf_sha" --perf-plan perf-plan.json)
+$svc wait "$perf_first" | grep -q '^passed '
+python3 - "$FM_TEST_SERVICE_STATE/results/$perf_first/$perf_sha/performance/summary.json" "$EVENTS" <<'PY'
+import json,sys
+data=json.load(open(sys.argv[1])); assert data['pass'] and len(data['rows'])==3
+events=open(sys.argv[2]).read().splitlines()
+start=events.index('lease-start'); end=events.index('lease-end',start)
+assert events[start-1]=='build'
+assert events[start+1:end]==['stop-old','install','drive','capture','pull','drive','capture','pull','drive','capture','pull','stop-own','uninstall']
+PY
+$svc perf-query "$FM_TEST_SERVICE_STATE/results/$perf_first/$perf_sha/performance" 'SELECT kind,name,SUM(calls),SUM(total_ms) FROM wallclock GROUP BY kind,name ORDER BY kind,name' > "$tmp/trace-query.csv"
+grep -q 'function,Godot::draw,3,15.0' "$tmp/trace-query.csv"
+grep -q 'zone,pond_zone,3,6.0' "$tmp/trace-query.csv"
+python3 - "$tmp/project/perf-plan.json" "$perf_first" <<'PY'
+import json,sys
+p=sys.argv[1]; data=json.load(open(p)); data['compare_to']=sys.argv[2]
+open(p,'w').write(json.dumps(data))
+PY
+git add perf-plan.json && git commit -qm perf-compare
+compare_sha=$(git rev-parse HEAD)
+perf_second=$($svc submit fake "$PWD" "$compare_sha" --perf-plan perf-plan.json)
+$svc wait "$perf_second" | grep -q '^passed '
+python3 - "$FM_TEST_SERVICE_STATE/results/$perf_second/$compare_sha/performance/summary.json" <<'PY'
+import json,sys
+data=json.load(open(sys.argv[1])); assert len(data['diff'])==3
+assert all(row['delta']=={'fps':0,'p95_ms':0} for row in data['diff'])
+PY
+touch "$HOME/wrong-foreground"
+lost_focus=$($svc submit fake "$PWD" "$perf_sha" --perf-plan perf-plan.json)
+if $svc wait "$lost_focus" > "$tmp/lost-focus.out"; then
+  fail 'performance capture proceeded without app focus'
+fi
+grep -q 'did not hold focus' "$tmp/lost-focus.out"
+[ "$(tail -2 "$EVENTS" | tr '\n' ' ')" = 'uninstall lease-end ' ]
+mv "$HOME/wrong-foreground" "$HOME/wrong-foreground-cleared"
+python3 - "$tmp/project/perf-plan.json" <<'PY'
+import json,sys
+p=sys.argv[1]; data=json.load(open(p)); data['states'][0]['repeats']=0
+open(p,'w').write(json.dumps(data))
+PY
+git add perf-plan.json && git commit -qm perf-bad
+bad_sha=$(git rev-parse HEAD)
+if $svc submit fake "$PWD" "$bad_sha" --perf-plan perf-plan.json > "$tmp/bad.out" 2>&1; then
+  fail 'known-bad committed performance plan was accepted'
+fi
+grep -q 'repeats must be 1..20' "$tmp/bad.out"
+echo 'ok - performance plan validation, ordered single-lease bundle, and named diff'
