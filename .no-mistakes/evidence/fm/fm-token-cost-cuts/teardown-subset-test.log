@@ -1,0 +1,5 @@
+ok - teardown closes its own backlog item before reporting success
+ok - a legacy record without routing facts cleans up, warns, and ledgers the missing-routing reason
+ok - lane teardown removes busy, progress, harness, and inbox runtime records
+ok - lane teardown preserves undelivered outcomes and reports them before removing metadata
+ok - a secondmate home's teardown delivers the child's final line or refuses until it can

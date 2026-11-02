@@ -1,0 +1,31 @@
+### 1. Worker appends the phase-handoff line; firstmate classifier sees it as an actionable blocker
+status_is_captain_relevant: YES (wakes firstmate)
+open decisions:
+default	blocked	phase handoff ready /tmp/tmp.N1ULhHGNOc/data/demo/phase-handoff.mdopen decisions after resolved: []
+(contrast) old 'working:' line relevance:
+NO (would not wake)
+
+### 2. Routing ledger record before teardown: gpt-6-sol priced, handoff excluded from blocked_count
+--- status log:
+working: setup complete
+phase: building - core change
+blocked: phase handoff ready $LAB/data/demo/phase-handoff.md
+resolved: relaunched from phase handoff
+blocked: waiting for credentials
+needs-decision: pick API shape
+note: stale wake recovered
+--- ledger row (selected fields):
+{
+  "task_id": "demo",
+  "blocked_count": 1,
+  "needs_decision_count": 1,
+  "stale_wake_count": 1,
+  "phase_handoff_count": null,
+  "usd_estimate": 0.2488,
+  "raw": {
+    "cached_input_tokens": 984000,
+    "input_tokens": 1000000,
+    "output_tokens": 2000
+  }
+}
+expected usd: 16000*2/1e6 + 984000*0.20/1e6 + 2000*10/1e6 = 0.2488

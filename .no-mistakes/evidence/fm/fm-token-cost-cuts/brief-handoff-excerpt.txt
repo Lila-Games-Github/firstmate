@@ -1,0 +1,22 @@
+## Rendered ship brief (fm-brief.sh demo-ship --mode no-mistakes): handoff + rule 2 excerpts
+68:   For Codex or Claude, finish the current phase, then write a short handoff to `$FM_HOME/data/demo-ship/phase-handoff.md`
+69-   naming completed work, exact files and commit, current gate or job ID, and the next action.
+70-   Append `blocked: phase handoff ready $FM_HOME/data/demo-ship/phase-handoff.md` to the status file, then end the turn.
+71-   Firstmate relaunches this task into a fresh session with that file as its progress note;
+72-   read the note and continue in the same worktree.
+73-   Do not request a relaunch while a file mutation or validation command is still running.
+74-   Keep long test output and large file contents in worktree files; return only the relevant
+75-   summary and file path to the conversation. Batch related independent reads or commands in one turn.
+53:2. Stay inside this worktree; modify nothing outside it except the phase-handoff note at `$FM_HOME/data/demo-ship/phase-handoff.md` and a private learning candidate created through the conditional lifecycle above.
+82:   until a defined `done:` gate under Definition of done, except at a planned phase handoff above.
+
+## Rendered scout brief: handoff + rule 2
+58:   For Codex or Claude, finish the current phase, then write a short handoff to `$FM_HOME/data/demo-scout/phase-handoff.md`
+59-   naming completed work, exact files and commit, current gate or job ID, and the next action.
+60-   Append `blocked: phase handoff ready $FM_HOME/data/demo-scout/phase-handoff.md` to the status file, then end the turn.
+61-   Firstmate relaunches this task into a fresh session with that file as its progress note;
+62-   read the note and continue in the same worktree.
+63-   Do not request a relaunch while a file mutation or validation command is still running.
+64-   Keep long test output and large file contents in worktree files; return only the relevant
+65-   summary and file path to the conversation. Batch related independent reads or commands in one turn.
+44:2. Stay inside this worktree; the only files you may write outside it are the report, the status file below, the phase-handoff note at `$FM_HOME/data/demo-scout/phase-handoff.md`, and a private learning candidate created through the conditional lifecycle above.
