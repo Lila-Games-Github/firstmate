@@ -1,0 +1,155 @@
+$ fm-landing-queue.sh ready ruins --branch fm/ruins --head 9daab184bd34e9b59a882070168a38c0f6bb298e
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=ruins
+branch=fm/ruins
+head=9daab184bd34e9b59a882070168a38c0f6bb298e
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=1
+target_ref=refs/heads/main
+target_sha=4b8faaea8d810a5310a3051c02e2a43cf55202af
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=needs-final
+receipt=-
+reason=-
+
+$ fm-landing-queue.sh ready b --branch fm/b --head 15c50f484a6251b11963f2631cf05fd9b4852fed
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=b
+branch=fm/b
+head=15c50f484a6251b11963f2631cf05fd9b4852fed
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=2
+target_ref=refs/heads/fm/ruins
+target_sha=9daab184bd34e9b59a882070168a38c0f6bb298e
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=waiting-for-front
+receipt=-
+reason=-
+
+$ fm-landing-queue.sh ready c --branch fm/c --head 8db5c7f058dd55692325e2afe39070046d8aeeeb
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=c
+branch=fm/c
+head=8db5c7f058dd55692325e2afe39070046d8aeeeb
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=3
+target_ref=refs/heads/fm/b
+target_sha=15c50f484a6251b11963f2631cf05fd9b4852fed
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=waiting-for-front
+receipt=-
+reason=-
+
+## front car 'ruins' submits a RED final receipt while b and c wait
+$ fm-landing-queue.sh ready ruins --branch fm/ruins --head 9daab184bd34e9b59a882070168a38c0f6bb298e --target 4b8faaea8d810a5310a3051c02e2a43cf55202af
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=ruins
+branch=fm/ruins
+head=9daab184bd34e9b59a882070168a38c0f6bb298e
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=1
+target_ref=refs/heads/main
+target_sha=4b8faaea8d810a5310a3051c02e2a43cf55202af
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=needs-final
+receipt=-
+reason=-
+
+$ fm-landing-queue.sh receipt ruins --head 9daab184bd34e9b59a882070168a38c0f6bb298e --target 4b8faaea8d810a5310a3051c02e2a43cf55202af --receipt /tmp/tmp.pAwGoD32ch/case/red.receipt
+warning: could not steer ruins after requeue; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+warning: could not steer b from waiting-for-front to needs-final; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=ruins
+branch=fm/ruins
+head=9daab184bd34e9b59a882070168a38c0f6bb298e
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=3
+target_ref=refs/heads/fm/c
+target_sha=8db5c7f058dd55692325e2afe39070046d8aeeeb
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=waiting-for-front
+receipt=-
+reason=-
+
+## next car b is now at the front; c moved up
+$ fm-landing-queue.sh status b
+warning: could not steer ruins after requeue; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+warning: could not steer b from waiting-for-front to needs-final; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=b
+branch=fm/b
+head=15c50f484a6251b11963f2631cf05fd9b4852fed
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=1
+target_ref=refs/heads/main
+target_sha=4b8faaea8d810a5310a3051c02e2a43cf55202af
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=needs-final
+receipt=-
+reason=-
+
+$ fm-landing-queue.sh status c
+warning: could not steer ruins after requeue; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+warning: could not steer b from waiting-for-front to needs-final; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=c
+branch=fm/c
+head=8db5c7f058dd55692325e2afe39070046d8aeeeb
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=2
+target_ref=refs/heads/fm/b
+target_sha=15c50f484a6251b11963f2631cf05fd9b4852fed
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=waiting-for-front
+receipt=-
+reason=-
+
+## message delivered to ruins' inbox:
+/tmp/tmp.pAwGoD32ch/case/home/state:
+b.meta
+c.meta
+ruins.meta
+
+## explicit fail then re-enroll under the SAME id/branch
+$ fm-landing-queue.sh fail c --reason giving up for now
+warning: could not steer ruins after requeue; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+warning: could not steer b from waiting-for-front to needs-final; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+warning: could not steer c from waiting-for-front to failed; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=c
+branch=fm/c
+head=8db5c7f058dd55692325e2afe39070046d8aeeeb
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=0
+target_ref=-
+target_sha=-
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=failed
+receipt=-
+reason=giving up for now
+
+$ fm-landing-queue.sh ready c --branch fm/c --head 8db5c7f058dd55692325e2afe39070046d8aeeeb
+warning: could not steer ruins after requeue; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+warning: could not steer b from waiting-for-front to needs-final; the next queue invocation retries: error: no-mistakes gate agent must not drive the fleet (NO_MISTAKES_GATE set)
+queue=f5dd2be34b17a640eb14722be4dd9d92a18f5bb4
+task=c
+branch=fm/c
+head=8db5c7f058dd55692325e2afe39070046d8aeeeb
+landing_branch=main
+tip=4b8faaea8d810a5310a3051c02e2a43cf55202af
+place=3
+target_ref=refs/heads/fm/ruins
+target_sha=9daab184bd34e9b59a882070168a38c0f6bb298e
+rebase_from=4b8faaea8d810a5310a3051c02e2a43cf55202af
+status=waiting-for-front
+receipt=-
+reason=-
+
