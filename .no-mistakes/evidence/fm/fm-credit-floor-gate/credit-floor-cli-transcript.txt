@@ -1,0 +1,45 @@
+=== deepseek-low
+quota-axi --json -> {"schemaVersion":5,"providers":[{"provider":"openrouter","credits":{"remaining":2,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}
+$ fm-spawn.sh deepseek-low <proj> --harness pi --model openrouter/deepseek/deepseek-v4.1-flash --routing-reason manual DeepSeek selection --mode no-mistakes --yolo off
+error: openrouter balance 2 usd is below the 5 usd floor; route this task to a native Codex or Claude profile, not an OpenRouter GPT or Claude model
+exit=1 launched=no task_meta=no
+
+=== deepseek-low-rule
+quota-axi --json -> {"schemaVersion":5,"providers":[{"provider":"openrouter","credits":{"remaining":2,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}
+$ fm-spawn.sh deepseek-low-rule <proj> --harness pi --model openrouter/deepseek/deepseek-v4.1-flash --routing-rule DeepSeek work --routing-provider openrouter --mode no-mistakes --yolo off
+error: openrouter balance 2 usd is below the 5 usd floor; route this task to a native Codex or Claude profile, not an OpenRouter GPT or Claude model
+exit=1 launched=no task_meta=no
+
+=== deepseek-ok
+quota-axi --json -> {"schemaVersion":5,"providers":[{"provider":"openrouter","credits":{"remaining":49.87,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}
+$ fm-spawn.sh deepseek-ok <proj> --harness pi --model openrouter/deepseek/deepseek-v4.1-flash --routing-reason manual DeepSeek selection --mode no-mistakes --yolo off
+warning: /tmp/fm-spawn-dispatch-profile.w1RPUx/deepseek-ok/home/data/deepseek-ok/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+exit=0 launched=yes task_meta=yes
+routing_provider=openrouter
+routing_quota={"provider":"openrouter","credits":{"remaining":49.87,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}
+routing_quota_reason=
+
+=== deepseek-unreadable
+quota-axi --json -> garbage
+$ fm-spawn.sh deepseek-unreadable <proj> --harness pi --model openrouter/deepseek/deepseek-v4.1-flash --routing-reason manual DeepSeek selection --mode no-mistakes --yolo off
+warning: openrouter prepaid credit balance unreadable (snapshot-unreadable); prepaid credit floor was not checked, proceeding
+warning: /tmp/fm-spawn-dispatch-profile.w1RPUx/deepseek-unreadable/home/data/deepseek-unreadable/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+exit=0 launched=yes task_meta=yes
+routing_provider=openrouter
+routing_quota_reason=snapshot-unreadable
+
+=== or-gpt
+quota-axi --json -> {"schemaVersion":5,"providers":[{"provider":"openrouter","credits":{"remaining":49.87,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}
+$ fm-spawn.sh or-gpt <proj> --harness pi --model openrouter/openai/gpt-5 --routing-reason manual --mode no-mistakes --yolo off
+error: openrouter/openai/gpt-5 routes a Codex or Claude model through OpenRouter; dispatch it on a native Codex or Claude profile instead
+exit=1 launched=no task_meta=no
+
+=== codex-fallback
+quota-axi --json -> {"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}
+$ fm-spawn.sh codex-fallback <proj> --harness codex --model gpt-5 --routing-reason rerouted from DeepSeek --mode no-mistakes --yolo off
+warning: /tmp/fm-spawn-dispatch-profile.w1RPUx/codex-fallback/home/data/codex-fallback/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+exit=0 launched=yes task_meta=yes
+routing_provider=codex
+routing_quota={"provider":"codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}
+routing_quota_reason=
+
