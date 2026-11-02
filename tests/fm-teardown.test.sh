@@ -1459,6 +1459,21 @@ SH
   pass "done and landed work permits Treehouse to reset edits and remove untracked scratch"
 }
 
+test_clean_landed_without_done_tears_down() {
+  local case_dir rc
+  case_dir=$(make_case clean-landed-no-done)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt landed "task work"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  printf 'blocked: awaiting review\n' > "$case_dir/state/task-x1.status"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "clean landed copy without done must tear down: $(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "clean-landed-no-done: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "clean-landed-no-done: teardown retained the task"
+  pass "a clean landed copy tears down without a done report"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -4278,6 +4293,7 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_done_landed_untracked_cleanup
+test_clean_landed_without_done_tears_down
 test_gh_error_and_content_absent_refuses
 test_persisted_steal_chain_refuses_at_depth_limit
 test_legacy_record_without_the_flag_refuses

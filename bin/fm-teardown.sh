@@ -56,8 +56,7 @@
 # lift the deferral (it authorizes discarding unlanded WORK, never the
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
-# Ordinary ship cleanup requires the worker's current status to be done and
-# REFUSES if the worktree holds committed work that has not LANDED, because cleanup
+# Ordinary ship cleanup REFUSES if the worktree holds committed work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. A pushed branch alone
 # does not prove a merge. Work has landed when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
@@ -79,8 +78,9 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Once the done and landed checks pass, tracked edits and untracked files are
-# disposable leftovers. The task's data/<id>/cleanup.md records their top-level
+# A clean landed copy needs no done report. Tracked edits and untracked files are
+# disposable leftovers only once the work has landed and the worker's current
+# status is done; otherwise they refuse. The task's data/<id>/cleanup.md records their top-level
 # paths before Treehouse resets and returns the copy, then marks that return done.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
@@ -2044,7 +2044,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local unpushed_raw unpushed DEFAULT DEFAULT_REF unmerged_raw unmerged branch terminal
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT DEFAULT_REF unmerged_raw unmerged branch terminal
   # This gate asks about the task's own checkout, so the landed-work family it
   # calls is scoped back to that checkout at HEAD.
   WORK_LANDED_REPO=$WT
@@ -2055,13 +2055,7 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  terminal=$(status_current_line "$STATE/$ID.status" "$KIND")
-  if [ "$(status_line_verb "$terminal")" != "done" ]; then
-    echo "REFUSED: task $ID has not reported done; preserving worktree $WT." >&2
-    return 1
-  fi
-
-  if ! git -C "$WT" status --porcelain >/dev/null 2>&1; then
+  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
@@ -2069,6 +2063,7 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2130,10 +2125,20 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+
+  if [ -n "$dirty" ]; then
+    terminal=$(status_current_line "$STATE/$ID.status" "$KIND")
+    if [ "$(status_line_verb "$terminal")" != "done" ]; then
+      echo "REFUSED: worktree $WT has uncommitted changes or untracked files and task $ID has not reported done." >&2
+      echo "uncommitted changes present" >&2
+      echo "Have the worker report done, commit the changes, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  fi
 }
 
-# The worker's done declaration and the landed-work gate above must both pass
-# before this list can authorize a forced Treehouse return. Keep the pre-return
+# The landed-work gate above, plus the worker's done declaration whenever the
+# copy is dirty, must pass before this list can authorize a forced Treehouse return. Keep the pre-return
 # intent durable; a completed marker is written only after Treehouse succeeds.
 record_disposable_work() {
   local list path top prior found record
@@ -2150,7 +2155,7 @@ record_disposable_work() {
   while IFS= read -r -d '' path; do
     top=${path%%/*}
     found=0
-    for prior in "${tops[@]}"; do
+    for prior in "${tops[@]+"${tops[@]}"}"; do
       if [ "$prior" = "$top" ]; then found=1; break; fi
     done
     [ "$found" -eq 1 ] || tops+=("$top")
@@ -2158,7 +2163,7 @@ record_disposable_work() {
   rm -f "$list"
   {
     printf '%s\n' '# Treehouse cleanup' '' 'Return pending; top-level changed paths selected for reset or removal:'
-    for top in "${tops[@]}"; do printf -- '- %q\n' "$top"; done
+    for top in "${tops[@]+"${tops[@]}"}"; do printf -- '- %q\n' "$top"; done
   } > "$record" || return 1
 }
 
