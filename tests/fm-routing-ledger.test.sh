@@ -54,6 +54,8 @@ phase: validating - reviewing results
 working: validation round 1 failed tests
 needs-decision: clarify outcome
 blocked: waiting for tool
+blocked: phase handoff ready /tmp/fm/data/pi-task/phase-handoff.md
+resolved: relaunched from phase handoff
 working: stale wake recovered
 working: captain correction recorded
 EOF
