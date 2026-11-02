@@ -69,7 +69,7 @@
 #   2. an unhealthy session with a verified live session-lock owner outside its
 #      harness ancestry exits with a read-only diagnostic instead of blocking a
 #      session that cannot repair supervision without stealing ownership;
-#   3. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
+#   3. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 3000ms)
 #      for the auto-arm to claim this home (a live OPEN generation claim in the
 #      state/.claude-autoarm-epoch ledger - fm_autoarm_claim_open - or a legacy
 #      build's lock-holding claim under the legacy abandonment proof) or to
@@ -99,10 +99,10 @@ GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
-SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
+SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-3000}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
-case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
+case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=3000 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 
