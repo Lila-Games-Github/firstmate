@@ -92,7 +92,16 @@ cat > benchmark.sh <<'BENCH'
 #!/usr/bin/env bash
 echo "benchmark-v1" >> "$EVENTS"
 BENCH
-chmod +x prepare.sh suite.sh phone.sh benchmark.sh
+cat > m31-perf.sh <<'PERF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec {phone_lock}> "$HOME/m31-perf.lock"
+flock -n "$phone_lock"
+echo 'm31-perf-start' >> "$EVENTS"
+sleep .2
+echo 'm31-perf-end' >> "$EVENTS"
+PERF
+chmod +x prepare.sh suite.sh phone.sh benchmark.sh m31-perf.sh
 git add . && git commit -qm v1
 sha1=$(git rev-parse HEAD)
 printf '\necho dirty-live-tree >&2; exit 1\n' >> suite.sh
@@ -400,6 +409,20 @@ PY
   sleep .05
 done
 [ "$i" -lt 300 ]
+for i in $(seq 1 300); do
+  [ "$(grep -c '^parallel-start:' "$EVENTS")" -ge 4 ] && break
+  sleep .05
+done
+[ "$i" -lt 300 ]
+performance=$($svc submit fake "$PWD" "$sha1" --task m31-only --harness m31-perf.sh)
+$svc wait "$performance" | grep -q "^passed $sha1"
+python3 - "$EVENTS" <<'PY'
+from pathlib import Path
+import sys
+events=Path(sys.argv[1]).read_text().splitlines()
+assert 'm31-perf-end' in events
+assert not any(e.startswith('parallel-end:') for e in events[:events.index('m31-perf-start')])
+PY
 for id in "${parallel_ids[@]}"; do
   $svc wait "$id" | grep -q "^passed $sha1"
 done

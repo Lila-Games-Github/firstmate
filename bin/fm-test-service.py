@@ -910,7 +910,7 @@ def serve():
         finally:
             worker_db.close()
     while not STOP:
-        for rid, (thread, _project) in list(active.items()):
+        for rid, (thread, _project, _suite) in list(active.items()):
             if not thread.is_alive():
                 thread.join()
                 del active[rid]
@@ -923,22 +923,24 @@ def serve():
                 complete(db, row, "cancelled", "cancelled before start")
                 continue
             limit = config(row["project"])["max_concurrent"]
-            in_project = sum(1 for rid in active if active[rid][1] == row["project"])
-            if in_project >= limit:
+            has_suite = json.loads(row["options"])["suite"]
+            in_project = sum(1 for _thread, project, suite in active.values()
+                             if project == row["project"] and suite)
+            if has_suite and in_project >= limit:
                 continue
             updated = db.execute("UPDATE requests SET state='running',started=? WHERE id=? AND state='queued' AND cancel_requested=0", (time.time(), row["id"]))
             if updated.rowcount != 1:
                 continue
             snapshot(db)
             thread = threading.Thread(target=process_request, args=(row,), name="test-" + row["id"])
-            active[row["id"]] = (thread, row["project"])
+            active[row["id"]] = (thread, row["project"], has_suite)
             thread.start()
         if time.time() - last_retest > 5:
             retest_moved(db)
             reclaim_finished(db, active)
             last_retest = time.time()
         time.sleep(.2)
-    for thread, _project in active.values():
+    for thread, _project, _suite in active.values():
         thread.join()
     notifier.join()
     snapshot(db)

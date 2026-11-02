@@ -19,7 +19,7 @@ The quick device command performs the short phone check.
 The file also names the ordered phone serials, named scenario argument arrays, and landing branch.
 Optional `landing_gates` names checks the worker must record for the exact pre-queue head and tip before `ready` accepts the car.
 FrogPile's example requires `real-phone`, which the worker records after the real-phone end-to-end check passes.
-`max_concurrent` limits active requests for that project; it defaults to one and may be set from one to sixteen.
+`max_concurrent` limits active suite requests for that project; it defaults to one and may be set from one to sixteen.
 An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
 A ship brief for a repository that matches exactly one configuration names that project in its test-service gate.
 Each suite command must use its project's shared queue entry point, so other callers and service requests share the same capacity and arrival order.
@@ -29,7 +29,8 @@ An optional `landing_repo` absolute path, with `{fm_home}` expansion, selects a 
 Use `{serial}` in the device argv where the chosen serial belongs.
 The phone command must use the project's shared phone queue entry point when it has one.
 FrogPile's suite configuration calls `prototype-game/tests/run_suite.sh`, whose four-place queue owns suite admission, worktree isolation, the no-output watchdog, and script-error verdicts for service and direct callers alike.
-The example caps FrogPile at four active requests through `max_concurrent`; these request slots include phone and preparation time.
+The example caps FrogPile at four active suite requests through `max_concurrent`; these suite slots include phone and preparation time.
+Requests without a suite start without consuming a suite slot, so a phone-only performance harness can use its free phone while suites wait for another phone.
 The service takes no separate suite or phone lock and does not stop the adb server.
 The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
 Queued front checks start before ordinary queued requests; each class keeps submission order, and a request already running is never interrupted.
