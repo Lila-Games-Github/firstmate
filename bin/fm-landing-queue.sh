@@ -83,8 +83,8 @@
 # wakes, deduplicated per event. A wake is an event: firstmate rechecks status
 # before acting, following the landing-queue agent skill.
 # Only firstmate invokes fm-merge-local.sh and pushes, subject
-# to the existing merge authority. This tool has no daemon; park steers are
-# its only steering messages.
+# to the existing merge authority. This tool has no daemon; park and requeue
+# steers are its only steering messages.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

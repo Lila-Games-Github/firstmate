@@ -370,7 +370,7 @@ landing_queue() {
    If a landing gate fails, record it with \`landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha> --reason <failure>\`.
    At \`needs-gate\`, read the missing gate in \`reason\` and submit its pass after the check succeeds; status becomes ready only when all declared gates pass.
    A changed head or target refuses the receipt: read status and finalize again only when bottom on the live tip, under the re-capture budget above.
-   A failing final receipt or gate moves your car to the back if another car waits. Read status, fix your branch while waiting, and rebase and retest only when your car reaches the front again.
+   A failing final receipt or gate moves your car to the back if another car waits, and the queue sends your steering inbox one message saying why. Read status, fix your branch while waiting, and rebase and retest only when your car reaches the front again.
    At \`red-receipt\` with no waiting successor, do not rerun the suite on the same head: fix its failures in a new commit and finalize again.
    Use \`landing_queue fail --reason <failure>\` only when leaving the train. A later \`landing_queue ready\` re-enrolls a failed id and branch at the back.
    At \`failed\`, report \`failed:\` with the status \`reason\` and stop unless you are ready to re-enroll.
