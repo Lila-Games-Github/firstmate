@@ -8,8 +8,7 @@
 # is already in the up-to-date default branch.
 #
 # Covers three fixes:
-#   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
-#     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
+#   - remote-only commits do not prove a merge, even after the worker reports done.
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
 #     remote after a squash merge deletes the head branch, yet the change is fully in
 #     main. Reachability alone false-refused this common GitHub flow; the check now
@@ -21,15 +20,15 @@
 #     provably stale lock before re-running safety checks.
 #
 # Matrix:
-#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
+#   (a) local-only + HEAD on fork and local landing branch     -> ALLOW
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
+#   (d) no-mistakes + merged PR for origin-pushed HEAD         -> ALLOW
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
 #   (h) no-mistakes + no PR but content already in default     -> ALLOW  (content fallback)
-#   (i) no-mistakes + dirty worktree, even when work landed     -> REFUSE (dirty wins)
+#   (i) done + landed + tracked edits or untracked scratch      -> ALLOW (Treehouse reset)
 #   (j) no-mistakes + gh lookup errors + content not in default -> REFUSE (fail-safe)
 #   (k) no-mistakes + merged PR but HEAD moved afterward        -> REFUSE (stale PR)
 #   (l) no-mistakes + stale origin/main but fetched content     -> ALLOW  (fresh fetch)
@@ -60,7 +59,7 @@
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
 #   (s) index.lock with a live holder, any age                -> lock kept, REFUSE
 #   (t) lsof error while checking index.lock                  -> lock kept, REFUSE
-#   (u) dirty worktree after stale lock cleanup               -> lock removed, REFUSE
+#   (u) dirty landed worktree after stale lock cleanup        -> lock removed, ALLOW
 #   (v) non-linked repo index.lock                            -> lock removed, ALLOW
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
@@ -218,6 +217,9 @@ write_meta() {
     "routing_effort=default" \
     "routing_started_at=1760000000" \
     "routing_instance_id=teardown-test-task-x1"
+  if [ "$kind" = ship ]; then
+    printf 'done: task work complete\n' > "$case_dir/state/task-x1.status"
+  fi
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -679,6 +681,11 @@ SH
 # Run teardown with PATH mocking. Args: case_dir [extra args...]
 run_teardown() {
   local case_dir=$1; shift
+  # Historical fixtures often build metadata directly. Unless a case supplies
+  # its own status, model the worker's completed handoff explicitly.
+  if [ ! -e "$case_dir/state/task-x1.status" ]; then
+    printf 'done: task work complete\n' > "$case_dir/state/task-x1.status"
+  fi
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
@@ -728,6 +735,7 @@ test_local_only_fork_remote_allows() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
   # The supervision branch's bounded per-task outcome cache is a footprint of
   # the retired task, not a record anything reads after it is gone.
   printf 'fm-branch-outcome-index-v1\t5\t0\t-\n' > "$case_dir/state/.task-x1.branch-outcome-index"
@@ -737,7 +745,7 @@ test_local_only_fork_remote_allows() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
+  expect_code 0 "$rc" "fork-allow: teardown should succeed after local landing"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
   [ ! -e "$case_dir/state/.task-x1.branch-outcome-index" ] \
     || fail "fork-allow: teardown left the task's branch outcome index behind"
@@ -759,7 +767,7 @@ test_local_only_fork_remote_allows() {
     and all(.endpoints[]; .id != $id)
   ' "$case_dir/state/home-summary.json" >/dev/null \
     || fail "successful task teardown did not publish the task's removal from the home summary ledger"
-  pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
+  pass "local-only worktree pushed to a fork and landed locally is torn down"
 }
 
 test_teardown_closes_the_backlog_item_itself() {
@@ -1024,24 +1032,42 @@ test_landing_branch_missing_on_origin_names_branch() {
 }
 
 test_no_mistakes_origin_remote_allows() {
-  local case_dir rc
+  local case_dir rc head
   case_dir=$(make_case nm-origin)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
+  wt_commit_file "$case_dir" feature.txt landed "shippable work"
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
+  expect_code 0 "$rc" "nm-origin: teardown should succeed when the pushed PR merged: $(cat "$case_dir/stderr")"
   ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+  pass "no-mistakes worktree with a merged PR and pushed HEAD is torn down"
+}
+
+test_remote_pushed_without_merge_refuses() {
+  local case_dir rc
+  case_dir=$(make_case remote-only)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt unmerged "pushed but unmerged"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "remote-only commit must not authorize cleanup"
+  assert_grep 'not landed' "$case_dir/stderr" "remote-only refusal did not name missing landing"
+  assert_present "$case_dir/state/task-x1.meta" "remote-only refusal removed task metadata"
+  pass "a pushed branch without a merged PR or landing ancestry does not authorize cleanup"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -1382,29 +1408,55 @@ test_content_fallback_refreshes_stale_origin_ref() {
   pass "content fallback refreshes origin default before comparing trees"
 }
 
-test_dirty_worktree_refuses() {
-  local case_dir rc pr_head
-  case_dir=$(make_case dirty-wt)
-  write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
-  # The committed work has fully landed (merged PR + content in default), but an
-  # uncommitted edit remains. Dirtiness must refuse regardless: the reset would
-  # discard those changes.
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
-  land_on_origin_main "$case_dir" feature.txt hello
-  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
-  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
-  printf '%s\n' "uncommitted edit" > "$case_dir/wt/feature.txt"
-
-  set +e
-  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" "dirty-wt: teardown should refuse a dirty worktree even when the committed work has landed"
-  grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
-  grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
-  pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+# Exercise the real teardown entrypoint with a Treehouse stand-in that actually
+# clears the isolated fixture, including nested Git repositories.
+test_done_landed_untracked_cleanup() {
+  local case_dir rc name
+  for name in landed no-done tracked-edit unlanded; do
+    case_dir=$(make_case "scratch-$name")
+    write_meta "$case_dir" local-only ship
+    wt_commit_file "$case_dir" feature.txt landed "task work"
+    if [ "$name" != unlanded ]; then
+      git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+    fi
+    mkdir -p "$case_dir/wt/.task_tmp/reference" "$case_dir/wt/prototype"
+    git init -q "$case_dir/wt/.task_tmp/reference"
+    printf 'download\n' > "$case_dir/wt/prototype/download.txt"
+    if [ "$name" = no-done ]; then
+      printf 'working: task not complete\n' > "$case_dir/state/task-x1.status"
+    fi
+    if [ "$name" = tracked-edit ]; then
+      printf 'uncommitted change\n' > "$case_dir/wt/feature.txt"
+    fi
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+"$REAL_GIT_FOR_TEST" -C "$3" clean -ffdx -q || exit 1
+"$REAL_GIT_FOR_TEST" -C "$3" reset --hard -q || exit 1
+touch "${3%/*}/return-called"
+SH
+    chmod +x "$case_dir/fakebin/treehouse"
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$name" = landed ] || [ "$name" = tracked-edit ]; then
+      expect_code 0 "$rc" "done landed scratch must return: $(cat "$case_dir/stderr")"
+      assert_present "$case_dir/return-called" "Treehouse return was not invoked"
+      assert_absent "$case_dir/wt/.task_tmp" "nested scratch clone survived"
+      assert_absent "$case_dir/wt/prototype" "download survived"
+      assert_grep '.task_tmp' "$case_dir/data/task-x1/cleanup.md" "cleanup record omitted scratch"
+      assert_grep 'prototype' "$case_dir/data/task-x1/cleanup.md" "cleanup record omitted download"
+      if [ "$name" = tracked-edit ]; then
+        assert_grep 'feature.txt' "$case_dir/data/task-x1/cleanup.md" "cleanup record omitted tracked edit"
+        [ "$(cat "$case_dir/wt/feature.txt")" = landed ] || fail "tracked edit survived Treehouse reset"
+      fi
+      assert_grep 'Return completed' "$case_dir/data/task-x1/cleanup.md" "cleanup record was not completed"
+    else
+      expect_code 1 "$rc" "$name scratch must refuse"
+      assert_absent "$case_dir/return-called" "$name scratch called Treehouse return"
+      assert_present "$case_dir/wt/.task_tmp/reference/.git" "$name scratch was discarded"
+      assert_absent "$case_dir/data/task-x1/cleanup.md" "$name scratch wrote a cleanup record"
+    fi
+  done
+  pass "done and landed work permits Treehouse to reset edits and remove untracked scratch"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -1514,7 +1566,8 @@ test_legacy_record_without_routing_cleans_up_and_ledgers_the_gap() {
   local case_dir
   case_dir=$(make_case legacy-no-routing)
   write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'blocked: sample blocker' 'needs-decision: sample call' 'note: stale wake observed' \
+  printf '%s\n' 'blocked: sample blocker' 'needs-decision: sample call' \
+    'note: stale wake observed' 'done: task work complete' \
     >> "$case_dir/state/task-x1.status"
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
@@ -1843,12 +1896,15 @@ test_lsof_error_never_clears_index_lock() {
 }
 
 test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
-  local case_dir rc lock
+  local case_dir rc lock head
   case_dir=$(make_case stale-lock-dirty-recheck)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt landed "landed work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$head"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' dirty > "$case_dir/wt/feature.txt"
 
   add_lock_aware_treehouse "$case_dir"
@@ -1866,14 +1922,14 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "stale-lock-dirty-recheck: teardown should refuse dirty work after clearing the stale lock"
+  expect_code 0 "$rc" "stale-lock-dirty-recheck: teardown should return done and landed work after clearing the stale lock"
   assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
     "stale-lock-dirty-recheck: teardown did not report clearing the stale lock"
-  assert_grep "uncommitted changes present" "$case_dir/stderr" \
-    "stale-lock-dirty-recheck: teardown did not re-run the dirty check"
+  assert_grep "Return completed" "$case_dir/data/task-x1/cleanup.md" \
+    "stale-lock-dirty-recheck: teardown did not record the return"
   assert_absent "$lock" "stale-lock-dirty-recheck: stale lock file should have been removed"
-  [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-lock-dirty-recheck: teardown completed despite dirty work"
-  pass "stale lock cleanup rechecks and refuses dirty worktree before return"
+  assert_absent "$case_dir/state/task-x1.meta" "stale-lock-dirty-recheck: teardown retained the task after return"
+  pass "stale lock cleanup rechecks done and landed work before returning a dirty copy"
 }
 
 test_non_linked_index_lock_path_is_checked_from_worktree() {
@@ -2208,6 +2264,7 @@ test_landed_teardown_labels_the_jev_acceptance_row_accepted() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
   seed_pending_jev_acceptance_row "$case_dir"
 
   set +e
@@ -4185,6 +4242,7 @@ test_landing_branch_content_on_origin_dev_allows
 test_no_landing_branch_content_on_origin_dev_refuses
 test_landing_branch_missing_on_origin_names_branch
 test_no_mistakes_origin_remote_allows
+test_remote_pushed_without_merge_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_forced_teardown_labels_the_jev_acceptance_row_discarded
@@ -4219,7 +4277,7 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
-test_dirty_worktree_refuses
+test_done_landed_untracked_cleanup
 test_gh_error_and_content_absent_refuses
 test_persisted_steal_chain_refuses_at_depth_limit
 test_legacy_record_without_the_flag_refuses
