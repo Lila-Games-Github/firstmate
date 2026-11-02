@@ -37,7 +37,7 @@ case "${0##*/}" in
   fm-public-followup.test.sh) key=public-followup; count=1 ;;
   fm-watch-triage.test.sh) key=watch-churn; count=1 ;;
   fm-learning-candidate.test.sh) key=learning; count=1 ;;
-  fm-merge-local.test.sh) key=merge; count=17 ;;
+  fm-merge-local.test.sh) key=merge; count=18 ;;
   *) exit 2 ;;
 esac
 if [ "${FM_TEST_HANG_CONSUMER:-}" = "$key" ]; then
@@ -212,7 +212,7 @@ test_single_consumer_runs_with_own_temp_root() {
   [ -s "$log_root/stock-bash-PR-19-local-merge-branch-resolution.log" ] \
     || fail "selected consumer must stream its log under the local temp root"
   assert_contains "$out" "stock Bash runtime: /bin/bash " "the child runtime is reported"
-  assert_contains "$out" "Stock Bash consumer passed::PR 19 local-merge branch resolution emitted 17 expected assertions" \
+  assert_contains "$out" "Stock Bash consumer passed::PR 19 local-merge branch resolution emitted 18 expected assertions" \
     "selected consumer keeps its assertion floor"
   [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 1 ] \
     || fail "single-consumer selection must produce exactly one verdict"
