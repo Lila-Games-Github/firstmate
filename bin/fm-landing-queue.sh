@@ -12,7 +12,7 @@
 #
 # ready joins at the back only with --branch, --head, --target, a green exact-head
 # full-suite --receipt, and one --gate-receipt for each configured landing gate.
-# The branch must contain the current landing tip, and the target must equal it.
+# The tested target must be an ancestor of the current landing tip and head.
 # Each gate receipt is four lines: schema=fm-landing-gate.v1, gate=<name>,
 # sha=<full head SHA>, target=<full target SHA>. A failed car must pass these
 # checks again before re-enrolling. Active cars use ready without a receipt to
@@ -293,8 +293,11 @@ if [ "$ACTION" = ready ]; then
   valid_branch "$BRANCH" && [ "$BRANCH" != "$LANDING" ] || die 'ready requires a task branch distinct from the landing branch'
   [ -n "$HEAD" ] && [ "$(resolve "$BRANCH")" = "$HEAD" ] || die '--head must equal the full current branch SHA'
   if [ "$found" -lt 0 ] || [ "${states[found]}" = failed ]; then
-    [ "$TARGET" = "$TIP" ] || die 'pre-queue target changed; rebase and test the current landing tip'
-    git -C "$PROJECT" merge-base --is-ancestor "$TIP" "$HEAD" || die 'pre-queue head must contain the current landing tip'
+    if [ -z "$TARGET" ] || ! git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$TIP"; then
+      die 'pre-queue target must be an ancestor of the current landing tip'
+    fi
+    git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" \
+      || die 'pre-queue head must contain the tested landing tip'
     [ -n "$RECEIPT" ] || die 'ready requires an exact-head full-suite receipt before joining'
     fm_health_receipt_read "$RECEIPT" "$HEAD" || die 'ready requires a valid exact-head full-suite receipt'
     [ "$FM_HEALTH_COUNT" -eq 0 ] || die 'ready requires a green full-suite receipt'
@@ -302,7 +305,7 @@ if [ "$ACTION" = ready ]; then
       gate_pass=0
       for entry in ${GATE_RECEIPTS[@]+"${GATE_RECEIPTS[@]}"}; do
         [ "${entry%%=*}" = "$gate_name" ] || continue
-        gate_receipt_read "${entry#*=}" "$gate_name" "$HEAD" "$TIP" || die "invalid pre-queue gate receipt: $gate_name"
+        gate_receipt_read "${entry#*=}" "$gate_name" "$HEAD" "$TARGET" || die "invalid pre-queue gate receipt: $gate_name"
         gate_pass=1
       done
       [ "$gate_pass" -eq 1 ] || die "ready requires pre-queue landing gate: $gate_name"
@@ -313,7 +316,7 @@ if [ "$ACTION" = ready ]; then
       [ "$known" -eq 1 ] || die "unconfigured pre-queue gate: ${entry%%=*}"
     done
     TMP=$(mktemp "$DIR/.pre.XXXXXX")
-    printf '%s\n' "$TIP" > "$TMP"
+    printf '%s\n' "$TARGET" > "$TMP"
     mv -f -- "$TMP" "$DIR/pre-$ID"
     TMP=
     rm -f -- "$DIR/full-$ID"
