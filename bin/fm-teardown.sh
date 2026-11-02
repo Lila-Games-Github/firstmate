@@ -2090,7 +2090,13 @@ validate_worktree_teardown_safety() {
       DEFAULT_REF=refs/heads/$LANDING_BRANCH
     else
       DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-      DEFAULT_REF=$DEFAULT
+      DEFAULT_REF=refs/heads/$DEFAULT
+      # origin/HEAD can name a default branch this checkout never created
+      # locally; its remote-tracking ref is then the landing target.
+      if ! git -C "$WT" rev-parse --quiet --verify "$DEFAULT_REF^{commit}" >/dev/null 2>&1 \
+          && git -C "$WT" rev-parse --quiet --verify "refs/remotes/origin/$DEFAULT^{commit}" >/dev/null 2>&1; then
+        DEFAULT_REF=refs/remotes/origin/$DEFAULT
+      fi
     fi
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT_REF" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
