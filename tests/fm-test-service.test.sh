@@ -437,6 +437,7 @@ rm "$FM_HOME/config/test-service/frogpile.json"
 # The project suite entry point reports its script error to the service.
 cat > suite.sh <<'SCRIPT_ERROR'
 #!/usr/bin/env bash
+echo 'export warning: ErrorNames.csv was not generated'
 echo 'SCRIPT ERROR: fake parse failure'
 exit 1
 SCRIPT_ERROR

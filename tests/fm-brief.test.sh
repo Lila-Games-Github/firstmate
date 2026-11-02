@@ -1826,6 +1826,23 @@ test_worker_owned_finalization() {
 }
 
 test_worker_owned_finalization
+test_direct_pr_ci_and_data_tooling_contract() {
+  local home brief
+  home="$TMP_ROOT/direct-pr-ci"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" direct-pr-ci alpha --mode direct-PR >/dev/null \
+    || fail 'direct PR fixture did not scaffold'
+  brief="$home/data/direct-pr-ci/brief.md"
+  assert_grep 'direct-pr' "$brief" 'direct PR brief omitted required label'
+  assert_grep 'pushed head' "$brief" 'direct PR brief omitted head-bound CI check'
+  assert_grep 'no CI run' "$brief" 'direct PR brief omitted unscheduled-run recovery'
+  assert_grep 'authoritative input' "$brief" 'brief omitted real data/tooling invocation'
+  assert_grep "source's own counts" "$brief" 'brief omitted source record counts'
+  assert_grep 'known-bad fixture' "$brief" 'brief omitted rejected validator fixture'
+  assert_grep 'Refuse a completion report' "$brief" 'brief does not refuse count-less completion'
+  pass 'direct PR and data/tooling completion contracts are generated'
+}
+test_direct_pr_ci_and_data_tooling_contract
 test_recorded_direct_pr_base
 test_recorded_no_mistakes_target
 test_open_question_dependencies_gate_dispatch

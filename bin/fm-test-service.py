@@ -309,7 +309,9 @@ def expand(argv, serial=None):
 
 
 def first_error(log, code, step):
-    for line in log.splitlines():
+    # The last failure belongs to the command's terminal verdict. Earlier
+    # warnings and file names can contain the same words without causing exit.
+    for line in reversed(log.splitlines()):
         if re.search(r"(?i)(FAIL|ERROR|Assertion|Exception|not ok)", line):
             return step + ": " + line[:500]
     return step + ": exit " + str(code) + (": " + log.strip().splitlines()[-1][:500] if log.strip() else "")

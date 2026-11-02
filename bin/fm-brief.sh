@@ -915,6 +915,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 Execution contract: workspace=$WORKSPACE_KIND
 
 $TASK_SECTION
+For a data-driven or tooling deliverable, the task specification must name the authoritative input and expected source counts; follow the evidence gate in the Definition of done below.
 $HEALTH_MARKER
 $OPEN_QUESTIONS_SECTION
 $TEST_SERVICE_GUIDANCE
