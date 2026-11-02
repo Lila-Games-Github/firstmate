@@ -372,6 +372,98 @@ SH
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
+test_prepaid_credit_floor() {
+  local rec id out status balance balance_value
+  local -a credit_route
+  for balance in 2 2-rule 8 unreadable; do
+    balance_value=${balance%%-*}
+    id="credit-floor-$balance"
+    rec=$(make_spawn_case "credit-floor-$balance" pi "$id")
+    read_case_record "$rec"
+    printf '5\n' > "$HOME_DIR/config/prepaid-credit-floor-usd"
+    cat > "$FAKEBIN_DIR/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_CREDIT_BALANCE:-}" = unreadable ]; then
+  printf '%s\n' 'invalid snapshot'
+else
+  printf '{"schemaVersion":5,"providers":[{"provider":"openrouter","credits":{"remaining":%s,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}\n' "$FM_TEST_CREDIT_BALANCE"
+fi
+SH
+    chmod +x "$FAKEBIN_DIR/quota-axi"
+    credit_route=(--routing-reason 'manual DeepSeek selection')
+    [ "$balance" != 2-rule ] || credit_route=(--routing-rule 'DeepSeek work')
+    out=$(FM_TEST_CREDIT_BALANCE="$balance_value" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness pi --model deepseek/deepseek-chat \
+      "${credit_route[@]}" --routing-provider openrouter 2>&1)
+    status=$?
+    if [ "$balance_value" = 2 ]; then
+      expect_code 1 "$status" "below-floor prepaid balance should refuse a manual route"
+      assert_contains "$out" 'openrouter balance 2 usd is below the 5 usd floor' "refusal omitted balance or floor"
+      assert_contains "$out" 'native Codex or Claude profile' "refusal omitted rerouting guidance"
+      assert_absent "$HOME_DIR/state/$id.meta" "refusal created task metadata"
+      [ ! -s "$LAUNCH_LOG" ] || fail "below-floor task launched"
+    else
+      expect_code 0 "$status" "above-floor or unreadable balance should launch"
+      if [ "$balance" = unreadable ]; then
+        assert_contains "$out" 'credit balance unreadable' "unreadable balance passed silently"
+      else
+        assert_grep '"remaining":8' "$HOME_DIR/state/$id.meta" "launch lost checked snapshot"
+      fi
+      [ -s "$LAUNCH_LOG" ] || fail "eligible task did not launch"
+    fi
+  done
+  pass "prepaid credit floor refuses low balance and discloses unreadable balance"
+}
+
+test_pi_openrouter_model_infers_prepaid_provider() {
+  local rec id out status model
+  for model in openrouter/deepseek/deepseek-v4.1-flash openrouter/openai/gpt-5 openrouter/anthropic/claude-sonnet-4-5; do
+    id="credit-infer-${model//\//-}"
+    id=${id//./-}
+    rec=$(make_spawn_case "$id" pi "$id")
+    read_case_record "$rec"
+    cat > "$FAKEBIN_DIR/quota-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"openrouter","credits":{"remaining":2,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}'
+SH
+    chmod +x "$FAKEBIN_DIR/quota-axi"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness pi --model "$model" --routing-reason 'manual DeepSeek selection')
+    status=$?
+    expect_code 1 "$status" "pi $model dispatch without --routing-provider should refuse"
+    if [ "$model" = openrouter/deepseek/deepseek-v4.1-flash ]; then
+      assert_contains "$out" 'openrouter balance 2 usd is below the 5 usd floor' "inferred openrouter dispatch skipped the floor"
+    else
+      assert_contains "$out" 'dispatch it on a native Codex or Claude profile' "OpenRouter Codex or Claude model was not refused"
+    fi
+    assert_absent "$HOME_DIR/state/$id.meta" "refusal created task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "refused pi $model dispatch launched"
+  done
+  pass "pi openrouter model ids infer the prepaid provider and refuse OpenRouter Codex or Claude models"
+}
+
+test_subscription_provider_dispatch_skips_credit_warning() {
+  local rec id out status snapshot
+  for snapshot in creditless unavailable; do
+    id="credit-silent-$snapshot"
+    rec=$(make_spawn_case "credit-silent-$snapshot" codex "$id")
+    read_case_record "$rec"
+    cat > "$FAKEBIN_DIR/quota-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_QUOTA_SNAPSHOT:-}" = creditless ] || exit 1
+printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}'
+SH
+    chmod +x "$FAKEBIN_DIR/quota-axi"
+    out=$(FM_TEST_QUOTA_SNAPSHOT="$snapshot" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness codex --model gpt-5 --routing-reason 'manual Codex selection')
+    status=$?
+    expect_code 0 "$status" "codex dispatch should launch with a $snapshot quota snapshot"
+    assert_not_contains "$out" 'credit floor was not checked' "codex dispatch with a $snapshot quota snapshot printed a credit warning"
+    [ -s "$LAUNCH_LOG" ] || fail "codex dispatch with a $snapshot quota snapshot did not launch"
+  done
+  pass "subscription provider dispatch prints no prepaid credit warning"
+}
+
 test_active_dispatch_profile_allows_positional_harness() {
   local rec id out status
   id=profile-positional-z14
@@ -1557,6 +1649,9 @@ test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
+test_prepaid_credit_floor
+test_subscription_provider_dispatch_skips_credit_warning
+test_pi_openrouter_model_infers_prepaid_provider
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort

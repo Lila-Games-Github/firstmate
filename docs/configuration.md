@@ -81,7 +81,7 @@ It persists the model pick in gitignored `config/supervision-branch-model` and t
 Firstmate keeps no model catalog of its own; the list is the intersection of what Pi reports when the picker opens and what a fresh isolated branch runtime can run.
 A provider that exists only because an extension registered it inside the captain's session, such as pi-devin-auth's `devin`, is offered and can be pinned or followed like any other; [pi-supervision-branch.md](pi-supervision-branch.md#cost-model-and-the-byte-stable-prefix) owns how that registration reaches the isolated branch runtime.
 Stored OAuth and API-key credentials retain their native credential type because Firstmate never copies, converts, installs, or overwrites credentials for the branch runtime.
-The file holds one `<provider>/<model-id>` line followed by one newline, split at the first `/` so a provider-qualified model id such as `openrouter/anthropic/claude-sonnet-4-5` survives intact.
+The file holds one `<provider>/<model-id>` line followed by one newline, split at the first `/` so a provider-qualified model id such as `openrouter/deepseek/deepseek-v4.1-flash` survives intact.
 An absent, unreadable, or unparseable file means no pin, and the branch then follows main's own current model, applied explicitly and live whenever main changes models mid-session.
 When main uses `codex-native`, following main explicitly selects the same model through ordinary Pi's `openai-codex` provider, so the background branch owns an independent Pi conversation.
 If that ordinary Pi model is unavailable, the branch refuses to build and returns the notification to main; it never inherits the main native thread or silently selects a different model.
@@ -503,6 +503,11 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 ## Routing ledger (data/routing-ledger.jsonl)
 
 `bin/fm-spawn.sh` records the original dispatch rule, manual override reason, provider, harness, model, effort, dispatch time, and the chosen provider's `quota-axi --json` snapshot in the task metadata.
+Before a fresh launch, `fm-spawn.sh` refuses a provider whose quota snapshot reports USD prepaid credits below the default 5 USD floor, regardless of whether the route uses `--routing-rule` or `--routing-reason`.
+Without `--routing-provider`, a Pi dispatch whose model id starts with `openrouter/`, such as `openrouter/deepseek/deepseek-v4.1-flash`, is checked as the `openrouter` provider, and a floor refusal points the task to a native Codex or Claude profile.
+Pi dispatches of `openrouter/openai/` and `openrouter/anthropic/` model ids are refused, because Codex and Claude models run on their native harnesses rather than through OpenRouter.
+Set `config/prepaid-credit-floor-usd` to one nonnegative USD amount to override that floor for this home; the setting is inherited by secondmate homes, and a prepaid provider (OpenRouter, or any provider whose snapshot row carries credits) with an absent or unreadable balance is disclosed while dispatch proceeds.
+Subscription providers without credits, such as Claude and Codex, pass silently, as does a dispatch whose provider does not resolve.
 The `profile:` line from `bin/fm-dispatch-resolve.sh` includes `--routing-rule` and `--routing-provider`; for a hand-picked profile, pass `--routing-reason` with the reason for overriding the resolved choice.
 An omitted rule is recorded as `manual` with `reason-not-recorded`, so legacy callers are visible in the review instead of being attributed to a rule.
 Relaunches preserve the original routing facts and increment `routing_relaunches` while retaining the harness history used to find rerun sessions.
