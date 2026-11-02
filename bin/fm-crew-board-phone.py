@@ -207,6 +207,12 @@ def project(payload):
                 shown["link"] = shown["link"] or "details#landing-detail"
                 landing.append(shown)
     phones = [shown for raw in entries(panels.get("phones")) if (shown := item(raw))]
+    testing = [shown for raw in entries(panels.get("test_queue"))
+               if isinstance(raw, dict) and str(raw.get("id", "")).startswith(
+                   ("suite-running-", "suite-wait-", "ticket-", "service-"))
+               and str(raw.get("status", "")).startswith(("running", "waiting"))
+               if (shown := item({**raw, "title": raw.get("phone_title") if str(raw["id"]).startswith(("ticket-", "service-"))
+                                     else raw.get("title")}))]
     allowance = [shown for raw in entries(panels.get("allowance")) if (shown := item(raw))]
     landings = [shown for raw in entries(panels.get("landings")) if (shown := item(raw))]
     try:
@@ -214,7 +220,7 @@ def project(payload):
     except (TypeError, ValueError):
         updated = 0
     return {"schema": SCHEMA, "updated": updated, "needs": needs,
-            "workers": workers, "landing": landing, "phones": phones,
+            "workers": workers, "landing": landing, "phones": phones, "testing": testing,
             "allowance": allowance, "recent_landings": landings}
 
 

@@ -880,10 +880,21 @@ EOF
     "$any" "$(ticks "$any")" "$boot" "$((now-120))" > "$home/queues/phones/tickets/003-any.json"
   printf '{"pid":%s,"start_ticks":"%s","boot_id":"%s","requested":"R5CT32HRVNM","requested_unix_ns":%s000000000}\n' \
     "$vip_two" "$(ticks "$vip_two")" "$boot" "$((now-60))" > "$home/queues/phones/tickets/004-vip.json"
+  printf '{"pid":%s,"start_ticks":"%s","boot_id":"%s","requested_unix_ns":%s000000000}\n' \
+    "$vip_two" "$(ticks "$vip_two")" "$boot" "$((now-30))" > "$home/queues/phones/tickets/005-unknown.json"
   printf '{"pid":%s,"start_ticks":"%s","boot_id":"%s","cwd":"%s","requested_unix":%s}\n' \
     "$suite_wait" "$(ticks "$suite_wait")" "$boot" "$home/wt-alpha" "$((now-240))" > "$home/queues/suite/tickets/001-wait.json"
   printf 'pid=%s\ncwd=%s\nstarted=%s\nheartbeat=%s\n' "$suite_hold" "$home/wt-beta" "$((now-300))" "$now" > "$home/queues/suite.holder"
-  PATH="$stub:/usr/bin:/bin" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
+  mkdir -p "$home/test-service"
+  cat > "$home/test-service/status.json" <<JSON
+{"schema":"fm-test-service.v1","requests":[
+  {"id":"suite-request","task":"alpha","state":"queued","wait_seconds":240,"options":{"suite":true}},
+  {"id":"running-suite","task":"beta","state":"running","run_seconds":90,"options":{"suite":true},"steps":[{"name":"suite","state":"running","started":$((now-90))}]},
+  {"id":"phone-request","task":"beta","state":"running","run_seconds":90,"options":{"device_gate":"R5CT32HRVNM"}},
+  {"id":"stray-request","task":"beta","state":"queued","wait_seconds":30,"options":{"device_gate":"UNLISTED9"}}
+]}
+JSON
+  PATH="$stub:/usr/bin:/bin" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'ticketed queue refresh failed'
   assert_equals locked "$(jq -r '.panels.phones[] | select(.id == "R5CT32HRVNM") | .status' "$home/state/crew-board.json")" 'keyguard is a locked state'
@@ -891,7 +902,7 @@ EOF
     'an unreadable keyguard keeps the phone state'
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.title | test("S21 FE|RZCX224VH4T"))] | length' "$home/state/crew-board.json")" \
     'an unreadable keyguard raises no notification'
-  assert_equals 'EDITOR: 1 running, 1 waiting|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE' \
+  assert_equals 'EDITOR: 1 running, 1 waiting|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 4 pending' \
     "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'fixed resource sections and any-phone queue'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \
     'waiting 4m' 'suite ticket wait duration'
@@ -900,16 +911,40 @@ EOF
   assert_equals 'NEXT: Fix the gadget|#2: Make the widget spin' \
     "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-R5CT32HRVNM-wait-")) | .title] | join("|")' "$home/state/crew-board.json")" \
     'VIP waiters stay in ticket order'
+  assert_equals '#1: Make the widget spin · VIP (R5CT32HRVNM) · holding R5CT32HRVNM|#2: Fix the gadget · VIP (R5CT32HRVNM)|#3: Fix the gadget · Basic|#4: Make the widget spin · VIP (R5CT32HRVNM)|#5: Make the widget spin · Unknown' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("ticket-")) | .title] | join("|")' "$home/state/crew-board.json")" \
+    'phone tickets keep arrival order, kind, and holder'
+  assert_equals 'service-suite-request|service-running-suite' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-suite-request" or .id == "service-running-suite" or .id == "suite-wait-service-suite-request" or (.id | contains("/runs/running-suite"))) | .id] | join("|")' "$home/state/crew-board.json")" \
+    'queued and running service suites each have one row in TEST SERVICE'
+  assert_equals '#1: Make the widget spin · VIP (S22) · holding S22|#2: Fix the gadget · VIP (S22)|#3: Fix the gadget · Basic|#4: Make the widget spin · VIP (S22)|#5: Make the widget spin · Unknown' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("ticket-")) | .phone_title] | join("|")' "$home/state/crew-board.json")" \
+    'phone tickets name phones without serials for the phone page'
+  assert_equals 'WAITING: Make the widget spin · Suite|RUNNING: Fix the gadget · Suite|RUNNING: Fix the gadget · Phone gate (VIP: S22)|WAITING: Fix the gadget · Phone gate (VIP: phone)' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("service-")) | select(.status != "section") | .phone_title] | join("|")' "$home/state/crew-board.json")" \
+    'service gates name known phones and hide unknown serials'
+  assert_equals 'waiting 4m|running 1m|running 1m|waiting <1m' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("service-")) | select(.status != "section") | .status] | join("|")' "$home/state/crew-board.json")" \
+    'service queue and running ages'
+  assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "service-phone-request") | .title' "$home/state/crew-board.json")" \
+    'Phone gate (VIP: R5CT32HRVNM)' 'service phone gate kind'
   assert_equals 1 "$(jq '[.panels.alerts[] | select(.nid == "phone-locked:R5CT32HRVNM")] | length' "$home/state/crew-board.json")" \
     'a locked phone with a waiting test raises one notification'
   assert_not_contains "$(cat "$home/adb-commands")" 'kill-server' 'board never disturbs adb sessions'
   assert_not_contains "$(cat "$home/adb-commands")" 'reconnect' 'board never reconnects adb sessions'
   rm -f "$home/queues/phones/tickets/002-vip.json" "$home/queues/phones/tickets/004-vip.json"
-  PATH="$stub:/usr/bin:/bin" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
+  PATH="$stub:/usr/bin:/bin" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'cleared phone queue refresh failed'
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.nid == "phone-locked:R5CT32HRVNM")] | length' "$home/state/crew-board.json")" \
     'a locked phone with no waiting test is quiet'
+  rm -f "$home/queues/phones/tickets/001-held.json" "$home/queues/phones/tickets/003-any.json" \
+    "$home/queues/phones/tickets/005-unknown.json" "$home/test-service/status.json"
+  PATH="$stub:/usr/bin:/bin" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
+    FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'empty ticket queue refresh failed'
+  assert_equals 0 "$(jq '[.panels.test_queue[] | select(.status | test("^(running|waiting)")) | select(.id | test("^(ticket|service)-"))] | length' "$home/state/crew-board.json")" \
+    'empty queues have no pending entries'
   kill "$held" "$vip" "$vip_two" "$any" "$suite_wait" "$suite_hold" 2>/dev/null
   wait 2>/dev/null
   pass 'ticketed editor and phone queues show holders, ordered waits, and locked phone notifications'

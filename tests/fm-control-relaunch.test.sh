@@ -590,7 +590,7 @@ test_disabled_relaunch_clears_prior_trace_context() {
   pass "fm-control relaunch: disabling tracing clears metadata and pane context"
 }
 
-test_relaunch_appends_the_progress_note_to_the_instructions() {
+test_relaunch_replaces_the_progress_note_in_the_instructions() {
   local dir out rc brief launch_brief first_line role_line task_line
   dir=$(new_case note rl2)
   add_ship_task "$dir" rl2 claude
@@ -615,6 +615,54 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   assert_grep 'do not reject it as another home' "$launch_brief" \
     "the Firstmate-worktree relaunch did not distinguish its inbox from cross-home state"
   pass "fm-control relaunch: progress and the Firstmate-worktree worker identity reach the replacement"
+}
+
+test_relaunch_note_growth_and_large_brief_launch() {
+  local dir brief history note_file out rc i initial_size final_size launch_line
+  dir=$(new_case bounded rl54)
+  add_ship_task "$dir" rl54 claude
+  brief="$dir/home/data/rl54/brief.md"
+  history="$dir/home/data/rl54/relaunch-note-history.md"
+  note_file="$dir/large-note.md"
+  initial_size=$(wc -c < "$brief")
+  for i in $(seq 1 10); do
+    out=$(run_control "$dir" rl54 relaunch --note "phase $i completed") ||
+      fail "relaunch $i failed: $out"
+  done
+  final_size=$(wc -c < "$brief")
+  [ "$final_size" -lt "$((initial_size + 1500))" ] ||
+    fail "ten relaunches grew the brief from $initial_size to $final_size bytes"
+  [ "$(grep -c '^## Progress note (' "$brief")" -eq 1 ] ||
+    fail "the brief should carry exactly one progress note"
+  assert_grep 'phase 10 completed' "$brief" "the latest note should be visible"
+  assert_grep 'phase 1 completed' "$history" "superseded notes should be archived"
+
+  head -c 6000 /dev/zero | tr '\0' x > "$note_file"
+  printf '\n' >> "$note_file"
+  out=$(run_control "$dir" rl54 relaunch --note-file "$note_file") ||
+    fail "large-note relaunch failed: $out"
+  [ "$(wc -c < "$brief")" -lt "$((initial_size + 1500))" ] ||
+    fail "a large note was copied into the brief"
+  assert_grep 'Read the current note at' "$brief" "large note needs an on-disk pointer"
+  cmp "$note_file" "$dir/home/data/rl54/relaunch-note-current.md" ||
+    fail "large current note was not preserved"
+
+  head -c 200000 /dev/zero | tr '\0' z > "$dir/large-brief-prefix"
+  printf '\n' >> "$dir/large-brief-prefix"
+  cat "$brief" >> "$dir/large-brief-prefix"
+  mv "$dir/large-brief-prefix" "$brief"
+  out=$(run_control "$dir" rl54 relaunch --note 'resume the large brief'); rc=$?
+  expect_code 0 "$rc" "a 200 KB brief should relaunch successfully"$'\n'"$out"
+  launch_line=$(tail -n 1 "$dir/fake/literal")
+  case "$launch_line" in
+    *'launch-pointer.md'*) ;;
+    *) fail "the launch command did not use the bounded pointer: $launch_line" ;;
+  esac
+  assert_grep 'Read the brief at' "$dir/home/data/rl54/launch-pointer.md" \
+    "the launch pointer should name the rendered brief"
+  [ "$(wc -c < "$dir/home/data/rl54/launch-pointer.md")" -lt 512 ] ||
+    fail "the launch pointer should stay small"
+  pass "fm-control relaunch: ten notes stay bounded and a 200 KB brief launches by pointer"
 }
 
 test_relaunch_requires_a_note_for_a_ship_task() {
@@ -1957,7 +2005,8 @@ test_relaunch_preserves_durable_task_metadata
 test_relaunch_reuses_recorded_landing_branch_without_rebasing
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
-test_relaunch_appends_the_progress_note_to_the_instructions
+test_relaunch_replaces_the_progress_note_in_the_instructions
+test_relaunch_note_growth_and_large_brief_launch
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes

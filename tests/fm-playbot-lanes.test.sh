@@ -2443,7 +2443,9 @@ settle_dispatch() {
 }
 
 rm -f "$FIXTURE_ROOT/ipc-calls.jsonl" "$FIXTURE_ROOT/deferred-write-failure"
-printf '600\n' > "$FIXTURE_ROOT/workspace-roots-delay-ms"
+# Git worktree creation can exceed 600 ms on a loaded CI host, letting the
+# deferred roots arrive before dispatch makes its first registration read.
+printf '5000\n' > "$FIXTURE_ROOT/workspace-roots-delay-ms"
 out=$(settle_dispatch fm-settle-late main)
 rm -f "$FIXTURE_ROOT/workspace-roots-delay-ms"
 [ ! -e "$FIXTURE_ROOT/deferred-write-failure" ] \
