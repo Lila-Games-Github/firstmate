@@ -540,6 +540,9 @@ JOURNAL="$STATE/$ID.control-relaunch"
 META_PRIOR="$JOURNAL.meta-prior"
 BRIEF_PRIOR="$JOURNAL.brief-prior"
 NOTE_FILE="$JOURNAL.note"
+CURRENT_NOTE_PRIOR="$JOURNAL.current-note-prior"
+HISTORY_NOTE_PRIOR="$JOURNAL.note-history-prior"
+NOTE_SIDECARS_CHANGED=0
 RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
@@ -584,6 +587,22 @@ journal_write() {  # <phase> [extra-line]...
   return 1
 }
 
+restore_note_sidecars() {
+  [ "$NOTE_SIDECARS_CHANGED" = 1 ] || return 0
+  local current_note="$DATA/$ID/relaunch-note-current.md"
+  local history_note="$DATA/$ID/relaunch-note-history.md"
+  if [ -f "$CURRENT_NOTE_PRIOR" ]; then
+    cp -p "$CURRENT_NOTE_PRIOR" "$current_note" 2>/dev/null || true
+  else
+    rm -f "$current_note"
+  fi
+  if [ -f "$HISTORY_NOTE_PRIOR" ]; then
+    cp -p "$HISTORY_NOTE_PRIOR" "$history_note" 2>/dev/null || true
+  else
+    rm -f "$history_note"
+  fi
+}
+
 relaunch_rollback() {
   local state
   [ "$RELAUNCH_ACTIVE" = 1 ] || return 0
@@ -595,6 +614,7 @@ relaunch_rollback() {
       # a refused relaunch leaves nothing behind.
       if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
         cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+        restore_note_sidecars
       fi
       journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored" || true
       echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
@@ -605,6 +625,7 @@ relaunch_rollback() {
         alive)
           if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
             cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+            restore_note_sidecars
           fi
           journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-alive" || true
           echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
@@ -812,7 +833,7 @@ safe_checkpoint() {
 # never rewritten: a secondmate reconciles its own home's records at startup,
 # so the note stays parent-side audit evidence.
 record_note() {
-  local stamp
+  local stamp current_note history_note brief_tmp old_section note_bytes
   [ -n "$NOTE" ] || return 0
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
@@ -820,6 +841,35 @@ record_note() {
     ship|scout)
       cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
         || die "could not preserve task $ID's instructions before recording the progress note"
+      current_note="$DATA/$ID/relaunch-note-current.md"
+      history_note="$DATA/$ID/relaunch-note-history.md"
+      rm -f "$CURRENT_NOTE_PRIOR" "$HISTORY_NOTE_PRIOR"
+      [ ! -f "$current_note" ] || cp -p "$current_note" "$CURRENT_NOTE_PRIOR" \
+        || die "could not preserve task $ID's current note before relaunch"
+      [ ! -f "$history_note" ] || cp -p "$history_note" "$HISTORY_NOTE_PRIOR" \
+        || die "could not preserve task $ID's note history before relaunch"
+      NOTE_SIDECARS_CHANGED=1
+      brief_tmp="$DATA/$ID/.brief-relaunch.${BASHPID:-$$}"
+      old_section="$DATA/$ID/.brief-old-note.${BASHPID:-$$}"
+      # Older briefs appended unmarked progress sections. The first such
+      # section starts the disposable tail; new briefs use the same heading.
+      awk -v old="$old_section" '
+        /^## Progress note \(/ { in_note=1 }
+        in_note { print > old; next }
+        { print }
+      ' "$RELAUNCH_BRIEF" > "$brief_tmp" \
+        || die "could not separate task $ID's prior progress note"
+      if [ -s "$current_note" ]; then
+        { printf '\n## Superseded note (%s)\n\n' "$stamp"; cat "$current_note"; } >> "$history_note" \
+          || die "could not archive task $ID's prior note"
+      elif [ -s "$old_section" ]; then
+        cat "$old_section" >> "$history_note" \
+          || die "could not archive task $ID's legacy progress notes"
+      fi
+      rm -f "$old_section"
+      cp "$NOTE_FILE" "$current_note" \
+        || die "could not store task $ID's current progress note"
+      note_bytes=$(wc -c < "$current_note")
       {
         echo
         echo "## Progress note ($stamp)"
@@ -831,9 +881,17 @@ record_note() {
         echo "each message in numeric order, then mv each handled file into"
         echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
         echo
-        printf '%s\n' "$NOTE"
-      } >> "$RELAUNCH_BRIEF" \
-        || die "could not append the progress note to task $ID's instructions"
+        if [ "$note_bytes" -le 4096 ]; then
+          cat "$current_note"
+        else
+          echo "Read the current note at $current_note."
+        fi
+        echo
+        echo "Earlier notes are archived at $history_note for reference."
+      } >> "$brief_tmp" \
+        || die "could not write the progress note for task $ID"
+      mv -f "$brief_tmp" "$RELAUNCH_BRIEF" \
+        || die "could not publish the progress note for task $ID"
       ;;
   esac
 }
