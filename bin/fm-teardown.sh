@@ -82,9 +82,9 @@
 # disposable leftovers only once the work has landed and the worker's current
 # status is done; otherwise they refuse. The task's data/<id>/cleanup.md records their top-level
 # paths before Treehouse resets and returns the copy, then marks that return done.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# local-only projects instead require every commit to be merged into the local
+# default branch (firstmate performs that merge after configured approval), or
+# into origin's copy of it when no local branch of that name exists.
 # A task whose meta records landing_branch=<branch> (written by bin/fm-spawn.sh
 # --landing-branch at spawn time, or later by bin/fm-landing-branch.sh) verifies
 # landing against that recorded branch instead of the default branch: the
