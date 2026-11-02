@@ -83,6 +83,10 @@ with tempfile.TemporaryDirectory() as temporary:
                         "detail": "Worker-internal failure"}],
             "ready": [{"title": "Ship phone view", "status": "merge?", "link": "https://github.com/example/repo/pull/7"}],
             "phones": [{"title": "Galaxy S22", "status": "idle", "id": "device-serial", "pin": "1234"}],
+            "test_queue": [{"id": "tickets-heading", "title": "PHONE TICKETS: 2 pending", "status": "section"},
+                           {"id": "ticket-1", "title": "#1: Run smoke test · VIP (device-serial) · holding device-serial",
+                            "status": "running 2m", "detail": "secret=SECRET123"},
+                           {"id": "ticket-2", "title": "#2: Run regression · Basic", "status": "waiting 1m"}],
             "allowance": [{"title": "Codex", "status": "50%", "detail": "api_key=SECRET123"}],
         },
         "raw_output": "SECRET123 /private/path"
@@ -123,6 +127,11 @@ with tempfile.TemporaryDirectory() as temporary:
                 assert b"Ship phone view" not in denied, denied
         code, body = status(base + "/api/board", "Owner@Example.com")
         assert code == 200, code
+        projected = json.loads(body)
+        assert [row["title"] for row in projected["testing"]] == [
+            "#1: Run smoke test · VIP (device-serial) · holding device-serial",
+            "#2: Run regression · Basic"], projected["testing"]
+        assert "SECRET123" not in body.decode(), body
         body = body.decode()
         data = json.loads(body)
         assert data["workers"] == [{"title": "Ship phone view", "state": "building"}], data
@@ -130,7 +139,7 @@ with tempfile.TemporaryDirectory() as temporary:
         assert any(row["title"] == "Choose build target" for row in data["needs"]), data
         assert not any("Worker-internal failure" in row["title"] for row in data["needs"]), data
         assert all(s not in body for s in ("SECRET123", "1234", "/private/", "raw worker output",
-                                             "fm-internal-worker", "device-serial", "secret_key", "path")), body
+                                             "fm-internal-worker", "secret_key", "path")), body
         html = status(base + "/", OWNER)[1]
         assert b"Needs you" in html
         assert b"Recent landings" in status(base + "/details", OWNER)[1]
