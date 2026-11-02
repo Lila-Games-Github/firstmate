@@ -134,13 +134,14 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
   esac
 }
 
-fm_worker_context_block() {
+fm_worker_context_block() {  # <data-dir> <task-id>
+  local note="$1/$2/phase-handoff.md"
   printf '%s\n' \
-    '   For Codex or Claude, finish the current phase, then write a short phase-handoff.md in this worktree' \
+    "   For Codex or Claude, finish the current phase, then write a short handoff to \`$note\`" \
     '   naming completed work, exact files and commit, current gate or job ID, and the next action.' \
-    '   Append a working: phase handoff ready line that names that file, then end the turn.' \
+    "   Append \`blocked: phase handoff ready $note\` to the status file, then end the turn." \
     '   Firstmate relaunches this task into a fresh session with that file as its progress note;' \
-    '   read the note and continue in the same worktree. Remove the note before final delivery.' \
+    '   read the note and continue in the same worktree.' \
     '   Do not request a relaunch while a file mutation or validation command is still running.' \
     '   Keep long test output and large file contents in worktree files; return only the relevant' \
     '   summary and file path to the conversation. Batch related independent reads or commands in one turn.'

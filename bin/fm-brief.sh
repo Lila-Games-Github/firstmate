@@ -449,7 +449,7 @@ phase_protocol() {  # <ship|scout>
     "   A phase line never wakes firstmate, so append one each time you move between phases;" \
     "   it adds to the states above and never replaces them: needs-decision, blocked, $PAUSED_VERB, done, and" \
     "   failed are reported only with their own lines, never as a phase."
-  fm_worker_context_block
+  fm_worker_context_block "$DATA" "$ID"
   if [ "$1" = ship ]; then
     printf '%s\n' \
       "   When your work is ready to merge, append \`${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}: ready-to-merge - {PR URL or branch}\` just" \

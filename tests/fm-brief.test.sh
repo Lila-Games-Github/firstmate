@@ -1432,7 +1432,7 @@ test_non_lane_ship_briefs_carry_no_lane_vocabulary() {
 # also orders ready-to-merge before the ready line; a secondmate charter is not a
 # worker brief and carries none of it.
 test_phase_protocol_reaches_ship_and_scout_briefs() {
-  local home kind brief cmd cmd_run status phase got
+  local home kind brief cmd cmd_run status phase got handoff
   home="$TMP_ROOT/phase-protocol"
   mkdir -p "$home/data" "$home/state"
   for kind in no-mistakes direct-PR local-only scout; do
@@ -1448,7 +1448,18 @@ test_phase_protocol_reaches_ship_and_scout_briefs() {
     assert_grep 'Phases: investigating, building, fixing, testing, validating, ready-to-merge.' "$brief" \
       "$kind brief does not name the phase vocabulary"
     assert_grep 'A phase line never wakes firstmate' "$brief" "$kind brief does not say a phase line is quiet"
-    assert_grep 'write a short phase-handoff.md' "$brief" "$kind brief lacks a fresh-session handoff"
+    # shellcheck disable=SC2016 # the backticks are literal brief text
+    handoff=$(sed -n 's/^   Append `\(blocked: phase handoff ready [^`]*\)` to the status file, then end the turn\.$/\1/p' "$brief")
+    assert_equals "blocked: phase handoff ready $home/data/phase-$kind/phase-handoff.md" "$handoff" \
+      "$kind brief's phase handoff line does not name the task-private note"
+    printf '%s\n' "$handoff" >> "$status"
+    got=$(bash -c '. "$1"; status_is_captain_relevant "$2" && last_status_line "$3" && status_open_decisions "$3"' \
+      _ "$ROOT/bin/fm-classify-lib.sh" "$handoff" "$status") || fail "$kind brief's phase handoff line does not wake firstmate"
+    assert_equals "$handoff"$'\n'"default"$'\t'"blocked"$'\t'"phase handoff ready $home/data/phase-$kind/phase-handoff.md" "$got" \
+      "$kind brief's phase handoff line is not the latest open blocker"
+    printf 'resolved: relaunched from phase handoff\n' >> "$status"
+    got=$(bash -c '. "$1"; status_open_decisions "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$status")
+    assert_equals "" "$got" "$kind brief's phase handoff blocker stayed open after resolution"
     assert_grep 'Keep long test output and large file contents in worktree files' "$brief" "$kind brief lacks bounded tool output"
     assert_grep 'Batch related independent reads or commands in one turn' "$brief" "$kind brief lacks batched work guidance"
     # shellcheck disable=SC2016 # the backticks are literal brief text
