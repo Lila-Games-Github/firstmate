@@ -48,6 +48,7 @@ expect_field() {
 }
 wake_payloads() { cut -f5 "$CASE/home/state/.wake-queue"; }
 wake_count() { if [ -f "$CASE/home/state/.wake-queue" ]; then wc -l < "$CASE/home/state/.wake-queue" | tr -d ' '; else echo 0; fi; }
+inbox_count() { find "$CASE/home/state/$1.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' '; }
 
 make_case required-gate
 mkdir -p "$CASE/home/config/test-service"
@@ -107,6 +108,19 @@ expect_field "$out" status ready-to-land
 [ "$(wake_count)" = 1 ] || fail 'all-gates readiness did not emit one wake'
 pass 'every configured gate must pass before readiness'
 
+make_case lone-gate-failure
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+EOF
+car a main; join a >/dev/null; prepare a; receipt a >/dev/null
+if queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --reason 'device check failed' > "$CASE/lone.out" 2>&1; then
+  fail 'lone car gate failure was silently accepted'
+fi
+grep -q 'landing gate real-phone failed: device check failed' "$CASE/lone.out" || fail 'lone car gate failure lost its reason'
+expect_field "$(queue status a)" place 1
+pass 'a lone front car gate failure is rejected with its reason instead of dropped'
+
 make_case unrelated-malformed-gate-config
 mkdir -p "$CASE/home/config/test-service"
 cat > "$CASE/home/config/test-service/project.json" <<'EOF'
@@ -154,6 +168,51 @@ done
 [ "$(wake_count)" = 3 ] || fail 'landing did not wake each new bottom exactly once'
 pass 'three cars validate once each at front and land in order without repeated wakes'
 
+make_case failing-front-requeues
+mkdir -p "$CASE/home/state"
+for id in a b c; do
+  fm_write_meta "$CASE/home/state/$id.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+  car "$id" main
+  join "$id" >/dev/null
+done
+prepare a
+health_key=$(printf '%s\n%s\n' "$CASE/project" main | git hash-object --stdin)
+mkdir -p "$CASE/home/data/landing-health"
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$BASE" > "$CASE/home/data/landing-health/$health_key.receipt"
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=new-red\n' "$(head_of a)" > "$CASE/red.receipt"
+out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
+expect_field "$out" place 3
+expect_field "$out" status waiting-for-front
+expect_field "$(queue status b)" place 1
+[ "$(inbox_count a)" = 1 ] || fail 'requeued car did not receive one reason message'
+grep -q 'moved to back because receipt names failures outside' "$CASE/home/state/a.inbox/"*.msg || fail 'requeue message omitted reason'
+[ "$(inbox_count b)" = 1 ] || fail 'new front was not woken'
+queue status a >/dev/null
+[ "$(inbox_count a)" = 1 ] || fail 'requeue message repeated'
+expect_field "$(queue status c)" place 2
+pass 'red front receipt moves only that car to the back and wakes the next car'
+
+make_case failed-id-reenrolls
+for id in a b; do car "$id" main; join "$id" >/dev/null; done
+queue fail a --reason 'suite failed' >/dev/null
+out=$(join a)
+expect_field "$out" place 2
+expect_field "$out" status waiting-for-front
+expect_field "$(queue status b)" place 1
+pass 'an explicitly failed id and branch re-enroll at the back'
+
+make_case gate-failure-requeues
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+EOF
+for id in a b; do car "$id" main; join "$id" >/dev/null; done
+prepare a; receipt a >/dev/null
+out=$(queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --reason 'device check failed')
+expect_field "$out" place 2
+expect_field "$(queue status b)" place 1
+pass 'failed phone gate moves its front car to the back'
+
 # Front steers use the real durable sender, with only its terminal stubbed.
 mkdir -p "$TMP_ROOT/bin"
 cat > "$TMP_ROOT/bin/tmux" <<'TMUX'
@@ -167,7 +226,6 @@ esac
 TMUX
 chmod +x "$TMP_ROOT/bin/tmux"
 PATH="$TMP_ROOT/bin:$PATH"
-inbox_count() { find "$CASE/home/state/$1.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' '; }
 make_case front-steer
 mkdir -p "$CASE/home/state"
 for id in a b c; do
@@ -371,7 +429,8 @@ receipt b >/dev/null
 queue fail a --reason 'same failure' >/dev/null
 queue status a >/dev/null
 [ "$(wake_count)" = 2 ] || fail 'failed car emitted repeated wakes'
-if join a > "$CASE/rejoin.out" 2>&1; then fail 'failed task silently rejoined'; fi
+expect_field "$(join a)" place 3
+expect_field "$(queue status a)" status waiting-for-front
 pass 'a failed lower car is removed from targets and successors retain only their own work'
 git -C "$CASE/project" merge -q --ff-only fm/b
 expect_field "$(queue status c)" status needs-rebase
