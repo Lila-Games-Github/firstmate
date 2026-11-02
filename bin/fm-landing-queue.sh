@@ -446,6 +446,8 @@ if [ -n "$requeue_reason" ] && [ "$found" -ge 0 ] && [ "${places[found]}" -eq 1 
     states[found]=active bases[found]=$moved_base receipts[found]=- targets[found]=-
     notified[found]=- reasons[found]=-
     assign
+  elif [ "$ACTION" = gate ]; then
+    die "$requeue_reason; no other car is waiting, so fix the branch, rebase and retest on a new head"
   fi
 fi
 
@@ -453,6 +455,14 @@ fi
 # do not ring again for an unchanged readiness/failure event.
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=1
+if [ "$waiting" -eq 1 ]; then
+  marker="$DIR/requeue-$moved_id"
+  [ ! -L "$marker" ] || die "requeue marker is a symlink: $marker"
+  TMP=$(mktemp "$DIR/.requeue.XXXXXX")
+  printf '%s\n' "$requeue_reason" > "$TMP"
+  mv -f -- "$TMP" "$marker"
+  TMP=
+fi
 for ((i=0; i<count; i++)); do
   case "${statuses[i]}" in
     ready-to-land|needs-baseline|failed) ;;
@@ -472,14 +482,6 @@ save
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=0
 
-if [ "$waiting" -eq 1 ]; then
-  marker="$DIR/requeue-$moved_id"
-  [ ! -L "$marker" ] || die "requeue marker is a symlink: $marker"
-  TMP=$(mktemp "$DIR/.requeue.XXXXXX")
-  printf '%s\n' "$requeue_reason" > "$TMP"
-  mv -f -- "$TMP" "$marker"
-  TMP=
-fi
 for ((i=0; i<count; i++)); do
   marker="$DIR/requeue-${ids[i]}"
   [ ! -L "$marker" ] || die "requeue marker is a symlink: $marker"

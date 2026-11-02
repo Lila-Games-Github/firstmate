@@ -108,6 +108,19 @@ expect_field "$out" status ready-to-land
 [ "$(wake_count)" = 1 ] || fail 'all-gates readiness did not emit one wake'
 pass 'every configured gate must pass before readiness'
 
+make_case lone-gate-failure
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+EOF
+car a main; join a >/dev/null; prepare a; receipt a >/dev/null
+if queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --reason 'device check failed' > "$CASE/lone.out" 2>&1; then
+  fail 'lone car gate failure was silently accepted'
+fi
+grep -q 'landing gate real-phone failed: device check failed' "$CASE/lone.out" || fail 'lone car gate failure lost its reason'
+expect_field "$(queue status a)" place 1
+pass 'a lone front car gate failure is rejected with its reason instead of dropped'
+
 make_case unrelated-malformed-gate-config
 mkdir -p "$CASE/home/config/test-service"
 cat > "$CASE/home/config/test-service/project.json" <<'EOF'
