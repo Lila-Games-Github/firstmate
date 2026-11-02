@@ -14,6 +14,7 @@ BUG cards are accepted as a JSON Lines export with a landed change reference.
 import argparse
 import collections
 import difflib
+import io
 import json
 import re
 import sqlite3
@@ -59,12 +60,19 @@ def extract(database, candidates, stream, bug_cards=None, since=None):
         except (OSError, ValueError):
             continue
         incident = candidate.get("incident") or {}
-        if incident.get("signal_type") == "escaped-defect" and (not since or candidate.get("captured_at", "")[:10] >= since):
+        if incident.get("signal_type") == "escaped-defect" and (not since or (candidate.get("captured_at") or "")[:10] >= since):
             escaped.append((candidate, incident))
     cards = []
     if bug_cards:
-        for line in Path(bug_cards).read_text().splitlines():
-            card = json.loads(line)
+        for number, line in enumerate(Path(bug_cards).read_text().splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                card = json.loads(line)
+            except ValueError as error:
+                raise ValueError(f"{bug_cards}:{number}: malformed BUG card JSON: {error}") from error
+            if not isinstance(card, dict):
+                continue
             if card.get("type", card.get("card_type")) != "BUG":
                 continue
             if not (card.get("pr_url") or card.get("landed_change")):
@@ -88,7 +96,7 @@ def extract(database, candidates, stream, bug_cards=None, since=None):
                     continue
                 description = finding.get("description") or ""
                 repeated = any(previous["round"] != row["round"] and (
-                    (finding.get("id") == previous["id"] and not re.fullmatch(r"(?:review|r)-?\d+", str(finding.get("id")), re.I))
+                    (finding.get("id") == previous["id"] and not re.fullmatch(r"[A-Za-z]{1,8}-?\d+", str(finding.get("id"))))
                     or (finding.get("file") == previous["file"] and
                         difflib.SequenceMatcher(None, description[:600], previous["description"][:600]).ratio() >= 0.68)
                 ) for previous in seen)
@@ -129,7 +137,7 @@ def extract(database, candidates, stream, bug_cards=None, since=None):
     connection.close()
 
 
-INSTANCE = re.compile(r"(?:\b(?:PR|BUG|ET)[- #]*\d+\b|\b[a-f0-9]{7,40}\b|(?:^|\s)[\w.-]+/[\w./-]+|\b\w+\.(?:py|sh|js|ts|gd|md)\b)", re.I)
+INSTANCE = re.compile(r"(?:\b(?:PR|BUG|ET)[- #]*\d+\b|\b(?=[a-f0-9]*\d)[a-f0-9]{7,40}\b|(?:^|\s)[\w.-]+/[\w.-]+/[\w./-]+|\b\w+\.(?:py|sh|js|ts|gd|md)\b)", re.I)
 OWNERS = {"reviewer-guidance", "firstmate-brief", "project-agents", "no-mistakes-follow-up"}
 
 
@@ -170,11 +178,12 @@ def main():
             if args.since:
                 import datetime
                 datetime.date.fromisoformat(args.since)
+            buffer = io.StringIO()
+            extract(args.database, args.candidates, buffer, args.bug_cards, args.since)
             if args.output:
-                with open(args.output, "w") as stream:
-                    extract(args.database, args.candidates, stream, args.bug_cards, args.since)
+                Path(args.output).write_text(buffer.getvalue())
             else:
-                extract(args.database, args.candidates, sys.stdout, args.bug_cards, args.since)
+                sys.stdout.write(buffer.getvalue())
         else:
             validate(args.playbook)
     except (OSError, sqlite3.Error, ValueError, KeyError) as error:
