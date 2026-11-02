@@ -42,6 +42,8 @@ TERMINAL = {"passed", "failed", "cancelled", "conflict"}
 STOP = False
 NOTIFY_ATTEMPTS = 12
 NOTIFY_MAX_DELAY = 300
+PHONE_CLAIMS = {}
+PHONE_CLAIMS_LOCK = threading.Lock()
 
 
 def run(argv, **kw):
@@ -253,6 +255,8 @@ def submit(args):
         fm_perf_plan.validate_comparison(plan, ROOT / "results")
     if args.device_gate and args.device_gate != "any" and args.device_gate not in cfg["phones"]:
         raise ValueError("phone is not configured for this project")
+    if args.device_gate and args.device_gate != "any" and args.device_gate not in cfg.get("any_phones", cfg["phones"]):
+        raise ValueError("phone is not configured for functional runs")
     for name in args.scenario:
         if name not in cfg.get("scenarios", {}):
             raise ValueError("unknown scenario: " + name)
@@ -378,19 +382,68 @@ def connected_phones():
 
 
 def phone_candidates(requested, cfg):
+    functional = cfg.get("any_phones", cfg["phones"])
     if requested == "any":
-        return cfg.get("any_phones", cfg["phones"])
-    return [requested] + cfg.get("equivalent_phones", {}).get(requested, [])
+        return functional
+    return [phone for phone in [requested] + cfg.get("equivalent_phones", {}).get(requested, [])
+            if phone in functional]
 
 
-def choose_phone(requested, cfg, excluded=()):
+def phone_busy(serial):
+    queue = Path(os.environ.get("FROGPILE_QUEUE_ROOT", str(Path.home() / ".frogpile-queues"))) / "phones"
+    paths = [Path("/tmp") / ("frogpile-phone-" + serial + ".lock")]
+    if queue.is_dir():
+        paths.insert(0, queue / (serial + ".lock"))
+    streams = []
+    try:
+        for path in paths:
+            stream = path.open("a+")
+            streams.append(stream)
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        for stream in streams:
+            stream.close()
+
+
+def choose_phone(requested, cfg, excluded=(), owner=None):
     candidates = phone_candidates(requested, cfg)
     online = connected_phones()
-    choice = next((phone for phone in candidates if phone in online and phone not in excluded), None)
-    if choice is None:
+    available = [phone for phone in candidates if phone in online and phone not in excluded]
+    if not available:
         raise RuntimeError("device-unavailable: " + requested + " disconnected or exhausted; "
                            "no equivalent connected (" + ", ".join(candidates) + ")")
-    return choice
+    with PHONE_CLAIMS_LOCK:
+        for phone in available:
+            if phone not in PHONE_CLAIMS and not phone_busy(phone):
+                if owner is not None:
+                    PHONE_CLAIMS[phone] = owner
+                return phone
+    return None
+
+
+def wait_for_phone(rid, requested, cfg, excluded=()):
+    wait_db = connection()
+    try:
+        while not STOP:
+            if wait_db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+                raise RuntimeError("cancelled")
+            phone = choose_phone(requested, cfg, excluded, owner=rid)
+            if phone:
+                return phone
+            time.sleep(.2)
+        raise RuntimeError("service stopping")
+    finally:
+        wait_db.close()
+
+
+def release_phone(rid):
+    with PHONE_CLAIMS_LOCK:
+        for phone, owner in list(PHONE_CLAIMS.items()):
+            if owner == rid:
+                del PHONE_CLAIMS[phone]
 
 
 def execute(db, row):
@@ -498,7 +551,7 @@ def execute(db, row):
             try:
                 attempted = set()
                 while True:
-                    serial = choose_phone(requested, cfg, attempted)
+                    serial = wait_for_phone(rid, requested, cfg, attempted)
                     try:
                         prepare_phone(serial)
                         break
@@ -508,6 +561,10 @@ def execute(db, row):
                         attempted.add(serial)
             except (RuntimeError, OSError) as exc:
                 step_state(db, rid, row["generation"], "phone-prep", "failed", 1)
+                if str(exc) == "cancelled":
+                    return "cancelled", "cancelled", work
+                if str(exc) == "service stopping":
+                    return "interrupted", "service stopping", work
                 return "failed", str(exc), work
             step_state(db, rid, row["generation"], "phone-prep", "passed", 0)
         def device_step():
@@ -519,12 +576,15 @@ def execute(db, row):
                     command += cfg.get("scenarios", {})[scenario]
                 result = step("device", command, watch_serial=current)
                 if not (result[1] == 125 and result[2].startswith("device-unavailable:")):
+                    release_phone(rid)
                     return result
                 attempted.add(current)
+                release_phone(rid)
                 try:
-                    next_serial = choose_phone(requested, cfg, attempted)
+                    next_serial = wait_for_phone(rid, requested, cfg, attempted)
                     prepare_phone(next_serial)
                 except (RuntimeError, OSError) as exc:
+                    release_phone(rid)
                     return "device", 125, str(exc)
                 serial_holder[0] = next_serial
         serial_holder = [serial]
@@ -547,6 +607,7 @@ def execute(db, row):
                 if result[1]:
                     break
     finally:
+        release_phone(rid)
         for proc in processes:
             if proc.poll() is None:
                 try:
@@ -853,9 +914,11 @@ def serve():
             if not thread.is_alive():
                 thread.join()
                 del active[rid]
-        for row in db.execute("SELECT * FROM requests WHERE state IN ('preparing','queued') ORDER BY queued_at,seq").fetchall():
-            if row["state"] == "preparing":
-                break
+        rows = db.execute("SELECT * FROM requests WHERE state IN ('preparing','queued') ORDER BY queued_at,seq").fetchall()
+        # A snapshot still being prepared can be a landing check; wait for its
+        # classification before dispatching another queued request.
+        ready = [] if any(row["state"] == "preparing" for row in rows) else rows
+        for row in sorted(ready, key=lambda item: (json.loads(item["options"]).get("check") != "quick", item["queued_at"], item["seq"])):
             if row["cancel_requested"]:
                 complete(db, row, "cancelled", "cancelled before start")
                 continue
