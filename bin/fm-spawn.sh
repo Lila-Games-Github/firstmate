@@ -8,6 +8,9 @@
 #   from the same quota-axi JSON snapshot recorded in task metadata. The floor
 #   defaults to 5 USD; config/prepaid-credit-floor-usd overrides it with one
 #   nonnegative amount. A known balance below the floor refuses before launch.
+#   Without --routing-provider, a Pi model id under openrouter/ resolves to the
+#   openrouter provider; Pi never dispatches openrouter/openai/ or
+#   openrouter/anthropic/ models, which belong on native Codex or Claude.
 #   A prepaid provider (openrouter, or any whose snapshot row carries credits)
 #   with an absent or unreadable balance warns and proceeds; other providers
 #   are not prepaid and pass silently. Relaunches preserve the
@@ -2806,6 +2809,15 @@ fi
 ROUTING_QUOTA=
 ROUTING_QUOTA_REASON='quota-axi-unavailable'
 if [ "$RELAUNCH" -eq 0 ]; then
+  case "$HARNESS:${MODEL:-}" in
+    pi:openrouter/openai/*|pi-signed:openrouter/openai/*|pi:openrouter/anthropic/*|pi-signed:openrouter/anthropic/*)
+      echo "error: $MODEL routes a Codex or Claude model through OpenRouter; dispatch it on a native Codex or Claude profile instead" >&2
+      exit 1
+      ;;
+    pi:openrouter/*|pi-signed:openrouter/*)
+      [ -n "$ROUTING_PROVIDER" ] || ROUTING_PROVIDER=openrouter
+      ;;
+  esac
   [ -n "$ROUTING_PROVIDER" ] || ROUTING_PROVIDER=$(fm_quota_single_provider_for_harness "$HARNESS" 2>/dev/null || true)
   CREDIT_FLOOR=5
   if [ -e "$CONFIG/prepaid-credit-floor-usd" ] || [ -L "$CONFIG/prepaid-credit-floor-usd" ]; then
@@ -2832,7 +2844,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
         CREDIT_BALANCE=$(printf '%s' "$ROUTING_QUOTA" | jq -r 'if .credits.unit == "usd" and (.credits.remaining | type) == "number" then .credits.remaining else empty end')
         if [ -n "$CREDIT_BALANCE" ]; then
           if jq -ne --argjson balance "$CREDIT_BALANCE" --argjson floor "$CREDIT_FLOOR" '$balance < $floor' | grep -qx true; then
-            echo "error: $ROUTING_PROVIDER balance $CREDIT_BALANCE usd is below the $CREDIT_FLOOR usd floor; route this task to another profile" >&2
+            echo "error: $ROUTING_PROVIDER balance $CREDIT_BALANCE usd is below the $CREDIT_FLOOR usd floor; route this task to a native Codex or Claude profile, not an OpenRouter GPT or Claude model" >&2
             exit 1
           fi
         fi

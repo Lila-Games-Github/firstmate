@@ -399,7 +399,7 @@ SH
     if [ "$balance_value" = 2 ]; then
       expect_code 1 "$status" "below-floor prepaid balance should refuse a manual route"
       assert_contains "$out" 'openrouter balance 2 usd is below the 5 usd floor' "refusal omitted balance or floor"
-      assert_contains "$out" 'another profile' "refusal omitted rerouting guidance"
+      assert_contains "$out" 'native Codex or Claude profile' "refusal omitted rerouting guidance"
       assert_absent "$HOME_DIR/state/$id.meta" "refusal created task metadata"
       [ ! -s "$LAUNCH_LOG" ] || fail "below-floor task launched"
     else
@@ -413,6 +413,33 @@ SH
     fi
   done
   pass "prepaid credit floor refuses low balance and discloses unreadable balance"
+}
+
+test_pi_openrouter_model_infers_prepaid_provider() {
+  local rec id out status model
+  for model in openrouter/deepseek/deepseek-v4.1-flash openrouter/openai/gpt-5 openrouter/anthropic/claude-sonnet-4-5; do
+    id="credit-infer-${model//\//-}"
+    id=${id//./-}
+    rec=$(make_spawn_case "$id" pi "$id")
+    read_case_record "$rec"
+    cat > "$FAKEBIN_DIR/quota-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"openrouter","credits":{"remaining":2,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}'
+SH
+    chmod +x "$FAKEBIN_DIR/quota-axi"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness pi --model "$model" --routing-reason 'manual DeepSeek selection')
+    status=$?
+    expect_code 1 "$status" "pi $model dispatch without --routing-provider should refuse"
+    if [ "$model" = openrouter/deepseek/deepseek-v4.1-flash ]; then
+      assert_contains "$out" 'openrouter balance 2 usd is below the 5 usd floor' "inferred openrouter dispatch skipped the floor"
+    else
+      assert_contains "$out" 'dispatch it on a native Codex or Claude profile' "OpenRouter Codex or Claude model was not refused"
+    fi
+    assert_absent "$HOME_DIR/state/$id.meta" "refusal created task metadata"
+    [ ! -s "$LAUNCH_LOG" ] || fail "refused pi $model dispatch launched"
+  done
+  pass "pi openrouter model ids infer the prepaid provider and refuse OpenRouter Codex or Claude models"
 }
 
 test_subscription_provider_dispatch_skips_credit_warning() {
@@ -1624,6 +1651,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_prepaid_credit_floor
 test_subscription_provider_dispatch_skips_credit_warning
+test_pi_openrouter_model_infers_prepaid_provider
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
