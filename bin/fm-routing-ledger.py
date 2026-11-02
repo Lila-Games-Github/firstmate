@@ -56,7 +56,10 @@ def event_counts(path):
     lines = path.read_text(errors="replace").splitlines() if path.is_file() else []
     return {
         "needs_decision_count": sum(x.startswith("needs-decision") for x in lines),
-        "blocked_count": sum(x.startswith("blocked:") for x in lines),
+        "blocked_count": sum(
+            x.startswith("blocked:") and not x.startswith("blocked: phase handoff ready ")
+            for x in lines
+        ),
         "stale_wake_count": sum("stale wake" in x.lower() for x in lines),
     }
 

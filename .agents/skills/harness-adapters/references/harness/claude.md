@@ -8,6 +8,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 |---|---|
 | Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
 | Exit | `/exit`. |
+| Fresh task phase | Firstmate uses `bin/fm-control.sh <task-id> relaunch --note-file data/<task-id>/phase-handoff.md` after the worker's `blocked: phase handoff ready <path>` status. Relaunch keeps the worktree and starts a new conversation. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
