@@ -119,6 +119,20 @@ fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# --- starting marker: publish recovery-under-way before the slower gates ------
+# The synchronous guard fires on the same Stop and waits on this marker
+# (fm_autoarm_starting_live in bin/fm-wake-lib.sh) while the identity, need, and
+# session-lock gates below run, so a slow startup is not reported as blind. It
+# binds this firing's pid identity and Stop session_id, and it is removed on
+# every exit and once a generation claim supersedes it.
+STARTING_MARKER="$STATE/.claude-autoarm-starting.$$"
+STOP_SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || true)
+STARTING_IDENTITY=$(fm_pid_identity "$$" 2>/dev/null || true)
+if [ -n "$STARTING_IDENTITY" ]; then
+  printf 'session=%s\n%s\n' "${STOP_SESSION_ID:-unknown}" "$STARTING_IDENTITY" > "$STARTING_MARKER" 2>/dev/null || true
+fi
+trap 'rm -f "$STARTING_MARKER" 2>/dev/null || true' EXIT
+
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its numeric harness pid in .lock.
 # Use the shared liveness predicate to recognize only that stale-owner case.
@@ -177,6 +191,7 @@ if [ "$CLAIM_RC" -ne 0 ]; then
 fi
 MY_GEN=$FM_AUTOARM_MY_GEN
 [ -n "$MY_GEN" ] || exit 0
+rm -f "$STARTING_MARKER" 2>/dev/null || true
 
 # Commit <outcome> (optionally with the once-per-episode notice marker) for
 # this generation. Success means this generation's translation WINS and the

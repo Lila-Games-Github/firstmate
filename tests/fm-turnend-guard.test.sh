@@ -1930,6 +1930,92 @@ test_hook_claude_mode_waits_for_late_claim() {
   pass "fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation"
 }
 
+# The previous watcher has exited after a wake, and a long handling turn has
+# aged its beacon. Claude starts the async Stop hook beside the synchronous
+# guard; its generation claim can appear after the former 800ms wait expired.
+test_hook_claude_mode_waits_for_async_generation_claim() {
+  local dir helper out status owner identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-async-claim")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  (
+    sleep 1.2
+    owner=$BASHPID
+    identity=$(fm_test_pid_identity "$owner") || exit 1
+    printf 'epoch=1 owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
+      "$owner" "$(date +%s)" "$identity" > "$dir/state/.claude-autoarm-epoch"
+    sleep 30 &
+    wait
+  ) &
+  helper=$!
+  out=$(run_hook_claude "$dir" true); status=$?
+  kill "$helper" 2>/dev/null || true
+  wait "$helper" 2>/dev/null || true
+  expect_code 0 "$status" "an async generation claim after 800ms must suppress the blind-turn alarm"
+  [ -z "$out" ] || fail "async generation claim produced a blind-turn alarm: $out"
+  pass "fm-turnend-guard --claude: an async Stop claim after the old deadline owns recovery"
+}
+
+test_hook_claude_mode_blocks_without_async_claim() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-no-async-claim")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "the longer handoff must still block when no auto-arm claims recovery"
+  assert_contains "$out" 'TURN WOULD END BLIND' "missing async claim lost the blind-turn alarm"
+  pass "fm-turnend-guard --claude: a genuinely absent async claim still blocks"
+}
+
+# The auto-arm's identity, need, and session-lock gates can outlast the sync
+# wait on a loaded machine. Its starting marker, published before those gates,
+# keeps the guard waiting for the generation claim instead of alarming.
+test_hook_claude_mode_waits_on_live_starting_marker() {
+  local dir helper out status owner identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-slow-start")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  (
+    owner=$BASHPID
+    identity=$(fm_test_pid_identity "$owner") || exit 1
+    printf 'session=sess-claude-mode\n%s\n' "$identity" > "$dir/state/.claude-autoarm-starting.$owner"
+    sleep 1.5
+    printf 'epoch=1 owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
+      "$owner" "$(date +%s)" "$identity" > "$dir/state/.claude-autoarm-epoch"
+    rm -f "$dir/state/.claude-autoarm-starting.$owner"
+    sleep 30 &
+    wait
+  ) &
+  helper=$!
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=500 run_hook_claude "$dir" true); status=$?
+  kill "$helper" 2>/dev/null || true
+  wait "$helper" 2>/dev/null || true
+  expect_code 0 "$status" "a live starting auto-arm must hold the guard past the sync wait"
+  [ -z "$out" ] || fail "slow auto-arm startup produced a blind-turn alarm: $out"
+  pass "fm-turnend-guard --claude: a live starting marker waits out a slow auto-arm startup"
+}
+
+test_hook_claude_mode_dead_starting_marker_still_blocks() {
+  local dir dead identity out status start elapsed
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-dead-start")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  sleep 30 &
+  dead=$!
+  identity=$(fm_test_pid_identity "$dead") || fail "could not read helper identity"
+  kill "$dead" 2>/dev/null || true
+  wait "$dead" 2>/dev/null || true
+  printf 'session=sess-claude-mode\n%s\n' "$identity" > "$dir/state/.claude-autoarm-starting.$dead"
+  printf 'session=other-session\n%s\n' "$(fm_test_pid_identity "$$")" > "$dir/state/.claude-autoarm-starting.$$"
+  start=$(date +%s)
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=500 FM_CLAUDE_AUTOARM_START_WAIT_MS=20000 run_hook_claude "$dir" true); status=$?
+  elapsed=$(( $(date +%s) - start ))
+  expect_code 2 "$status" "a dead or foreign starting marker must not hide a missing auto-arm"
+  assert_contains "$out" 'TURN WOULD END BLIND' "dead starting marker lost the blind-turn alarm"
+  [ "$elapsed" -lt 10 ] || fail "dead starting marker extended the guard wait to ${elapsed}s"
+  pass "fm-turnend-guard --claude: a dead or foreign starting marker still blocks at the short bound"
+}
+
 test_hook_claude_mode_secondmate_reblocks_like_primary() {
   local dir pid out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-claude-sm-reblock")
@@ -2263,6 +2349,10 @@ test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
+test_hook_claude_mode_waits_for_async_generation_claim
+test_hook_claude_mode_blocks_without_async_claim
+test_hook_claude_mode_waits_on_live_starting_marker
+test_hook_claude_mode_dead_starting_marker_still_blocks
 test_hook_claude_mode_secondmate_reblocks_like_primary
 test_hook_away_daemon_allows_between_watcher_cycles
 test_hook_away_daemon_allows_over_dead_watcher_lock
