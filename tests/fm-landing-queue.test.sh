@@ -98,8 +98,10 @@ full_receipt b
 git -C "$CASE/project" commit -qm tip-moved --allow-empty
 expect_field "$(queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a.full")" status needs-rebase
 expect_field "$(queue ready b --branch fm/b --head "$(head_of b)" --target "$BASE" --receipt "$CASE/b.full")" status waiting-for-front
-[ "$(cat "$(rg --files "$CASE/home/data/landing-queue" -g pre-a)")" = "$BASE" ] || fail 'first car lost its tested target'
-[ "$(cat "$(rg --files "$CASE/home/data/landing-queue" -g pre-b)")" = "$BASE" ] || fail 'second car lost its tested target'
+pre_a=$(find "$CASE/home/data/landing-queue" -name pre-a -type f -print -quit)
+pre_b=$(find "$CASE/home/data/landing-queue" -name pre-b -type f -print -quit)
+[ -n "$pre_a" ] && [ "$(cat "$pre_a")" = "$BASE" ] || fail 'first car lost its tested target'
+[ -n "$pre_b" ] && [ "$(cat "$pre_b")" = "$BASE" ] || fail 'second car lost its tested target'
 prepare a
 expect_field "$(queue status a)" status needs-quick
 expect_field "$(quick_receipt a)" status ready-to-land
