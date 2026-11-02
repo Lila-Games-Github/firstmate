@@ -1,0 +1,2 @@
+committed example plan validates against generic adapter: ['pond', 'harvesting_list', 'harvesting_crew', 'ftue_missions']
+frogpile service config has 'performance' adapter values: False
