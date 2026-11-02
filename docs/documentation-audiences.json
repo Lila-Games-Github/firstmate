@@ -357,6 +357,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/fm-performance-frogpile-2026-11-02.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/fm-test-service-frogpile.json",
       "audience": "operator-example"
     },

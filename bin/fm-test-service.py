@@ -2,10 +2,12 @@
 """Firstmate test service: durable CLI and user-service worker.
 
 Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--device-gate SERIAL|any]
-       [--scenario NAME]... [--harness PATH]... [--receipt PATH] [--retest-on-move]
+       [--scenario NAME]... [--harness PATH]... [--perf-plan PATH] [--receipt PATH] [--retest-on-move]
        fm-test-service.py serve | status [--json] | wait ID | cancel ID
+       fm-test-service.py perf-query BUNDLE SQL
        fm-test-service.py install-unit | project-for-repo REPO | landing-gates-for-repo REPO
-Configuration: FM_HOME/config/test-service/PROJECT.json (see docs/test-service.md).
+Configuration: FM_HOME/config/test-service/PROJECT.json, or FM_TEST_SERVICE_CONFIG_ROOT/PROJECT.json
+for an isolated service instance (see docs/test-service.md).
 State: FM_TEST_SERVICE_STATE or ~/.local/state/firstmate-test-service.
 Task completions use a persistent SQLite outbox and fm-send's idempotent inbox
 delivery, independently of test execution. Workers submit, pause, and resume on
@@ -27,9 +29,12 @@ import threading
 import time
 import uuid
 
+import fm_perf_plan
+
 CODE = Path(__file__).resolve()
 HOME = Path(os.environ.get("FM_HOME", CODE.parent.parent)).resolve()
 ROOT = Path(os.environ.get("FM_TEST_SERVICE_STATE", Path.home() / ".local/state/firstmate-test-service")).resolve()
+CONFIG_ROOT = Path(os.environ.get("FM_TEST_SERVICE_CONFIG_ROOT", HOME / "config/test-service")).resolve()
 DB = ROOT / "requests.sqlite3"
 STATUS = ROOT / "status.json"
 TERMINAL = {"passed", "failed", "cancelled", "conflict"}
@@ -45,7 +50,7 @@ def run(argv, **kw):
 def config(project):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", project):
         raise ValueError("invalid project name")
-    path = HOME / "config/test-service" / (project + ".json")
+    path = CONFIG_ROOT / (project + ".json")
     data = json.loads(path.read_text())
     if not isinstance(data.get("suite"), list) or not isinstance(data.get("device"), list):
         raise ValueError("configuration needs suite and device argv arrays")
@@ -86,7 +91,7 @@ def config(project):
 
 def project_for_repo(repo):
     names = []
-    for path in sorted((HOME / "config/test-service").glob("*.json")):
+    for path in sorted(CONFIG_ROOT.glob("*.json")):
         try:
             data = config(path.stem)
         except (ValueError, OSError, json.JSONDecodeError):
@@ -100,7 +105,7 @@ def project_for_repo(repo):
 
 def landing_gates_for_repo(repo):
     matches = []
-    for path in sorted((HOME / "config/test-service").glob("*.json")):
+    for path in sorted(CONFIG_ROOT.glob("*.json")):
         if repo != path.stem:
             try:
                 data = json.loads(path.read_text())
@@ -205,8 +210,10 @@ def step_state(db, rid, generation, name, state, exit_code=None):
 
 def submit(args):
     cfg = config(args.project)
-    if not (args.suite or args.device_gate or args.harness):
+    if not (args.suite or args.device_gate or args.harness or args.perf_plan):
         raise ValueError("request has no suite, phone, or harness step")
+    if args.perf_plan and (args.suite or args.device_gate or args.scenario or args.harness or args.retest_on_move):
+        raise ValueError("performance plan cannot combine with suite, phone gate, scenarios, harnesses, or retests")
     if args.receipt and not args.suite:
         raise ValueError("a full-suite receipt requires --suite")
     if args.scenario and not args.device_gate:
@@ -222,6 +229,9 @@ def submit(args):
     check = run(["git", "-C", str(source), "rev-parse", "--verify", args.sha + "^{commit}"])
     if check.returncode or check.stdout.strip().lower() != args.sha.lower():
         raise ValueError("sha is not an available exact commit")
+    plan = fm_perf_plan.load_committed_plan(source, args.sha, args.perf_plan, cfg) if args.perf_plan else None
+    if plan:
+        fm_perf_plan.validate_comparison(plan, ROOT / "results")
     if args.device_gate and args.device_gate != "any" and args.device_gate not in cfg["phones"]:
         raise ValueError("phone is not configured for this project")
     for name in args.scenario:
@@ -239,6 +249,7 @@ def submit(args):
     opts = {"suite": args.suite, "device_gate": args.device_gate, "scenarios": args.scenario,
             "harnesses": args.harness, "receipt": str(Path(args.receipt).resolve()) if args.receipt else None,
             "retest_on_move": args.retest_on_move, "branch_source": branch_source, "task": args.task,
+            "perf_plan": args.perf_plan, "perf_plan_data": plan,
             "home": str(HOME), "state_dir": str(Path(os.environ.get("FM_STATE_OVERRIDE", HOME / "state")).resolve())}
     db = connection()
     rid = uuid.uuid4().hex[:16]
@@ -386,6 +397,8 @@ def execute(db, row):
             argv[0] = str(work / target)
         target = Path(argv[0])
         inside = os.path.commonpath((str(work), str(target.resolve()))) == str(work)
+        if name.startswith("perf-"):
+            inside = inside or os.path.commonpath((str(CODE.parent), str(target.resolve()))) == str(CODE.parent)
         if not inside or not target.is_file() or not os.access(target, os.X_OK):
             step_state(watch_db, rid, row["generation"], name, "failed", 127)
             watch_db.close()
@@ -434,6 +447,28 @@ def execute(db, row):
             return "interrupted", "service stopping", work
         if db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
             return "cancelled", "cancelled", work
+        if opts.get("perf_plan_data"):
+            plan = opts["perf_plan_data"]
+            adapter = cfg["performance"]
+            bundle = ROOT / "results" / rid / row["sha"] / "performance"
+            shutil.rmtree(bundle, ignore_errors=True)
+            bundle.mkdir(parents=True)
+            serial = plan["device"]
+            queue = fm_perf_plan.command(adapter["queue"], work, bundle, plan, serial, "", 0, "")
+            child = [sys.executable, str(CODE), "perf-child", row["project"], str(work),
+                     str(bundle), serial, rid, row["sha"]]
+            for name, argv in (("perf-build", fm_perf_plan.command(adapter["build"], work, bundle, plan, "", "", 0, "")),
+                               ("perf-lease", queue + ["--"] + child)):
+                name, code, log = step(name, argv)
+                if db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+                    return "cancelled", "cancelled", work
+                if STOP:
+                    return "interrupted", "service stopping", work
+                if code:
+                    return "failed", first_error(log, code, name), work
+            if run(["git", "-C", str(work), "status", "--porcelain"]).stdout.strip():
+                return "failed", "test copy changed during test", work
+            return "passed", None, work
         requested = opts["device_gate"]
         serial = None
         if requested:
@@ -829,6 +864,12 @@ def main():
     s.add_argument("--harness", action="append", default=[])
     s.add_argument("--receipt")
     s.add_argument("--retest-on-move", action="store_true")
+    s.add_argument("--perf-plan")
+    s = sub.add_parser("perf-child")
+    for field in ("project", "worktree", "bundle", "serial", "request", "sha"):
+        s.add_argument(field)
+    s = sub.add_parser("perf-query")
+    s.add_argument("bundle"); s.add_argument("sql")
     s = sub.add_parser("status"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("wait"); s.add_argument("id")
     s = sub.add_parser("cancel"); s.add_argument("id")
@@ -838,6 +879,15 @@ def main():
     args = p.parse_args()
     if args.cmd == "submit":
         submit(args)
+    elif args.cmd == "perf-child":
+        row = connection().execute("SELECT options FROM requests WHERE id=?", (args.request,)).fetchone()
+        if not row:
+            raise ValueError("unknown performance request")
+        prepare_phone(args.serial)
+        fm_perf_plan.run_plan(config(args.project)["performance"], json.loads(row["options"])["perf_plan_data"],
+                              Path(args.worktree), Path(args.bundle), args.serial, args.sha)
+    elif args.cmd == "perf-query":
+        fm_perf_plan.query(Path(args.bundle), args.sql)
     elif args.cmd == "serve":
         serve()
     elif args.cmd == "project-for-repo":
