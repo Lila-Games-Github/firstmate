@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   # Pin Linux to the image used by the process-liveness and Herdr checks.
-  # ubuntu-latest switched to 26.04 on 2026-11-02 and changed process reporting.
+  # Ubuntu 26.04 Rust coreutils sleep rejects agent-named symlink fixtures.
   lint:
     name: Lint ${{ matrix.partition }}
     runs-on: ubuntu-24.04
