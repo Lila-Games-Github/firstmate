@@ -1020,7 +1020,7 @@ def service_request_rows(snapshot):
 
 
 def service_suite_rows(trees, now):
-    """Attribute test-service suite runs to their task in the editor queue."""
+    """Identify service-owned suites for resource tags and editor deduplication."""
     root = Path(os.environ.get("FM_TEST_SERVICE_STATE", Path.home() / ".local/state/firstmate-test-service"))
     try:
         status = json.loads((root / "status.json").read_text(encoding="utf-8"))
@@ -1122,28 +1122,29 @@ def test_queue(snapshot, phones, now, tags=None):
         except ValueError:
             ran = "unknown time"
         running = {"task": task, "for": ran, "detail": f"pid {holder.get('pid', '?')} in {cwd}"}
-        if task in task_ids:
-            resource_tag(tags, task, 0, f"FULL SUITE {ran}")
     suite_queue = list(queued_suite_waiters(lock, trees, now))
     service_running, service_waiting = service_suite_rows(trees, now)
     suite_running = suite_processes(trees, now)
-    waiting_cwds = {os.path.realpath(entry.get("cwd", "")) for entry in suite_queue}
-    process_cwds = [(os.path.realpath(entry["cwd"]), entry) for entry in suite_running]
+    service_run_cwds = [os.path.realpath(entry["cwd"]) for entry in service_running]
+    service_wait_cwds = [os.path.realpath(entry["run_cwd"]) for entry in service_waiting]
+
+    def under(cwd, roots):
+        real = os.path.realpath(cwd)
+        return any(real == root or real.startswith(root + os.sep) for root in roots)
+
     for entry in service_running:
-        cwd = os.path.realpath(entry["cwd"])
-        matched = [process for real, process in process_cwds if real == cwd or real.startswith(cwd + os.sep)]
-        for process in matched:
-            process["task"] = entry["task"]
-        if not matched and cwd not in waiting_cwds:
-            suite_running.append(entry)
+        if entry["task"] in task_ids:
+            resource_tag(tags, entry["task"], 0, f"FULL SUITE {entry['for']}")
+    suite_running = [entry for entry in suite_running if not under(entry["cwd"], service_run_cwds)]
     if running and not suite_running:
-        running.update({"pid": holder.get("pid"), "cwd": holder.get("cwd", ""),
-                        "version": suite_version(holder.get("cwd", "")), "progress": ""})
-        suite_running.append(running)
-    for entry in service_waiting:
-        run_cwd = os.path.realpath(entry["run_cwd"])
-        if not any(cwd == run_cwd or cwd.startswith(run_cwd + os.sep) for cwd in waiting_cwds):
-            suite_queue.append(entry)
+        if not under(holder.get("cwd", ""), service_run_cwds):
+            running.update({"pid": holder.get("pid"), "cwd": holder.get("cwd", ""),
+                            "version": suite_version(holder.get("cwd", "")), "progress": ""})
+            suite_running.append(running)
+    suite_queue = [entry for entry in suite_queue if not under(entry.get("cwd", ""), service_wait_cwds)]
+    for position, entry in enumerate(service_waiting, 1):
+        if entry["task"] in task_ids:
+            resource_tag(tags, entry["task"], 1, f"WAITING FOR FULL SUITE #{position}")
     rows.append(item(f"EDITOR: {len(suite_running)} running, {len(suite_queue)} waiting",
                      status="section", item_id="suite-heading"))
     if not suite_running and not suite_queue:

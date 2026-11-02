@@ -886,9 +886,10 @@ EOF
     "$suite_wait" "$(ticks "$suite_wait")" "$boot" "$home/wt-alpha" "$((now-240))" > "$home/queues/suite/tickets/001-wait.json"
   printf 'pid=%s\ncwd=%s\nstarted=%s\nheartbeat=%s\n' "$suite_hold" "$home/wt-beta" "$((now-300))" "$now" > "$home/queues/suite.holder"
   mkdir -p "$home/test-service"
-  cat > "$home/test-service/status.json" <<'JSON'
+  cat > "$home/test-service/status.json" <<JSON
 {"schema":"fm-test-service.v1","requests":[
   {"id":"suite-request","task":"alpha","state":"queued","wait_seconds":240,"options":{"suite":true}},
+  {"id":"running-suite","task":"beta","state":"running","run_seconds":90,"options":{"suite":true},"steps":[{"name":"suite","state":"running","started":$((now-90))}]},
   {"id":"phone-request","task":"beta","state":"running","run_seconds":90,"options":{"device_gate":"R5CT32HRVNM"}},
   {"id":"stray-request","task":"beta","state":"queued","wait_seconds":30,"options":{"device_gate":"UNLISTED9"}}
 ]}
@@ -901,7 +902,7 @@ JSON
     'an unreadable keyguard keeps the phone state'
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.title | test("S21 FE|RZCX224VH4T"))] | length' "$home/state/crew-board.json")" \
     'an unreadable keyguard raises no notification'
-  assert_equals 'EDITOR: 1 running, 2 waiting|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 3 pending' \
+  assert_equals 'EDITOR: 1 running, 1 waiting|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 4 pending' \
     "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'fixed resource sections and any-phone queue'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \
     'waiting 4m' 'suite ticket wait duration'
@@ -913,16 +914,16 @@ JSON
   assert_equals '#1: Make the widget spin · VIP (R5CT32HRVNM) · holding R5CT32HRVNM|#2: Fix the gadget · VIP (R5CT32HRVNM)|#3: Fix the gadget · Basic|#4: Make the widget spin · VIP (R5CT32HRVNM)|#5: Make the widget spin · Unknown' \
     "$(jq -r '[.panels.test_queue[] | select(.id | startswith("ticket-")) | .title] | join("|")' "$home/state/crew-board.json")" \
     'phone tickets keep arrival order, kind, and holder'
-  assert_equals '#2: Make the widget spin|waiting 4m' \
-    "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-service-suite-request") | "\(.title)|\(.status)"' "$home/state/crew-board.json")" \
-    'a queued service suite waits in the editor queue under its task'
+  assert_equals 'service-suite-request|service-running-suite' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-suite-request" or .id == "service-running-suite" or .id == "suite-wait-service-suite-request" or (.id | contains("/runs/running-suite"))) | .id] | join("|")' "$home/state/crew-board.json")" \
+    'queued and running service suites each have one row in TEST SERVICE'
   assert_equals '#1: Make the widget spin · VIP (S22) · holding S22|#2: Fix the gadget · VIP (S22)|#3: Fix the gadget · Basic|#4: Make the widget spin · VIP (S22)|#5: Make the widget spin · Unknown' \
     "$(jq -r '[.panels.test_queue[] | select(.id | startswith("ticket-")) | .phone_title] | join("|")' "$home/state/crew-board.json")" \
     'phone tickets name phones without serials for the phone page'
-  assert_equals 'WAITING: Make the widget spin · Suite|RUNNING: Fix the gadget · Phone gate (VIP: S22)|WAITING: Fix the gadget · Phone gate (VIP: phone)' \
+  assert_equals 'WAITING: Make the widget spin · Suite|RUNNING: Fix the gadget · Suite|RUNNING: Fix the gadget · Phone gate (VIP: S22)|WAITING: Fix the gadget · Phone gate (VIP: phone)' \
     "$(jq -r '[.panels.test_queue[] | select(.id | startswith("service-")) | select(.status != "section") | .phone_title] | join("|")' "$home/state/crew-board.json")" \
     'service gates name known phones and hide unknown serials'
-  assert_equals 'waiting 4m|running 1m|waiting <1m' \
+  assert_equals 'waiting 4m|running 1m|running 1m|waiting <1m' \
     "$(jq -r '[.panels.test_queue[] | select(.id | startswith("service-")) | select(.status != "section") | .status] | join("|")' "$home/state/crew-board.json")" \
     'service queue and running ages'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "service-phone-request") | .title' "$home/state/crew-board.json")" \
