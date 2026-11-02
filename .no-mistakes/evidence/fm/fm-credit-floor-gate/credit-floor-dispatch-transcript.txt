@@ -1,0 +1,31 @@
+=== deepseek-low  (quota-axi credits: 2, default floor 5 usd)
+$ fm-spawn.sh deepseek-low <project> --mode no-mistakes --yolo off --harness pi --model openrouter/deepseek/deepseek-v4.1-flash --routing-reason manual DeepSeek selection
+  error: openrouter balance 2 usd is below the 5 usd floor; route this task to a native Codex or Claude profile, not an OpenRouter GPT or Claude model
+  exit=1  launched=no  meta=none
+
+=== deepseek-low-rule  (quota-axi credits: 2, default floor 5 usd)
+$ fm-spawn.sh deepseek-low-rule <project> --mode no-mistakes --yolo off --harness pi --model deepseek/deepseek-chat --routing-rule DeepSeek work --routing-provider openrouter
+  error: openrouter balance 2 usd is below the 5 usd floor; route this task to a native Codex or Claude profile, not an OpenRouter GPT or Claude model
+  exit=1  launched=no  meta=none
+
+=== deepseek-ok  (quota-axi credits: 49.87, default floor 5 usd)
+$ fm-spawn.sh deepseek-ok <project> --mode no-mistakes --yolo off --harness pi --model openrouter/deepseek/deepseek-v4.1-flash --routing-reason manual DeepSeek selection
+  spawned deepseek-ok harness=pi kind=ship mode=no-mistakes yolo=off
+  exit=0  launched=yes  meta=routing_quota={"provider":"openrouter","credits":{"remaining":49.87,"unit":"usd"},"quotaSemantics":{
+
+=== deepseek-unreadable  (quota-axi credits: bad, default floor 5 usd)
+$ fm-spawn.sh deepseek-unreadable <project> --mode no-mistakes --yolo off --harness pi --model openrouter/deepseek/deepseek-v4.1-flash --routing-reason manual DeepSeek selection
+  warning: openrouter prepaid credit balance unreadable (credits-unreadable); prepaid credit floor was not checked, proceeding
+  spawned deepseek-unreadable harness=pi kind=ship mode=no-mistakes yolo=off
+  exit=0  launched=yes  meta=routing_quota={"provider":"openrouter","credits":{"remaining":"n/a","unit":"usd"},"quotaSemantics":{
+
+=== or-gpt  (quota-axi credits: 49.87, default floor 5 usd)
+$ fm-spawn.sh or-gpt <project> --mode no-mistakes --yolo off --harness pi --model openrouter/openai/gpt-5 --routing-reason manual
+  error: openrouter/openai/gpt-5 routes a Codex or Claude model through OpenRouter; dispatch it on a native Codex or Claude profile instead
+  exit=1  launched=no  meta=none
+
+=== codex-native  (quota-axi credits: none, default floor 5 usd)
+$ fm-spawn.sh codex-native <project> --mode no-mistakes --yolo off --harness codex --model gpt-5 --routing-reason manual Codex selection
+  spawned codex-native harness=codex kind=ship mode=no-mistakes yolo=off
+  exit=0  launched=yes  meta=routing_quota={"provider":"codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}
+
