@@ -1415,7 +1415,7 @@ test_launch_environment_inherited_by_secondmate
 test_launch_environment_inheritance_preserves_on_source_errors
 
 test_worker_launch_delivers_role_scope() {
-  local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox
+  local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox pointer
   for brief_kind in heading legacy scaffold; do
   for kind in no-mistakes direct-PR local-only scout; do
     [ "$brief_kind" = heading ] && [ "$kind" != no-mistakes ] && continue
@@ -1459,6 +1459,16 @@ SH
     sed -n '/FIRSTMATE_OP: v1 launch-brief:/,$p' "$envelope" > "$encoded"
     "$ROOT/bin/fm-operational-input.sh" body < "$encoded" > "$prompt" ||
       fail "could not decode $kind launch-brief envelope"
+    first_line=$(sed -n '1p' "$prompt")
+    case "$first_line" in
+      'Read the brief at '*' and follow it exactly.')
+        pointer=${first_line#Read the brief at }
+        pointer=${pointer% and follow it exactly.}
+        [ "$pointer" = "$HOME_DIR/data/$id/launch-brief.md" ] ||
+          fail "$kind launch pointer named the wrong brief: $pointer"
+        cp "$pointer" "$prompt" || fail "$kind launch pointer was unreadable"
+        ;;
+    esac
     # The final prompt delivered to the harness is the generated interface.
     # The current identity must precede the authored task, because a Firstmate
     # worktree's own AGENTS.md assigns the unrelated supervisor identity.
