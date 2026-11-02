@@ -415,6 +415,28 @@ SH
   pass "prepaid credit floor refuses low balance and discloses unreadable balance"
 }
 
+test_subscription_provider_dispatch_skips_credit_warning() {
+  local rec id out status snapshot
+  for snapshot in creditless unavailable; do
+    id="credit-silent-$snapshot"
+    rec=$(make_spawn_case "credit-silent-$snapshot" codex "$id")
+    read_case_record "$rec"
+    cat > "$FAKEBIN_DIR/quota-axi" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_TEST_QUOTA_SNAPSHOT:-}" = creditless ] || exit 1
+printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}'
+SH
+    chmod +x "$FAKEBIN_DIR/quota-axi"
+    out=$(FM_TEST_QUOTA_SNAPSHOT="$snapshot" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness codex --model gpt-5 --routing-reason 'manual Codex selection')
+    status=$?
+    expect_code 0 "$status" "codex dispatch should launch with a $snapshot quota snapshot"
+    assert_not_contains "$out" 'credit floor was not checked' "codex dispatch with a $snapshot quota snapshot printed a credit warning"
+    [ -s "$LAUNCH_LOG" ] || fail "codex dispatch with a $snapshot quota snapshot did not launch"
+  done
+  pass "subscription provider dispatch prints no prepaid credit warning"
+}
+
 test_active_dispatch_profile_allows_positional_harness() {
   local rec id out status
   id=profile-positional-z14
@@ -1601,6 +1623,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
 test_prepaid_credit_floor
+test_subscription_provider_dispatch_skips_credit_warning
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort

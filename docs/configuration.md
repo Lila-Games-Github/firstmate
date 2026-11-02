@@ -504,7 +504,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-spawn.sh` records the original dispatch rule, manual override reason, provider, harness, model, effort, dispatch time, and the chosen provider's `quota-axi --json` snapshot in the task metadata.
 Before a fresh launch, `fm-spawn.sh` refuses a provider whose quota snapshot reports USD prepaid credits below the default 5 USD floor, regardless of whether the route uses `--routing-rule` or `--routing-reason`.
-Set `config/prepaid-credit-floor-usd` to one nonnegative USD amount to override that floor for this home; the setting is inherited by secondmate homes, and an absent or unreadable balance is disclosed while dispatch proceeds.
+Set `config/prepaid-credit-floor-usd` to one nonnegative USD amount to override that floor for this home; the setting is inherited by secondmate homes, and a prepaid provider (OpenRouter, or any provider whose snapshot row carries credits) with an absent or unreadable balance is disclosed while dispatch proceeds.
+Subscription providers without credits, such as Claude and Codex, pass silently, as does a dispatch whose provider does not resolve.
 The `profile:` line from `bin/fm-dispatch-resolve.sh` includes `--routing-rule` and `--routing-provider`; for a hand-picked profile, pass `--routing-reason` with the reason for overriding the resolved choice.
 An omitted rule is recorded as `manual` with `reason-not-recorded`, so legacy callers are visible in the review instead of being attributed to a rule.
 Relaunches preserve the original routing facts and increment `routing_relaunches` while retaining the harness history used to find rerun sessions.

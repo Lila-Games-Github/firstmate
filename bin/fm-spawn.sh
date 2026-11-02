@@ -8,7 +8,9 @@
 #   from the same quota-axi JSON snapshot recorded in task metadata. The floor
 #   defaults to 5 USD; config/prepaid-credit-floor-usd overrides it with one
 #   nonnegative amount. A known balance below the floor refuses before launch.
-#   An absent or unreadable balance warns and proceeds. Relaunches preserve the
+#   A prepaid provider (openrouter, or any whose snapshot row carries credits)
+#   with an absent or unreadable balance warns and proceeds; other providers
+#   are not prepaid and pass silently. Relaunches preserve the
 #   original routing decision and do not repeat the credit check.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -2813,6 +2815,11 @@ if [ "$RELAUNCH" -eq 0 ]; then
       exit 1
     fi
   fi
+  CREDIT_BALANCE=
+  CREDIT_PREPAID=0
+  case "$ROUTING_PROVIDER" in
+    openrouter) CREDIT_PREPAID=1 ;;
+  esac
   if [ -z "$ROUTING_PROVIDER" ]; then
     ROUTING_QUOTA_REASON='provider-unresolved'
   elif command -v quota-axi >/dev/null 2>&1; then
@@ -2821,14 +2828,13 @@ if [ "$RELAUNCH" -eq 0 ]; then
       ROUTING_QUOTA=$(printf '%s' "$ROUTING_QUOTA_ALL" | jq -c --arg provider "$ROUTING_PROVIDER" '.providers[]? | select(.provider == $provider)' 2>/dev/null | head -1)
       if [ -n "$ROUTING_QUOTA" ]; then
         ROUTING_QUOTA_REASON=
+        ! printf '%s' "$ROUTING_QUOTA" | jq -e '.credits != null' >/dev/null 2>&1 || CREDIT_PREPAID=1
         CREDIT_BALANCE=$(printf '%s' "$ROUTING_QUOTA" | jq -r 'if .credits.unit == "usd" and (.credits.remaining | type) == "number" then .credits.remaining else empty end')
         if [ -n "$CREDIT_BALANCE" ]; then
           if jq -ne --argjson balance "$CREDIT_BALANCE" --argjson floor "$CREDIT_FLOOR" '$balance < $floor' | grep -qx true; then
             echo "error: $ROUTING_PROVIDER balance $CREDIT_BALANCE usd is below the $CREDIT_FLOOR usd floor; route this task to another profile" >&2
             exit 1
           fi
-        else
-          echo "warning: $ROUTING_PROVIDER credit balance absent or unreadable; prepaid credit floor was not checked, proceeding" >&2
         fi
       else
         ROUTING_QUOTA_REASON='provider-absent-from-snapshot'
@@ -2837,8 +2843,8 @@ if [ "$RELAUNCH" -eq 0 ]; then
       ROUTING_QUOTA_REASON='snapshot-unreadable'
     fi
   fi
-  if [ -n "$ROUTING_QUOTA_REASON" ]; then
-    echo "warning: $ROUTING_PROVIDER credit balance unreadable ($ROUTING_QUOTA_REASON); prepaid credit floor was not checked, proceeding" >&2
+  if [ "$CREDIT_PREPAID" -eq 1 ] && [ -z "$CREDIT_BALANCE" ]; then
+    echo "warning: $ROUTING_PROVIDER prepaid credit balance unreadable (${ROUTING_QUOTA_REASON:-credits-unreadable}); prepaid credit floor was not checked, proceeding" >&2
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
