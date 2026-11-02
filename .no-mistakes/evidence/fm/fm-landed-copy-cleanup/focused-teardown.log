@@ -1,0 +1,13 @@
+ok - a pushed branch without a merged PR or landing ancestry does not authorize cleanup
+ok - no-mistakes worktree with genuinely unlanded work is refused (safety preserved)
+ok - local-only worktree with unpushed work is torn down under --force (escape hatch)
+ok - squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)
+ok - worktree whose content already landed in the default branch is torn down (content fallback)
+ok - done and landed work permits Treehouse to reset edits and remove untracked scratch
+ok - a clean landed copy tears down without a done report
+ok - gh lookup error with content not in default refuses (fail-safe)
+ok - local-only worktree pushed to a fork and landed locally is torn down
+
+real	0m19.602s
+user	0m7.743s
+sys	0m11.983s
