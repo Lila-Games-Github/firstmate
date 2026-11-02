@@ -191,6 +191,9 @@ def run_plan(adapter, plan, work, bundle, serial, sha):
                     data = json.loads(output.read_text())
                     if not isinstance(data, dict) or any(not _number(v) for v in data.values()):
                         raise ValueError("capture output must be numeric metric JSON: " + str(output))
+                    duplicate = sorted(set(metrics) & set(data))
+                    if duplicate:
+                        raise ValueError("capture " + kind + " repeats metric names: " + ", ".join(duplicate))
                     metrics.update(data)
                     _call("pull " + tag + "/" + kind,
                           command(adapter["pull"], work, bundle, plan, serial, state["target"], repeat, output, kind),

@@ -676,6 +676,13 @@ if [ "$action" = build ]; then
 fi
 [ "${PERF_LEASE:-}" = 1 ]
 echo "$action" >> "$EVENTS"
+if [ "$action" = drive ] && [ -e "$HOME/perf-dirty" ]; then
+  echo dirty >> perf-plan.json
+fi
+if [ "$action" = drive ] && [ -e "$HOME/perf-block" ]; then
+  touch "$HOME/perf-blocked"
+  while [ -e "$HOME/perf-block" ]; do sleep 0.1; done
+fi
 if [ "$action" = capture ]; then
   printf '{"fps":%s,"p95_ms":%s}\n' "${PERF_FPS:-40}" 34 > "$1"
   printf 'fixture trace\n' > "$(dirname "$1")/$(basename "$1" .json).pftrace"
@@ -691,6 +698,7 @@ chmod +x "$tmp/bin/trace_processor"
 python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
 import json,sys
 p=sys.argv[1]; data=json.load(open(p))
+data['phones']=sorted(set(data['phones'])|{'M31'})
 data['performance']={
   'package':'com.example.perftest',
   'isolated_package_prefixes':['com.example'],
@@ -755,4 +763,36 @@ if $svc submit fake "$PWD" "$bad_sha" --perf-plan perf-plan.json > "$tmp/bad.out
   fail 'known-bad committed performance plan was accepted'
 fi
 grep -q 'repeats must be 1..20' "$tmp/bad.out"
+if $svc submit fake "$PWD" "$perf_sha" --suite --perf-plan perf-plan.json > "$tmp/perf-suite.out" 2>&1; then
+  fail 'performance plan accepted --suite without running it'
+fi
+grep -q 'cannot combine with suite' "$tmp/perf-suite.out"
+touch "$HOME/perf-dirty"
+dirty=$($svc submit fake "$PWD" "$perf_sha" --perf-plan perf-plan.json)
+if $svc wait "$dirty" > "$tmp/perf-dirty.out"; then
+  fail 'performance plan passed after changing the tracked test copy'
+fi
+grep -q 'test copy changed during test' "$tmp/perf-dirty.out"
+rm "$HOME/perf-dirty"
+touch "$HOME/perf-block"
+blocked=$($svc submit fake "$PWD" "$perf_sha" --perf-plan perf-plan.json)
+for i in $(seq 1 300); do [ -e "$HOME/perf-blocked" ] && break; sleep 0.1; done
+[ -e "$HOME/perf-blocked" ] || fail 'performance drive never started'
+$svc cancel "$blocked"
+$svc wait "$blocked" > "$tmp/perf-cancel.out" && exit 1 || true
+rm -f "$HOME/perf-block" "$HOME/perf-blocked"
+grep -q '^cancelled ' "$tmp/perf-cancel.out"
+[ ! -e "$FM_TEST_SERVICE_STATE/results/$blocked/$perf_sha.failure.json" ]
+python3 - "$tmp/project/perf-plan.json" <<'PY'
+import json,sys
+p=sys.argv[1]; data=json.load(open(p)); data['states'][0]['repeats']=1; data['states'][0]['measurements']=['frame','gpu']; data.pop('compare_to',None)
+open(p,'w').write(json.dumps(data))
+PY
+git add perf-plan.json && git commit -qm perf-duplicate
+duplicate_sha=$(git rev-parse HEAD)
+duplicate=$($svc submit fake "$PWD" "$duplicate_sha" --perf-plan perf-plan.json)
+if $svc wait "$duplicate" > "$tmp/perf-duplicate.out"; then
+  fail 'performance plan merged duplicate metric names across kinds'
+fi
+grep -q 'repeats metric names: fps, p95_ms' "$tmp/perf-duplicate.out"
 echo 'ok - performance plan validation, ordered single-lease bundle, and named diff'

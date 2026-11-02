@@ -212,8 +212,8 @@ def submit(args):
     cfg = config(args.project)
     if not (args.suite or args.device_gate or args.harness or args.perf_plan):
         raise ValueError("request has no suite, phone, or harness step")
-    if args.perf_plan and (args.device_gate or args.scenario or args.harness or args.retest_on_move):
-        raise ValueError("performance plan cannot combine with phone gate, scenarios, harnesses, or retests")
+    if args.perf_plan and (args.suite or args.device_gate or args.scenario or args.harness or args.retest_on_move):
+        raise ValueError("performance plan cannot combine with suite, phone gate, scenarios, harnesses, or retests")
     if args.receipt and not args.suite:
         raise ValueError("a full-suite receipt requires --suite")
     if args.scenario and not args.device_gate:
@@ -451,17 +451,23 @@ def execute(db, row):
             plan = opts["perf_plan_data"]
             adapter = cfg["performance"]
             bundle = ROOT / "results" / rid / row["sha"] / "performance"
-            bundle.mkdir(parents=True, exist_ok=True)
-            name, code, log = step("perf-build", fm_perf_plan.command(adapter["build"], work, bundle, plan, "", "", 0, ""))
-            if code:
-                return "failed", first_error(log, code, name), work
+            shutil.rmtree(bundle, ignore_errors=True)
+            bundle.mkdir(parents=True)
             serial = plan["device"]
             queue = fm_perf_plan.command(adapter["queue"], work, bundle, plan, serial, "", 0, "")
             child = [sys.executable, str(CODE), "perf-child", row["project"], str(work),
                      str(bundle), serial, rid, row["sha"]]
-            name, code, log = step("perf-lease", queue + ["--"] + child)
-            if code:
-                return "failed", first_error(log, code, name), work
+            for name, argv in (("perf-build", fm_perf_plan.command(adapter["build"], work, bundle, plan, "", "", 0, "")),
+                               ("perf-lease", queue + ["--"] + child)):
+                name, code, log = step(name, argv)
+                if db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+                    return "cancelled", "cancelled", work
+                if STOP:
+                    return "interrupted", "service stopping", work
+                if code:
+                    return "failed", first_error(log, code, name), work
+            if run(["git", "-C", str(work), "status", "--porcelain"]).stdout.strip():
+                return "failed", "test copy changed during test", work
             return "passed", None, work
         requested = opts["device_gate"]
         serial = None

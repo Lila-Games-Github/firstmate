@@ -35,7 +35,7 @@ The service starts a request's suite and phone steps concurrently after preparat
 Use `submit PROJECT WORKTREE SHA --perf-plan PATH` to run an ordered performance audit on one configured phone.
 `PATH` names a JSON file committed in the tested project SHA, or `@service/PATH` for a file committed in the running Firstmate code checkout.
 The service validates the pinned file before accepting the request and stores its parsed content in the durable request.
-`--perf-plan` can be combined with `--suite`, but not with `--device-gate`, `--scenario`, `--harness`, or `--retest-on-move`.
+`--perf-plan` cannot be combined with `--suite`, `--device-gate`, `--scenario`, `--harness`, or `--retest-on-move`; submit the suite as its own request.
 The [FrogPile plan](examples/fm-performance-frogpile-2026-11-02.json) selects pond, Harvesting List and Crew, and FTUE Missions from the 2026-11-02 audit.
 
 The plan schema is `fm-performance-plan.v1` with a configured `device`, nonempty ordered `states`, and optional `compare_to` request ID.
@@ -48,8 +48,11 @@ The executable in each array must be in the tested checkout; `@service/NAME` sel
 Placeholders are `{worktree}`, `{bundle}`, `{device}`, `{state}`, `{kind}`, `{repeat}`, and `{output}`.
 `build` runs before the phone ticket; the queue command receives `--` and the service child command, and holds one lease while the child wakes the phone, clears a previous isolated app from the foreground, installs, drives each state, confirms app focus, captures, pulls, force-stops, and uninstalls.
 The adapter's capture command writes a numeric JSON metric map to `{output}`; its pull command can also place `.pftrace` files under `{bundle}`.
-The [FrogPile configuration](examples/fm-test-service-frogpile.json) uses the committed Godot audit scene and the project's phone queue through a Firstmate-owned adapter.
-Additional measurement kinds can use the same capture and pull hooks once their project harnesses are available.
+Adapter executables are project-owned and committed in the tested checkout; Firstmate ships no project-specific adapter, so the [FrogPile configuration](examples/fm-test-service-frogpile.json) has no `performance` block until ProjectWhite commits its adapter.
+The `frame` measurement kind is the first supported capture; Perfetto, SurfaceFlinger, simpleperf, Arm Streamline, and malioc kinds can use the same capture and pull hooks once their project harnesses land.
+Metric names must be unique across a state's measurement kinds; a repeated name fails the request instead of overwriting the earlier value.
+Each run recreates its bundle, so a requeued request never mixes rows or traces from an interrupted attempt.
+Cancellation and service stop are reported as `cancelled` and `interrupted`, and a run that changes the tracked test copy fails like any other request.
 
 The result is `results/REQUEST/SHA/performance/summary.json`, alongside each raw measurement, command log, and trace.
 `summary.json` contains one row per state and repeat, pass status, and metric deltas against `compare_to` when supplied.
@@ -58,7 +61,7 @@ When traces are present, the service calls `trace_processor query` (or the adapt
 Function rows are identified by `::` or `GDScript` names and other slices are labeled zones; the raw name, category, timestamps, and durations remain in the index for deeper queries.
 `compare_to` must name one completed bundle in the same service state directory.
 
-For the historical M31 reproduction, copy the FrogPile configuration into `FM_HOME/config/test-service/frogpile.json`, then submit its audit-only commit with:
+For the historical M31 reproduction, copy the FrogPile configuration into `FM_HOME/config/test-service/frogpile.json`, add a `performance` block pointing at ProjectWhite's committed adapter, then submit its audit-only commit with:
 
 ```sh
 bin/fm-test-service.py submit frogpile /path/to/ProjectWhite e90ef2869c8bc8a2c9e441a69fbecec45f6be355 --perf-plan @service/docs/examples/fm-performance-frogpile-2026-11-02.json
