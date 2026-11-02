@@ -563,6 +563,21 @@ def live_tickets(queue):
     return rows
 
 
+def phone_label(serial):
+    """Phone-page name for a serial; serials never leave the terminal board."""
+    return next((re.sub(r"^Galaxy\s+", "", name) for known, name in PHONE_ORDER if known == serial), "phone")
+
+
+def phone_ticket_kind(record, name=str):
+    """Use the producer's requested field; an absent request has no inferred kind."""
+    requested = record.get("requested")
+    if requested == "any":
+        return "Basic"
+    if isinstance(requested, str) and requested:
+        return f"VIP ({name(requested)})"
+    return "Unknown"
+
+
 def since_unix(record, name, now):
     try:
         value = float(record[name]) / (1e9 if name.endswith("_ns") else 1)
@@ -650,6 +665,7 @@ def phone_queue(serial, trees, now):
             pid = int(owner["pid"])
             task, kind, _ = process_owner(pid, trees, owner.get("cwd", ""))
             entry = {"task": task, "kind": kind, "pid": pid,
+                     "ticket_kind": phone_ticket_kind(owner),
                      "for": since_unix(owner, "acquired_unix_ns" if owner.get("holding") else "requested_unix_ns", now)}
             if owner.get("holding") == serial:
                 holder = entry
@@ -706,6 +722,7 @@ def any_phone_waiters(trees, now):
         pid = int(owner["pid"])
         task, kind, _ = process_owner(pid, trees, owner.get("cwd", ""))
         waiting.append({"task": task, "kind": kind, "pid": pid,
+                        "ticket_kind": phone_ticket_kind(owner),
                         "for": since_unix(owner, "requested_unix_ns", now)})
     return waiting
 
@@ -953,10 +970,60 @@ def suite_processes(trees, now):
     return sorted(result, key=lambda row: row["pid"])
 
 
-def service_suite_rows(trees, now):
+def service_request_rows(snapshot):
+    """Show every live service request using the service's published status."""
     root = Path(os.environ.get("FM_TEST_SERVICE_STATE", Path.home() / ".local/state/firstmate-test-service"))
     try:
-        status = json.loads((root / "status.json").read_text())
+        status = json.loads((root / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(status, dict) or status.get("schema") != "fm-test-service.v1":
+        return []
+    requests = status.get("requests")
+    if not isinstance(requests, list):
+        return []
+    titles = task_titles(snapshot)
+    rows = []
+    for request in requests:
+        if not isinstance(request, dict) or request.get("state") not in ("queued", "preparing", "running"):
+            continue
+        rid = str(request.get("id") or "")
+        if not rid or "/" in rid or ".." in rid:
+            continue
+        options = request.get("options")
+        options = options if isinstance(options, dict) else {}
+        gate = options.get("device_gate")
+
+        def kind_text(name):
+            kinds = ["Suite"] if options.get("suite") else []
+            if gate:
+                kinds.append("Phone gate (Basic)" if gate == "any" else f"Phone gate (VIP: {name(str(gate))})")
+            if options.get("harness"):
+                kinds.append("Harness")
+            return ", ".join(kinds) or "Unknown"
+
+        kind = kind_text(str)
+        task = str(request.get("task") or "unknown task")
+        running = request["state"] == "running"
+        age = request.get("run_seconds") if running else request.get("wait_seconds")
+        try:
+            age = duration(float(age))
+        except (ValueError, TypeError, OverflowError):
+            age = "unknown time"
+        state = "running" if running else "waiting"
+        row = item(f"{state.upper()}: {titles.get(task, task)} · {kind}",
+                   f"Task: {task}\nKind: {kind}\nRequest: {rid}\nAge: {age}",
+                   f"{state} {age}", item_id=f"service-{rid}")
+        row["phone_title"] = f"{state.upper()}: {titles.get(task, task)} · {kind_text(phone_label)}"
+        rows.append(row)
+    return rows
+
+
+def service_suite_rows(trees, now):
+    """Identify service-owned suites for resource tags and editor deduplication."""
+    root = Path(os.environ.get("FM_TEST_SERVICE_STATE", Path.home() / ".local/state/firstmate-test-service"))
+    try:
+        status = json.loads((root / "status.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return [], []
     if not isinstance(status, dict) or status.get("schema") != "fm-test-service.v1":
@@ -972,7 +1039,7 @@ def service_suite_rows(trees, now):
         if not rid or "/" in rid or ".." in rid:
             continue
         source = str(request.get("source") or "")
-        task, _, _ = process_owner("", trees, source)
+        task = str(request.get("task") or "") or process_owner("", trees, source)[0]
         state = request.get("state")
         if state == "running" and any(step.get("name") == "suite" and step.get("state") == "running" for step in steps):
             cwd = str(root / "runs" / rid)
@@ -1055,28 +1122,29 @@ def test_queue(snapshot, phones, now, tags=None):
         except ValueError:
             ran = "unknown time"
         running = {"task": task, "for": ran, "detail": f"pid {holder.get('pid', '?')} in {cwd}"}
-        if task in task_ids:
-            resource_tag(tags, task, 0, f"FULL SUITE {ran}")
     suite_queue = list(queued_suite_waiters(lock, trees, now))
     service_running, service_waiting = service_suite_rows(trees, now)
     suite_running = suite_processes(trees, now)
-    waiting_cwds = {os.path.realpath(entry.get("cwd", "")) for entry in suite_queue}
-    process_cwds = [(os.path.realpath(entry["cwd"]), entry) for entry in suite_running]
+    service_run_cwds = [os.path.realpath(entry["cwd"]) for entry in service_running]
+    service_wait_cwds = [os.path.realpath(entry["run_cwd"]) for entry in service_waiting]
+
+    def under(cwd, roots):
+        real = os.path.realpath(cwd)
+        return any(real == root or real.startswith(root + os.sep) for root in roots)
+
     for entry in service_running:
-        cwd = os.path.realpath(entry["cwd"])
-        matched = [process for real, process in process_cwds if real == cwd or real.startswith(cwd + os.sep)]
-        for process in matched:
-            process["task"] = entry["task"]
-        if not matched and cwd not in waiting_cwds:
-            suite_running.append(entry)
+        if entry["task"] in task_ids:
+            resource_tag(tags, entry["task"], 0, f"FULL SUITE {entry['for']}")
+    suite_running = [entry for entry in suite_running if not under(entry["cwd"], service_run_cwds)]
     if running and not suite_running:
-        running.update({"pid": holder.get("pid"), "cwd": holder.get("cwd", ""),
-                        "version": suite_version(holder.get("cwd", "")), "progress": ""})
-        suite_running.append(running)
-    for entry in service_waiting:
-        run_cwd = os.path.realpath(entry["run_cwd"])
-        if not any(cwd == run_cwd or cwd.startswith(run_cwd + os.sep) for cwd in waiting_cwds):
-            suite_queue.append(entry)
+        if not under(holder.get("cwd", ""), service_run_cwds):
+            running.update({"pid": holder.get("pid"), "cwd": holder.get("cwd", ""),
+                            "version": suite_version(holder.get("cwd", "")), "progress": ""})
+            suite_running.append(running)
+    suite_queue = [entry for entry in suite_queue if not under(entry.get("cwd", ""), service_wait_cwds)]
+    for position, entry in enumerate(service_waiting, 1):
+        if entry["task"] in task_ids:
+            resource_tag(tags, entry["task"], 1, f"WAITING FOR FULL SUITE #{position}")
     rows.append(item(f"EDITOR: {len(suite_running)} running, {len(suite_queue)} waiting",
                      status="section", item_id="suite-heading"))
     if not suite_running and not suite_queue:
@@ -1109,11 +1177,11 @@ def test_queue(snapshot, phones, now, tags=None):
         active, waiting = phone_queue(serial, trees, now)
         short = re.sub(r"^Galaxy\s+", "", name).upper()
         if active:
-            active["detail"] = f"{active['kind'] or 'test'} holding {serial}"
+            active["detail"] = f"{active.get('ticket_kind', 'Unknown')} · {active['kind'] or 'test'} holding {serial}"
             if active["task"] in task_ids:
                 resource_tag(tags, active["task"], 0, f"{short} {resource_word(active['kind'])} {active['for']}")
         for position, entry in enumerate(waiting, 1):
-            entry["detail"] = f"{entry['kind'] or 'test'} waiting for {serial}"
+            entry["detail"] = f"{entry.get('ticket_kind', 'Unknown')} · {entry['kind'] or 'test'} waiting for {serial}"
             if entry["task"] in task_ids:
                 resource_tag(tags, entry["task"], 1, f"WAITING FOR {short} #{position}")
         state = phones_by_id.get(serial, {}).get("status", "disconnected")
@@ -1122,7 +1190,39 @@ def test_queue(snapshot, phones, now, tags=None):
         group(name, active, waiting, f"phone-{serial}", state)
     any_waiting = any_phone_waiters(trees, now)
     if any_waiting:
+        for entry in any_waiting:
+            entry["detail"] = f"{entry['ticket_kind']} · waiting for any phone"
         group("ANY PHONE", None, any_waiting, "phone-any")
+    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ:
+        tickets = live_tickets(phone_queue_root())
+
+        def arrival(row):
+            try:
+                return int(row[1]["requested_unix_ns"]), row[0]
+            except (KeyError, TypeError, ValueError):
+                return float("inf"), row[0]
+
+        tickets.sort(key=arrival)
+        rows.append(item(f"PHONE TICKETS: {len(tickets)} pending", status="section", item_id="tickets-heading"))
+        if not tickets:
+            rows.append(item("Idle", status="idle", item_id="tickets-state"))
+        for position, (ticket, owner) in enumerate(tickets, 1):
+            pid = int(owner["pid"])
+            task, _, _ = process_owner(pid, trees, owner.get("cwd", ""))
+            held = owner.get("holding")
+            age = since_unix(owner, "acquired_unix_ns" if held else "requested_unix_ns", now)
+            kind = phone_ticket_kind(owner)
+            state = "running" if held else "waiting"
+            row = item(f"#{position}: {titles.get(task, task)} · {kind}"
+                       + (f" · holding {held}" if held else ""),
+                       f"Task: {task}\nTicket: {ticket}\nKind: {kind}\nHolding: {held or 'none'}\nAge: {age}",
+                       f"{state} {age}", item_id=f"ticket-{ticket}")
+            row["phone_title"] = (f"#{position}: {titles.get(task, task)} · {phone_ticket_kind(owner, phone_label)}"
+                                  + (f" · holding {phone_label(held)}" if held else ""))
+            rows.append(row)
+    service_rows = service_request_rows(snapshot)
+    rows.append(item(f"TEST SERVICE: {len(service_rows)} pending", status="section", item_id="service-heading"))
+    rows.extend(service_rows or [item("Idle", status="idle", item_id="service-state")])
     return rows
 
 

@@ -62,6 +62,7 @@
     <section><h2>Active workers</h2><div id="workers" class="stack"></div><a class="more" href="details#workers-detail">All workers</a></section>
     <section><h2>Landing queue</h2><div id="landing" class="stack"></div><a class="more" href="details#landing-detail">Full queue and recent landings</a></section>
     <section><h2>Phone status</h2><div id="phones" class="stack"></div></section>
+    <section><h2>Testing</h2><div id="testing" class="stack"></div></section>
     <section><h2>Allowance</h2><div id="allowance" class="stack"></div></section>
   </div>
   <div id="detail" hidden>
@@ -213,6 +214,7 @@
       render('workers', data.workers, 'No active workers.');
       render('landing', data.landing, 'No work waiting to land.', false, 3);
       render('phones', data.phones, 'No phone status available.');
+      render('testing', data.testing || [], 'No tests pending.');
       render('allowance', data.allowance, 'No allowance data available.');
       if (detail) {
         render('all-decisions', data.needs, 'Nothing needs you right now.', true);

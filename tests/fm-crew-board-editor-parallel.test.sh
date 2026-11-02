@@ -55,10 +55,13 @@ def spawn(pid, tree, script="tests/run_tests.gd", progress=DONE.format("a"), ext
     log.write_text("starting\n" + progress + "\n")
     (process / "fd/1").symlink_to(log)
 
-def read():
+def read_all():
     result = subprocess.run([sys.executable, panel, str(snapshot)], env=env,
                             capture_output=True, text=True, check=True)
-    return [row for row in json.loads(result.stdout)["test_queue"] if row["id"].startswith("suite-")]
+    return json.loads(result.stdout)["test_queue"]
+
+def read():
+    return [row for row in read_all() if row["id"].startswith("suite-")]
 
 (trees[0] / "tests").mkdir()
 (trees[0] / "tests/run_tests.gd").write_text("const TESTS: Array = [\n" + "".join(
@@ -109,12 +112,12 @@ for pid in range(900020, 900025):
     {"id": "bad2", "state": "running", "options": {"suite": True}, "steps": ["x", {"name": "suite", "state": "running", "started": "-inf"}]},
     {"id": "bad3", "state": "queued", "source": str(trees[2]), "options": {"suite": True}, "wait_seconds": "soon", "steps": 7}]}))
 rows = read()
-assert rows[0]["title"] == "EDITOR: 6 running, 1 waiting", rows
-assert any(row["id"] == "suite-wait-service-bad3" and row["status"] == "waiting unknown time" for row in rows), rows
+assert rows[0]["title"] == "EDITOR: 5 running, 0 waiting", rows
+assert {row["id"] for row in read_all() if row["id"].startswith("service-")} >= {"service-bad1", "service-bad2", "service-bad3"}
 (service / "status.json").write_text(json.dumps({"schema": "fm-test-service.v1", "requests": 5}))
 assert read()[0]["title"] == "EDITOR: 5 running, 0 waiting"
 
-# A service suite running from its private copy is the same process, not a sixth run.
+# A service suite running from its private copy appears only in TEST SERVICE.
 run_copy = service / "runs/r1"
 run_copy.parent.mkdir(parents=True)
 subprocess.run(["git", "clone", "--quiet", str(trees[0]), str(run_copy)], check=True)
@@ -132,13 +135,13 @@ spawn(900007, run_copy / "prototype-game")
     "[sharded_suite] shard 0: 5 tests pid=1\n[sharded_suite] shard 1: 6 tests pid=2\n"
     "[sharded_suite] 15s: completed [2, 3]\n[sharded_suite] 30s: completed [4, 3]\n")
 rows = read()
-assert rows[0]["title"] == "EDITOR: 6 running, 2 waiting", rows
-assert len([row for row in rows if row["id"].startswith("suite-running-")]) == 6, rows
-assert any(row["id"] == "suite-running-900007" and "task-1" in row["title"] for row in rows), rows
-assert {row["id"] for row in rows} >= {"suite-wait-service-r2", "suite-wait-service-r3"}, rows
+assert rows[0]["title"] == "EDITOR: 5 running, 0 waiting", rows
+assert len([row for row in rows if row["id"].startswith("suite-running-")]) == 5, rows
+assert "suite-running-900007" not in {row["id"] for row in rows}, rows
+assert {row["id"] for row in read_all() if row["id"].startswith("service-")} >= {"service-r1", "service-r2", "service-r3"}
 shutil.rmtree(proc / "900007")
 rows = read()
-assert rows[0]["title"] == "EDITOR: 6 running, 2 waiting", rows
-assert any("test service request r1" in row["detail"] and row["title"].endswith("· 7/11 tests") for row in rows), rows
-print("ok - Editor lists zero, one, four, unknown, focused, sharded, and service suites")
+assert rows[0]["title"] == "EDITOR: 5 running, 0 waiting", rows
+assert len([row for row in read_all() if row["id"] == "service-r1"]) == 1
+print("ok - Editor lists independent suites while service suites appear once in TEST SERVICE")
 PY
