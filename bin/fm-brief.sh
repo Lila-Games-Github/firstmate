@@ -449,6 +449,7 @@ phase_protocol() {  # <ship|scout>
     "   A phase line never wakes firstmate, so append one each time you move between phases;" \
     "   it adds to the states above and never replaces them: needs-decision, blocked, $PAUSED_VERB, done, and" \
     "   failed are reported only with their own lines, never as a phase."
+  fm_worker_context_block
   if [ "$1" = ship ]; then
     printf '%s\n' \
       "   When your work is ready to merge, append \`${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}: ready-to-merge - {PR URL or branch}\` just" \
@@ -945,8 +946,8 @@ $(phase_protocol ship)
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
-   A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   A mid-task \`working:\` line (including setup complete) is nonterminal: continue the same stage
+   until a defined \`done:\` gate under Definition of done, except at a planned phase handoff below.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
    firstmate then leaves your idle pane alone and rechecks it on a long

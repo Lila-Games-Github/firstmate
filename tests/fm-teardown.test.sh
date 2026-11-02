@@ -1514,6 +1514,8 @@ test_legacy_record_without_routing_cleans_up_and_ledgers_the_gap() {
   local case_dir
   case_dir=$(make_case legacy-no-routing)
   write_legacy_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'blocked: sample blocker' 'needs-decision: sample call' 'note: stale wake observed' \
+    >> "$case_dir/state/task-x1.status"
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
@@ -1527,6 +1529,7 @@ test_legacy_record_without_routing_cleans_up_and_ledgers_the_gap() {
     || fail "legacy-no-routing: teardown returned success with its backlog item still open"
   jq -e -s 'length == 1 and (.[0] | .task_id == "task-x1"
     and .routing.rule == "unrecorded" and .started_at == null
+    and .blocked_count == 1 and .needs_decision_count == 1 and .stale_wake_count == 1
     and (.routing.missing_reason | contains("routing_rule") and contains("routing_started_at")))' \
     "$case_dir/data/routing-ledger.jsonl" >/dev/null \
     || fail "legacy-no-routing: the ledger row did not record the missing-routing reason: $(cat "$case_dir/data/routing-ledger.jsonl" 2>/dev/null)"

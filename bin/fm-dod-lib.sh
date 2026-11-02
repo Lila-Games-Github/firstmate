@@ -38,6 +38,8 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# fm_worker_context_block owns the phase handoff and bounded-context guidance
+# rendered by fm-brief for both ship and scout workers.
 # fm_long_suite_block owns the worker-side contract for a task whose definition
 # of done requires a long-running suite: the durable reattachable job shape that
 # survives one execution-session limit, and the evidence snapshot policy that
@@ -130,6 +132,18 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
       return 1
       ;;
   esac
+}
+
+fm_worker_context_block() {
+  printf '%s\n' \
+    '   For Codex or Claude, finish the current phase, then write a short phase-handoff.md in this worktree' \
+    '   naming completed work, exact files and commit, current gate or job ID, and the next action.' \
+    '   Append a working: phase handoff ready line that names that file, then end the turn.' \
+    '   Firstmate relaunches this task into a fresh session with that file as its progress note;' \
+    '   read the note and continue in the same worktree. Remove the note before final delivery.' \
+    '   Do not request a relaunch while a file mutation or validation command is still running.' \
+    '   Keep long test output and large file contents in worktree files; return only the relevant' \
+    '   summary and file path to the conversation. Batch related independent reads or commands in one turn.'
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold

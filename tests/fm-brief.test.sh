@@ -1448,6 +1448,9 @@ test_phase_protocol_reaches_ship_and_scout_briefs() {
     assert_grep 'Phases: investigating, building, fixing, testing, validating, ready-to-merge.' "$brief" \
       "$kind brief does not name the phase vocabulary"
     assert_grep 'A phase line never wakes firstmate' "$brief" "$kind brief does not say a phase line is quiet"
+    assert_grep 'write a short phase-handoff.md' "$brief" "$kind brief lacks a fresh-session handoff"
+    assert_grep 'Keep long test output and large file contents in worktree files' "$brief" "$kind brief lacks bounded tool output"
+    assert_grep 'Batch related independent reads or commands in one turn' "$brief" "$kind brief lacks batched work guidance"
     # shellcheck disable=SC2016 # the backticks are literal brief text
     cmd=$(sed -n 's/^   `\(echo "phase: {phase} - {one short line}" >> .*\)`$/\1/p' "$brief")
     [ -n "$cmd" ] || fail "$kind brief carries no phase command"

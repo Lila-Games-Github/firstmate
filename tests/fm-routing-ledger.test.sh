@@ -109,6 +109,13 @@ jq -e 'select(.task_id == "codex-task") | .cost.sessions[0].raw.input_tokens == 
   "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "Codex cumulative usage was miscounted"
 pass "Codex cumulative tokens use the final total and price table"
 
+sed 's/gpt-6.1-sol/gpt-6-sol/' "$LAB/codex.jsonl" > "$LAB/codex-sol.jsonl"
+make_meta codex-sol codex "$LAB/codex-sol.jsonl" gpt-6-sol
+record codex-sol
+jq -e 'select(.task_id == "codex-sol") | .cost.usd_estimate == 0.00664' \
+  "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "GPT-6 Sol cached input price was not applied"
+pass "GPT-6 Sol cached input uses the published model price"
+
 mkdir -p "$LAB/codex-home/sessions/2026/10/25"
 cp "$LAB/codex.jsonl" "$LAB/codex-home/sessions/2026/10/25/discovered.jsonl"
 make_meta discovered-task codex '' gpt-6.1-sol
@@ -173,14 +180,14 @@ jq -e 'select(.task_id == "rerun-task") |
 pass "Missing relaunch usage prevents a complete cost estimate"
 
 out=$(python3 "$TOOL" summary --data "$LAB/data" --from 2026-01-01 --to 2027-01-01)
-printf '%s\n' "$out" | grep -F $'rule_1\t8\t1.000\t1.5\t1\t5/8\t0.00662\tnull' >/dev/null \
+printf '%s\n' "$out" | grep -F $'rule_1\t9\t1.000\t1.5\t1\t6/9\t0.00662\tnull' >/dev/null \
   || fail "summary treated missing usage as zero cost: $out"
 pass "Summary groups by rule and preserves incomplete cost"
 
 printf '{"id":"lc-later","captured_at":"%s","incident":{"origin_task":"codex-task","signal_type":"review-rejection"}}\n' \
   "$(iso_at $((STAMP + 5)))" > "$LAB/state/learning-candidates/lc-later.dismissed.json"
 out=$(python3 "$TOOL" summary --data "$LAB/data" --state "$LAB/state" --from 2026-01-01 --to 2027-01-01)
-printf '%s\n' "$out" | grep -F $'rule_1\t8\t1.000\t1.5\t2\t5/8\t0.00662\tnull' >/dev/null \
+printf '%s\n' "$out" | grep -F $'rule_1\t9\t1.000\t1.5\t2\t6/9\t0.00662\tnull' >/dev/null \
   || fail "summary did not join a correction captured after teardown: $out"
 jq -es 'map(select(.task_id == "codex-task")) | .[0].outcome.captain_rejected == null' \
   "$LAB/data/routing-ledger.jsonl" >/dev/null || fail "summary rewrote the teardown snapshot"
