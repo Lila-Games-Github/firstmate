@@ -354,7 +354,7 @@
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEF__    absolute path to the brief or its bounded launch pointer
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
@@ -4953,7 +4953,22 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
-sq_brief=$(shell_quote "$BRIEF")
+# Positional prompts pass through exec's per-argument limit. Ordinary briefs
+# retain their direct launch contract; large ones use a small file pointer.
+if [ "$(wc -c < "$BRIEF")" -gt 8192 ]; then
+  LAUNCH_POINTER="$DATA/$ID/launch-pointer.md"
+  LAUNCH_POINTER_TMP="$DATA/$ID/.launch-pointer.${BASHPID:-$$}"
+  if ! mkdir -p "$DATA/$ID" \
+    || ! printf 'Read the brief at %s and follow it exactly.\n' "$BRIEF_REAL" > "$LAUNCH_POINTER_TMP" \
+    || ! mv -f "$LAUNCH_POINTER_TMP" "$LAUNCH_POINTER"; then
+      rm -f "$LAUNCH_POINTER_TMP"
+      echo "error: could not publish launch pointer for $ID" >&2
+      exit 1
+  fi
+  sq_brief=$(shell_quote "$LAUNCH_POINTER")
+else
+  sq_brief=$(shell_quote "$BRIEF")
+fi
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
 sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts")
