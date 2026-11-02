@@ -391,7 +391,10 @@ fm_dod_block() {  # <mode> <task-id> [landing-branch]
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\` and the \`direct-pr\` label. This repository's required check accepts that label.
+Before reporting done, use \`gh-axi run list --commit <pushed head SHA>\` with an explicit repository scope to confirm a CI run exists for that exact pushed head, then use \`gh-axi pr checks\` to confirm the required checks are green.
+If there is no CI run after two minutes, merge the latest main into your branch, push the resulting head, and wait up to two minutes for its run. If the new pushed head also has no CI run, report \`blocked: no CI run for pushed head\` with both SHAs and stop; do not report done.
+Once the pushed head has a CI run and required checks are green, append \`done: PR {url} checks green\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       fm_direct_pr_target_block "$landing_branch" || return 1
@@ -454,4 +457,8 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+  cat <<'EOF'
+
+For a data-driven or tooling deliverable, run it once against the authoritative input and record the observed record counts beside the source's own counts in the completion report. Include a known-bad fixture and show that its validator rejects it. Refuse a completion report with no observed counts, even when synthetic tests pass.
+EOF
 }
