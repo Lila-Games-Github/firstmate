@@ -1,0 +1,30 @@
+===== scenario: done-landed (status: done: task work complete; work merged to local main)
+--- untracked before teardown:
+?? .task_tmp/
+?? prototype/
+--- fm-teardown.sh exit=0 output:
+[treehouse stub] return --force <case>/wt
+teardown task-x1 complete (window firstmate:fm-task-x1, worktree <case>/wt)
+Backlog: task-x1 just finished (this home keeps no markdown backlog at <case>/data/backlog.md). Update <case>/data/backlog.md - move task-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+--- untracked after teardown:
+--- data/task-x1/cleanup.md:
+# Treehouse cleanup
+
+Return pending; top-level changed paths selected for reset or removal:
+- .task_tmp
+- prototype
+
+Return completed; the paths above were reset or removed.
+
+===== scenario: not-done-dirty (status: working: task not complete; work merged to local main)
+--- untracked before teardown:
+?? .task_tmp/
+?? prototype/
+--- fm-teardown.sh exit=1 output:
+REFUSED: worktree <case>/wt has uncommitted changes or untracked files and task task-x1 has not reported done.
+uncommitted changes present
+Have the worker report done, commit the changes, or get the captain's explicit OK to discard, then --force.
+--- untracked after teardown:
+?? .task_tmp/
+?? prototype/
+
