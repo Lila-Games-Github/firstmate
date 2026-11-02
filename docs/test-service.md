@@ -19,7 +19,7 @@ The quick device command performs the short phone check.
 The file also names the ordered phone serials, named scenario argument arrays, and landing branch.
 Optional `landing_gates` names checks the worker must record for the exact pre-queue head and tip before `ready` accepts the car.
 FrogPile's example requires `real-phone`, which the worker records after the real-phone end-to-end check passes.
-`max_concurrent` limits active requests for that project; it defaults to one and may be set from one to sixteen.
+`max_concurrent` limits active suite requests for that project; it defaults to one and may be set from one to sixteen.
 An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
 A ship brief for a repository that matches exactly one configuration names that project in its test-service gate.
 Each suite command must use its project's shared queue entry point, so other callers and service requests share the same capacity and arrival order.
@@ -29,9 +29,11 @@ An optional `landing_repo` absolute path, with `{fm_home}` expansion, selects a 
 Use `{serial}` in the device argv where the chosen serial belongs.
 The phone command must use the project's shared phone queue entry point when it has one.
 FrogPile's suite configuration calls `prototype-game/tests/run_suite.sh`, whose four-place queue owns suite admission, worktree isolation, the no-output watchdog, and script-error verdicts for service and direct callers alike.
-The example caps FrogPile at four active requests through `max_concurrent`; these request slots include phone and preparation time.
+The example caps FrogPile at four active suite requests through `max_concurrent`; these suite slots include phone and preparation time.
+Requests without a suite start without consuming a suite slot, so a phone-only performance harness can use its free phone while suites wait for another phone.
 The service takes no separate suite or phone lock and does not stop the adb server.
 The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
+Queued front checks start before ordinary queued requests; each class keeps submission order, and a request already running is never interrupted.
 
 ## Performance plans
 
@@ -71,14 +73,15 @@ bin/fm-test-service.py submit frogpile /path/to/ProjectWhite e90ef2869c8bc8a2c9e
 ```
 
 For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json` and add the project's touched-file suite and short phone commands as `quick_suite` and `quick_device` before using the landing queue.
-An `any` request chooses the first connected phone in `any_phones`, ordered with the S22 first, and enters the project's shared queue for that phone.
+An `any` request chooses the first connected, free phone in `any_phones`, ordered with the S22 first, and enters the project's shared queue for that phone.
+While every connected functional phone is busy, the service waits and retries instead of pinning the request to one busy serial.
 The older `any_device` command remains accepted in existing configuration files but is ignored so a project queue cannot select a phone outside `any_phones`.
-When a named phone is disconnected, `equivalent_phones` selects the first connected alternative and the project queue waits until that phone is idle.
+When a named phone is disconnected or busy, `equivalent_phones` supplies other functional phones to try before waiting.
 The service monitors the selected phone during the test and retries on another equivalent if it disconnects.
 When none is connected, the request fails with a `device-unavailable` alert instead of leaving an offline ticket waiting forever.
 Submit a new request after a phone reconnects.
 The FrogPile preparation starts Godot's editor import so class discovery works in a fresh checkout.
-The M31 remains explicitly addressable for performance requests and is excluded from the functional phone alternatives.
+The M31 remains explicitly addressable for performance requests and is rejected as a functional phone.
 The example is configuration, not a second copy of the suite or phone queue.
 
 A worker submits the exact committed head and resumes on the completion message in its steering inbox.
@@ -103,7 +106,7 @@ A retired task is skipped and logged; a failed send is logged and retried indepe
 Completions recorded before a store first gained its notification outbox are settled as skipped, so an upgrade never replays history.
 The standalone `wait ID` command remains available for interactive operators and scripts.
 
-`submit` refuses a short SHA, an unavailable commit, a harness that is not committed in that commit, an unknown scenario, or a phone outside the project configuration.
+`submit` refuses a short SHA, an unavailable commit, a harness that is not committed in that commit, an unknown scenario, or a functional phone outside `any_phones` when that list is configured.
 `status --json` prints the same JSON published at the status path; `cancel ID` cancels a queued request, asks the runner to stop a running one, or stops future retests of a completed one.
 A full request with `--suite` writes a three-line `fm-full-suite.v1` success receipt; a failed run writes `results/ID/SHA.failure.json` with its first failing step and message.
 For a front check, submit `--suite --check quick --target <front-target-sha> --device-gate any --receipt <path>`.

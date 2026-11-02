@@ -92,7 +92,16 @@ cat > benchmark.sh <<'BENCH'
 #!/usr/bin/env bash
 echo "benchmark-v1" >> "$EVENTS"
 BENCH
-chmod +x prepare.sh suite.sh phone.sh benchmark.sh
+cat > m31-perf.sh <<'PERF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec {phone_lock}> "$HOME/m31-perf.lock"
+flock -n "$phone_lock"
+echo 'm31-perf-start' >> "$EVENTS"
+sleep .2
+echo 'm31-perf-end' >> "$EVENTS"
+PERF
+chmod +x prepare.sh suite.sh phone.sh benchmark.sh m31-perf.sh
 git add . && git commit -qm v1
 sha1=$(git rev-parse HEAD)
 printf '\necho dirty-live-tree >&2; exit 1\n' >> suite.sh
@@ -174,6 +183,38 @@ if grep -q '1234' "$FM_TEST_SERVICE_STATE/status.json" "$FM_TEST_SERVICE_STATE"/
 any_phone=$($svc submit fake "$PWD" "$sha1" --suite --device-gate any)
 $svc wait "$any_phone" | grep -q '^passed '
 grep -q '^phone-start-v1:S22:$' "$EVENTS"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data['max_concurrent']=2
+open(path,'w').write(json.dumps(data))
+PY
+touch "$HOME/slow-phone"
+before_s22=$(grep -c '^phone-start-v1:S22:$' "$EVENTS")
+concurrent_one=$($svc submit fake "$PWD" "$sha1" --device-gate any)
+for i in $(seq 1 300); do
+  [ "$(grep -c '^phone-start-v1:S22:$' "$EVENTS")" -gt "$before_s22" ] && break
+  sleep .05
+done
+[ "$i" -lt 300 ]
+concurrent_two=$($svc submit fake "$PWD" "$sha1" --device-gate any)
+$svc wait "$concurrent_two" | grep -q '^passed '
+$svc wait "$concurrent_one" | grep -q '^passed '
+grep -q '^phone-start-v1:S21:$' "$EVENTS"
+if grep -q '^phone-start-v1:M31:' "$EVENTS"; then fail 'functional any request used performance phone'; fi
+rm "$HOME/slow-phone"
+flock /tmp/frogpile-phone-S22.lock -c 'sleep 4' & external_phone=$!
+sleep .2
+leased=$($svc submit fake "$PWD" "$sha1" --device-gate any)
+$svc wait "$leased" | grep -q '^passed '
+wait "$external_phone"
+[ "$(tail -2 "$EVENTS" | grep -c '^phone-start-v1:S21:$')" -eq 1 ]
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data.pop('max_concurrent')
+open(path,'w').write(json.dumps(data))
+PY
 printf 'S21\nM31\n' > "$HOME/online-devices"
 fallback=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$fallback" | grep -q '^passed '
@@ -194,9 +235,10 @@ $svc wait "$disconnect" | grep -q '^passed '
 rm "$HOME/slow-phone"
 [ "$(grep -c '^phone-start-v1:S21:$' "$EVENTS")" -gt "$before_s21" ]
 printf 'S21\n' > "$HOME/online-devices"
-performance=$($svc submit fake "$PWD" "$sha1" --device-gate M31)
-$svc wait "$performance" > "$tmp/performance.out" && exit 1 || true
-grep -q 'device-unavailable: M31' "$tmp/performance.out"
+if $svc submit fake "$PWD" "$sha1" --device-gate M31 > "$tmp/performance.out" 2>&1; then
+  fail 'performance phone accepted for functional run'
+fi
+grep -q 'phone is not configured for functional runs' "$tmp/performance.out"
 : > "$HOME/online-devices"
 offline=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$offline" > "$tmp/offline.out" && exit 1 || true
@@ -367,6 +409,20 @@ PY
   sleep .05
 done
 [ "$i" -lt 300 ]
+for i in $(seq 1 300); do
+  [ "$(grep -c '^parallel-start:' "$EVENTS")" -ge 4 ] && break
+  sleep .05
+done
+[ "$i" -lt 300 ]
+performance=$($svc submit fake "$PWD" "$sha1" --task m31-only --harness m31-perf.sh)
+$svc wait "$performance" | grep -q "^passed $sha1"
+python3 - "$EVENTS" <<'PY'
+from pathlib import Path
+import sys
+events=Path(sys.argv[1]).read_text().splitlines()
+assert 'm31-perf-end' in events
+assert not any(e.startswith('parallel-end:') for e in events[:events.index('m31-perf-start')])
+PY
 for id in "${parallel_ids[@]}"; do
   $svc wait "$id" | grep -q "^passed $sha1"
 done
@@ -413,7 +469,7 @@ done
 [ "$(grep -c '^parallel-start:' "$EVENTS")" -ge "$((before_parallel + 8))" ]
 # A project's concurrency comes only from its configuration, never from its name.
 cat > "$FM_HOME/config/test-service/frogpile.json" <<'JSON'
-{"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"phones":["S22"],"landing_branch":"main"}
+{"suite":["suite.sh"],"quick_suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"quick_device":["phone.sh","--serial","{serial}"],"phones":["S22"],"landing_branch":"main"}
 JSON
 named=()
 for n in 1 2; do
@@ -433,6 +489,26 @@ done
 for id in "${named[@]}"; do
   $svc wait "$id" | grep -q "^passed $sha1"
 done
+priority_running=$($svc submit frogpile "$PWD" "$sha1" --task priority-running --suite)
+for i in $(seq 1 300); do
+  if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$priority_running" <<'PY' 2>/dev/null
+import json,sys
+assert any(row['id']==sys.argv[2] for row in json.load(open(sys.argv[1]))['running_requests'])
+PY
+  then break; fi
+  sleep .05
+done
+[ "$i" -lt 300 ]
+priority_ordinary=$($svc submit frogpile "$PWD" "$sha1" --task priority-ordinary --suite)
+priority_quick=$($svc submit frogpile "$PWD" "$sha1" --task priority-quick --suite --check quick --target "$sha1" --device-gate S22)
+for id in "$priority_running" "$priority_ordinary" "$priority_quick"; do
+  $svc wait "$id" | grep -q "^passed $sha1"
+done
+python3 - "$FM_TEST_SERVICE_STATE/status.json" "$priority_quick" "$priority_ordinary" <<'PY'
+import json,sys
+rows={row['id']:row for row in json.load(open(sys.argv[1]))['requests']}
+assert rows[sys.argv[2]]['started'] < rows[sys.argv[3]]['started'], 'landing check did not start first'
+PY
 rm "$FM_HOME/config/test-service/frogpile.json"
 # The project suite entry point reports its script error to the service.
 cat > suite.sh <<'SCRIPT_ERROR'
