@@ -4,6 +4,12 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>] [--base-health-receipt <path>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--routing-rule <matched-rule>|--routing-reason <manual-override-reason>] [--routing-provider <provider>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--routing-rule <matched-rule>|--routing-reason <manual-override-reason>] [--routing-provider <provider>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--routing-reason <manual-selection-reason>] [--routing-provider <provider>] --secondmate
+#   Fresh local dispatches check the selected provider's prepaid USD credits
+#   from the same quota-axi JSON snapshot recorded in task metadata. The floor
+#   defaults to 5 USD; config/prepaid-credit-floor-usd overrides it with one
+#   nonnegative amount. A known balance below the floor refuses before launch.
+#   An absent or unreadable balance warns and proceeds. Relaunches preserve the
+#   original routing decision and do not repeat the credit check.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -2795,6 +2801,46 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
+ROUTING_QUOTA=
+ROUTING_QUOTA_REASON='quota-axi-unavailable'
+if [ "$RELAUNCH" -eq 0 ]; then
+  [ -n "$ROUTING_PROVIDER" ] || ROUTING_PROVIDER=$(fm_quota_single_provider_for_harness "$HARNESS" 2>/dev/null || true)
+  CREDIT_FLOOR=5
+  if [ -e "$CONFIG/prepaid-credit-floor-usd" ] || [ -L "$CONFIG/prepaid-credit-floor-usd" ]; then
+    CREDIT_FLOOR=$(cat "$CONFIG/prepaid-credit-floor-usd" 2>/dev/null) || CREDIT_FLOOR=
+    if [[ ! "$CREDIT_FLOOR" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      echo "error: config/prepaid-credit-floor-usd must contain one nonnegative USD amount" >&2
+      exit 1
+    fi
+  fi
+  if [ -z "$ROUTING_PROVIDER" ]; then
+    ROUTING_QUOTA_REASON='provider-unresolved'
+  elif command -v quota-axi >/dev/null 2>&1; then
+    ROUTING_QUOTA_ALL=$(quota-axi --json 2>/dev/null || true)
+    if [ -n "$ROUTING_QUOTA_ALL" ] && printf '%s' "$ROUTING_QUOTA_ALL" | fm_quota_json_valid >/dev/null 2>&1; then
+      ROUTING_QUOTA=$(printf '%s' "$ROUTING_QUOTA_ALL" | jq -c --arg provider "$ROUTING_PROVIDER" '.providers[]? | select(.provider == $provider)' 2>/dev/null | head -1)
+      if [ -n "$ROUTING_QUOTA" ]; then
+        ROUTING_QUOTA_REASON=
+        CREDIT_BALANCE=$(printf '%s' "$ROUTING_QUOTA" | jq -r 'if .credits.unit == "usd" and (.credits.remaining | type) == "number" then .credits.remaining else empty end')
+        if [ -n "$CREDIT_BALANCE" ]; then
+          if jq -ne --argjson balance "$CREDIT_BALANCE" --argjson floor "$CREDIT_FLOOR" '$balance < $floor' | grep -qx true; then
+            echo "error: $ROUTING_PROVIDER balance $CREDIT_BALANCE usd is below the $CREDIT_FLOOR usd floor; route this task to another profile" >&2
+            exit 1
+          fi
+        else
+          echo "warning: $ROUTING_PROVIDER credit balance absent or unreadable; prepaid credit floor was not checked, proceeding" >&2
+        fi
+      else
+        ROUTING_QUOTA_REASON='provider-absent-from-snapshot'
+      fi
+    else
+      ROUTING_QUOTA_REASON='snapshot-unreadable'
+    fi
+  fi
+  if [ -n "$ROUTING_QUOTA_REASON" ]; then
+    echo "warning: $ROUTING_PROVIDER credit balance unreadable ($ROUTING_QUOTA_REASON); prepaid credit floor was not checked, proceeding" >&2
+  fi
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
@@ -4740,9 +4786,6 @@ preserve_relaunch_routing_meta() {
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   if [ "$RELAUNCH" -eq 0 ]; then
-    if [ -z "$ROUTING_PROVIDER" ]; then
-      ROUTING_PROVIDER=$(fm_quota_single_provider_for_harness "$HARNESS" 2>/dev/null || true)
-    fi
     echo "routing_rule=${ROUTING_RULE:-manual}"
     if [ -n "$ROUTING_RULE" ]; then
       echo "routing_reason="
@@ -4756,23 +4799,7 @@ preserve_relaunch_routing_meta() {
     echo "routing_effort=${EFFORT:-default}"
     echo "routing_started_at=$(date +%s)"
     echo "routing_instance_id=$SPAWN_GEN"
-    ROUTING_QUOTA_REASON='quota-axi-unavailable'
-    if [ -z "$ROUTING_PROVIDER" ]; then
-      ROUTING_QUOTA_REASON='provider-unresolved'
-    elif command -v quota-axi >/dev/null 2>&1; then
-      ROUTING_QUOTA_ALL=$(quota-axi --json 2>/dev/null || true)
-      if [ -n "$ROUTING_QUOTA_ALL" ] && printf '%s' "$ROUTING_QUOTA_ALL" | fm_quota_json_valid >/dev/null 2>&1; then
-        ROUTING_QUOTA=$(printf '%s' "$ROUTING_QUOTA_ALL" | jq -c --arg provider "$ROUTING_PROVIDER" '.providers[]? | select(.provider == $provider)' 2>/dev/null | head -1)
-        if [ -n "$ROUTING_QUOTA" ]; then
-          echo "routing_quota=$ROUTING_QUOTA"
-          ROUTING_QUOTA_REASON=
-        else
-          ROUTING_QUOTA_REASON='provider-absent-from-snapshot'
-        fi
-      else
-        ROUTING_QUOTA_REASON='snapshot-unreadable'
-      fi
-    fi
+    [ -z "$ROUTING_QUOTA" ] || echo "routing_quota=$ROUTING_QUOTA"
     echo "routing_quota_reason=$ROUTING_QUOTA_REASON"
     echo "routing_relaunches=0"
   else

@@ -372,6 +372,49 @@ SH
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
 
+test_prepaid_credit_floor() {
+  local rec id out status balance balance_value
+  local -a credit_route
+  for balance in 2 2-rule 8 unreadable; do
+    balance_value=${balance%%-*}
+    id="credit-floor-$balance"
+    rec=$(make_spawn_case "credit-floor-$balance" pi "$id")
+    read_case_record "$rec"
+    printf '5\n' > "$HOME_DIR/config/prepaid-credit-floor-usd"
+    cat > "$FAKEBIN_DIR/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_CREDIT_BALANCE:-}" = unreadable ]; then
+  printf '%s\n' 'invalid snapshot'
+else
+  printf '{"schemaVersion":5,"providers":[{"provider":"openrouter","credits":{"remaining":%s,"unit":"usd"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}\n' "$FM_TEST_CREDIT_BALANCE"
+fi
+SH
+    chmod +x "$FAKEBIN_DIR/quota-axi"
+    credit_route=(--routing-reason 'manual DeepSeek selection')
+    [ "$balance" != 2-rule ] || credit_route=(--routing-rule 'DeepSeek work')
+    out=$(FM_TEST_CREDIT_BALANCE="$balance_value" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" --harness pi --model deepseek/deepseek-chat \
+      "${credit_route[@]}" --routing-provider openrouter 2>&1)
+    status=$?
+    if [ "$balance_value" = 2 ]; then
+      expect_code 1 "$status" "below-floor prepaid balance should refuse a manual route"
+      assert_contains "$out" 'openrouter balance 2 usd is below the 5 usd floor' "refusal omitted balance or floor"
+      assert_contains "$out" 'another profile' "refusal omitted rerouting guidance"
+      assert_absent "$HOME_DIR/state/$id.meta" "refusal created task metadata"
+      [ ! -s "$LAUNCH_LOG" ] || fail "below-floor task launched"
+    else
+      expect_code 0 "$status" "above-floor or unreadable balance should launch"
+      if [ "$balance" = unreadable ]; then
+        assert_contains "$out" 'credit balance unreadable' "unreadable balance passed silently"
+      else
+        assert_grep '"remaining":8' "$HOME_DIR/state/$id.meta" "launch lost checked snapshot"
+      fi
+      [ -s "$LAUNCH_LOG" ] || fail "eligible task did not launch"
+    fi
+  done
+  pass "prepaid credit floor refuses low balance and discloses unreadable balance"
+}
+
 test_active_dispatch_profile_allows_positional_harness() {
   local rec id out status
   id=profile-positional-z14
@@ -1557,6 +1600,7 @@ test_unresolvable_relative_overrides_fail_loudly
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness
+test_prepaid_credit_floor
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort

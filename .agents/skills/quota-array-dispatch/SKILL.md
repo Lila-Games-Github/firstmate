@@ -68,6 +68,7 @@ You establish those relations yourself, in the open, from the candidate's own au
 Confirm the catalog lists the candidate's model and record the provider family it reports.
 A model the catalog does not list is concrete contradictory evidence: block that candidate and quote the catalog result.
 Apply quota at the granularity the vendor actually supplies.
+Treat a provider below the prepaid USD credit floor owned by `bin/fm-spawn.sh` as ineligible.
 A provider-level or `all_models`/`all_products` scope bounds every model you established in that family, including one with no window of its own.
 A named-model or named-product scope is an additional bound for that model alone.
 Match the candidate to its `quota[]` row by that established provider and scope; a stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.
