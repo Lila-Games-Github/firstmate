@@ -39,15 +39,19 @@
 # receipt (parser: fm-landing-health-lib.sh) only for the bottom car's current
 # head and target. Upper-car receipt and gate submissions are refused.
 # A target/head race refuses the submission; status then supplies the new work.
-# gate requires --gate, --head, --target, and --receipt for a configured landing
+# gate requires --gate, --head, --target, and --receipt for a passing configured landing
 # gate. Its receipt is exactly four lines: schema=fm-landing-gate.v1,
 # gate=<name>, sha=<full head SHA>, target=<full target SHA>. The worker submits
-# it only after that check passes. The queue snapshots the claim and accepts it
+# it only after that check passes. Use --reason instead of --receipt when the
+# gate fails. A failing final receipt or gate at the front moves that car to
+# the back when another car waits, and sends it one durable reason message.
+# Its old final evidence is cleared; it fixes its branch while waiting and
+# rebases and tests again only on reaching the front. The queue accepts it
 # only for the current head and target. A missing gate yields needs-gate with
 # the gate name in reason; it never emits a readiness wake.
 # fail removes a car from the active train with --reason, a single line without
-# control characters other than '-', recorded for later status calls; it cannot silently
-# rejoin. Start a new task id after resolving a failed car. Landed ids also stay
+# control characters other than '-', recorded for later status calls. A later
+# ready with the same id and branch re-enrolls it at the back. Landed ids stay
 # terminal. A missing branch whose recorded head is in the landing tip is landed;
 # any other missing branch becomes a failed car on reconciliation.
 # baseline requires --receipt for exactly the live landing tip and records it as
@@ -71,7 +75,7 @@
 # no recorded baseline, or red-receipt when it names failures outside that
 # baseline; neither demands another suite run on the same head. Once firstmate
 # records the baseline, the car becomes ready-to-land, needs-gate, or red-receipt.
-# red-receipt is the worker's to fix on a new head or fail.
+# red-receipt is the worker's to fix on a new head when no other car waits.
 # Existing v1 rows and still-matching receipts remain readable without migration.
 # Only ready-to-land (bottom, acceptable receipt, every configured gate passed,
 # fast-forward of the live tip),
@@ -180,7 +184,7 @@ trap 'trap "" TERM INT HUP; exit 143' TERM INT HUP
 fm_lock_acquire_wait "$LOCK"
 FILE="$DIR/queue"
 ids=() branches=() heads=() states=() bases=() receipts=() targets=() notified=() reasons=()
-count=0 found=-1 joined=0
+count=0 found=-1 joined=0 requeue_reason='' waiting=0
 if [ -e "$FILE" ]; then
   [ -f "$FILE" ] && [ ! -L "$FILE" ] || die 'invalid queue snapshot'
   {
@@ -268,8 +272,21 @@ if [ "$ACTION" = ready ]; then
     count=$((count + 1))
     joined=1
   else
-    [ "${states[found]}" = active ] || die "task is already ${states[found]}; use a new task id"
+    [ "${states[found]}" != landed ] || die 'landed task cannot rejoin'
     [ "${branches[found]}" = "$BRANCH" ] || die 'cannot change a queued task branch'
+    if [ "${states[found]}" = failed ]; then
+      ! git -C "$PROJECT" merge-base --is-ancestor "$HEAD" "$TIP" || die 'nothing to land: head is already in the landing branch'
+      for ((i=found; i<count-1; i++)); do
+        ids[i]=${ids[i+1]} branches[i]=${branches[i+1]} heads[i]=${heads[i+1]}
+        states[i]=${states[i+1]} bases[i]=${bases[i+1]} receipts[i]=${receipts[i+1]}
+        targets[i]=${targets[i+1]} notified[i]=${notified[i+1]} reasons[i]=${reasons[i+1]}
+      done
+      found=$((count - 1))
+      ids[found]=$ID branches[found]=$BRANCH heads[found]=$HEAD states[found]=active
+      bases[found]=$(git -C "$PROJECT" merge-base "$HEAD" "$TIP") || die 'task and landing branch have no common base'
+      receipts[found]=- targets[found]=- notified[found]=- reasons[found]=-
+      joined=1
+    fi
   fi
 fi
 [ "$found" -ge 0 ] || [ "$ACTION" = reconcile ] || die 'task has not joined the landing queue; run ready first'
@@ -286,7 +303,7 @@ assign() {
     places[i]=$position target_refs[i]=$ref target_shas[i]=$sha
     if [ "${targets[i]}" != "$sha" ]; then receipts[i]=-; targets[i]=-; fi
     if [ "$position" -gt 1 ]; then
-      statuses[i]=waiting-for-front
+      statuses[i]='waiting-for-front'
       ref="refs/heads/${branches[i]}" sha=${heads[i]}
       continue
     fi
@@ -339,12 +356,17 @@ case "$ACTION" in
     [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
       && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
     git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" || die 'head is not a fast-forward of the assigned target'
-    [ -n "$RECEIPT" ] || die 'gate requires --receipt'
-    TMP=$(mktemp "$DIR/.gate.XXXXXX")
-    cp -- "$RECEIPT" "$TMP" || die 'cannot stage gate receipt'
-    gate_receipt_read "$TMP" "$GATE" "$HEAD" "$TARGET" || die 'invalid exact-head and target gate receipt'
-    mv -f -- "$TMP" "$(gate_receipt_path "$ID" "$GATE" "$HEAD" "$TARGET")"
-    TMP=
+    if [ -n "$REASON" ]; then
+      [ -z "$RECEIPT" ] || die 'gate failure cannot also submit a passing receipt'
+      requeue_reason="landing gate $GATE failed: $REASON"
+    else
+      [ -n "$RECEIPT" ] || die 'gate requires --receipt or --reason'
+      TMP=$(mktemp "$DIR/.gate.XXXXXX")
+      cp -- "$RECEIPT" "$TMP" || die 'cannot stage gate receipt'
+      gate_receipt_read "$TMP" "$GATE" "$HEAD" "$TARGET" || die 'invalid exact-head and target gate receipt'
+      mv -f -- "$TMP" "$(gate_receipt_path "$ID" "$GATE" "$HEAD" "$TARGET")"
+      TMP=
+    fi
     ;;
   fail)
     [ -n "$REASON" ] || die 'fail requires --reason'
@@ -403,6 +425,30 @@ for ((i=0; i<count; i++)); do
   done
 done
 
+# A failing final check moves only the front car behind the other active cars.
+if [ -z "$requeue_reason" ] && [ "$found" -ge 0 ] && [ "${statuses[found]}" = red-receipt ]; then
+  requeue_reason=${reasons[found]}
+fi
+if [ -n "$requeue_reason" ] && [ "$found" -ge 0 ] && [ "${places[found]}" -eq 1 ]; then
+  for ((i=0; i<count; i++)); do
+    [ "$i" -eq "$found" ] || [ "${states[i]}" != active ] || waiting=1
+  done
+  if [ "$waiting" -eq 1 ]; then
+    moved_id=${ids[found]} moved_branch=${branches[found]}
+    moved_head=${heads[found]} moved_base=${bases[found]}
+    for ((i=found; i<count-1; i++)); do
+      ids[i]=${ids[i+1]} branches[i]=${branches[i+1]} heads[i]=${heads[i+1]}
+      states[i]=${states[i+1]} bases[i]=${bases[i+1]} receipts[i]=${receipts[i+1]}
+      targets[i]=${targets[i+1]} notified[i]=${notified[i+1]} reasons[i]=${reasons[i+1]}
+    done
+    found=$((count - 1))
+    ids[found]=$moved_id branches[found]=$moved_branch heads[found]=$moved_head
+    states[found]=active bases[found]=$moved_base receipts[found]=- targets[found]=-
+    notified[found]=- reasons[found]=-
+    assign
+  fi
+fi
+
 # Persist queue and wake publication under the wake lock. Repeated status calls
 # do not ring again for an unchanged readiness/failure event.
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
@@ -425,6 +471,28 @@ done
 save
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=0
+
+if [ "$waiting" -eq 1 ]; then
+  marker="$DIR/requeue-$moved_id"
+  [ ! -L "$marker" ] || die "requeue marker is a symlink: $marker"
+  TMP=$(mktemp "$DIR/.requeue.XXXXXX")
+  printf '%s\n' "$requeue_reason" > "$TMP"
+  mv -f -- "$TMP" "$marker"
+  TMP=
+fi
+for ((i=0; i<count; i++)); do
+  marker="$DIR/requeue-${ids[i]}"
+  [ ! -L "$marker" ] || die "requeue marker is a symlink: $marker"
+  [ -f "$marker" ] || continue
+  [ -f "$STATE/${ids[i]}.meta" ] || continue
+  requeue_message_reason=$(cat -- "$marker")
+  if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${ids[i]}" \
+    "Landing queue: task=${ids[i]} moved to back because $requeue_message_reason. Fix your branch while waiting; run landing_queue status when you reach front, then rebase and retest." 2>&1 >/dev/null); then
+    printf 'warning: could not steer %s after requeue; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
+    continue
+  fi
+  rm -f -- "$marker"
+done
 
 for ((i=0; i<count; i++)); do
   marker="$DIR/park-${ids[i]}"

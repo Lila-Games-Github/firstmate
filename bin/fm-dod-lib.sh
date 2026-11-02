@@ -367,11 +367,13 @@ landing_queue() {
 3. At \`needs-final\` (bottom on the live tip), run the task's full suite on exactly that committed head and create its receipt using the format owned by \`$root/bin/fm-landing-health-lib.sh\`.
    Submit with \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
    For each required landing gate shown by this project's test-service configuration, complete that check on the same head and target, write the four-line \`fm-landing-gate.v1\` receipt from the queue tool's \`--help\`, and submit \`landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
+   If a landing gate fails, record it with \`landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha> --reason <failure>\`.
    At \`needs-gate\`, read the missing gate in \`reason\` and submit its pass after the check succeeds; status becomes ready only when all declared gates pass.
    A changed head or target refuses the receipt: read status and finalize again only when bottom on the live tip, under the re-capture budget above.
-   If your car fails, record \`landing_queue fail --reason <failure>\` before reporting \`failed:\` and stopping.
-   At \`red-receipt\`, do not rerun the suite on the same head: fix the failures its \`reason\` names in a new commit and finalize again, or record the failure as above.
-   At \`failed\`, report \`failed:\` with the status \`reason\` and stop.
+   A failing final receipt or gate moves your car to the back if another car waits. Read status, fix your branch while waiting, and rebase and retest only when your car reaches the front again.
+   At \`red-receipt\` with no waiting successor, do not rerun the suite on the same head: fix its failures in a new commit and finalize again.
+   Use \`landing_queue fail --reason <failure>\` only when leaving the train. A later \`landing_queue ready\` re-enrolls a failed id and branch at the back.
+   At \`failed\`, report \`failed:\` with the status \`reason\` and stop unless you are ready to re-enroll.
 4. At \`ready-to-land\` or \`needs-baseline\`, append \`paused: landing-queue <status>\` and end your turn without polling; a pending test-service request instead follows the submit-and-end-turn rule above.
    The queue sends your steering inbox one message when your car lands, fails, its baseline resolves, or a moved head or target returns work to you; resume then with \`landing_queue status\`.
    The tool emits the readiness or baseline wake only for the bottom car with a valid receipt; do not add a ready \`done:\` or ask firstmate to coordinate the queue.
