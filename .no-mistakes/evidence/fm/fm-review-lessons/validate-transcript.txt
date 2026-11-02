@@ -1,0 +1,6 @@
+$ fm-review-lessons.py validate general-playbook.json
+valid playbook: 1 patterns
+exit=0
+$ fm-review-lessons.py validate instance-playbook.json
+fm-review-lessons: pattern 1: pattern is absent or instance-specific
+exit=1
