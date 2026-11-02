@@ -1651,6 +1651,29 @@ fm_autoarm_ledger_read() {  # <state-dir>
 # entry is never open: real generation claims always record identity, a legacy
 # build's entry gets its deference from its held role-carrying lock through
 # the legacy shim, and anything else must not defer.
+# Succeeds while a Stop auto-arm firing for <session-id> has published its
+# starting marker within <fresh-secs> and that exact process (pid identity) is
+# still alive: recovery is under way even though no generation claim exists yet.
+# A dead, reused-pid, foreign-session, or stale marker never counts.
+fm_autoarm_starting_live() {  # <state-dir> <session-id> <fresh-secs>
+  local state=$1 session=$2 fresh=$3 marker pid now mtime marker_session identity
+  now=$(date +%s)
+  for marker in "$state"/.claude-autoarm-starting.*; do
+    [ -f "$marker" ] || continue
+    pid=${marker##*.}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    mtime=$(fm_path_mtime "$marker" 2>/dev/null) || continue
+    [ $((now - mtime)) -le "$fresh" ] || continue
+    marker_session=$(sed -n '1s/^session=//p' "$marker" 2>/dev/null)
+    [ "$marker_session" = "$session" ] || continue
+    identity=$(sed -n '2p' "$marker" 2>/dev/null)
+    [ -n "$identity" ] || continue
+    [ "$(fm_pid_identity "$pid" 2>/dev/null)" = "$identity" ] || continue
+    return 0
+  done
+  return 1
+}
+
 fm_autoarm_claim_open() {  # <state-dir> [grace]
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current
   epoch="$state/.claude-autoarm-epoch"

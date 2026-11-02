@@ -78,6 +78,11 @@
 #      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #      the first fresh exhausted-failure epoch preserves the bounded progression,
 #      while later fresh failed epochs consume it instead of resetting it;
+#      while a live auto-arm firing for this Stop session holds a fresh
+#      starting marker (fm_autoarm_starting_live), keep waiting up to
+#      FM_CLAUDE_AUTOARM_START_WAIT_MS (default 15000ms) in total so a slow
+#      auto-arm startup is not reported as blind; a missing, dead, or stale
+#      marker ends the wait at the shorter bound;
 #   4. only when neither materializes is the auto-arm genuinely absent: re-block
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
@@ -100,9 +105,12 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-3000}
+START_WAIT_MS=${FM_CLAUDE_AUTOARM_START_WAIT_MS:-15000}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=3000 ;; esac
+case "$START_WAIT_MS" in ''|*[!0-9]*) START_WAIT_MS=15000 ;; esac
+[ "$START_WAIT_MS" -ge "$SYNC_WAIT_MS" ] || START_WAIT_MS=$SYNC_WAIT_MS
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 
@@ -485,7 +493,9 @@ failure_episode_verified() {
 }
 
 i=0
-while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
+while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ] \
+  || { [ "$i" -lt $((START_WAIT_MS / 100)) ] \
+    && fm_autoarm_starting_live "$STATE" "$SESSION_ID" "$EPOCH_FRESH"; }; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       fm_failure_episode_reset "$STATE" || exit 2
