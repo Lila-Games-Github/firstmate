@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Firstmate test service: durable CLI and user-service worker.
 
-Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--device-gate SERIAL|any]
+Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--check full|quick]
+       [--target FULL_SHA] [--device-gate SERIAL|any]
        [--scenario NAME]... [--harness PATH]... [--receipt PATH] [--retest-on-move]
        fm-test-service.py serve | status [--json] | wait ID | cancel ID
        fm-test-service.py install-unit | project-for-repo REPO | landing-gates-for-repo REPO
@@ -78,7 +79,7 @@ def config(project):
     data["max_concurrent"] = limit
     if "landing_repo" in data:
         data["landing_repo"] = data["landing_repo"].replace("{fm_home}", str(HOME))
-    for name in ("prepare", "suite", "device", "any_device"):
+    for name in ("prepare", "suite", "quick_suite", "device", "quick_device", "any_device"):
         if name in data and (not data[name] or Path(data[name][0]).is_absolute() or ".." in Path(data[name][0]).parts):
             raise ValueError(name + " executable must be relative to the tested checkout")
     return data
@@ -205,6 +206,14 @@ def step_state(db, rid, generation, name, state, exit_code=None):
 
 def submit(args):
     cfg = config(args.project)
+    if args.check == "quick" and (not cfg.get("quick_suite") or not cfg.get("quick_device")):
+        raise ValueError("quick check requires configured quick_suite and quick_device commands")
+    if args.check == "quick" and (not args.suite or not args.device_gate or not args.target):
+        raise ValueError("quick check requires --suite, --device-gate, and --target")
+    if args.check == "quick" and args.retest_on_move:
+        raise ValueError("quick checks cannot retest on landing-branch moves")
+    if args.check == "full" and args.target:
+        raise ValueError("--target applies only to a quick check")
     if not (args.suite or args.device_gate or args.harness):
         raise ValueError("request has no suite, phone, or harness step")
     if args.receipt and not args.suite:
@@ -222,6 +231,16 @@ def submit(args):
     check = run(["git", "-C", str(source), "rev-parse", "--verify", args.sha + "^{commit}"])
     if check.returncode or check.stdout.strip().lower() != args.sha.lower():
         raise ValueError("sha is not an available exact commit")
+    changed_files = []
+    if args.check == "quick":
+        if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", args.target):
+            raise ValueError("target must be a full commit SHA")
+        if run(["git", "-C", str(source), "merge-base", "--is-ancestor", args.target, args.sha]).returncode:
+            raise ValueError("quick target must be an ancestor of the tested SHA")
+        changed = run(["git", "-C", str(source), "diff", "--name-only", "-z", args.target, args.sha])
+        if changed.returncode:
+            raise ValueError("cannot map touched files for quick check")
+        changed_files = [name for name in changed.stdout.split("\0") if name]
     if args.device_gate and args.device_gate != "any" and args.device_gate not in cfg["phones"]:
         raise ValueError("phone is not configured for this project")
     for name in args.scenario:
@@ -236,7 +255,8 @@ def submit(args):
     if common.returncode:
         raise ValueError("cannot locate project Git storage for landing retests")
     branch_source = str((source / common.stdout.strip()).resolve())
-    opts = {"suite": args.suite, "device_gate": args.device_gate, "scenarios": args.scenario,
+    opts = {"suite": args.suite, "check": args.check, "target": args.target,
+            "changed_files": changed_files, "device_gate": args.device_gate, "scenarios": args.scenario,
             "harnesses": args.harness, "receipt": str(Path(args.receipt).resolve()) if args.receipt else None,
             "retest_on_move": args.retest_on_move, "branch_source": branch_source, "task": args.task,
             "home": str(HOME), "state_dir": str(Path(os.environ.get("FM_STATE_OVERRIDE", HOME / "state")).resolve())}
@@ -457,7 +477,7 @@ def execute(db, row):
             attempted = set()
             while True:
                 current = serial_holder[0]
-                command = expand(cfg["device"], current)
+                command = expand(cfg["quick_device" if opts.get("check") == "quick" else "device"], current)
                 for scenario in opts["scenarios"]:
                     command += cfg.get("scenarios", {})[scenario]
                 result = step("device", command, watch_serial=current)
@@ -473,7 +493,10 @@ def execute(db, row):
         serial_holder = [serial]
         actions = []
         if opts["suite"]:
-            actions.append(lambda: step("suite", expand(cfg["suite"])))
+            suite_command = expand(cfg["quick_suite" if opts.get("check") == "quick" else "suite"])
+            if opts.get("check") == "quick":
+                suite_command += opts["changed_files"]
+            actions.append(lambda: step("suite", suite_command))
         if requested:
             actions.append(device_step)
         # Each request's suite and device commands enter their project-owned shared queues concurrently.
@@ -513,7 +536,11 @@ def complete(db, row, state, error):
     result_dir = ROOT / "results" / rid
     result_dir.mkdir(parents=True, exist_ok=True)
     if state == "passed" and json.loads(row["options"])["suite"]:
-        receipt = "schema=fm-full-suite.v1\nsha=" + sha + "\nfailures=0\n"
+        opts = json.loads(row["options"])
+        if opts.get("check") == "quick":
+            receipt = "schema=fm-quick-check.v1\nsha=" + sha + "\ntarget=" + opts["target"] + "\n"
+        else:
+            receipt = "schema=fm-full-suite.v1\nsha=" + sha + "\nfailures=0\n"
         atomic_write(result_dir / (sha + ".receipt"), receipt)
         path = json.loads(row["options"]).get("receipt")
         if path and sha == row["original_sha"]:
@@ -824,6 +851,8 @@ def main():
     s.add_argument("project"); s.add_argument("worktree"); s.add_argument("sha")
     s.add_argument("--task")
     s.add_argument("--suite", action="store_true")
+    s.add_argument("--check", choices=("full", "quick"), default="full")
+    s.add_argument("--target")
     s.add_argument("--device-gate")
     s.add_argument("--scenario", action="append", default=[])
     s.add_argument("--harness", action="append", default=[])

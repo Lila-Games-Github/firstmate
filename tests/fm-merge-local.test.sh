@@ -454,11 +454,15 @@ esac
 TMUX
   chmod +x "$case_dir/bin/tmux"
   queue_env=(env PATH="$case_dir/bin:$PATH" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state")
+  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$case_dir/project" rev-parse fm/task-x1)" > "$case_dir/x.pre"
+  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$case_dir/project" rev-parse fm/task-y2)" > "$case_dir/y.pre"
   "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" ready task-x1 --project "$case_dir/project" \
-    --branch fm/task-x1 --head "$(git -C "$case_dir/project" rev-parse fm/task-x1)" >/dev/null \
+    --branch fm/task-x1 --head "$(git -C "$case_dir/project" rev-parse fm/task-x1)" \
+    --target "$(git -C "$case_dir/project" rev-parse main)" --receipt "$case_dir/x.pre" >/dev/null \
     || fail 'queue-hook: first car could not join'
   "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" ready task-y2 --project "$case_dir/project" \
-    --branch fm/task-y2 --head "$(git -C "$case_dir/project" rev-parse fm/task-y2)" >/dev/null \
+    --branch fm/task-y2 --head "$(git -C "$case_dir/project" rev-parse fm/task-y2)" \
+    --target "$(git -C "$case_dir/project" rev-parse main)" --receipt "$case_dir/y.pre" >/dev/null \
     || fail 'queue-hook: second car could not join'
   [ ! -e "$case_dir/state/task-y2.inbox" ] || fail 'queue-hook: waiting car was steered before landing'
 
@@ -467,7 +471,7 @@ TMUX
 
   [ "$(find "$case_dir/state/task-y2.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
     || fail 'queue-hook: landing did not steer the next car exactly once'
-  grep -q 'task=task-y2 status=needs-final (was waiting-for-front) place=1' "$case_dir/state/task-y2.inbox/"*.msg \
+  grep -q 'task=task-y2 status=needs-quick (was waiting-for-front) place=1' "$case_dir/state/task-y2.inbox/"*.msg \
     || fail 'queue-hook: front steer did not name the next car'
   ! grep -q 'not reconciled' "$case_dir/stderr" || fail 'queue-hook: reconcile failed after landing'
   pass 'landing a queued car steers its sleeping successor to the front once'
@@ -493,9 +497,11 @@ esac
 TMUX
   chmod +x "$case_dir/bin/tmux"
   for car in task-x1 task-y2; do
+    printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$case_dir/project" rev-parse "fm/$car")" > "$case_dir/$car.pre"
     env PATH="$case_dir/bin:$PATH" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
       "$ROOT/bin/fm-landing-queue.sh" ready "$car" --project "$case_dir/project" \
-      --branch "fm/$car" --head "$(git -C "$case_dir/project" rev-parse "fm/$car")" >/dev/null \
+      --branch "fm/$car" --head "$(git -C "$case_dir/project" rev-parse "fm/$car")" \
+      --target "$(git -C "$case_dir/project" rev-parse main)" --receipt "$case_dir/$car.pre" >/dev/null \
       || fail "queue-hook-exit3: $car could not join"
   done
   : > "$case_dir/home/data/landing-health"
@@ -522,6 +528,21 @@ test_landing_without_train_creates_no_queue() {
   pass 'a landing without a train creates no queue state'
 }
 
+test_quick_receipt_lands_without_claiming_full_health() {
+  local case_dir target head
+  case_dir=$(make_case quick-front)
+  commit_task_change "$case_dir" main
+  write_meta "$case_dir" "" local-only
+  target=$(git -C "$case_dir/project" rev-parse main)
+  head=$(git -C "$case_dir/project" rev-parse fm/task-x1)
+  printf 'schema=fm-quick-check.v1\nsha=%s\ntarget=%s\n' "$head" "$target" > "$case_dir/quick.receipt"
+  run_merge_with_receipts "$case_dir" "$case_dir/quick.receipt" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "quick receipt did not land: $(cat "$case_dir/stderr")"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$head" ] || fail 'quick receipt did not fast-forward'
+  [ ! -e "$case_dir/home/data/landing-health" ] || fail 'quick check was recorded as full-suite health'
+  pass 'a quick front receipt lands without claiming a full suite ran on the rebased head'
+}
+
 test_recorded_nondefault_branch_never_merges_default
 test_absent_landing_branch_keeps_default_behavior
 test_unresolved_recorded_branch_refuses_without_fallback
@@ -539,5 +560,6 @@ test_receipt_missing_or_wrong_sha_refused
 test_landing_steers_next_queue_car
 test_landing_without_train_creates_no_queue
 test_unrecorded_receipt_still_steers_next_queue_car
+test_quick_receipt_lands_without_claiming_full_health
 
 printf 'all fm-merge-local tests passed\n'

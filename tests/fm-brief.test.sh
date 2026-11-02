@@ -231,16 +231,16 @@ test_ship_modes_generate_clean_briefs() {
       "$id: ship brief missing the durable long-suite and evidence snapshot contract"
     assert_grep "reattach through that identifier instead of re-running the suite" "$brief" \
       "$id: long-suite contract lost the durable reattachable job shape"
-    assert_grep "invalidates that evidence" "$brief" \
-      "$id: long-suite contract lost the moved-tip snapshot policy"
-    assert_grep "one re-capture and re-run" "$brief" \
-      "$id: long-suite contract lost its named re-capture budget"
+    assert_grep "full suite, phone play-through, applicable benchmark" "$brief" \
+      "$id: long-suite contract lost pre-queue validation"
+    assert_grep "quick test and short phone check" "$brief" \
+      "$id: long-suite contract lost the front check"
     assert_grep 'paused: test-service request=<request-id>' "$brief" \
       "$id: ship brief omitted the service pause identifier"
     assert_grep 'without polling status or holding a waiter session' "$brief" \
       "$id: ship brief omitted the completion-driven wait contract"
-    assert_grep 'ordinary target movement while above bottom uses no re-capture budget' "$brief" \
-      "$id: ship brief charges upper-car movement against final validation"
+    assert_grep 'An upper car waits without rebasing or rerunning tests' "$brief" \
+      "$id: ship brief retests an upper car"
   done
   id='brief-scout-preamble-a1'
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1; status=$?
@@ -1795,10 +1795,11 @@ test_worker_owned_finalization() {
     brief="$home/data/$id/brief.md"
     assert_grep 'Use the queue tool for your place, rebase target, and final receipt' "$brief" 'brief omitted queue handoff'
     assert_grep 'landing_queue receipt --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted exact-head receipt submission'
-    assert_grep 'landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha>' "$brief" 'brief omitted landing gate submission'
+    # shellcheck disable=SC2016 # Literal command in the generated brief.
+    assert_grep 'Add `--gate-receipt <name>=<path>` once for each configured gate' "$brief" 'brief omitted pre-queue gate submission'
     assert_no_grep 'every 30 seconds' "$brief" 'parked worker still told to poll'
     assert_grep "append \`paused: landing-queue <status>\` and end your turn without polling" "$brief" 'ready or baseline worker still polls'
-    assert_grep 'do not rebase, run the final suite or gates, or capture final evidence' "$brief" 'upper worker still finalizes before reaching front'
+    assert_grep 'do not rebase or rerun checks even when the target changes' "$brief" 'upper worker still reruns checks before reaching front'
     assert_grep "append \`paused: landing-queue waiting-for-front\` and end your turn without polling" "$brief" 'upper worker still polls for the front'
     assert_no_grep "At \`waiting-for-front\`, \`ready-to-land\`" "$brief" 'upper worker still told to poll'
     assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
@@ -1810,7 +1811,9 @@ test_worker_owned_finalization() {
     . "$helper"
     git -C "$project" checkout -qb "fm/$id" proto/landing
     git -C "$project" commit -qm "$id" --allow-empty
-    out=$(cd "$project" && landing_queue ready --branch "fm/$id" --head "$(git rev-parse HEAD)") \
+    printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$project" rev-parse HEAD)" > "$home/$id.receipt"
+    out=$(cd "$project" && landing_queue ready --branch "fm/$id" --head "$(git rev-parse HEAD)" \
+      --target "$(git rev-parse proto/landing)" --receipt "$home/$id.receipt") \
       || fail 'generated queue helper did not execute'
     assert_contains "$out" 'landing_branch=proto/landing' 'generated helper selected the wrong landing branch'
   done

@@ -3,13 +3,20 @@
 # Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|reconcile> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
-#          [--receipt <file>] [--gate <name>] [--reason <text>]
+#          [--receipt <file>] [--gate-receipt <name>=<file>]...
+#          [--gate <name>] [--reason <text>]
 # FM_HOME must explicitly select the owning home; FM_STATE_OVERRIDE and
 # FM_DATA_OVERRIDE optionally select its state and data directories.
 # Without --landing-branch, use this task's recorded landing_branch, else the
 # repository's origin/HEAD, main, or master. All branches must be local refs.
 #
-# ready joins at the back, or updates an active car, with --branch and --head.
+# ready joins at the back only with --branch, --head, --target, a green exact-head
+# full-suite --receipt, and one --gate-receipt for each configured landing gate.
+# The branch must contain the current landing tip, and the target must equal it.
+# Each gate receipt is four lines: schema=fm-landing-gate.v1, gate=<name>,
+# sha=<full head SHA>, target=<full target SHA>. A failed car must pass these
+# checks again before re-enrolling. Active cars use ready without a receipt to
+# acknowledge their one front-of-line rebase.
 # A head already contained in the landing tip has nothing to land and is refused.
 # After rebasing, repeat ready with --target from status to acknowledge the new
 # base. The target must still be current and an ancestor of the submitted head.
@@ -17,8 +24,8 @@
 # place (bottom=1), target_ref, target_sha, rebase_from, head, status, receipt,
 # and reason (a failed car's recorded reason or this invocation's red-receipt
 # reason, else '-').
-# Use git rebase --onto <target_sha> <rebase_from> when the base changes, retaining
-# only this car's commits, then ready --target before the exact-head suite.
+# Use git rebase --onto <target_sha> <rebase_from> when the front base changes,
+# retaining only this car's commits, then ready --target before the last check.
 # Only the bottom car prepares final evidence on the live landing tip. Upper
 # cars return waiting-for-front, regardless of receipts or target movement, and
 # their workers pause instead of polling, as do workers at ready-to-land and
@@ -35,20 +42,21 @@
 # steers, without requiring <task-id> to be a car; it prints nothing and is a
 # no-op when the landing branch has no queue. fm-merge-local.sh runs it after
 # every landing, so a landing steers its own car and advances sleeping cars.
-# receipt requires --head, --target and --receipt. It snapshots an fm-full-suite.v1
-# receipt (parser: fm-landing-health-lib.sh) only for the bottom car's current
-# head and target. Upper-car receipt and gate submissions are refused.
+# receipt requires --head, --target and --receipt. At needs-quick it accepts
+# exactly schema=fm-quick-check.v1, sha=<full head SHA>, target=<full target SHA>.
+# The service produces that receipt only after its configured touched-file suite
+# and short phone check pass. At needs-full it accepts fm-full-suite.v1 instead.
+# A quick failure is reported with --reason, requiring a later full rerun.
+# A tip change touching any of this car's files also requires the full rerun.
+# Only the bottom car can submit its last-check receipt.
 # A target/head race refuses the submission; status then supplies the new work.
-# gate requires --gate, --head, --target, and --receipt for a passing configured landing
-# gate. Its receipt is exactly four lines: schema=fm-landing-gate.v1,
-# gate=<name>, sha=<full head SHA>, target=<full target SHA>. The worker submits
-# it only after that check passes. Use --reason instead of --receipt when the
-# gate fails. A failing final receipt or gate at the front moves that car to
-# the back when another car waits, and sends it one durable reason message.
+# The legacy gate command can still record a configured gate at the front;
+# admission requires all configured gate receipts on the tested pre-queue head.
+# A failing front check moves its car to the back when another car waits and
+# sends it one durable reason message.
 # Its old final evidence is cleared; it fixes its branch while waiting and
 # rebases and tests again only on reaching the front. The queue accepts it
-# only for the current head and target. A missing gate yields needs-gate with
-# the gate name in reason; it never emits a readiness wake.
+# only for the current head and target.
 # fail removes a car from the active train with --reason, a single line without
 # control characters other than '-', recorded for later status calls. A later
 # ready with the same id and branch re-enrolls it at the back. Landed ids stay
@@ -68,7 +76,7 @@
 # state/.landing-queue-<hash>.lock using the shared recoverable lock helpers.
 # Every invocation refreshes live refs, retires heads already in the landing tip,
 # and invalidates receipts after head/target changes. Landing an unchanged lower
-# car preserves the next car's exact-SHA receipt. Failed cars are skipped; their
+# car preserves the next car's pre-queue evidence. Failed cars are skipped; their
 # successors retain rebase_from so they can drop the failed car's commits.
 # Known-red acceptance uses the current landing-health baseline, as the local
 # merge gate does. A red bottom receipt is needs-baseline when the live tip has
@@ -98,6 +106,7 @@ case "$ACTION" in ready|status|receipt|gate|fail|baseline|reconcile) ;; *) die "
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
 PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE=''
+GATE_RECEIPTS=()
 while [ "$#" -gt 0 ]; do
   [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 requires a value"
   case "$1" in
@@ -109,6 +118,7 @@ while [ "$#" -gt 0 ]; do
     --receipt) RECEIPT=$2 ;;
     --reason) REASON=$2 ;;
     --gate) GATE=$2 ;;
+    --gate-receipt) GATE_RECEIPTS[${#GATE_RECEIPTS[@]}]=$2 ;;
     *) die "unknown queue option $1" ;;
   esac
   shift 2
@@ -172,6 +182,28 @@ gate_receipt_read() { # <path> <gate> <head> <target>
     && [ "${lines[3]}" = "target=$target" ]
 }
 gate_receipt_path() { printf '%s/gate-%s-%s-%s-%s.receipt' "$DIR" "$1" "$2" "$3" "$4"; }
+pre_target() {
+  local path="$DIR/pre-$1" value
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  IFS= read -r value < "$path"
+  [[ "$value" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
+  printf '%s' "$value"
+}
+overlap_requires_full() { # <id> <head> <target>
+  local prior changed touched
+  [ ! -L "$DIR/full-$1" ] || die "full-rerun marker is a symlink: $DIR/full-$1"
+  [ -f "$DIR/full-$1" ] && return 0
+  prior=$(pre_target "$1") || return 0
+  [ "$prior" = "$3" ] && return 1
+  git -C "$PROJECT" merge-base --is-ancestor "$prior" "$3" || return 0
+  changed=$(git -C "$PROJECT" diff --name-only "$prior" "$3") || return 0
+  touched=$(git -C "$PROJECT" diff --name-only "$3" "$2") || return 0
+  changed=$(printf '%s\n' "$changed" | LC_ALL=C sort -u)
+  touched=$(printf '%s\n' "$touched" | LC_ALL=C sort -u)
+  [ -z "$changed" ] && return 1
+  [ -z "$touched" ] && return 1
+  [ -n "$(LC_ALL=C comm -12 <(printf '%s\n' "$changed") <(printf '%s\n' "$touched"))" ]
+}
 cleanup() {
   trap '' TERM INT HUP
   [ -z "$TMP" ] || rm -f -- "$TMP"
@@ -260,6 +292,32 @@ refresh
 if [ "$ACTION" = ready ]; then
   valid_branch "$BRANCH" && [ "$BRANCH" != "$LANDING" ] || die 'ready requires a task branch distinct from the landing branch'
   [ -n "$HEAD" ] && [ "$(resolve "$BRANCH")" = "$HEAD" ] || die '--head must equal the full current branch SHA'
+  if [ "$found" -lt 0 ] || [ "${states[found]}" = failed ]; then
+    [ "$TARGET" = "$TIP" ] || die 'pre-queue target changed; rebase and test the current landing tip'
+    git -C "$PROJECT" merge-base --is-ancestor "$TIP" "$HEAD" || die 'pre-queue head must contain the current landing tip'
+    [ -n "$RECEIPT" ] || die 'ready requires an exact-head full-suite receipt before joining'
+    fm_health_receipt_read "$RECEIPT" "$HEAD" || die 'ready requires a valid exact-head full-suite receipt'
+    [ "$FM_HEALTH_COUNT" -eq 0 ] || die 'ready requires a green full-suite receipt'
+    for gate_name in ${GATES[@]+"${GATES[@]}"}; do
+      gate_pass=0
+      for entry in ${GATE_RECEIPTS[@]+"${GATE_RECEIPTS[@]}"}; do
+        [ "${entry%%=*}" = "$gate_name" ] || continue
+        gate_receipt_read "${entry#*=}" "$gate_name" "$HEAD" "$TIP" || die "invalid pre-queue gate receipt: $gate_name"
+        gate_pass=1
+      done
+      [ "$gate_pass" -eq 1 ] || die "ready requires pre-queue landing gate: $gate_name"
+    done
+    for entry in ${GATE_RECEIPTS[@]+"${GATE_RECEIPTS[@]}"}; do
+      known=0
+      for gate_name in ${GATES[@]+"${GATES[@]}"}; do [ "${entry%%=*}" != "$gate_name" ] || known=1; done
+      [ "$known" -eq 1 ] || die "unconfigured pre-queue gate: ${entry%%=*}"
+    done
+    TMP=$(mktemp "$DIR/.pre.XXXXXX")
+    printf '%s\n' "$TIP" > "$TMP"
+    mv -f -- "$TMP" "$DIR/pre-$ID"
+    TMP=
+    rm -f -- "$DIR/full-$ID"
+  fi
   if [ "$found" -lt 0 ]; then
     for ((i=0; i<count; i++)); do
       [ "${branches[i]}" != "$BRANCH" ] || die 'branch already belongs to a queue car'
@@ -309,12 +367,18 @@ assign() {
     fi
     statuses[i]=needs-rebase
     if [ "${bases[i]}" = "$sha" ] && git -C "$PROJECT" merge-base --is-ancestor "$sha" "${heads[i]}"; then
-      statuses[i]=needs-final
-      if [ "${receipts[i]}" != - ] && fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}" >/dev/null 2>&1; then
-        statuses[i]=ready-to-land
+      if overlap_requires_full "${ids[i]}" "${heads[i]}" "$sha"; then
+        statuses[i]=needs-full
+        if [ "${receipts[i]}" != - ] && fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}" >/dev/null 2>&1; then
+          statuses[i]=ready-to-land
+        fi
       else
-        receipts[i]=-; targets[i]=-
+        statuses[i]=needs-quick
+        if [ "${receipts[i]}" != - ] && fm_quick_receipt_read "$DIR/${receipts[i]}" "${heads[i]}" "$sha"; then
+          statuses[i]=ready-to-land
+        fi
       fi
+      if [ "${statuses[i]}" != ready-to-land ]; then receipts[i]=-; targets[i]=-; fi
     fi
     ref="refs/heads/${branches[i]}" sha=${heads[i]}
   done
@@ -326,7 +390,7 @@ fi
 
 case "$ACTION" in
   ready)
-    if [ -n "$TARGET" ]; then
+    if [ "$joined" -eq 0 ] && [ -n "$TARGET" ]; then
       [ "$TARGET" = "${target_shas[found]}" ] || die 'target changed; check status and rebase again'
       git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" || die 'head is not a fast-forward of the assigned target'
       bases[found]=$TARGET
@@ -338,13 +402,28 @@ case "$ACTION" in
     [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
       && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
     git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" || die 'head is not a fast-forward of the assigned target'
-    TMP=$(mktemp "$DIR/.receipt.XXXXXX")
-    cp -- "$RECEIPT" "$TMP" || die 'cannot stage receipt'
-    fm_health_receipt_read "$TMP" "$HEAD" || die 'invalid exact-head receipt'
-    digest=$(git hash-object -- "$TMP")
-    mv -f -- "$TMP" "$DIR/$digest.receipt"
-    TMP=
-    receipts[found]="$digest.receipt" targets[found]=$TARGET
+    if [ -n "$REASON" ]; then
+      [ -z "$RECEIPT" ] || die 'failed quick check cannot also submit a receipt'
+      [ "${statuses[found]}" = needs-quick ] || die 'failure reason is for a quick check'
+      TMP=$(mktemp "$DIR/.full.XXXXXX")
+      printf '%s\n' "$REASON" > "$TMP"
+      mv -f -- "$TMP" "$DIR/full-$ID"
+      TMP=
+      requeue_reason="quick check failed: $REASON"
+    else
+      [ -n "$RECEIPT" ] || die 'receipt requires --receipt or --reason'
+      TMP=$(mktemp "$DIR/.receipt.XXXXXX")
+      cp -- "$RECEIPT" "$TMP" || die 'cannot stage receipt'
+      if [ "${statuses[found]}" = needs-full ]; then
+        fm_health_receipt_read "$TMP" "$HEAD" || die 'invalid exact-head full receipt'
+      else
+        fm_quick_receipt_read "$TMP" "$HEAD" "$TARGET" || die 'invalid exact-head quick receipt'
+      fi
+      digest=$(git hash-object -- "$TMP")
+      mv -f -- "$TMP" "$DIR/$digest.receipt"
+      TMP=
+      receipts[found]="$digest.receipt" targets[found]=$TARGET
+    fi
     ;;
   gate)
     [ "${states[found]}" = active ] || die 'only active cars can submit gate receipts'
@@ -396,10 +475,9 @@ case "$ACTION" in
 esac
 assign
 
-# Readiness uses the same current-tip failure-set policy as fm-merge-local.
-# Legacy upper-car receipts are considered only when their car reaches front.
+# Full fallback receipts use the current-tip failure-set policy as fm-merge-local.
 for ((i=0; i<count; i++)); do
-  if [ "${statuses[i]}" = ready-to-land ]; then
+  if [ "${statuses[i]}" = ready-to-land ] && overlap_requires_full "${ids[i]}" "${heads[i]}" "${target_shas[i]}"; then
     fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}"
     if [ "$FM_HEALTH_COUNT" -gt 0 ]; then
       incoming=$FM_HEALTH_SET
@@ -412,9 +490,10 @@ for ((i=0; i<count; i++)); do
   fi
 done
 
-# A passing suite still waits for every declared project landing gate.
+# A full front rerun must repeat configured landing gates on the rebased head.
 for ((i=0; i<count; i++)); do
-  case "${statuses[i]}" in ready-to-land) ;; *) continue ;; esac
+  [ "${statuses[i]}" = ready-to-land ] || continue
+  overlap_requires_full "${ids[i]}" "${heads[i]}" "${target_shas[i]}" || continue
   for gate_name in ${GATES[@]+"${GATES[@]}"}; do
     if ! gate_receipt_read "$(gate_receipt_path "${ids[i]}" "$gate_name" "${heads[i]}" "${target_shas[i]}")" \
       "$gate_name" "${heads[i]}" "${target_shas[i]}"; then

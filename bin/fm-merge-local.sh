@@ -17,11 +17,13 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
-# Usage: fm-merge-local.sh <task-id> --receipt <full-suite-receipt> [--base-receipt <full-suite-receipt>]
+# Usage: fm-merge-local.sh <task-id> --receipt <front-receipt> [--base-receipt <full-suite-receipt>]
 # The project-agnostic receipt has schema=fm-full-suite.v1, sha=<full SHA>,
 # failures=<count>, then one failure=<stable id> line per failure; the complete
 # parser contract is owned by bin/fm-landing-health-lib.sh. --receipt must
-# name the exact branch SHA to be merged. If the current landing tip is already
+# name the exact branch SHA to be merged. A quick receipt also names the exact
+# current target SHA; it is accepted for the fast-forward but never recorded as
+# a full-suite landing-health baseline. If the current landing tip is already
 # red and has no recorded baseline, --base-receipt names that exact current SHA;
 # its failing set is recorded once under data/landing-health/. A red candidate
 # lands only when every failure is in that current tip's recorded set. Every red
@@ -200,15 +202,22 @@ fm_lock_acquire_wait "$MERGE_HEALTH_LOCK"
 CURRENT_SHA=$(git -C "$PROJ" rev-parse "$TARGET_REF^{commit}") || exit 1
 INCOMING_SHA=$(git -C "$PROJ" rev-parse "refs/heads/$BRANCH^{commit}") || exit 1
 MERGE_RECEIPT_STAGE=$(mktemp "$STATE/.merge-receipt.XXXXXX") || exit 1
-cp -- "$RECEIPT" "$MERGE_RECEIPT_STAGE" || { echo "error: cannot stage full-suite receipt $RECEIPT" >&2; exit 1; }
-fm_health_receipt_read "$MERGE_RECEIPT_STAGE" "$INCOMING_SHA" || exit 1
-INCOMING_COUNT=$FM_HEALTH_COUNT
-INCOMING_SET=$FM_HEALTH_SET
+cp -- "$RECEIPT" "$MERGE_RECEIPT_STAGE" || { echo "error: cannot stage receipt $RECEIPT" >&2; exit 1; }
+QUICK_RECEIPT=0
+if fm_quick_receipt_read "$MERGE_RECEIPT_STAGE" "$INCOMING_SHA" "$CURRENT_SHA"; then
+  QUICK_RECEIPT=1
+  INCOMING_COUNT=0
+  INCOMING_SET=
+else
+  fm_health_receipt_read "$MERGE_RECEIPT_STAGE" "$INCOMING_SHA" || exit 1
+  INCOMING_COUNT=$FM_HEALTH_COUNT
+  INCOMING_SET=$FM_HEALTH_SET
+fi
 RECORDED_RECEIPT="$DATA/landing-health/$HEALTH_KEY.receipt"
 BASELINE_COUNT=0
 BASELINE_SET=
 BASELINE_PRESENT=0
-if [ -f "$RECORDED_RECEIPT" ]; then
+if [ "$QUICK_RECEIPT" -eq 0 ] && [ -f "$RECORDED_RECEIPT" ]; then
   if fm_health_receipt_read "$RECORDED_RECEIPT" "$CURRENT_SHA" 2>/dev/null; then
     BASELINE_PRESENT=1
     BASELINE_COUNT=$FM_HEALTH_COUNT
@@ -218,7 +227,7 @@ if [ -f "$RECORDED_RECEIPT" ]; then
     exit 1
   fi
 fi
-if [ -n "$BASE_RECEIPT" ]; then
+if [ "$QUICK_RECEIPT" -eq 0 ] && [ -n "$BASE_RECEIPT" ]; then
   MERGE_BASE_STAGE=$(mktemp "$STATE/.base-receipt.XXXXXX") || exit 1
   cp -- "$BASE_RECEIPT" "$MERGE_BASE_STAGE" || { echo "error: cannot stage base receipt $BASE_RECEIPT" >&2; exit 1; }
   fm_health_receipt_read "$MERGE_BASE_STAGE" "$CURRENT_SHA" || exit 1
@@ -275,7 +284,9 @@ merge_status=0
 git -C "$PROJ" merge --ff-only "$INCOMING_SHA" >/dev/null || merge_status=$?
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
 health_status=0
-fm_health_store "$MERGE_RECEIPT_STAGE" "$DATA" "$HEALTH_KEY" || health_status=$?
+if [ "$QUICK_RECEIPT" -eq 0 ]; then
+  fm_health_store "$MERGE_RECEIPT_STAGE" "$DATA" "$HEALTH_KEY" || health_status=$?
+fi
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 fm_lock_release "$MERGE_HEALTH_LOCK" || true
