@@ -433,7 +433,18 @@ RECOVERY_WORKER_PID=
 pass "tentative quarantine blocks replacement until recorded execution stops"
 
 CRASHED_WORKER_PID=$NEW_WORKER_PID
-kill -KILL "$CRASHED_WORKER_PID"
+# Crash the whole worker tree, not just the serving child: a surviving Linux
+# supervisor would restart its own serving child, which then races the
+# ensure-started worker for the stale lock and can leave two serving workers
+# that reclaim each other's running jobs (portable serial shard 7).
+CRASHED_WORKER_PGID=$(fm_remote_job_worker_process_group "$CRASHED_WORKER_PID") \
+  || fail "the crashed worker has no isolated worker process group"
+kill -KILL -- "-$CRASHED_WORKER_PGID"
+for _ in $(seq 1 100); do
+  kill -0 -- "-$CRASHED_WORKER_PGID" 2>/dev/null || break
+  sleep 0.05
+done
+! kill -0 -- "-$CRASHED_WORKER_PGID" 2>/dev/null || fail "the crashed worker tree did not exit"
 wait "$CRASHED_WORKER_PID" 2>/dev/null || true
 assert_present "$STATE_ROOT/worker.lock" "an unclean exit did not retain the worker ownership lock"
 sleep 20 &
