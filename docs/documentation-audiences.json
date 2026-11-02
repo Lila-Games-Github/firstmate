@@ -237,6 +237,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/review-lessons/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/playbot-workspace-retirement/SKILL.md",
       "audience": "agent-runtime"
     },
