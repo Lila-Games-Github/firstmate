@@ -56,11 +56,9 @@
 # lift the deferral (it authorizes discarding unlanded WORK, never the
 # captain's question), and bin/fm-captain-hold.sh answer stays the only act
 # that closes the call.
-# REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
+# Ordinary ship cleanup REFUSES if the worktree holds committed work that has not LANDED, because cleanup
+# hard-resets/removes the worktree and kills its processes. A pushed branch alone
+# does not prove a merge. Work has landed when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
@@ -80,10 +78,13 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# A clean landed copy needs no done report. Tracked edits and untracked files are
+# disposable leftovers only once the work has landed and the worker's current
+# status is done; otherwise they refuse. The task's data/<id>/cleanup.md records their top-level
+# paths before Treehouse resets and returns the copy, then marks that return done.
+# local-only projects instead require every commit to be merged into the local
+# default branch (firstmate performs that merge after configured approval), or
+# into origin's copy of it when no local branch of that name exists.
 # A task whose meta records landing_branch=<branch> (written by bin/fm-spawn.sh
 # --landing-branch at spawn time, or later by bin/fm-landing-branch.sh) verifies
 # landing against that recorded branch instead of the default branch: the
@@ -1719,8 +1720,7 @@ content_in_default() {
   [ "$merged_tree" = "$default_tree" ]
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
+# Has the worktree's committed work actually LANDED? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # only for genuinely unlanded work.
@@ -2044,7 +2044,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT DEFAULT_REF unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT DEFAULT_REF unmerged_raw unmerged branch terminal
   # This gate asks about the task's own checkout, so the landed-work family it
   # calls is scoped back to that checkout at HEAD.
   WORK_LANDED_REPO=$WT
@@ -2075,7 +2075,7 @@ validate_worktree_teardown_safety() {
   fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
-  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
+  if [ "$MODE" = local-only ]; then
     # The landing target is the recorded landing_branch when the task has one,
     # else the default branch - the same reachability test either way. A
     # recorded branch that does not resolve refuses rather than silently
@@ -2090,7 +2090,13 @@ validate_worktree_teardown_safety() {
       DEFAULT_REF=refs/heads/$LANDING_BRANCH
     else
       DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-      DEFAULT_REF=$DEFAULT
+      DEFAULT_REF=refs/heads/$DEFAULT
+      # origin/HEAD can name a default branch this checkout never created
+      # locally; its remote-tracking ref is then the landing target.
+      if ! git -C "$WT" rev-parse --quiet --verify "$DEFAULT_REF^{commit}" >/dev/null 2>&1 \
+          && git -C "$WT" rev-parse --quiet --verify "refs/remotes/origin/$DEFAULT^{commit}" >/dev/null 2>&1; then
+        DEFAULT_REF=refs/remotes/origin/$DEFAULT
+      fi
     fi
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT_REF" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
@@ -2101,19 +2107,13 @@ validate_worktree_teardown_safety() {
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
+    if [ -n "$unmerged" ]; then
+      echo "REFUSED: local-only worktree $WT has commits not yet merged into $DEFAULT." >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
-  elif [ -n "$dirty" ]; then
-    echo "REFUSED: worktree $WT has uncommitted changes." >&2
-    echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
-    return 1
-  elif [ -n "$unpushed" ]; then
+  else
     branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
     if [ -z "$branch" ]; then
       branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -2125,12 +2125,52 @@ validate_worktree_teardown_safety() {
         echo "Correct it with bin/fm-landing-branch.sh, or get the captain's explicit OK to discard, then --force." >&2
         return 1
       fi
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "REFUSED: worktree $WT has committed work not landed by a merged PR or landing branch." >&2
+      [ -z "$unpushed" ] || printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      echo "Land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   fi
+
+  if [ -n "$dirty" ]; then
+    terminal=$(status_current_line "$STATE/$ID.status" "$KIND")
+    if [ "$(status_line_verb "$terminal")" != "done" ]; then
+      echo "REFUSED: worktree $WT has uncommitted changes or untracked files and task $ID has not reported done." >&2
+      echo "uncommitted changes present" >&2
+      echo "Have the worker report done, commit the changes, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  fi
+}
+
+# The landed-work gate above, plus the worker's done declaration whenever the
+# copy is dirty, must pass before this list can authorize a forced Treehouse return. Keep the pre-return
+# intent durable; a completed marker is written only after Treehouse succeeds.
+record_disposable_work() {
+  local list path top prior found record
+  local -a tops=()
+  record="$DATA/$ID/cleanup.md"
+  mkdir -p "$DATA/$ID" || return 1
+  list=$(mktemp "$DATA/$ID/.cleanup-work.XXXXXX") || return 1
+  if ! git -C "$WT" diff --no-renames --name-only -z HEAD > "$list" \
+      || ! git -C "$WT" ls-files --others --directory -z >> "$list"; then
+    rm -f "$list"
+    echo "REFUSED: cannot list changed paths in $WT before Treehouse return." >&2
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    top=${path%%/*}
+    found=0
+    for prior in "${tops[@]+"${tops[@]}"}"; do
+      if [ "$prior" = "$top" ]; then found=1; break; fi
+    done
+    [ "$found" -eq 1 ] || tops+=("$top")
+  done < "$list"
+  rm -f "$list"
+  {
+    printf '%s\n' '# Treehouse cleanup' '' 'Return pending; top-level changed paths selected for reset or removal:'
+    for top in "${tops[@]+"${tops[@]}"}"; do printf -- '- %q\n' "$top"; done
+  } > "$record" || return 1
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
@@ -3881,6 +3921,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  if [ "$KIND" = ship ] && [ "$FORCE" != --force ]; then
+    record_disposable_work || exit 1
+  fi
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -3893,6 +3936,12 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  if [ "$KIND" = ship ] && [ "$FORCE" != --force ]; then
+    printf '\n%s\n' 'Return completed; the paths above were reset or removed.' >> "$DATA/$ID/cleanup.md" || {
+      echo "error: Treehouse returned $WT but its cleanup record could not be completed" >&2
+      exit 1
+    }
+  fi
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
