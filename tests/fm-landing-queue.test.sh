@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise the worker-owned train through its executable with real Git refs.
+# Exercise pre-queue admission and front checks through the queue executable.
 set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -10,633 +10,220 @@ make_case() {
   CASE="$TMP_ROOT/$1"
   mkdir -p "$CASE/home" "$CASE/project"
   git init -q -b main "$CASE/project"
-  git -C "$CASE/project" commit -qm baseline --allow-empty
+  printf 'first\na\nb\nc\nd\ne\nf\ng\nh\ni\nsecond\n' > "$CASE/project/shared.txt"
+  git -C "$CASE/project" add .
+  git -C "$CASE/project" commit -qm baseline
   BASE=$(git -C "$CASE/project" rev-parse HEAD)
 }
 car() {
-  local id=$1 base=$2
-  git -C "$CASE/project" worktree add -qb "fm/$id" "$CASE/$id" "$base"
+  local id=$1
+  git -C "$CASE/project" worktree add -qb "fm/$id" "$CASE/$id" main
   printf '%s\n' "$id" > "$CASE/$id/$id.txt"
   git -C "$CASE/$id" add .
   git -C "$CASE/$id" commit -qm "$id"
 }
-queue() {
-  FM_HOME="$CASE/home" "$QUEUE" "$@" --project "$CASE/project" --landing-branch main
-}
+queue() { FM_HOME="$CASE/home" "$QUEUE" "$@" --project "$CASE/project" --landing-branch main; }
 field() { sed -n "s/^$1=//p"; }
 head_of() { git -C "$CASE/project" rev-parse "fm/$1"; }
-join() { queue ready "$1" --branch "fm/$1" --head "$(head_of "$1")"; }
+tip() { git -C "$CASE/project" rev-parse main; }
+full_receipt() { printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(head_of "$1")" > "$CASE/$1.full"; }
+join() {
+  local id=$1 target
+  shift
+  target=$(tip)
+  full_receipt "$id"
+  queue ready "$id" --branch "fm/$id" --head "$(head_of "$id")" --target "$target" --receipt "$CASE/$id.full" "$@"
+}
 prepare() {
-  local id=$1 output target previous
-  output=$(queue status "$id")
-  target=$(printf '%s\n' "$output" | field target_sha)
-  previous=$(printf '%s\n' "$output" | field rebase_from)
-  git -C "$CASE/$id" rebase --onto "$target" "$previous" >/dev/null 2>&1
+  local id=$1 out target previous
+  out=$(queue status "$id")
+  target=$(printf '%s\n' "$out" | field target_sha)
+  previous=$(printf '%s\n' "$out" | field rebase_from)
+  if [ "$target" != "$previous" ]; then
+    git -C "$CASE/$id" rebase --onto "$target" "$previous" > "$CASE/$id.rebase.log" 2>&1
+  fi
   queue ready "$id" --branch "fm/$id" --head "$(head_of "$id")" --target "$target" >/dev/null
 }
-receipt() {
-  local id=$1 sha target
-  sha=$(head_of "$id")
+quick_receipt() {
+  local id=$1 target head
   target=$(queue status "$id" | field target_sha)
-  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$sha" > "$CASE/$id.receipt"
-  queue receipt "$id" --head "$sha" --target "$target" --receipt "$CASE/$id.receipt"
+  head=$(head_of "$id")
+  printf 'schema=fm-quick-check.v1\nsha=%s\ntarget=%s\n' "$head" "$target" > "$CASE/$id.quick"
+  queue receipt "$id" --head "$head" --target "$target" --receipt "$CASE/$id.quick"
+}
+full_front() {
+  local id=$1 target
+  target=$(queue status "$id" | field target_sha)
+  full_receipt "$id"
+  queue receipt "$id" --head "$(head_of "$id")" --target "$target" --receipt "$CASE/$id.full"
 }
 expect_field() {
-  local output=$1 key=$2 expected=$3 actual
-  actual=$(printf '%s\n' "$output" | field "$key")
+  local out=$1 key=$2 expected=$3 actual
+  actual=$(printf '%s\n' "$out" | field "$key")
   [ "$actual" = "$expected" ] || fail "$key: expected $expected, got $actual"
 }
-wake_payloads() { cut -f5 "$CASE/home/state/.wake-queue"; }
 wake_count() { if [ -f "$CASE/home/state/.wake-queue" ]; then wc -l < "$CASE/home/state/.wake-queue" | tr -d ' '; else echo 0; fi; }
-inbox_count() { find "$CASE/home/state/$1.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' '; }
 
-make_case required-gate
+make_case admission
+car a
+if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" > "$CASE/refusal" 2>&1; then
+  fail 'ready admitted a car without a full pre-queue receipt'
+fi
+grep -q 'requires an exact-head full-suite receipt' "$CASE/refusal" || fail 'admission refusal omitted the missing receipt'
+expect_field "$(join a)" status needs-quick
+expect_field "$(quick_receipt a)" status ready-to-land
+[ "$(wake_count)" = 1 ] || fail 'front quick receipt did not wake firstmate once'
+pass 'ready requires a green exact-head full receipt and a quick front check lands'
+
+make_case pre-gates
 mkdir -p "$CASE/home/config/test-service"
 cat > "$CASE/home/config/test-service/project.json" <<'EOF'
-{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+{"suite":["suite.sh"],"quick_suite":["related.sh"],"device":["phone.sh"],"quick_device":["short-phone.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone","m31"]}
 EOF
-car a main; join a >/dev/null; prepare a
-out=$(receipt a)
-expect_field "$out" status needs-gate
-expect_field "$out" reason 'missing landing gate: real-phone'
-[ "$(wake_count)" = 0 ] || fail 'suite green with missing landing gate emitted readiness'
-old_head=$(head_of a)
-printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$old_head" "$BASE" > "$CASE/gate.receipt"
-out=$(queue gate a --gate real-phone --head "$old_head" --target "$BASE" --receipt "$CASE/gate.receipt")
-expect_field "$out" status ready-to-land
-[ "$(wake_count)" = 1 ] || fail 'suite and gate did not emit readiness'
-git -C "$CASE/a" commit -qm update --allow-empty
-out=$(queue status a)
-expect_field "$out" status needs-final
-receipt a > "$CASE/new-suite.out"
-expect_field "$(cat "$CASE/new-suite.out")" status needs-gate
-[ "$(wake_count)" = 1 ] || fail 'old-head gate pass emitted new-head readiness'
-if queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --receipt "$CASE/gate.receipt" > "$CASE/stale-gate.out" 2>&1; then
-  fail 'old-head gate receipt was accepted for new head'
-fi
-printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$CASE/gate.receipt"
-out=$(queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --receipt "$CASE/gate.receipt")
-expect_field "$out" status ready-to-land
-[ "$(wake_count)" = 2 ] || fail 'current suite and gate did not emit renewed readiness'
-git -C "$CASE/project" merge -q --ff-only "$old_head"
-expect_field "$(queue status a)" status needs-rebase
-queue ready a --branch fm/a --head "$(head_of a)" --target "$old_head" >/dev/null
-out=$(receipt a)
-expect_field "$out" status needs-gate
-expect_field "$out" reason 'missing landing gate: real-phone'
-if queue gate a --gate real-phone --head "$(head_of a)" --target "$old_head" \
-  --receipt "$CASE/gate.receipt" > "$CASE/old-target-gate.out" 2>&1; then
-  fail 'old-target gate receipt was accepted for new target'
-fi
-[ "$(wake_count)" = 2 ] || fail 'old-target gate pass emitted readiness'
-printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$(head_of a)" "$old_head" > "$CASE/gate.receipt"
-expect_field "$(queue gate a --gate real-phone --head "$(head_of a)" --target "$old_head" --receipt "$CASE/gate.receipt")" status ready-to-land
-pass 'declared gate holds suite green, invalidates on head or target change, and permits matching readiness'
-
-make_case multiple-gates
-mkdir -p "$CASE/home/config/test-service"
-cat > "$CASE/home/config/test-service/project.json" <<'EOF'
-{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone","device-review"]}
-EOF
-car a main; join a >/dev/null; prepare a; receipt a >/dev/null
-for gate in real-phone device-review; do
-  expect_field "$(queue status a)" reason "missing landing gate: $gate"
-  printf 'schema=fm-landing-gate.v1\ngate=%s\nsha=%s\ntarget=%s\n' "$gate" "$(head_of a)" "$BASE" > "$CASE/$gate.receipt"
-  out=$(queue gate a --gate "$gate" --head "$(head_of a)" --target "$BASE" --receipt "$CASE/$gate.receipt")
+car a
+if join a > "$CASE/refusal" 2>&1; then fail 'ready admitted missing gates'; fi
+grep -q 'requires pre-queue landing gate: real-phone' "$CASE/refusal" || fail 'missing gate refusal was unclear'
+for gate in real-phone m31; do
+  printf 'schema=fm-landing-gate.v1\ngate=%s\nsha=%s\ntarget=%s\n' "$gate" "$(head_of a)" "$BASE" > "$CASE/$gate.gate"
 done
-expect_field "$out" status ready-to-land
-[ "$(wake_count)" = 1 ] || fail 'all-gates readiness did not emit one wake'
-pass 'every configured gate must pass before readiness'
+expect_field "$(join a --gate-receipt real-phone="$CASE/real-phone.gate" --gate-receipt m31="$CASE/m31.gate")" status needs-quick
+expect_field "$(quick_receipt a)" status ready-to-land
+pass 'configured phone and benchmark gates are required before joining'
 
-make_case lone-gate-failure
+make_case stale-admission
+car a
+full_receipt a
+git -C "$CASE/project" commit -qm tip-moved --allow-empty
+if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a.full" > "$CASE/refusal" 2>&1; then
+  fail 'ready admitted a full receipt tested against an old tip'
+fi
+grep -q 'pre-queue target changed' "$CASE/refusal" || fail 'stale tip refusal was unclear'
+if queue status a > "$CASE/refusal" 2>&1; then fail 'stale admission created a queue car'; fi
+pass 'admission refuses a full receipt when the landing tip moved'
+
+make_case unrelated-tip
+car a; join a >/dev/null
+git -C "$CASE/project" commit -qm unrelated --allow-empty
+expect_field "$(queue status a)" status needs-rebase
+prepare a
+expect_field "$(queue status a)" status needs-quick
+expect_field "$(quick_receipt a)" status ready-to-land
+pass 'an unrelated tip change needs only the quick front check'
+
+make_case overlapping-tip
+car a
+sed -i 's/first/updated-first/' "$CASE/a/shared.txt"
+git -C "$CASE/a" commit -qam touch-shared
+join a >/dev/null
+sed -i 's/second/updated-second/' "$CASE/project/shared.txt"
+git -C "$CASE/project" commit -qam outside-shared
+prepare a
+expect_field "$(queue status a)" status needs-full
+if quick_receipt a > "$CASE/quick-refusal" 2>&1; then fail 'overlap accepted a quick receipt'; fi
+grep -q 'invalid exact-head full receipt' "$CASE/quick-refusal" || fail 'overlap refusal did not require full receipt'
+expect_field "$(full_front a)" status ready-to-land
+pass 'a tip change to a touched file requires a full front rerun'
+
+make_case overlap-gate
 mkdir -p "$CASE/home/config/test-service"
 cat > "$CASE/home/config/test-service/project.json" <<'EOF'
-{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
+{"suite":["suite.sh"],"quick_suite":["related.sh"],"device":["phone.sh"],"quick_device":["short-phone.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["m31"]}
 EOF
-car a main; join a >/dev/null; prepare a; receipt a >/dev/null
-if queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --reason 'device check failed' > "$CASE/lone.out" 2>&1; then
-  fail 'lone car gate failure was silently accepted'
-fi
-grep -q 'landing gate real-phone failed: device check failed' "$CASE/lone.out" || fail 'lone car gate failure lost its reason'
-expect_field "$(queue status a)" place 1
-pass 'a lone front car gate failure is rejected with its reason instead of dropped'
+car a
+sed -i 's/first/updated-first/' "$CASE/a/shared.txt"
+git -C "$CASE/a" commit -qam touch-shared
+printf 'schema=fm-landing-gate.v1\ngate=m31\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$CASE/m31.pre"
+join a --gate-receipt m31="$CASE/m31.pre" >/dev/null
+sed -i 's/second/updated-second/' "$CASE/project/shared.txt"
+git -C "$CASE/project" commit -qam outside-shared
+prepare a
+expect_field "$(full_front a)" status needs-gate
+target=$(tip)
+printf 'schema=fm-landing-gate.v1\ngate=m31\nsha=%s\ntarget=%s\n' "$(head_of a)" "$target" > "$CASE/m31.front"
+expect_field "$(queue gate a --gate m31 --head "$(head_of a)" --target "$target" --receipt "$CASE/m31.front")" status ready-to-land
+pass 'a full fallback repeats configured gates on the rebased head'
 
-make_case unrelated-malformed-gate-config
-mkdir -p "$CASE/home/config/test-service"
-cat > "$CASE/home/config/test-service/project.json" <<'EOF'
-{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
-EOF
-printf '{"half-edited":' > "$CASE/home/config/test-service/other.json"
-printf '[]\n' > "$CASE/home/config/test-service/listed.json"
-car a main; join a >/dev/null; prepare a
-out=$(receipt a)
-expect_field "$out" status needs-gate
-expect_field "$out" reason 'missing landing gate: real-phone'
-printf '{"half-edited":' > "$CASE/home/config/test-service/project.json"
-if queue status a > "$CASE/malformed.out" 2>&1; then
-  fail 'malformed matching gate config did not fail closed'
-fi
-grep -q 'cannot read landing gates for project' "$CASE/malformed.out" || fail 'malformed matching config error was not reported'
-pass 'unrelated malformed configs are skipped while a malformed matching config fails closed'
+make_case failing-quick
+car a; join a >/dev/null
+car b; join b >/dev/null
+expect_field "$(queue receipt a --head "$(head_of a)" --target "$BASE" --reason 'short phone check failed')" place 2
+expect_field "$(queue status b)" place 1
+expect_field "$(queue status a)" status waiting-for-front
+expect_field "$(quick_receipt b)" status ready-to-land
+git -C "$CASE/project" merge -q --ff-only fm/b
+prepare a
+expect_field "$(queue status a)" status needs-full
+expect_field "$(full_front a)" status ready-to-land
+pass 'a failed quick check moves back and requires a full rerun when front again'
 
 make_case three-cars
-for id in a b c; do car "$id" main; join "$id" > "$CASE/$id.out"; done
-expect_field "$(cat "$CASE/a.out")" place 1
-expect_field "$(cat "$CASE/b.out")" target_ref refs/heads/fm/a
-expect_field "$(cat "$CASE/c.out")" place 3
-expect_field "$(cat "$CASE/c.out")" target_ref refs/heads/fm/b
-[ "$(wake_count)" = 0 ] || fail 'joining emitted a routine wake'
-for id in b c; do
-  expect_field "$(queue status "$id")" status waiting-for-front
-  if receipt "$id" > "$CASE/upper.out" 2>&1; then fail 'upper car submitted final evidence'; fi
-  grep -q 'only the bottom car' "$CASE/upper.out" || fail 'upper receipt refusal did not name front requirement'
-done
-[ "$(wake_count)" = 0 ] || fail 'upper receipt woke firstmate'
-[ "$(git -C "$CASE/project" rev-parse main)" = "$BASE" ] || fail 'queue merged a car'
-expected_wakes=0
+for id in a b c; do car "$id"; join "$id" >/dev/null; done
+for id in b c; do expect_field "$(queue status "$id")" status waiting-for-front; done
 for id in a b c; do
   expect_field "$(queue status "$id")" place 1
   prepare "$id"
-  expect_field "$(queue status "$id")" status needs-final
-  expect_field "$(receipt "$id")" status ready-to-land
-  expected_wakes=$((expected_wakes + 1))
-  for check_id in a b c; do queue status "$check_id" >/dev/null; done
-  [ "$(wake_count)" = "$expected_wakes" ] || fail 'status repeated a readiness wake'
+  expect_field "$(quick_receipt "$id")" status ready-to-land
   git -C "$CASE/project" merge -q --ff-only "fm/$id"
   expect_field "$(queue status "$id")" status landed
 done
-[ "$(wake_count)" = 3 ] || fail 'landing did not wake each new bottom exactly once'
-pass 'three cars validate once each at front and land in order without repeated wakes'
-
-make_case failing-front-requeues
-mkdir -p "$CASE/home/state"
-for id in a b c; do
-  fm_write_meta "$CASE/home/state/$id.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
-  car "$id" main
-  join "$id" >/dev/null
-done
-prepare a
-health_key=$(printf '%s\n%s\n' "$CASE/project" main | git hash-object --stdin)
-mkdir -p "$CASE/home/data/landing-health"
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$BASE" > "$CASE/home/data/landing-health/$health_key.receipt"
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=new-red\n' "$(head_of a)" > "$CASE/red.receipt"
-out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
-expect_field "$out" place 3
-expect_field "$out" status waiting-for-front
-expect_field "$(queue status b)" place 1
-[ "$(inbox_count a)" = 1 ] || fail 'requeued car did not receive one reason message'
-grep -q 'moved to back because receipt names failures outside' "$CASE/home/state/a.inbox/"*.msg || fail 'requeue message omitted reason'
-[ "$(inbox_count b)" = 1 ] || fail 'new front was not woken'
-queue status a >/dev/null
-[ "$(inbox_count a)" = 1 ] || fail 'requeue message repeated'
-expect_field "$(queue status c)" place 2
-pass 'red front receipt moves only that car to the back and wakes the next car'
-
-make_case failed-id-reenrolls
-for id in a b; do car "$id" main; join "$id" >/dev/null; done
-queue fail a --reason 'suite failed' >/dev/null
-out=$(join a)
-expect_field "$out" place 2
-expect_field "$out" status waiting-for-front
-expect_field "$(queue status b)" place 1
-pass 'an explicitly failed id and branch re-enroll at the back'
-
-make_case gate-failure-requeues
-mkdir -p "$CASE/home/config/test-service"
-cat > "$CASE/home/config/test-service/project.json" <<'EOF'
-{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
-EOF
-for id in a b; do car "$id" main; join "$id" >/dev/null; done
-prepare a; receipt a >/dev/null
-out=$(queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --reason 'device check failed')
-expect_field "$out" place 2
-expect_field "$(queue status b)" place 1
-pass 'failed phone gate moves its front car to the back'
-
-# Front steers use the real durable sender, with only its terminal stubbed.
-mkdir -p "$TMP_ROOT/bin"
-cat > "$TMP_ROOT/bin/tmux" <<'TMUX'
-#!/usr/bin/env bash
-case "$1" in
-  display-message) echo fakepane ;;
-  list-windows) echo fm-notify ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
-  send-keys) exit 1 ;;
-esac
-TMUX
-chmod +x "$TMP_ROOT/bin/tmux"
-PATH="$TMP_ROOT/bin:$PATH"
-make_case front-steer
-mkdir -p "$CASE/home/state"
-for id in a b c; do
-  fm_write_meta "$CASE/home/state/$id.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
-done
-car a main; join a >/dev/null
-car b fm/a; join b >/dev/null
-car c fm/b; join c >/dev/null
-for id in a b c; do [ "$(inbox_count "$id")" = 0 ] || fail "joining steered $id"; done
-prepare a; receipt a >/dev/null
-git -C "$CASE/project" merge -q --ff-only fm/a
-queue reconcile a > "$CASE/reconcile.out"
-[ ! -s "$CASE/reconcile.out" ] || fail 'reconcile printed per-car output'
-[ "$(inbox_count b)" = 1 ] || fail 'new bottom car was not steered once'
-[ "$(inbox_count c)" = 0 ] || fail 'upper car was steered before reaching bottom'
-[ "$(inbox_count a)" = 1 ] || fail 'the landed car named by reconcile was not steered once'
-grep -q 'task=b status=needs-final (was waiting-for-front) place=1' "$CASE/home/state/b.inbox/"*.msg || fail 'front steer did not name the car'
-grep -q 'task=a status=landed (was ready-to-land)' "$CASE/home/state/a.inbox/"*.msg || fail 'landed steer did not name the car'
-mv "$CASE/home/state/b.inbox/"*.msg "$CASE/home/state/b.inbox/handled/"
-queue reconcile a >/dev/null
-queue status c >/dev/null
-expect_field "$(queue status b)" status needs-final
-[ "$(find "$CASE/home/state/b.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] || fail 'front steer repeated'
-queue fail b --reason 'suite failed' >/dev/null
-[ "$(inbox_count c)" = 1 ] || fail 'a failed lower car did not steer its successor'
-[ "$(inbox_count a)" = 1 ] || fail 'the landed car was steered again'
-pass 'cars that reach bottom after waiting get exactly one durable steer from landing or failure'
-
-make_case front-steer-retry
-mkdir -p "$CASE/home/state"
-fm_write_meta "$CASE/home/state/b.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
-car a main; join a >/dev/null
-car b fm/a; join b >/dev/null
-: > "$CASE/home/state/b.inbox"
-queue fail a --reason 'suite failed' > /dev/null 2> "$CASE/retry.err"
-grep -q 'could not steer b' "$CASE/retry.err" || fail 'failed front steer was not reported'
-rm "$CASE/home/state/b.inbox"
-queue reconcile a >/dev/null
-[ "$(inbox_count b)" = 1 ] || fail 'failed front steer was not retried'
-queue reconcile a >/dev/null
-[ "$(inbox_count b)" = 1 ] || fail 'retried front steer duplicated'
-pass 'a failed front steer is retried by the next invocation without duplication'
-
-make_case reconcile-without-queue
-queue reconcile a > "$CASE/none.out"
-[ ! -s "$CASE/none.out" ] && [ ! -e "$CASE/home/data/landing-queue" ] || fail 'reconcile without a queue had side effects'
-pass 'reconcile is a no-op for a landing branch without a train'
-
-steer_meta() { mkdir -p "$CASE/home/state"; fm_write_meta "$CASE/home/state/$1.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'; }
-red_receipt() {
-  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=%s\n' "$(head_of a)" "$#" > "$CASE/red.receipt"
-  for failure in "$@"; do printf 'failure=%s\n' "$failure" >> "$CASE/red.receipt"; done
-  expect_field "$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")" status needs-baseline
-  [ "$(inbox_count a)" = 0 ] || fail 'parking at needs-baseline steered the worker'
-  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" > "$CASE/tip.receipt"
-}
-make_case park-baseline-ready
-steer_meta a
-car a main; join a >/dev/null; prepare a
-red_receipt known-red
-expect_field "$(queue baseline a --receipt "$CASE/tip.receipt")" status ready-to-land
-[ "$(inbox_count a)" = 1 ] || fail 'baseline resolution did not steer the car named by firstmate'
-grep -q 'task=a status=ready-to-land (was needs-baseline)' "$CASE/home/state/a.inbox/"*.msg || fail 'baseline steer did not name the new status'
-queue status a >/dev/null; queue reconcile a >/dev/null
-[ "$(inbox_count a)" = 1 ] || fail 'repeated reconciliation repeated the baseline steer'
-git -C "$CASE/project" merge -q --ff-only fm/a
-queue reconcile a >/dev/null; queue reconcile a >/dev/null
-[ "$(inbox_count a)" = 2 ] || fail 'the landed worker was not steered exactly once'
-grep -q 'task=a status=landed (was ready-to-land)' "$CASE/home/state/a.inbox/"*.msg || fail 'landed steer did not name landing'
-pass 'a parked worker is steered once when its baseline resolves and once when it lands'
-
-make_case park-baseline-red
-steer_meta a
-car a main; join a >/dev/null; prepare a
-red_receipt known-red new-red
-expect_field "$(queue baseline a --receipt "$CASE/tip.receipt")" status red-receipt
-[ "$(inbox_count a)" = 1 ] || fail 'a baseline resolving to red-receipt left the worker asleep'
-grep -q 'task=a status=red-receipt (was needs-baseline)' "$CASE/home/state/a.inbox/"*.msg || fail 'red-receipt steer did not name the status'
-pass 'a baseline resolving to red-receipt returns the work to its paused worker'
-
-make_case park-baseline-gate
-mkdir -p "$CASE/home/config/test-service"
-cat > "$CASE/home/config/test-service/project.json" <<'EOF'
-{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
-EOF
-steer_meta a
-car a main; join a >/dev/null; prepare a
-red_receipt known-red
-expect_field "$(queue baseline a --receipt "$CASE/tip.receipt")" status needs-gate
-[ "$(inbox_count a)" = 1 ] || fail 'a baseline resolving to needs-gate left the worker asleep'
-grep -q 'task=a status=needs-gate (was needs-baseline)' "$CASE/home/state/a.inbox/"*.msg || fail 'needs-gate steer did not name the status'
-pass 'a baseline resolving to needs-gate returns the gate check to its paused worker'
-
-make_case park-ready-stale
-steer_meta a
-car a main; join a >/dev/null; prepare a
-expect_field "$(receipt a)" status ready-to-land
-[ "$(inbox_count a)" = 0 ] || fail 'parking at ready-to-land steered the worker'
-git -C "$CASE/project" commit -qm 'outside landing' --allow-empty
-queue reconcile other >/dev/null; queue reconcile other >/dev/null
-[ "$(inbox_count a)" = 1 ] || fail 'a moved target left the paused ready worker asleep'
-grep -q 'task=a status=needs-rebase (was ready-to-land)' "$CASE/home/state/a.inbox/"*.msg || fail 'stale steer did not name the returned work'
-pass 'a paused ready car whose target moves is steered once to prepare again'
-
-make_case legacy-upper-receipt
-mkdir -p "$CASE/home/config/test-service"
-cat > "$CASE/home/config/test-service/project.json" <<'EOF'
-{"suite":["suite.sh"],"device":["device.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["real-phone"]}
-EOF
-car a main; join a >/dev/null; prepare a
-car b fm/a; join b > "$CASE/b.out"
-old_a=$(head_of a)
-old_b=$(head_of b)
-key=$(cat "$CASE/b.out" | field queue)
-queue_dir="$CASE/home/data/landing-queue/$key"
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$old_b" > "$CASE/legacy.receipt"
-digest=$(git hash-object "$CASE/legacy.receipt")
-cp "$CASE/legacy.receipt" "$queue_dir/$digest.receipt"
-# Seed an upper receipt using the pre-upgrade v1 format. No migration is owed.
-python3 - "$queue_dir/queue" "$digest.receipt" "$old_a" <<'PY'
-from pathlib import Path
-import sys
-path=Path(sys.argv[1]); lines=path.read_text().splitlines()
-for i in range(3,len(lines)):
-    fields=lines[i].split('\t')
-    if fields[0]=='b':
-        fields[5:7]=sys.argv[2:4]
-        lines[i]='\t'.join(fields)
-path.write_text('\n'.join(lines)+'\n')
-PY
-expect_field "$(queue status b)" status waiting-for-front
-expect_field "$(queue status b)" receipt "$queue_dir/$digest.receipt"
-printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$old_b" "$old_a" > "$CASE/gate.receipt"
-if queue gate b --gate real-phone --head "$old_b" --target "$old_a" --receipt "$CASE/gate.receipt" > "$CASE/upper-gate.out" 2>&1; then
-  fail 'upper car submitted a configured gate'
-fi
-grep -q 'only the bottom car' "$CASE/upper-gate.out" || fail 'upper gate refusal did not name front requirement'
-for change in first second third; do
-  git -C "$CASE/a" commit -qm "$change" --allow-empty
-  out=$(queue status b)
-  expect_field "$out" status waiting-for-front
-  expect_field "$out" receipt -
-  expect_field "$out" head "$old_b"
-  expect_field "$out" rebase_from "$old_a"
-done
-[ "$(wake_count)" = 0 ] || fail 'stale legacy upper receipt became ready'
-receipt a >/dev/null
-printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$CASE/a-gate.receipt"
-queue gate a --gate real-phone --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a-gate.receipt" >/dev/null
-git -C "$CASE/project" merge -q --ff-only fm/a
-expect_field "$(queue status b)" status needs-rebase
-prepare b
-expect_field "$(receipt b)" status needs-gate
-if queue gate b --gate real-phone --head "$(head_of b)" --target "$(head_of a)" --receipt "$CASE/gate.receipt" > "$CASE/legacy-stale.out" 2>&1; then
-  fail 'stale legacy gate passed after reaching front'
-fi
-[ "$(wake_count)" = 1 ] || fail 'stale upper evidence emitted readiness after reaching front'
-pass 'v1 upper receipts remain readable but repeated target moves defer validation and stale gates fail closed at front'
-
-make_case changed-head
-car a main; join a >/dev/null; prepare a; receipt a >/dev/null
-car b fm/a; join b >/dev/null
-old_a=$(head_of a)
-old_b=$(head_of b)
-printf 'amended\n' >> "$CASE/a/a.txt"
-git -C "$CASE/a" commit -qam amend
-out=$(queue status b)
-expect_field "$out" target_sha "$(head_of a)"
-expect_field "$out" rebase_from "$old_a"
-expect_field "$out" status waiting-for-front
-expect_field "$out" receipt -
-if queue receipt b --head "$old_b" --target "$old_a" --receipt "$CASE/b.receipt" > "$CASE/stale.out" 2>&1; then
-  fail 'stale target receipt was accepted'
-fi
-expect_field "$(queue status a)" status needs-final
-[ "$(wake_count)" = 1 ] || fail 'target updates emitted routine wakes'
-receipt a >/dev/null
-[ "$(wake_count)" = 2 ] || fail 'changed bottom head did not ring again after validation'
-git -C "$CASE/project" merge -q --ff-only fm/a
-expect_field "$(queue status b)" status needs-rebase
-prepare b; receipt b >/dev/null
-pass 'a lower head change leaves upper validation deferred until the successor reaches front'
-
-make_case failed-lower
-car a main; join a >/dev/null; prepare a
-car b fm/a; join b >/dev/null
-car c fm/b; join c >/dev/null
-old_a=$(head_of a)
-queue fail a --reason 'suite failed' >/dev/null
-out=$(queue status b)
-expect_field "$out" place 1
-expect_field "$out" target_sha "$BASE"
-expect_field "$out" rebase_from "$old_a"
-expect_field "$out" status needs-rebase
-prepare b
-[ ! -e "$CASE/b/a.txt" ] || fail 'rebasing the successor retained the failed car'
-[ -f "$CASE/b/b.txt" ] || fail 'rebasing the successor dropped its own change'
-expect_field "$(queue status c)" status waiting-for-front
-receipt b >/dev/null
-[ "$(wake_count)" = 2 ] || fail 'expected one failure wake and one successor-ready wake'
-queue fail a --reason 'same failure' >/dev/null
-queue status a >/dev/null
-[ "$(wake_count)" = 2 ] || fail 'failed car emitted repeated wakes'
-expect_field "$(join a)" place 3
-expect_field "$(queue status a)" status waiting-for-front
-pass 'a failed lower car is removed from targets and successors retain only their own work'
-git -C "$CASE/project" merge -q --ff-only fm/b
-expect_field "$(queue status c)" status needs-rebase
-prepare c; receipt c >/dev/null
-[ "$(wake_count)" = 3 ] || fail 'a later landing repeated the failed car wake'
-
-make_case receipt-race
-car a main; join a >/dev/null; prepare a
-old_head=$(head_of a)
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$old_head" > "$CASE/old.receipt"
-git -C "$CASE/a" commit -qm changed --allow-empty
-if queue receipt a --head "$old_head" --target "$BASE" --receipt "$CASE/old.receipt" > "$CASE/race.out" 2>&1; then
-  fail 'receipt for old head was accepted'
-fi
-expect_field "$(queue status a)" status needs-final
-[ "$(wake_count)" = 0 ] || fail 'invalid receipt emitted a ready wake'
-# The same shared Git repository viewed from a worker must address the same queue.
-from_worker=$(FM_HOME="$CASE/home" "$QUEUE" status a --project "$CASE/a" --landing-branch main)
-expect_field "$from_worker" queue "$(queue status a | field queue)"
-pass 'receipts bind full current heads and worktrees share queue identity'
+[ "$(wake_count)" = 3 ] || fail 'three cars did not emit exactly three readiness wakes'
+pass 'three cars move through the train with one quick check each'
 
 make_case missing-branch
-car a main; join a >/dev/null
-git -C "$CASE/project" worktree remove "$CASE/a"
+car a; join a >/dev/null
+git -C "$CASE/project" worktree remove --force "$CASE/a"
 git -C "$CASE/project" branch -D fm/a >/dev/null
 expect_field "$(queue status a)" status failed
-queue status a >/dev/null
-[ "$(wake_count)" = 1 ] || fail 'missing branch did not emit one failure wake'
-pass 'a missing local branch fails visibly rather than silently retargeting a receipt'
+expect_field "$(queue status a)" reason 'local branch missing'
+pass 'a deleted unlanded branch fails visibly and keeps its reason'
 
 make_case concurrent
-car a main; car b main
-join a > "$CASE/a.out" &
-first=$!
-join b > "$CASE/b.out" &
-second=$!
+car a; car b
+join a > "$CASE/a.out" & first=$!
+join b > "$CASE/b.out" & second=$!
 wait "$first"; wait "$second"
 places=$( { queue status a | field place; queue status b | field place; } | sort | tr '\n' ' ')
 [ "$places" = '1 2 ' ] || fail "concurrent joins lost a car: $places"
-pass 'concurrent worker admission serializes without losing either car'
+pass 'concurrent green admission serializes without losing a car'
 
-make_case independent-targets
-git -C "$CASE/project" branch proto/landing
-car a main; join a > "$CASE/a.out"
-car b main
-out=$(FM_HOME="$CASE/home" "$QUEUE" ready b --project "$CASE/project" --landing-branch proto/landing \
-  --branch fm/b --head "$(head_of b)")
-expect_field "$out" place 1
-[ "$(printf '%s\n' "$out" | field queue)" != "$(cat "$CASE/a.out" | field queue)" ] || fail 'two landing branches shared one queue'
-mkdir -p "$CASE/home/state"
-printf 'landing_branch=proto/landing\n' > "$CASE/home/state/b.meta"
-out=$(FM_HOME="$CASE/home" "$QUEUE" status b --project "$CASE/b")
-expect_field "$out" landing_branch proto/landing
-pass 'landing branches have independent queues and recorded targets work from worker checkouts'
-
-make_case known-red
-car a main; join a >/dev/null; prepare a
-health_key=$(printf '%s\n%s\n' "$CASE/project" main | git hash-object --stdin)
-mkdir -p "$CASE/home/data/landing-health"
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" \
-  > "$CASE/home/data/landing-health/$health_key.receipt"
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$(head_of a)" > "$CASE/red.receipt"
-out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
-expect_field "$out" status ready-to-land
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=new-red\n' "$(head_of a)" > "$CASE/new-red.receipt"
-out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/new-red.receipt")
-expect_field "$out" status red-receipt
-expect_field "$out" reason 'receipt names failures outside the landing-health baseline'
-[ "$(wake_count)" = 1 ] || fail 'new failures emitted readiness'
-out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
-expect_field "$out" status ready-to-land
-[ "$(wake_count)" = 2 ] || fail 'renewed valid readiness did not emit a fresh transition'
-pass 'queue readiness preserves the merge gate policy for existing red baselines'
-
-make_case interrupted
-car a main; join a >/dev/null
-mkdir -p "$CASE/tools"
-cat > "$CASE/tools/mv" <<'EOF'
-#!/usr/bin/env bash
-touch "$FM_TEST_QUEUE_BARRIER"
-sleep 0.3
-exec "$FM_TEST_REAL_MV" "$@"
-EOF
-chmod +x "$CASE/tools/mv"
-FM_TEST_REAL_MV=$(command -v mv)
-export FM_TEST_REAL_MV
-FM_HOME="$CASE/home" FM_TEST_QUEUE_BARRIER="$CASE/barrier" PATH="$CASE/tools:$PATH" \
-  "$QUEUE" status a --project "$CASE/project" --landing-branch main > "$CASE/interrupted.out" 2>&1 &
-interrupted=$!
-for ((attempt=0; attempt<100; attempt++)); do
-  [ ! -f "$CASE/barrier" ] || break
-  sleep 0.1
-done
-[ -f "$CASE/barrier" ] || fail 'queue did not reach snapshot publication'
-for ((attempt=0; attempt<50; attempt++)); do
-  kill -TERM "$interrupted" 2>/dev/null || true
-  sleep 0.01
-done
-rc=0
-wait "$interrupted" || rc=$?
-expect_code 143 "$rc" 'signal barrage must preserve the protected shutdown result'
-expect_field "$(queue status a)" status needs-final
-if find "$CASE/home/data/landing-queue" -name '.queue.*' | grep -q .; then fail 'signal left a snapshot publisher temp'; fi
-pass 'repeated shutdown signals preserve the snapshot and release both locks for the next worker'
-
-make_case red-without-baseline
-car a main; join a >/dev/null; prepare a
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$(head_of a)" > "$CASE/red.receipt"
-out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
-expect_field "$out" status needs-baseline
-expect_field "$out" reason 'landing tip has no recorded landing-health baseline'
-for id in a a; do queue status "$id" >/dev/null; done
-[ "$(wake_count)" = 1 ] || fail 'missing baseline did not emit exactly one wake'
-case "$(wake_payloads)" in
-  "check: landing-queue needs-baseline task=a "*"tip=$BASE "*) ;;
-  *) fail "unexpected baseline wake: $(wake_payloads)" ;;
-esac
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$(head_of a)" > "$CASE/not-tip.receipt"
-if queue baseline a --receipt "$CASE/not-tip.receipt" > "$CASE/not-tip.out" 2>&1; then fail 'a non-tip baseline was accepted'; fi
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" > "$CASE/tip.receipt"
-out=$(queue baseline a --receipt "$CASE/tip.receipt")
-expect_field "$out" status ready-to-land
-[ "$(git -C "$CASE/project" rev-parse main)" = "$BASE" ] || fail 'recording a baseline moved the landing branch'
-[ "$(wake_count)" = 2 ] || fail 'recorded baseline did not ring readiness'
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$BASE" > "$CASE/conflict.receipt"
-if queue baseline a --receipt "$CASE/conflict.receipt" > "$CASE/conflict.out" 2>&1; then fail 'a conflicting baseline was accepted'; fi
-expect_field "$(queue status a)" status ready-to-land
-pass 'a red receipt on an unrecorded red tip wakes firstmate once and resolves from a recorded tip baseline'
-
-make_case baseline-regression
-car a main; join a >/dev/null; prepare a
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=2\nfailure=known-red\nfailure=new-red\n' "$(head_of a)" > "$CASE/red.receipt"
-expect_field "$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")" status needs-baseline
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$BASE" > "$CASE/tip.receipt"
-out=$(queue baseline a --receipt "$CASE/tip.receipt")
-expect_field "$out" status red-receipt
-expect_field "$out" reason 'receipt names failures outside the landing-health baseline'
-git -C "$CASE/a" commit -qm fix --allow-empty
-expect_field "$(queue status a)" status needs-final
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$(head_of a)" > "$CASE/fixed.receipt"
-out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/fixed.receipt")
-expect_field "$out" status ready-to-land
-[ "$(wake_count)" = 2 ] || fail 'expected one baseline wake and one readiness wake'
-pass 'a regression found after recording a missing baseline stays with its worker under the same task id'
+make_case failed-reenroll
+car a; car b
+join a >/dev/null; join b >/dev/null
+expect_field "$(queue fail a --reason 'worker fix needed')" status failed
+expect_field "$(join a)" place 2
+expect_field "$(queue status b)" place 1
+pass 'a failed car needs fresh pre-queue evidence and re-enrolls at the back'
 
 make_case empty-car
 git -C "$CASE/project" branch fm/empty
-if queue ready empty --branch fm/empty --head "$BASE" > "$CASE/empty.out" 2>&1; then fail 'a car with nothing to land was admitted'; fi
-if queue status empty > "$CASE/empty-status.out" 2>&1; then fail 'a refused empty car joined the queue'; fi
-pass 'a head already in the landing tip is refused at admission rather than reported landed'
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$BASE" > "$CASE/empty.full"
+if queue ready empty --branch fm/empty --head "$BASE" --target "$BASE" --receipt "$CASE/empty.full" > "$CASE/refusal" 2>&1; then
+  fail 'a car with nothing to land was admitted'
+fi
+if queue status empty > "$CASE/refusal" 2>&1; then fail 'refused empty car joined the queue'; fi
+pass 'a tested head already on the tip cannot join'
 
-make_case red-receipt-fix
-car a main; join a >/dev/null; prepare a
-health_key=$(printf '%s\n%s\n' "$CASE/project" main | git hash-object --stdin)
-mkdir -p "$CASE/home/data/landing-health"
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$BASE" > "$CASE/home/data/landing-health/$health_key.receipt"
-printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=new-red\n' "$(head_of a)" > "$CASE/red.receipt"
-out=$(queue receipt a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/red.receipt")
-expect_field "$out" status red-receipt
-expect_field "$(queue status a)" status red-receipt
-[ "$(wake_count)" = 0 ] || fail 'a worker-owned regression woke firstmate'
-git -C "$CASE/a" commit -qm fix --allow-empty
-expect_field "$(queue status a)" status needs-final
-receipt a >/dev/null
-expect_field "$(queue status a)" status ready-to-land
-pass 'a regression receipt stays with the worker until a fixed head is finalized'
+make_case independent-targets
+git -C "$CASE/project" branch proto/landing
+car a; car b
+join a > "$CASE/a.out"
+full_receipt b
+out=$(FM_HOME="$CASE/home" "$QUEUE" ready b --project "$CASE/project" --landing-branch proto/landing \
+  --branch fm/b --head "$(head_of b)" --target "$BASE" --receipt "$CASE/b.full")
+expect_field "$out" place 1
+[ "$(printf '%s\n' "$out" | field queue)" != "$(cat "$CASE/a.out" | field queue)" ] || fail 'landing branches shared a queue'
+pass 'separate landing branches have separate queues'
+
+make_case reconcile-without-queue
+queue reconcile a > "$CASE/out"
+[ ! -s "$CASE/out" ] && [ ! -e "$CASE/home/data/landing-queue" ] || fail 'reconcile created an empty train'
+pass 'reconcile without a train has no queue side effects'
 
 make_case landed-then-deleted
-car a main; join a >/dev/null; prepare a; receipt a >/dev/null
+car a; join a >/dev/null; quick_receipt a >/dev/null
 git -C "$CASE/project" merge -q --ff-only fm/a
 git -C "$CASE/project" worktree remove "$CASE/a"
 git -C "$CASE/project" branch -D fm/a >/dev/null
-out=$(queue status a)
-expect_field "$out" status landed
-expect_field "$out" reason -
-[ "$(wake_count)" = 1 ] || fail 'a landed and deleted branch emitted a failure wake'
-pass 'a branch deleted after landing reconciles as landed rather than failed'
-
-make_case distinct-reasons
-car a main; join a >/dev/null
-car b main; join b >/dev/null
-git -C "$CASE/project" worktree remove "$CASE/b"
-git -C "$CASE/project" branch -D fm/b >/dev/null
-out=$(queue fail a --reason 'suite failed')
-expect_field "$out" status failed
-expect_field "$out" reason 'suite failed'
-expect_field "$(queue status b)" status failed
-[ "$(wake_count)" = 2 ] || fail 'expected one failure wake per car'
-wake_payloads | grep -qx 'check: landing-queue failed task=a .* reason=suite failed' \
-  || fail "explicit failure reason missing: $(wake_payloads)"
-wake_payloads | grep -qx 'check: landing-queue failed task=b .* reason=local branch missing' \
-  || fail "missing-branch reason misattributed: $(wake_payloads)"
-pass 'one invocation attributes explicit and missing-branch failure reasons to their own cars'
-out=$(queue status b)
-expect_field "$out" status failed
-expect_field "$out" reason 'local branch missing'
-pass 'a detected missing-branch reason survives into later status calls'
-
-make_case persisted-reason
-car a main; join a >/dev/null; prepare a
-if queue fail a --reason $'two\nlines' > "$CASE/multiline.out" 2>&1; then fail 'multi-line reason was accepted'; fi
-if queue fail a --reason $'tab\there' > "$CASE/tab.out" 2>&1; then fail 'tabbed reason was accepted'; fi
-expect_field "$(queue status a)" status needs-final
-queue fail a --reason 'new-red: failure=parser, failure=io' >/dev/null
-out=$(FM_HOME="$CASE/home" "$QUEUE" status a --project "$CASE/a" --landing-branch main)
-expect_field "$out" status failed
-expect_field "$out" reason 'new-red: failure=parser, failure=io'
-[ "$(wake_count)" = 1 ] || fail 'the worker status repeated the failure wake'
-pass 'a supervisor-recorded failure reason reaches the worker through a later status call'
+expect_field "$(queue status a)" status landed
+[ "$(wake_count)" = 1 ] || fail 'landed deleted branch emitted a failure wake'
+pass 'a deleted branch whose head landed stays landed'

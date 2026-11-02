@@ -126,7 +126,7 @@ run_consumer watch-churn "watcher churn deferral" "$WATCH_CHURN_TIMEOUT" 1 \
 run_consumer learning "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIMEOUT" 1 \
   env FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
-run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 17 \
+run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 18 \
   "$STOCK_BASH" "$ROOT/tests/fm-merge-local.test.sh"
 [ "$ran_consumer" -eq 1 ] || {
   echo "::error::unknown stock Bash consumer: $selected" >&2

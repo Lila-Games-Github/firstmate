@@ -13,8 +13,11 @@ The service keeps a private copy of each submitted commit so removing a worker's
 
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
 `FM_TEST_SERVICE_CONFIG_ROOT` can point an isolated service instance at a different configuration directory while keeping `FM_HOME` for task completion delivery.
-The file names the suite and device executable argv arrays relative to the tested checkout, the ordered phone serials, named scenario argument arrays, and the landing branch.
-Optional `landing_gates` names checks the worker must record for the exact head and queue target before the local landing queue announces readiness.
+The file names `suite` and `device` executable argv arrays for the full pre-queue run and `quick_suite` and `quick_device` arrays for the front check, all relative to the tested checkout.
+The quick suite receives the touched file paths, computed from the front target to the tested head, as trailing arguments; it maps those paths to related tests.
+The quick device command performs the short phone check.
+The file also names the ordered phone serials, named scenario argument arrays, and landing branch.
+Optional `landing_gates` names checks the worker must record for the exact pre-queue head and tip before `ready` accepts the car.
 FrogPile's example requires `real-phone`, which the worker records after the real-phone end-to-end check passes.
 `max_concurrent` limits active requests for that project; it defaults to one and may be set from one to sixteen.
 An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
@@ -67,7 +70,7 @@ For the historical M31 reproduction, copy the FrogPile configuration into `FM_HO
 bin/fm-test-service.py submit frogpile /path/to/ProjectWhite e90ef2869c8bc8a2c9e441a69fbecec45f6be355 --perf-plan @service/docs/examples/fm-performance-frogpile-2026-11-02.json
 ```
 
-For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json`.
+For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json` and add the project's touched-file suite and short phone commands as `quick_suite` and `quick_device` before using the landing queue.
 An `any` request chooses the first connected phone in `any_phones`, ordered with the S22 first, and enters the project's shared queue for that phone.
 The older `any_device` command remains accepted in existing configuration files but is ignored so a project queue cannot select a phone outside `any_phones`.
 When a named phone is disconnected, `equivalent_phones` selects the first connected alternative and the project queue waits until that phone is idle.
@@ -79,8 +82,10 @@ The M31 remains explicitly addressable for performance requests and is excluded 
 The example is configuration, not a second copy of the suite or phone queue.
 
 A worker submits the exact committed head and resumes on the completion message in its steering inbox.
-Submit final suite and gate checks for a landing train only when the queue assigns the car to bottom on the live landing tip.
-The success record is accepted by `fm-merge-local.sh --receipt`:
+Before joining a landing train, rebase onto the current tip and submit the full suite and phone play-through on that exact head, with the applicable benchmark as a landing gate.
+The queue requires a green full-suite receipt and every configured gate receipt with the `ready` command.
+At the front, rebase once and submit a quick check; if the new tip changed files this task touches or the quick check failed, queue status requires the full suite, phone play-through, and applicable benchmark again.
+The front success receipt is accepted by `fm-merge-local.sh --receipt`.
 For a dispatched ship task in a configured project, use the exact `data/<task-id>/suite.receipt` path printed in its brief; the service creates that receipt on success.
 
 ```sh
@@ -100,7 +105,10 @@ The standalone `wait ID` command remains available for interactive operators and
 
 `submit` refuses a short SHA, an unavailable commit, a harness that is not committed in that commit, an unknown scenario, or a phone outside the project configuration.
 `status --json` prints the same JSON published at the status path; `cancel ID` cancels a queued request, asks the runner to stop a running one, or stops future retests of a completed one.
-A request with `--suite` writes a success receipt with exactly the three lines accepted by `fm-merge-local.sh`; a failed run writes `results/ID/SHA.failure.json` with its first failing step and message.
+A full request with `--suite` writes a three-line `fm-full-suite.v1` success receipt; a failed run writes `results/ID/SHA.failure.json` with its first failing step and message.
+For a front check, submit `--suite --check quick --target <front-target-sha> --device-gate any --receipt <path>`.
+The service requires both quick commands in the project configuration and writes `schema=fm-quick-check.v1`, `sha=<tested-full-sha>`, and `target=<front-target-sha>` after the touched-file suite and short phone check pass.
+Quick requests cannot use `--retest-on-move`.
 Per-step logs stay under the service state directory.
 Once a request finishes, the service deletes its test checkout and scratch copy, and deletes its pinned commit copy unless the request still retests on landing-branch moves.
 

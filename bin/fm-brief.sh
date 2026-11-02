@@ -869,8 +869,10 @@ if [ -n "$TEST_SERVICE_PROJECT" ]; then
   TEST_SERVICE_RECEIPT_ARG=$(shell_quote "$TEST_SERVICE_RECEIPT")
   TEST_SERVICE_GUIDANCE="# Test service gate
 When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit through the Firstmate test service with explicit FM_HOME.
-In a landing train, submit final validation only at bottom on the live tip as directed by the queue below.
+In a landing train, submit the full suite and device play-through before joining on your branch rebased onto the current tip.
+At the front, submit a quick check on the rebased head unless queue status requires a full rerun.
 Use \`FM_HOME=$(shell_quote "$FM_HOME") $FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`.
+For the front quick check, use \`--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>\` instead of the full check options; the configured quick suite receives the touched file paths and its phone command is short.
 Follow the Long-suite and evidence snapshot contract below to pause and end your turn; the service sends your steering inbox the request id, final state, SHA, receipt path, and first failure.
 On success, the service automatically writes \`$TEST_SERVICE_RECEIPT\` in exactly this three-line form for the tested full SHA:
 \`\`\`text

@@ -60,6 +60,14 @@ fm_health_receipt_read() { # <receipt> <expected-full-sha>; sets FM_HEALTH_COUNT
   FM_HEALTH_SET=$seen
 }
 
+fm_quick_receipt_read() { # <receipt> <expected-full-sha> <expected-target-sha>
+  local path=$1 head=$2 target=$3 line lines=()
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do lines[${#lines[@]}]=$line; done < "$path"
+  [ "${#lines[@]}" -eq 3 ] && [ "${lines[0]}" = schema=fm-quick-check.v1 ] \
+    && [ "${lines[1]}" = "sha=$head" ] && [ "${lines[2]}" = "target=$target" ]
+}
+
 fm_health_key() { # <canonical-project-path> <landing-branch>
   printf '%s\n%s\n' "$1" "$2" | git hash-object --stdin
 }
