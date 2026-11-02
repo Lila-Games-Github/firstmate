@@ -211,7 +211,8 @@ def project(payload):
                if isinstance(raw, dict) and str(raw.get("id", "")).startswith(
                    ("suite-running-", "suite-wait-", "ticket-", "service-"))
                and str(raw.get("status", "")).startswith(("running", "waiting"))
-               if (shown := item(raw))]
+               if (shown := item({**raw, "title": raw.get("phone_title") if str(raw["id"]).startswith(("ticket-", "service-"))
+                                     else raw.get("title")}))]
     allowance = [shown for raw in entries(panels.get("allowance")) if (shown := item(raw))]
     landings = [shown for raw in entries(panels.get("landings")) if (shown := item(raw))]
     try:

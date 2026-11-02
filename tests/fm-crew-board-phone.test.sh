@@ -85,8 +85,14 @@ with tempfile.TemporaryDirectory() as temporary:
             "phones": [{"title": "Galaxy S22", "status": "idle", "id": "device-serial", "pin": "1234"}],
             "test_queue": [{"id": "tickets-heading", "title": "PHONE TICKETS: 2 pending", "status": "section"},
                            {"id": "ticket-1", "title": "#1: Run smoke test · VIP (device-serial) · holding device-serial",
+                            "phone_title": "#1: Run smoke test · VIP (S22) · holding S22",
                             "status": "running 2m", "detail": "secret=SECRET123"},
-                           {"id": "ticket-2", "title": "#2: Run regression · Basic", "status": "waiting 1m"}],
+                           {"id": "ticket-2", "title": "#2: Run regression · Basic",
+                            "phone_title": "#2: Run regression · Basic", "status": "waiting 1m"},
+                           {"id": "ticket-3", "title": "#3: Legacy row · VIP (device-serial)", "status": "waiting 1m"},
+                           {"id": "service-r1", "title": "WAITING: Gate · Phone gate (VIP: device-serial)",
+                            "phone_title": "WAITING: Gate · Phone gate (VIP: phone)", "status": "waiting 30s"},
+                           {"id": "suite-wait-9", "title": "NEXT: Run suite", "status": "waiting 3m"}],
             "allowance": [{"title": "Codex", "status": "50%", "detail": "api_key=SECRET123"}],
         },
         "raw_output": "SECRET123 /private/path"
@@ -129,8 +135,10 @@ with tempfile.TemporaryDirectory() as temporary:
         assert code == 200, code
         projected = json.loads(body)
         assert [row["title"] for row in projected["testing"]] == [
-            "#1: Run smoke test · VIP (device-serial) · holding device-serial",
-            "#2: Run regression · Basic"], projected["testing"]
+            "#1: Run smoke test · VIP (S22) · holding S22",
+            "#2: Run regression · Basic",
+            "WAITING: Gate · Phone gate (VIP: phone)",
+            "NEXT: Run suite"], projected["testing"]
         assert "SECRET123" not in body.decode(), body
         body = body.decode()
         data = json.loads(body)
@@ -139,7 +147,7 @@ with tempfile.TemporaryDirectory() as temporary:
         assert any(row["title"] == "Choose build target" for row in data["needs"]), data
         assert not any("Worker-internal failure" in row["title"] for row in data["needs"]), data
         assert all(s not in body for s in ("SECRET123", "1234", "/private/", "raw worker output",
-                                             "fm-internal-worker", "secret_key", "path")), body
+                                             "fm-internal-worker", "device-serial", "secret_key", "path")), body
         html = status(base + "/", OWNER)[1]
         assert b"Needs you" in html
         assert b"Recent landings" in status(base + "/details", OWNER)[1]
