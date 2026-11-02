@@ -90,16 +90,66 @@ expect_field "$(join a --gate-receipt real-phone="$CASE/real-phone.gate" --gate-
 expect_field "$(quick_receipt a)" status ready-to-land
 pass 'configured phone and benchmark gates are required before joining'
 
-make_case stale-admission
+make_case concurrent-old-tip
+car a
+car b
+full_receipt a
+full_receipt b
+git -C "$CASE/project" commit -qm tip-moved --allow-empty
+expect_field "$(queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a.full")" status needs-rebase
+expect_field "$(queue ready b --branch fm/b --head "$(head_of b)" --target "$BASE" --receipt "$CASE/b.full")" status waiting-for-front
+pre_a=$(find "$CASE/home/data/landing-queue" -name pre-a -type f -print -quit)
+pre_b=$(find "$CASE/home/data/landing-queue" -name pre-b -type f -print -quit)
+[ -n "$pre_a" ] && [ "$(cat "$pre_a")" = "$BASE" ] || fail 'first car lost its tested target'
+[ -n "$pre_b" ] && [ "$(cat "$pre_b")" = "$BASE" ] || fail 'second car lost its tested target'
+prepare a
+expect_field "$(queue status a)" status needs-quick
+expect_field "$(quick_receipt a)" status ready-to-land
+pass 'two cars tested against the same old tip both get admitted and the front quick check runs after rebase'
+
+make_case old-tip-gate
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"quick_suite":["related.sh"],"device":["phone.sh"],"quick_device":["short-phone.sh"],"phones":["phone"],"landing_branch":"main","landing_gates":["m31"]}
+EOF
 car a
 full_receipt a
+printf 'schema=fm-landing-gate.v1\ngate=m31\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$CASE/m31.gate"
 git -C "$CASE/project" commit -qm tip-moved --allow-empty
-if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a.full" > "$CASE/refusal" 2>&1; then
-  fail 'ready admitted a full receipt tested against an old tip'
+expect_field "$(queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a.full" --gate-receipt m31="$CASE/m31.gate")" status needs-rebase
+pass 'a gate receipt for the tested older tip admits the car'
+
+make_case wrong-head-receipt
+car a
+car b
+full_receipt b
+if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/b.full" > "$CASE/refusal" 2>&1; then
+  fail 'ready admitted a full receipt for another head'
 fi
-grep -q 'pre-queue target changed' "$CASE/refusal" || fail 'stale tip refusal was unclear'
-if queue status a > "$CASE/refusal" 2>&1; then fail 'stale admission created a queue car'; fi
-pass 'admission refuses a full receipt when the landing tip moved'
+grep -q 'valid exact-head full-suite receipt' "$CASE/refusal" || fail 'wrong-head refusal was unclear'
+pass 'admission refuses a receipt for a different head'
+
+make_case red-receipt
+car a
+printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=1\nfailure=known-red\n' "$(head_of a)" > "$CASE/a.full"
+if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a.full" > "$CASE/refusal" 2>&1; then
+  fail 'ready admitted a red pre-queue receipt'
+fi
+grep -q 'green full-suite receipt' "$CASE/refusal" || fail 'red-receipt refusal was unclear'
+pass 'admission refuses a red receipt'
+
+make_case foreign-head
+car a
+git -C "$CASE/project" checkout -q --orphan foreign
+git -C "$CASE/project" commit -qm foreign --allow-empty
+git -C "$CASE/a" reset -q --hard foreign
+git -C "$CASE/project" checkout -q main
+full_receipt a
+if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --receipt "$CASE/a.full" > "$CASE/refusal" 2>&1; then
+  fail 'ready admitted a head without the landing tip'
+fi
+grep -q 'pre-queue head must contain' "$CASE/refusal" || fail 'foreign-head refusal was unclear'
+pass 'admission refuses a head without a landing-branch tip'
 
 make_case unrelated-tip
 car a; join a >/dev/null
