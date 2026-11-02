@@ -649,7 +649,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 
 # Rules
 1. Never push to any remote and never open a PR.
-2. Stay inside this worktree; the only files you may write outside it are the report, the status file below, and a private learning candidate created through the conditional lifecycle above.
+2. Stay inside this worktree; the only files you may write outside it are the report, the status file below, the phase-handoff note at \`$DATA/$ID/phase-handoff.md\`, and a private learning candidate created through the conditional lifecycle above.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -933,7 +933,7 @@ $SETUP1$SETUP2
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it except a private learning candidate created through the conditional lifecycle above.
+2. Stay inside this worktree; modify nothing outside it except the phase-handoff note at \`$DATA/$ID/phase-handoff.md\` and a private learning candidate created through the conditional lifecycle above.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -947,7 +947,7 @@ $(phase_protocol ship)
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: continue the same stage
-   until a defined \`done:\` gate under Definition of done, except at a planned phase handoff below.
+   until a defined \`done:\` gate under Definition of done, except at a planned phase handoff above.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
    firstmate then leaves your idle pane alone and rechecks it on a long
