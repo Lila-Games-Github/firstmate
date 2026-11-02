@@ -3,25 +3,27 @@
 Thanks for wanting to contribute.
 One rule up front:
 
-**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes) unless they are the mechanically proven fork-sync merges described below.**
+**Human-authored pull requests targeting `main` must be raised through [`no-mistakes`](https://github.com/kunchenguid/no-mistakes), except small firstmate changes opened directly with the `direct-pr` label and the mechanically proven fork-sync merges described below.**
 We require this to reduce the maintainer's burden of reviewing and merging contributions.
 
 `no-mistakes` puts a local git proxy in front of your real remote.
 Pushing through it runs an AI-driven review/test/lint pipeline in an isolated worktree, forwards the push upstream only after every check passes, and opens a clean PR automatically.
 
-A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and accepts the deterministic signature that no-mistakes writes.
-PRs without that signature fail unless they satisfy the narrow fork-sync exception below.
-It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
-GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature or the proven fork-sync shape will not be reviewed or merged.
+A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and accepts the deterministic signature that no-mistakes writes, the `direct-pr` label, or the narrow fork-sync exception below.
+It evaluates every PR opening and body edit independently, reruns after head synchronization, reopening, or a label change, and prevents a later edit from replacing an earlier pending compliance check.
+All other required checks, including tests, lint, and repository invariants, still apply to direct PRs.
+GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without an accepted path will not be reviewed or merged.
 
-The sole marker-free exception is a fork-sync merge whose title starts with `Sync fork with upstream/main` and whose Git history passes [`bin/fm-pr-fork-sync-proof.sh`](bin/fm-pr-fork-sync-proof.sh).
+The fork-sync exception is a merge whose title starts with `Sync fork with upstream/main` and whose Git history passes [`bin/fm-pr-fork-sync-proof.sh`](bin/fm-pr-fork-sync-proof.sh).
 The title prefix is literal and case-sensitive, and any suffix after it is accepted, including punctuation.
 The verifier fetches `https://github.com/kunchenguid/firstmate` read-only, requires the PR head to be one two-parent merge whose first parent is already in the PR base and whose second parent is reachable from upstream `main`, and requires every non-merge commit introduced by the PR to be upstream-reachable.
 It also proves that the merge result preserves each side's untouched paths, allowing authored conflict resolution only where both sides changed the same path.
 Titles, labels, and body claims never grant the exception by themselves, and shallow history, failed fetches, missing commits, ambiguous ancestry, or indeterminate diffs fail closed.
-This exception exists only because an upstream merge has no no-mistakes pipeline to emit the marker; ordinary work still requires the marker.
+This exception exists because an upstream merge has no no-mistakes pipeline to emit the marker.
 
 ## Workflow
+
+For a small firstmate change, open the PR directly and add the `direct-pr` label; all other required checks still apply.
 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
 2. Create a branch and make your changes.

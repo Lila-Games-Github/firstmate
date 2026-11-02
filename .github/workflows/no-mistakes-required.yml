@@ -3,7 +3,7 @@ run-name: "PR #${{ github.event.pull_request.number }} no-mistakes compliance - 
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled]
     branches:
       - main
 
@@ -35,14 +35,18 @@ jobs:
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
-            echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+            echo "Found no-mistakes signature in PR #${PR_NUMBER} body; no-mistakes path passed."
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Accept direct PR label
+        if: steps.marker.outputs.found != 'true' && contains(github.event.pull_request.labels.*.name, 'direct-pr')
+        run: echo "Found direct-pr label; direct PR path passed."
+
       # A fork-sync merge has no no-mistakes pipeline to emit the marker.
-      # The only marker-free exception has a title beginning with the literal,
+      # The fork-sync exception has a title beginning with the literal,
       # case-sensitive "Sync fork with upstream/main" prefix; any suffix is
       # allowed, but the base revision's verifier must still prove the sync from
       # Git history. The head must be a two-parent merge of upstream/main into
@@ -51,7 +55,7 @@ jobs:
       # paths both sides touched. Every shallow, missing, unreachable,
       # ambiguous, or indeterminate proof fails.
       - name: Check out the trusted base revision for fork-sync verification
-        if: steps.marker.outputs.found != 'true'
+        if: steps.marker.outputs.found != 'true' && !contains(github.event.pull_request.labels.*.name, 'direct-pr')
         uses: actions/checkout@v6
         with:
           repository: Lila-Games-Github/firstmate
@@ -60,7 +64,7 @@ jobs:
           persist-credentials: false
 
       - name: Fetch the proposed PR head read-only
-        if: steps.marker.outputs.found != 'true'
+        if: steps.marker.outputs.found != 'true' && !contains(github.event.pull_request.labels.*.name, 'direct-pr')
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -77,7 +81,7 @@ jobs:
           fi
 
       - name: Prove fork-sync merge exemption
-        if: steps.marker.outputs.found != 'true'
+        if: steps.marker.outputs.found != 'true' && !contains(github.event.pull_request.labels.*.name, 'direct-pr')
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -89,18 +93,20 @@ jobs:
             --title "$PR_TITLE" \
             --head "$PR_HEAD_SHA" \
             --base "$PR_BASE_SHA"; then
+            echo "Fork-sync proof passed."
             exit 0
           fi
           {
-            echo "::error::This PR was neither raised through no-mistakes nor proved to be a fork-sync merge."
+            echo "::error::This PR has no no-mistakes signature or direct-pr label and was not proved to be a fork-sync merge."
             echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
+            echo "For the no-mistakes path, submit via 'git push no-mistakes'."
             echo "That pipeline runs the required review/test/lint/CI steps and writes a"
             echo "deterministic '## Pipeline' section into the PR body containing:"
             echo
             echo "    $marker"
             echo
             echo "See CONTRIBUTING.md for setup and the full workflow."
+            echo "Small firstmate changes may use a direct PR with the direct-pr label."
             echo
             echo "A marker-free fork sync must satisfy the narrow mechanical proof documented there."
           } >&2
