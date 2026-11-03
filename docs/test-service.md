@@ -29,16 +29,16 @@ The file also names the ordered phone serials, named scenario argument arrays, a
 Optional `landing_gates` names checks the worker must record for the exact pre-queue head and tip before `ready` accepts the car.
 FrogPile's example requires `real-phone`, which the worker records after the real-phone end-to-end check passes.
 `max_concurrent` limits active suite requests for that project; it defaults to one and may be set from one to sixteen.
-Set `export_cache` to `true` for a device command that honors `FROGPILE_E2E_EXPORT_CACHE_DIR` and keys exports by every build input.
-The service keeps that project's cache under its persistent state directory and passes its absolute path to each device command.
-Set `export_build` to `frogpile` to run the tested commit's `device_flow.prepare_export()` before a suite or phone starts.
-This mode partitions exports by exact commit, limits simultaneous builds with `max_concurrent_builds` (default two), and keeps builds outside the suite limit.
-The cache publisher lock covers only one commit's build, so device steps on different phones can run together.
+Set `export_cache` to `true`, name the project's cache environment variable in `export_cache_env`, and provide an `export_build` argv array that builds and verifies the export from the tested checkout.
+The builder must print `FM_EXPORT_KEY=<safe-key>` on success; it can use `{python}` as its executable to select the service's Python interpreter.
+The service keeps that project's cache under its persistent state directory and passes its absolute path to both the builder and device command through the configured environment variable.
+It partitions exports by exact commit, limits simultaneous builds with `max_concurrent_builds` (default two), and keeps builds outside the suite limit.
+The publisher lock covers only one commit's build; device steps on different phones can run together while the project publisher preserves readable entries during replacement.
 Queued builds waiting for that lock can be cancelled; the request status exposes `build_state` as `pending`, `waiting`, `building`, or `ready`.
 Ready artifacts remain on disk across restarts; the service rechecks external build inputs on restart before using them.
 `max_export_cache_bytes` defaults to four GiB per project; old commit directories are removed oldest first while queued and running commits remain protected.
-Without `export_build`, the service holds one project lock for the whole device step because FrogPile's current cache publisher can remove an entry while another request reads it.
-The option defaults to `false`, and the FrogPile example enables it.
+`export_cache`, `export_cache_env`, and `export_build` must be configured together, and cache use defaults to off.
+The FrogPile example keeps its export command and artifact verification in project configuration.
 An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
 A ship brief for a repository that matches exactly one configuration names that project in its test-service gate.
 Each suite command must use its project's shared queue entry point, so other callers and service requests share the same capacity and arrival order.

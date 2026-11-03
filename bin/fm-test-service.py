@@ -18,7 +18,6 @@ import argparse
 import concurrent.futures
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -100,6 +99,7 @@ def config(project):
     data["max_concurrent"] = limit
     if not isinstance(data.get("export_cache", False), bool):
         raise ValueError("export_cache must be a boolean")
+    data["export_cache"] = data.get("export_cache", False)
     builds = data.get("max_concurrent_builds", 2)
     if isinstance(builds, bool) or not isinstance(builds, int) or not 1 <= builds <= 8:
         raise ValueError("max_concurrent_builds must be an integer from 1 to 8")
@@ -108,10 +108,16 @@ def config(project):
     if isinstance(cache_bytes, bool) or not isinstance(cache_bytes, int) or cache_bytes < 1:
         raise ValueError("max_export_cache_bytes must be a positive integer")
     data["max_export_cache_bytes"] = cache_bytes
-    if data.get("export_build") not in (None, "frogpile"):
-        raise ValueError("export_build must be frogpile")
-    if data.get("export_build") and not data["export_cache"]:
-        raise ValueError("export_build requires export_cache")
+    builder = data.get("export_build")
+    if builder is not None and (not isinstance(builder, list) or not builder
+                                or not all(isinstance(arg, str) and arg for arg in builder)):
+        raise ValueError("export_build must be a nonempty argv array")
+    if bool(builder) != data["export_cache"]:
+        raise ValueError("export_cache and export_build must be configured together")
+    cache_env = data.get("export_cache_env")
+    if data["export_cache"] and (not isinstance(cache_env, str)
+                                 or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cache_env)):
+        raise ValueError("export_cache_env must name an environment variable")
     if "landing_repo" in data:
         data["landing_repo"] = data["landing_repo"].replace("{fm_home}", str(HOME))
     for name in ("prepare", "suite", "quick_suite", "device", "quick_device", "any_device"):
@@ -613,36 +619,13 @@ def export_directory(row):
     return ROOT / "export-cache" / row["project"] / row["sha"]
 
 
-def export_ready(row, key):
-    root = export_directory(row)
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key):
-        return False
-    for manifest_path in (root / key / "manifest.json",):
-        try:
-            manifest = json.loads(manifest_path.read_text())
-            apk = manifest_path.with_name("frogpile-e2e.apk")
-            digest = hashlib.sha256()
-            with apk.open("rb") as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(block)
-            if (manifest.get("key") == manifest_path.parent.name
-                    and manifest.get("release_beacon_excluded") is True
-                    and manifest.get("package") == "com.lila.prototype.e2e"
-                    and manifest.get("schema") == 1
-                    and apk.stat().st_size >= 100_000
-                    and digest.hexdigest() == manifest.get("apk_sha256")):
-                return True
-        except (OSError, ValueError, TypeError):
-            pass
-    return False
-
-
 def build_export(row):
     """Build in a private copy, holding only this commit's publisher lock."""
     rid = row["id"]
     db = connection()
     work = ROOT / "builds" / rid
     lock_path = ROOT / "export-cache" / row["project"] / (row["sha"] + ".lock")
+    cfg = config(row["project"])
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+b") as lock:
@@ -666,19 +649,19 @@ def build_export(row):
             cloned = run(["git", "clone", "--local", "--quiet", str(ROOT / "repos" / rid), str(work)])
             if cloned.returncode or run(["git", "-C", str(work), "checkout", "--detach", "--quiet", row["sha"]]).returncode:
                 raise RuntimeError("cannot prepare export build copy")
-            module = work / "prototype-game/tests/e2e/device_flow.py"
-            if not module.is_file():
-                raise RuntimeError("FrogPile export builder missing in tested commit")
             log_path = ROOT / "logs" / (rid + "-" + str(row["generation"]) + "-export-build.log")
             log_path.parent.mkdir(parents=True, exist_ok=True)
             env = os.environ.copy()
-            env["FROGPILE_E2E_EXPORT_CACHE_DIR"] = str(export_directory(row))
-            code = ("import sys; from pathlib import Path; "
-                    "sys.path.insert(0, str(Path(sys.argv[1]).parent)); "
-                    "import device_flow; key, _apk = device_flow.prepare_export(); "
-                    "print('FM_EXPORT_KEY=' + key, flush=True)")
+            env[cfg["export_cache_env"]] = str(export_directory(row))
+            argv = [sys.executable if arg == "{python}" else arg for arg in cfg["export_build"]]
+            if not Path(argv[0]).is_absolute():
+                argv[0] = str(work / argv[0])
+            target = Path(argv[0])
+            if not target.is_file() or not os.access(target, os.X_OK) or (
+                    argv[0] != sys.executable and os.path.commonpath((str(work), str(target.resolve()))) != str(work)):
+                raise RuntimeError("export-build command missing or not executable")
             with log_path.open("wb") as log:
-                proc = subprocess.Popen([sys.executable, "-c", code, str(module)], cwd=work,
+                proc = subprocess.Popen(argv, cwd=work,
                                         env=env, stdout=log, stderr=subprocess.STDOUT,
                                         start_new_session=True, pass_fds=(lock.fileno(),))
                 while proc.poll() is None:
@@ -696,7 +679,7 @@ def build_export(row):
                 return
             output = log_path.read_text(errors="replace")
             keys = re.findall(r"^FM_EXPORT_KEY=([A-Za-z0-9_-]{1,128})$", output, re.M)
-            if proc.returncode or not keys or not export_ready(row, keys[-1]):
+            if proc.returncode or not keys:
                 raise RuntimeError(first_error(output, proc.returncode or 1, "export-build"))
             db.execute("UPDATE requests SET build_state='ready',build_sha=? WHERE id=?", (row["sha"], rid))
             snapshot(db)
@@ -779,26 +762,10 @@ def execute(db, row):
         with contextlib.ExitStack() as resources:
             child_env = None
             if name == "device" and cfg.get("export_cache"):
-                cache_dir = export_directory(row) if cfg.get("export_build") else ROOT / "export-cache" / row["project"]
+                cache_dir = export_directory(row)
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                if not cfg.get("export_build"):
-                    cache_lock = resources.enter_context((ROOT / "export-cache" / (row["project"] + ".lock")).open("a+b"))
-                    watch_db.execute("UPDATE steps SET state='waiting',started=NULL WHERE request_id=? AND generation=? AND name=?",
-                                     (rid, row["generation"], name))
-                    snapshot(watch_db)
-                    while True:
-                        if STOP or watch_db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
-                            step_state(watch_db, rid, row["generation"], name, "failed", 130)
-                            watch_db.close()
-                            return name, 130, "cancelled while waiting for export cache"
-                        try:
-                            fcntl.flock(cache_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(.2)
-                    step_state(watch_db, rid, row["generation"], name, "running")
                 child_env = os.environ.copy()
-                child_env["FROGPILE_E2E_EXPORT_CACHE_DIR"] = str(cache_dir)
+                child_env[cfg["export_cache_env"]] = str(cache_dir)
             log = resources.enter_context(log_path.open("wb"))
             proc = subprocess.Popen(argv, cwd=work, env=child_env, stdout=log,
                                     stderr=subprocess.STDOUT, start_new_session=True)

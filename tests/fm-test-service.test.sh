@@ -121,20 +121,9 @@ cat > phone.sh <<'PHONE'
 #!/usr/bin/env bash
 set -euo pipefail
 serial=$2
-if [ -e "$HOME/cache-mode" ]; then
-  : "${FROGPILE_E2E_EXPORT_CACHE_DIR:?device cache must be configured}"
-  mkdir -p "$FROGPILE_E2E_EXPORT_CACHE_DIR"
-  exec {cache_probe}> "$FROGPILE_E2E_EXPORT_CACHE_DIR/probe.lock"
-  flock -n "$cache_probe" || { echo 'cache:concurrent' >> "$EVENTS"; exit 1; }
+if [ -n "${FROGPILE_E2E_EXPORT_CACHE_DIR:-}" ]; then
   key=$(cat export-input.txt)
-  if [ -f "$FROGPILE_E2E_EXPORT_CACHE_DIR/$key.apk" ]; then
-    [ "$(cat "$FROGPILE_E2E_EXPORT_CACHE_DIR/$key.apk")" = "$key" ]
-    echo "cache:hit:$key" >> "$EVENTS"
-  else
-    echo "cache:miss:$key" >> "$EVENTS"
-    sleep .5
-    printf '%s' "$key" > "$FROGPILE_E2E_EXPORT_CACHE_DIR/$key.apk"
-  fi
+  [ -f "$FROGPILE_E2E_EXPORT_CACHE_DIR/$key/frogpile-e2e.apk" ]
 fi
 echo "phone-ticket:$serial" >> "$EVENTS"
 if [ "$serial" = any ]; then
@@ -202,6 +191,19 @@ def prepare_export():
             events.write('build-hit:' + key + '\n')
     return key, apk
 EXPORT
+cat > export-build.sh <<'BUILDER'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'PYBUILD'
+import sys
+sys.path.insert(0, 'prototype-game/tests/e2e')
+import device_flow
+key, apk = device_flow.prepare_export()
+assert apk.is_file()
+print('FM_EXPORT_KEY=' + key, flush=True)
+PYBUILD
+BUILDER
+chmod +x export-build.sh
 git add . && git commit -qm v1
 sha1=$(git rev-parse HEAD)
 python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
@@ -218,6 +220,22 @@ python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
 import json,sys
 path=sys.argv[1]
 data=json.load(open(path)); data.pop('max_concurrent_builds')
+open(path,'w').write(json.dumps(data))
+PY
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data['export_cache']=True
+open(path,'w').write(json.dumps(data))
+PY
+if "$svc" submit fake "$PWD" "$sha1" --device-gate S22 > "$tmp/invalid-cache.out" 2>&1; then
+  fail 'cache without a builder was accepted'
+fi
+grep -q 'export_cache and export_build must be configured together' "$tmp/invalid-cache.out"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data.pop('export_cache')
 open(path,'w').write(json.dumps(data))
 PY
 printf '\necho dirty-live-tree >&2; exit 1\n' >> suite.sh
@@ -363,37 +381,7 @@ python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
 import json,sys
 path=sys.argv[1]
 data=json.load(open(path)); data['max_concurrent']=2; data['export_cache']=True
-open(path,'w').write(json.dumps(data))
-PY
-touch "$HOME/cache-mode"
-cache_one=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
-$svc wait "$cache_one" | grep -q '^passed '
-cache_two=$($svc submit fake "$PWD" "$sha1" --device-gate S21)
-$svc wait "$cache_two" | grep -q '^passed '
-cache_changed=$($svc submit fake "$PWD" "$sha2" --device-gate S22)
-$svc wait "$cache_changed" | grep -q '^passed '
-[ "$(grep -c '^cache:miss:v1$' "$EVENTS")" -eq 1 ]
-[ "$(grep -c '^cache:hit:v1$' "$EVENTS")" -eq 1 ]
-[ "$(grep -c '^cache:miss:v2$' "$EVENTS")" -eq 1 ]
-rm -f "$FM_TEST_SERVICE_STATE/export-cache/fake/"*.apk
-before_misses=$(grep -c '^cache:miss:v1$' "$EVENTS")
-cache_parallel_one=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
-for i in $(seq 1 100); do
-  [ "$(grep -c '^cache:miss:v1$' "$EVENTS")" -gt "$before_misses" ] && break
-  sleep .01
-done
-[ "$i" -lt 100 ]
-cache_parallel_two=$($svc submit fake "$PWD" "$sha1" --device-gate S21)
-$svc wait "$cache_parallel_one" | grep -q '^passed '
-$svc wait "$cache_parallel_two" | grep -q '^passed '
-[ "$(grep -c '^cache:miss:v1$' "$EVENTS")" -eq "$((before_misses + 1))" ]
-if grep -q '^cache:concurrent$' "$EVENTS"; then fail 'cache device steps overlapped'; fi
-[ "$(cat "$FM_TEST_SERVICE_STATE/export-cache/fake/v1.apk")" = v1 ]
-rm "$HOME/cache-mode"
-python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
-import json,sys
-path=sys.argv[1]
-data=json.load(open(path)); data['export_build']='frogpile'; data['max_concurrent_builds']=2
+data['export_build']=['export-build.sh']; data['export_cache_env']='FROGPILE_E2E_EXPORT_CACHE_DIR'
 open(path,'w').write(json.dumps(data))
 PY
 # A broken export fails before a phone ticket and leaves the suite slot free.
@@ -494,7 +482,7 @@ done
 python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
 import json,sys
 path=sys.argv[1]
-data=json.load(open(path)); data.pop('export_cache'); data.pop('export_build'); data.pop('max_export_cache_bytes')
+data=json.load(open(path)); data.pop('export_cache'); data.pop('export_build'); data.pop('export_cache_env'); data.pop('max_export_cache_bytes')
 open(path,'w').write(json.dumps(data))
 PY
 touch "$HOME/slow-phone"

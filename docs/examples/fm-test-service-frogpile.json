@@ -1,5 +1,12 @@
 {
-  "required_tools": {"adb": [], "godot": [], "python3": ["PIL"], "java": []},
+  "required_tools": {
+    "adb": [],
+    "godot": [],
+    "python3": [
+      "PIL"
+    ],
+    "java": []
+  },
   "prepare": [
     "scripts/godot-automation.sh",
     "--headless",
@@ -15,7 +22,11 @@
   "max_concurrent_builds": 2,
   "max_export_cache_bytes": 4294967296,
   "export_cache": true,
-  "export_build": "frogpile",
+  "export_build": [
+    "{python}",
+    "-c",
+    "import hashlib, json, sys\nfrom pathlib import Path\nsys.path.insert(0, 'prototype-game/tests/e2e')\nimport device_flow\nkey, apk = device_flow.prepare_export()\napk = Path(apk)\nmanifest = json.loads(apk.with_name('manifest.json').read_text())\nassert manifest['schema'] == 1 and manifest['key'] == key\nassert manifest['package'] == 'com.lila.prototype.e2e' and manifest['release_beacon_excluded'] is True\nassert apk.stat().st_size >= 100000\nassert hashlib.sha256(apk.read_bytes()).hexdigest() == manifest['apk_sha256']\nprint('FM_EXPORT_KEY=' + key, flush=True)\n"
+  ],
   "device": [
     "prototype-game/tests/e2e/run_device_flow.sh",
     "--serial",
@@ -55,5 +66,6 @@
     "RZCX224VH4T": [
       "R5CT32HRVNM"
     ]
-  }
+  },
+  "export_cache_env": "FROGPILE_E2E_EXPORT_CACHE_DIR"
 }
