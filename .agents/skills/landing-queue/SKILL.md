@@ -16,6 +16,12 @@ Load this on any `check: landing-queue <status> task=<id> ...` wake.
 Workers own admission, rebasing, suite runs, and receipts, so never message a worker about its place, target, rebase, or suite timing, and never edit queue files by hand; the queue tool alone steers paused workers when their car leaves parking.
 Workers also record configured landing-gate passes through the queue tool; a missing gate remains their work and emits no readiness wake.
 
+## Move a waiting car
+
+When the captain requests a queue reorder, use `bin/fm-landing-queue.sh move <id> --project <project> --landing-branch <landing> --place <number>` with this home's `FM_HOME`.
+The script header owns the place numbering and refusal rules.
+Use `status` afterward to report the resulting places; the queue tool handles any due worker steer.
+
 ## Recheck
 
 A wake is an event, not current state.
