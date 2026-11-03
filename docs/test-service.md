@@ -6,7 +6,7 @@ It keeps its SQLite request database, independent Git copies, logs, result recor
 The status file contains queue order, `running_requests` and `waiting_requests` arrays with task, SHA, state, start time, and elapsed times, plus per-request and per-step detail for the crew board.
 Its `runner` record carries an instance ID, runner-owned heartbeat, and live-lock verdict; `updated` is that heartbeat, while `observed_at` is only the status read time.
 If the runner is gone, a running request appears as `interrupted` until startup requeues the same ID, and a status read publishes one supervision wake for each pending or interrupted request.
-A failed step makes its request appear `failed` immediately while sibling steps finish, and a task receives a step-failure message before the terminal completion message.
+A failed step makes its request appear `failed` immediately while sibling steps finish, and when siblings are still running a task receives a step-failure message before the terminal completion message.
 The `alerts` array exposes runner loss, failed steps, and requests that have no connected eligible phone.
 
 Install the user unit from the checked-out code root with `bin/fm-test-service.py install-unit`, then run `systemctl --user daemon-reload` and `systemctl --user enable --now fm-test-service.service`.
