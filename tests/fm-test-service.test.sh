@@ -55,6 +55,40 @@ grep -q '^ExecStart=".*/bin/fm-test-service.py" serve$' "$(cat "$tmp/unit-path")
 cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
 {"prepare":["prepare.sh"],"suite":["suite.sh"],"quick_suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"any_device":["phone.sh","--serial","any"],"quick_device":["phone.sh","--serial","{serial}","--quick"],"phones":["S22","S21","M31"],"any_phones":["S22","S21","M31"],"equivalent_phones":{"S22":["S21"],"S21":["S22"]},"landing_branch":"main","scenarios":{"smoke":["--smoke"]}}
 JSON
+# The unit carries the installing shell's tool order and isolated paths.
+unit=$(cat "$tmp/unit-path")
+grep -Fqx "Environment=\"PATH=$PATH\"" "$unit"
+grep -Fqx "Environment=\"FM_TEST_SERVICE_CONFIG_ROOT=$FM_HOME/config/test-service\"" "$unit"
+grep -Fqx "ExecStartPre=\"$svc\" check-tools" "$unit"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PYUNIT'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data['required_tools'] = {'adb': [], 'python3': ['PIL']}
+open(path, 'w').write(json.dumps(data))
+PYUNIT
+if PATH=/usr/bin:/bin "$svc" check-tools > "$tmp/check-absent-adb" 2>&1; then
+  echo 'missing adb fixture passed' >&2; exit 1
+fi
+grep -q 'fake: missing tool adb' "$tmp/check-absent-adb"
+mkdir -p "$tmp/bad-python"
+cat > "$tmp/bad-python/python3" <<'PYSHIM'
+#!/bin/sh
+if [ "$1" = -c ]; then exit 1; fi
+exec /usr/bin/python3 "$@"
+PYSHIM
+chmod +x "$tmp/bad-python/python3"
+if PATH="$tmp/bad-python:$tmp/bin:/usr/bin:/bin" "$svc" check-tools > "$tmp/check-absent-pil" 2>&1; then
+  echo 'missing PIL fixture passed' >&2; exit 1
+fi
+grep -q 'fake: python3 missing Python module PIL' "$tmp/check-absent-pil"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PYUNIT'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+del data['required_tools']
+open(path, 'w').write(json.dumps(data))
+PYUNIT
 cd "$tmp/project"
 git init -q -b main
 git config user.name Test

@@ -6,7 +6,7 @@ Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--c
        [--scenario NAME]... [--harness PATH]... [--perf-plan PATH] [--receipt PATH] [--retest-on-move]
        fm-test-service.py serve | status [--json] | wait ID | cancel ID
        fm-test-service.py perf-query BUNDLE SQL
-       fm-test-service.py install-unit | project-for-repo REPO | landing-gates-for-repo REPO
+       fm-test-service.py install-unit | check-tools | project-for-repo REPO | landing-gates-for-repo REPO
 Configuration: FM_HOME/config/test-service/PROJECT.json, or FM_TEST_SERVICE_CONFIG_ROOT/PROJECT.json
 for an isolated service instance (see docs/test-service.md).
 State: FM_TEST_SERVICE_STATE or ~/.local/state/firstmate-test-service.
@@ -89,7 +89,33 @@ def config(project):
     for name in ("prepare", "suite", "quick_suite", "device", "quick_device", "any_device"):
         if name in data and (not data[name] or Path(data[name][0]).is_absolute() or ".." in Path(data[name][0]).parts):
             raise ValueError(name + " executable must be relative to the tested checkout")
+    requirements = data.get("required_tools", {})
+    if not isinstance(requirements, dict) or any(
+        not isinstance(tool, str) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", tool)
+        or not isinstance(modules, list)
+        or any(not isinstance(module, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", module)
+               for module in modules)
+        for tool, modules in requirements.items()
+    ):
+        raise ValueError("required_tools must map tool names to Python module lists")
     return data
+
+
+def check_tools():
+    failures = []
+    for path in sorted(CONFIG_ROOT.glob("*.json")):
+        requirements = config(path.stem).get("required_tools", {})
+        for tool, modules in requirements.items():
+            executable = shutil.which(tool)
+            if not executable:
+                failures.append(f"{path.stem}: missing tool {tool}")
+                continue
+            for module in modules:
+                result = run([executable, "-c", "import importlib, sys; importlib.import_module(sys.argv[1])", module])
+                if result.returncode:
+                    failures.append(f"{path.stem}: {tool} missing Python module {module}")
+    if failures:
+        raise RuntimeError("test service startup check failed: " + "; ".join(failures))
 
 
 def project_for_repo(repo):
@@ -860,6 +886,7 @@ def retest_moved(db):
 
 
 def serve():
+    check_tools()
     global STOP
     def stop(_sig, _frame):
         global STOP
@@ -977,7 +1004,7 @@ def main():
     s = sub.add_parser("status"); s.add_argument("--json", action="store_true")
     s = sub.add_parser("wait"); s.add_argument("id")
     s = sub.add_parser("cancel"); s.add_argument("id")
-    sub.add_parser("serve"); sub.add_parser("install-unit")
+    sub.add_parser("serve"); sub.add_parser("install-unit"); sub.add_parser("check-tools")
     s = sub.add_parser("project-for-repo"); s.add_argument("repo")
     s = sub.add_parser("landing-gates-for-repo"); s.add_argument("repo")
     args = p.parse_args()
@@ -994,6 +1021,8 @@ def main():
         fm_perf_plan.query(Path(args.bundle), args.sql)
     elif args.cmd == "serve":
         serve()
+    elif args.cmd == "check-tools":
+        check_tools()
     elif args.cmd == "project-for-repo":
         project = project_for_repo(args.repo)
         if not project:
@@ -1007,7 +1036,11 @@ def main():
         unit.parent.mkdir(parents=True, exist_ok=True)
         env = "Environment=" + json.dumps("FM_HOME=" + str(HOME)) + "\n"
         env += "Environment=" + json.dumps("FM_TEST_SERVICE_STATE=" + str(ROOT)) + "\n"
-        atomic_write(unit, "[Unit]\nDescription=Firstmate test service\n[Service]\nType=simple\n" + env + "ExecStart=" + json.dumps(str(CODE)) + " serve\nRestart=always\nRestartSec=2\nKillMode=control-group\n[Install]\nWantedBy=default.target\n")
+        env += "Environment=" + json.dumps("FM_TEST_SERVICE_CONFIG_ROOT=" + str(CONFIG_ROOT)) + "\n"
+        for name in ("PATH", "ANDROID_HOME", "ANDROID_SDK_ROOT", "JAVA_HOME", "GODOT_BIN", "FROGPILE_QUEUE_ROOT"):
+            if name in os.environ:
+                env += "Environment=" + json.dumps(name + "=" + os.environ[name]) + "\n"
+        atomic_write(unit, "[Unit]\nDescription=Firstmate test service\n[Service]\nType=simple\n" + env + "ExecStartPre=" + json.dumps(str(CODE)) + " check-tools\nExecStart=" + json.dumps(str(CODE)) + " serve\nRestart=always\nRestartSec=2\nKillMode=control-group\n[Install]\nWantedBy=default.target\n")
         print(unit)
     else:
         db = connection()
