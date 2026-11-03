@@ -546,7 +546,7 @@ def execute(db, row):
             return "passed", None, work
         requested = opts["device_gate"]
         serial = None
-        if requested:
+        if requested and requested != "any":
             step_state(db, rid, row["generation"], "phone-prep", "running")
             try:
                 attempted = set()
@@ -568,6 +568,14 @@ def execute(db, row):
                 return "failed", str(exc), work
             step_state(db, rid, row["generation"], "phone-prep", "passed", 0)
         def device_step():
+            if requested == "any":
+                device_command = cfg["quick_device" if opts.get("check") == "quick" else "device"]
+                if opts.get("check") != "quick":
+                    device_command = cfg.get("any_device", device_command)
+                command = expand(device_command, "any")
+                for scenario in opts["scenarios"]:
+                    command += cfg.get("scenarios", {})[scenario]
+                return step("device", command)
             attempted = set()
             while True:
                 current = serial_holder[0]

@@ -73,15 +73,15 @@ bin/fm-test-service.py submit frogpile /path/to/ProjectWhite e90ef2869c8bc8a2c9e
 ```
 
 For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json` and add the project's touched-file suite and short phone commands as `quick_suite` and `quick_device` before using the landing queue.
-An `any` request chooses the first connected, free phone in `any_phones`, ordered with the S22 first, and enters the project's shared queue for that phone.
-While every connected functional phone is busy, the service waits and retries instead of pinning the request to one busy serial.
-The older `any_device` command remains accepted in existing configuration files but is ignored so a project queue cannot select a phone outside `any_phones`.
+An `any` request enters the project's shared phone queue, which chooses the first eligible free phone from `any_phones` and gives waiting named-phone tickets priority.
+While every eligible phone is busy, the project queue waits for one to become free.
+An `any` device gate passes the any-phone sentinel to the project's `any_device` command when configured, or to its normal device command otherwise; a quick check uses `quick_device`.
 When a named phone is disconnected or busy, `equivalent_phones` supplies other functional phones to try before waiting.
-The service monitors the selected phone during the test and retries on another equivalent if it disconnects.
-When none is connected, the request fails with a `device-unavailable` alert instead of leaving an offline ticket waiting forever.
+For named requests, the service monitors the selected phone during the test and retries on another equivalent if it disconnects.
+When none of the named request's candidates is connected, the request fails with a `device-unavailable` alert instead of leaving an offline ticket waiting forever.
 Submit a new request after a phone reconnects.
 The FrogPile preparation starts Godot's editor import so class discovery works in a fresh checkout.
-The M31 remains explicitly addressable for performance requests and is rejected as a functional phone.
+The M31 is eligible for any-phone functional requests when it has no waiting named-phone ticket, and remains explicitly addressable for performance requests.
 The example is configuration, not a second copy of the suite or phone queue.
 
 A worker submits the exact committed head and resumes on the completion message in its steering inbox.
