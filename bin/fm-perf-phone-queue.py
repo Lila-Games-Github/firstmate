@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""Execute a project phone-queue module as the performance service lease entry."""
-import argparse
-from pathlib import Path
+"""Performance queue entry using Firstmate's shared client (no project import).
+
+Usage: fm-perf-phone-queue.py [old-phone_queue.py] --project PROJECT --serial SERIAL -- COMMAND...
+The optional old script path is accepted for existing adapter argv compatibility;
+it is never imported or executed. FM_TEST_PROJECT supplies --project in service steps.
+"""
 import sys
+
+import fm_test_queues
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("queue", type=Path)
-    p.add_argument("--serial", required=True)
-    p.add_argument("command", nargs=argparse.REMAINDER)
-    args = p.parse_args()
-    script = args.queue.resolve()
-    if not script.is_file() or script.name != "phone_queue.py":
-        p.error("queue must name the project's phone_queue.py")
-    sys.path.insert(0, str(script.parent))
-    import phone_queue  # noqa: E402
-    return phone_queue.main(["--serial", args.serial, *args.command])
+    args = sys.argv[1:]
+    if args and not args[0].startswith("-"):
+        args = args[1:]
+    return fm_test_queues.main(["phone", *args])
 
 
 if __name__ == "__main__":

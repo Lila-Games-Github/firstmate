@@ -12,6 +12,8 @@ trap cleanup EXIT
 trap 'echo "failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 export HOME=$tmp/home FM_HOME=$tmp/fm FM_TEST_SERVICE_STATE=$tmp/state EVENTS=$tmp/events
 export FM_STATE_OVERRIDE=$FM_HOME/state
+export FM_TEST_QUEUE_LEGACY_ROOT=$FM_TEST_SERVICE_STATE/queues/legacy
+mkdir -p "$FM_TEST_QUEUE_LEGACY_ROOT"
 mkdir -p "$HOME/.config/firstmate" "$FM_HOME/config/test-service" "$FM_STATE_OVERRIDE" "$tmp/bin" "$tmp/project"
 export PATH=$tmp/bin:$PATH
 cat > "$tmp/bin/adb" <<'ADB'
@@ -127,7 +129,7 @@ if [ "$serial" = any ]; then
     for candidate in S22 S21 M31; do
       [ ! -e "$HOME/vip-wait-$candidate" ] || continue
       if [ -e "$HOME/online-devices" ] && ! grep -qx "$candidate" "$HOME/online-devices"; then continue; fi
-      exec {phone_lock}> "/tmp/frogpile-phone-$candidate.lock"
+      exec {phone_lock}> "$FM_TEST_QUEUE_LEGACY_ROOT/frogpile-phone-$candidate.lock"
       if flock -n "$phone_lock"; then serial=$candidate; break; fi
       exec {phone_lock}>&-
     done
@@ -314,25 +316,27 @@ grep -q '^phone-start-v1:S21:$' "$EVENTS"
 if [ "$(grep -c '^phone-ticket:any$' "$EVENTS")" -lt 3 ]; then fail 'any-phone request passed a named serial'; fi
 rm "$HOME/slow-phone"
 touch "$HOME/vip-wait-M31"
-flock /tmp/frogpile-phone-S22.lock -c 'sleep 3' & vip_s22=$!
-sleep .2
+exec {vip_s22}> "$FM_TEST_QUEUE_LEGACY_ROOT/frogpile-phone-S22.lock"
+flock "$vip_s22"
 vip_waiting=$($svc submit fake "$PWD" "$sha1" --device-gate any)
 $svc wait "$vip_waiting" | grep -q '^passed '
-wait "$vip_s22"
+exec {vip_s22}>&-
 [ "$(tail -2 "$EVENTS" | grep -c '^phone-start-v1:S21:$')" -eq 1 ]
 rm "$HOME/vip-wait-M31"
-flock /tmp/frogpile-phone-S22.lock -c 'sleep 3' & m31_s22=$!
-flock /tmp/frogpile-phone-S21.lock -c 'sleep 3' & m31_s21=$!
-sleep .2
+exec {m31_s22}> "$FM_TEST_QUEUE_LEGACY_ROOT/frogpile-phone-S22.lock"
+exec {m31_s21}> "$FM_TEST_QUEUE_LEGACY_ROOT/frogpile-phone-S21.lock"
+flock "$m31_s22"
+flock "$m31_s21"
 m31_any=$($svc submit fake "$PWD" "$sha1" --device-gate any)
 $svc wait "$m31_any" | grep -q '^passed '
-wait "$m31_s22" "$m31_s21"
+exec {m31_s22}>&-
+exec {m31_s21}>&-
 [ "$(tail -2 "$EVENTS" | grep -c '^phone-start-v1:M31:$')" -eq 1 ]
-flock /tmp/frogpile-phone-S22.lock -c 'sleep 4' & external_phone=$!
-sleep .2
+exec {external_phone}> "$FM_TEST_QUEUE_LEGACY_ROOT/frogpile-phone-S22.lock"
+flock "$external_phone"
 leased=$($svc submit fake "$PWD" "$sha1" --device-gate any)
 $svc wait "$leased" | grep -q '^passed '
-wait "$external_phone"
+exec {external_phone}>&-
 [ "$(tail -2 "$EVENTS" | grep -c '^phone-start-v1:S21:$')" -eq 1 ]
 python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
 import json,sys

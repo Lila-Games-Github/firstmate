@@ -12,6 +12,7 @@
     "prototype-game/tests/run_suite.sh"
   ],
   "max_concurrent": 4,
+  "queue_mode": "client",
   "device": [
     "prototype-game/tests/e2e/run_device_flow.sh",
     "--serial",

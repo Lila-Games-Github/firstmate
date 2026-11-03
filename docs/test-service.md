@@ -31,18 +31,40 @@ FrogPile's example requires `real-phone`, which the worker records after the rea
 `max_concurrent` limits active suite requests for that project; it defaults to one and may be set from one to sixteen.
 An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
 A ship brief for a repository that matches exactly one configuration names that project in its test-service gate.
-Each suite command must use its project's shared queue entry point, so other callers and service requests share the same capacity and arrival order.
+Suite and phone admission use the host-wide queues exposed by `bin/fm-test-service.py queue`.
+Set `queue_mode` to `service` for project commands that do not already reserve resources; the service then wraps each suite and phone step in its shared client.
+The default `client` mode preserves existing wrappers: they acquire through the same client API at their existing admission boundary, after any app export, and the service supplies `FM_TEST_SERVICE` and `FM_TEST_PROJECT` for discovery.
+Choose one admission owner per command to avoid nested reservations.
+The [queue CLI help](../bin/fm_test_queues.py) owns commands, configuration variables, path precedence, and the Python `reservation()` API.
 An optional `prepare` argv runs once in the clean detached copy before either suite or phone step; it must leave the tracked tree clean.
 Retests read the submitting worktree's common Git storage by default, so a disposable linked worktree can disappear after submission.
 An optional `landing_repo` absolute path, with `{fm_home}` expansion, selects a different durable local clone.
 Use `{serial}` in the device argv where the chosen serial belongs.
-The phone command must use the project's shared phone queue entry point when it has one.
+A phone command in `client` mode uses the shared reservation API at the point it starts using the device.
 FrogPile's suite configuration calls `prototype-game/tests/run_suite.sh`, whose four-place queue owns suite admission, worktree isolation, the no-output watchdog, and script-error verdicts for service and direct callers alike.
 The example caps FrogPile at four active suite requests through `max_concurrent`; these suite slots include phone and preparation time.
 Requests without a suite start without consuming a suite slot, so a phone-only performance harness can use its free phone while suites wait for another phone.
-The service takes no separate suite or phone lock and does not stop the adb server.
+The global suite queue defaults to four slots across every project and direct caller, separately from each project's `max_concurrent` dispatch limit.
+Suite tickets admit in arrival order, named phone tickets use VIP FIFO, and any-phone tickets use FIFO with each project's configured preference order.
+A held resource is never preempted.
+The service does not stop the adb server.
 The service starts a request's suite and phone steps concurrently after preparation, then runs any committed harness scripts from that request.
 Queued front checks start before ordinary queued requests; each class keeps submission order, and a request already running is never interrupted.
+
+The shared queues retain FrogPile's existing `~/.frogpile-queues` ticket, counter, event, and flock files in place, including the old suite and per-phone compatibility flocks.
+There is no copy or migration into a second competing line.
+Existing held and waiting clients remain authoritative while the service restarts; process identity and boot identity let the next client reclaim dead tickets.
+The optional `queue_lease_dir` names an existing absolute device-test lease directory during project migration; new phone records retain their originating pool for label-specific cleanup.
+A custom `FM_TEST_SERVICE_STATE` isolates queue and legacy-lock paths as well as request state, and ignores a project's production lease directory.
+The normal installed state path retains the shared host queue; use the explicit root overrides from `queue --help` for private compatibility tests.
+Project wrappers in transition can continue their local implementation against these same files until they adopt the shared client.
+
+Direct callers use `queue suite -- COMMAND...` or `queue phone --project PROJECT --serial any -- COMMAND...` without requiring a running service.
+A shell that already owns suite descriptors uses `queue suite-acquire --help` for the compatible inherited-descriptor interface.
+A Python phone harness obtains the module path with `queue client-path`, imports `fm_test_queues`, and enters `reservation(serial, project=PROJECT)` after its export phase.
+Standalone teammates can retain their existing local queue fallback when the Firstmate executable is absent.
+The performance lease entry `bin/fm-perf-phone-queue.py` uses this same client and accepts its former project-module path argument for argv compatibility without importing project code.
+Use `bin/fm-test-run.sh tests/fm-test-queues.test.sh` to exercise ordering, compatibility locks, cancellation, recovery, and cross-project admission with fake devices and private roots.
 
 ## Performance plans
 
@@ -82,11 +104,13 @@ bin/fm-test-service.py submit frogpile /path/to/ProjectWhite e90ef2869c8bc8a2c9e
 ```
 
 For FrogPile, copy [the example](examples/fm-test-service-frogpile.json) into `FM_HOME/config/test-service/frogpile.json` and add the project's touched-file suite and short phone commands as `quick_suite` and `quick_device` before using the landing queue.
-An `any` request enters the project's shared phone queue, which chooses the first eligible free phone from `any_phones` and gives waiting named-phone tickets priority.
-While every eligible phone is busy, the project queue waits for one to become free.
-An `any` device gate passes the any-phone sentinel to the project's `any_device` command when configured, or to its normal device command otherwise; a quick check uses `quick_device`.
+An `any` request retains its any-phone ticket at admission; the shared queue chooses an eligible free phone from `any_phones` and gives waiting named-phone tickets priority.
+While every eligible phone is busy, its ticket waits for one to become free.
+In `client` mode, an `any` device gate passes the any-phone sentinel to the project's `any_device` command when configured, or to its normal device command otherwise; a quick check uses `quick_device`.
+In `service` mode the admitted phone replaces `{serial}` in `device` or `quick_device`, and the service prepares it inside the reservation.
 When a named phone is disconnected or busy, `equivalent_phones` supplies other functional phones to try before waiting.
-For named requests, the service monitors the selected phone during the test and retries on another equivalent if it disconnects.
+For named requests in `client` mode, the service monitors the selected phone during the test and retries on another equivalent if it disconnects.
+In `service` mode it selects a connected equivalent at admission when configured; a transport failure during the command is reported by that command.
 When none of the named request's candidates is connected, the request fails with a `device-unavailable` alert instead of leaving an offline ticket waiting forever.
 Submit a new request after a phone reconnects.
 The FrogPile preparation starts Godot's editor import so class discovery works in a fresh checkout.

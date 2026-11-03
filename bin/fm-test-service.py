@@ -5,6 +5,7 @@ Usage: fm-test-service.py submit PROJECT WORKTREE SHA [--task ID] [--suite] [--c
        [--target FULL_SHA] [--device-gate SERIAL|any]
        [--scenario NAME]... [--harness PATH]... [--perf-plan PATH] [--receipt PATH] [--retest-on-move]
        fm-test-service.py serve | status [--json] | wait ID | cancel ID
+       fm-test-service.py queue <phone|suite|suite-acquire|paths|client-path> --help
        fm-test-service.py perf-query BUNDLE SQL
        fm-test-service.py install-unit | check-tools | project-for-repo REPO | landing-gates-for-repo REPO
 Configuration: FM_HOME/config/test-service/PROJECT.json, or FM_TEST_SERVICE_CONFIG_ROOT/PROJECT.json
@@ -31,6 +32,7 @@ import time
 import uuid
 
 import fm_perf_plan
+import fm_test_queues
 
 CODE = Path(__file__).resolve()
 HOME = Path(os.environ.get("FM_HOME", CODE.parent.parent)).resolve()
@@ -96,6 +98,7 @@ def config(project):
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 16:
         raise ValueError("max_concurrent must be an integer from 1 to 16")
     data["max_concurrent"] = limit
+    fm_test_queues.validate(data)
     if "landing_repo" in data:
         data["landing_repo"] = data["landing_repo"].replace("{fm_home}", str(HOME))
     for name in ("prepare", "suite", "quick_suite", "device", "quick_device", "any_device"):
@@ -530,22 +533,7 @@ def phone_candidates(requested, cfg):
 
 
 def phone_busy(serial):
-    queue = Path(os.environ.get("FROGPILE_QUEUE_ROOT", str(Path.home() / ".frogpile-queues"))) / "phones"
-    paths = [Path("/tmp") / ("frogpile-phone-" + serial + ".lock")]
-    if queue.is_dir():
-        paths.insert(0, queue / (serial + ".lock"))
-    streams = []
-    try:
-        for path in paths:
-            stream = path.open("a+")
-            streams.append(stream)
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return False
-    except BlockingIOError:
-        return True
-    finally:
-        for stream in streams:
-            stream.close()
+    return fm_test_queues.phone_busy(serial)
 
 
 def choose_phone(requested, cfg, excluded=(), owner=None):
@@ -590,6 +578,7 @@ def execute(db, row):
     rid = row["id"]
     opts = json.loads(row["options"])
     cfg = config(row["project"])
+    service_queues = cfg.get("queue_mode", "client") == "service"
     repo = ROOT / "repos" / rid
     work = ROOT / "runs" / rid
     if work.exists():
@@ -620,8 +609,15 @@ def execute(db, row):
             return name, 127, "command missing or not executable: " + argv[0]
         log_path = ROOT / "logs" / (rid + "-" + str(row["generation"]) + "-" + re.sub(r"[^A-Za-z0-9_-]", "_", name) + ".log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        if service_queues and name == "device":
+            argv = [sys.executable, str(CODE), "queue", "phone", "--project", row["project"],
+                    "--serial", opts["device_gate"], "--equivalents", "--prepare", "--", *argv]
+        if service_queues and name == "suite":
+            argv = [sys.executable, str(CODE), "queue", "suite", "--", *argv]
         with log_path.open("wb") as log:
-            proc = subprocess.Popen(argv, cwd=work, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc = subprocess.Popen(argv, cwd=work, stdout=log, stderr=subprocess.STDOUT,
+                                    start_new_session=True,
+                                    env=fm_test_queues.environment(row["project"], cfg))
             processes.append(proc)
             last_phone_check = 0
             disconnected = False
@@ -673,7 +669,9 @@ def execute(db, row):
             shutil.rmtree(bundle, ignore_errors=True)
             bundle.mkdir(parents=True)
             serial = plan["device"]
-            queue = fm_perf_plan.command(adapter["queue"], work, bundle, plan, serial, "", 0, "")
+            queue = ([str(CODE), "queue", "phone", "--project", row["project"],
+                      "--serial", serial] if service_queues else
+                     fm_perf_plan.command(adapter["queue"], work, bundle, plan, serial, "", 0, ""))
             child = [sys.executable, str(CODE), "perf-child", row["project"], str(work),
                      str(bundle), serial, rid, row["sha"]]
             for name, argv in (("perf-build", fm_perf_plan.command(adapter["build"], work, bundle, plan, "", "", 0, "")),
@@ -690,7 +688,7 @@ def execute(db, row):
             return "passed", None, work
         requested = opts["device_gate"]
         serial = None
-        if requested and requested != "any":
+        if requested and requested != "any" and not service_queues:
             step_state(db, rid, row["generation"], "phone-prep", "running")
             try:
                 attempted = set()
@@ -712,6 +710,12 @@ def execute(db, row):
                 return "failed", str(exc), work
             step_state(db, rid, row["generation"], "phone-prep", "passed", 0)
         def device_step():
+            if service_queues:
+                command = expand(cfg["quick_device" if opts.get("check") == "quick" else "device"], "{serial}")
+                for scenario in opts["scenarios"]:
+                    command += cfg.get("scenarios", {})[scenario]
+                # Validate the project command before adding the trusted service lease wrapper.
+                return step("device", command)
             if requested == "any":
                 device_command = cfg["quick_device" if opts.get("check") == "quick" else "device"]
                 if opts.get("check") != "quick":
@@ -748,7 +752,7 @@ def execute(db, row):
             actions.append(lambda: step("suite", suite_command))
         if requested:
             actions.append(device_step)
-        # Each request's suite and device commands enter their project-owned shared queues concurrently.
+        # Both admission modes share the service's queue files; client wrappers acquire at their own boundary.
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(actions))) as pool:
             futures = [pool.submit(action) for action in actions]
             results = [future.result() for future in futures]
@@ -1129,6 +1133,8 @@ def serve():
 
 
 def main():
+    if sys.argv[1:2] == ["queue"]:
+        return fm_test_queues.main(sys.argv[2:], prepare_phone=prepare_phone)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("submit")
