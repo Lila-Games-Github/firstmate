@@ -67,7 +67,9 @@ data = json.load(open(path))
 data['required_tools'] = {'adb': [], 'python3': ['PIL']}
 open(path, 'w').write(json.dumps(data))
 PYUNIT
-if PATH=/usr/bin:/bin "$svc" check-tools > "$tmp/check-absent-adb" 2>&1; then
+mkdir -p "$tmp/python-only"
+ln -s "$(command -v python3)" "$tmp/python-only/python3"
+if PATH="$tmp/python-only" "$svc" check-tools > "$tmp/check-absent-adb" 2>&1; then
   echo 'missing adb fixture passed' >&2; exit 1
 fi
 grep -q 'fake: missing tool adb' "$tmp/check-absent-adb"
