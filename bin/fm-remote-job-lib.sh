@@ -564,6 +564,12 @@ fm_remote_job_next_seq() { # [stage-dir destination]
     value=$((value + 1))
     claim="$FM_REMOTE_JOB_SEQ_CLAIMS/$value"
     if (umask 077; mkdir "$claim") 2>/dev/null; then
+      # Ubuntu 26.04's mkdir can report success to concurrent callers for one
+      # directory. Bash noclobber gives exactly one caller the durable claim.
+      [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
+      if ! (umask 077; set -C; : > "$claim/.owned") 2>/dev/null; then
+        continue
+      fi
       chmod 700 "$claim" || return 1
       fm_remote_job_advance_seq_hint "$value" || true
       if [ -n "$stage" ]; then
@@ -803,6 +809,9 @@ fm_remote_job_reap_stale() { # <account-home>
         mtime=$(fm_remote_job_path_mtime "$claim" 2>/dev/null || true)
         case "$mtime" in ''|*[!0-9]*) continue ;; esac
         [ $((now - mtime)) -ge "$FM_REMOTE_JOB_SEQ_CLAIM_REAP_SECONDS" ] || continue
+        if [ -f "$claim/.owned" ] && [ ! -L "$claim/.owned" ]; then
+          rm -f -- "$claim/.owned" || continue
+        fi
         rmdir "$claim" 2>/dev/null || true
       done
     else
