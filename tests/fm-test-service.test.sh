@@ -136,6 +136,7 @@ if [ "$serial" = any ]; then
   done
 fi
 echo "phone-start-v1:$serial:${3:-}" >> "$EVENTS"
+if [ -e "$HOME/fail-phone" ]; then echo 'PHONE ERROR: simulated device failure'; exit 1; fi
 if [ "$serial" = S22 ] && [ -e "$HOME/slow-phone" ]; then sleep 8; else sleep .2; fi
 echo "phone-end-v1" >> "$EVENTS"
 PHONE
@@ -412,6 +413,20 @@ done
 kill -TERM "$server" 2>/dev/null || true
 wait "$server" 2>/dev/null || true
 server=
+$svc status --json > "$tmp/interrupted-status.json"
+sleep .2
+$svc status --json > "$tmp/interrupted-status-again.json"
+python3 - "$tmp/interrupted-status.json" "$tmp/interrupted-status-again.json" "$restart" <<'PY'
+import json,sys
+first,second=(json.load(open(path)) for path in sys.argv[1:3])
+rid=sys.argv[3]
+assert first['runner']['instance'] and not first['runner']['alive']
+assert first['updated']==second['updated']
+assert next(r for r in second['requests'] if r['id']==rid)['state']=='interrupted'
+assert rid not in [r['id'] for r in second['running_requests']]
+assert any(a['id']==rid and 'runner unavailable' in a['message'] for a in second['alerts'])
+PY
+grep -q "test-service-runner:.*:$restart" "$FM_STATE_OVERRIDE/.wake-queue"
 export SUITE_SLEEP=5
 "$svc" serve > "$tmp/server2.log" 2>&1 & server=$!
 for i in $(seq 1 300); do
@@ -437,6 +452,22 @@ assert now > float(sys.argv[3])+1
 PY
 $svc wait "$restart" | grep -q '^passed '
 [ "$(grep -c 'suite-start-v1' "$EVENTS")" -ge "$((before + 2))" ]
+# A preparation orphan has a deadline and does not block another request.
+kill -TERM "$server" 2>/dev/null || true
+wait "$server" 2>/dev/null || true
+server=
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$request" <<'PY'
+import sqlite3,sys,time
+db=sqlite3.connect(sys.argv[1]); db.execute('''INSERT INTO requests
+(id,seq,project,source,original_sha,sha,options,state,submitted,queued_at,generation)
+SELECT 'stale-preparing', (SELECT MAX(seq)+1 FROM requests),project,source,original_sha,sha,options,
+'preparing', ?, ?, 0 FROM requests WHERE id=?''',(time.time()-600,time.time()-600,sys.argv[2])); db.commit()
+PY
+"$svc" serve > "$tmp/server3.log" 2>&1 & server=$!
+if $svc wait stale-preparing > "$tmp/stale-preparing.out"; then fail 'stale preparation passed'; fi
+grep -q 'preparing timed out' "$tmp/stale-preparing.out"
+after_stale=$($svc submit fake "$PWD" "$sha1" --suite)
+$svc wait "$after_stale" | grep -q '^passed '
 # A divergent edit to the same committed file reports a rebase conflict.
 git clone --no-local -q "$tmp/project" "$tmp/conflict-project"
 cd "$tmp/conflict-project"
@@ -850,6 +881,21 @@ inflight=$($svc submit fake "$PWD" "$sha1" --task notify --suite)
 await_notice "$inflight" delivered
 grep -q "request=$inflight state=passed" "$FM_STATE_OVERRIDE/notify.inbox/005.msg"
 [ ! -e "$FM_STATE_OVERRIDE/notify.inbox/006.msg" ] || fail 'upgrade replayed historical completions'
+touch "$HOME/fail-phone"
+early_fail=$($svc submit fake "$PWD" "$sha1" --task notify --suite --device-gate S22)
+await_notice "$early_fail-failure-0-device" delivered
+$svc status --json > "$tmp/early-failure-status.json"
+python3 - "$tmp/early-failure-status.json" "$early_fail" <<'PY'
+import json,sys
+data=json.load(open(sys.argv[1])); row=next(r for r in data['requests'] if r['id']==sys.argv[2])
+assert row['state']=='failed' and row['finished'] is None
+assert row['error'].startswith('device: PHONE ERROR:')
+assert any(s['name']=='suite' and s['state']=='running' for s in row['steps'])
+PY
+grep -q "request=$early_fail state=failed" "$FM_STATE_OVERRIDE/notify.inbox/006.msg"
+if $svc wait "$early_fail" > "$tmp/early-fail.out"; then fail 'failed phone request passed'; fi
+await_notice "$early_fail" delivered
+rm "$HOME/fail-phone"
 echo 'ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites'
 echo 'ok - terminal completions wake once across restarts, acknowledgements, failures, and cancellation'
 echo 'ok - failed completion sends back off and stop at the retry cap with one firstmate wake, and the outbox upgrade never replays history'

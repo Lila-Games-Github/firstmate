@@ -42,6 +42,8 @@ TERMINAL = {"passed", "failed", "cancelled", "conflict"}
 STOP = False
 NOTIFY_ATTEMPTS = 12
 NOTIFY_MAX_DELAY = 300
+PREPARING_TIMEOUT = 300
+RUNNER_HEARTBEAT_TIMEOUT = 10
 PHONE_CLAIMS = {}
 PHONE_CLAIMS_LOCK = threading.Lock()
 
@@ -204,25 +206,89 @@ def atomic_write(path, content):
         tmp.unlink(missing_ok=True)
 
 
+def runner_state():
+    """Read only runner-owned evidence; a status reader cannot renew it."""
+    try:
+        record = json.loads((ROOT / "runner.json").read_text())
+        with (ROOT / "service.lock").open("r") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                locked = True
+            else:
+                locked = False
+                fcntl.flock(lock, fcntl.LOCK_UN)
+        alive = locked and time.time() - record["heartbeat"] < RUNNER_HEARTBEAT_TIMEOUT
+        return dict(record, alive=alive)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"instance": None, "heartbeat": None, "alive": False}
+
+
+def publish_runner(instance):
+    atomic_write(ROOT / "runner.json", json.dumps({"instance": instance, "pid": os.getpid(),
+                                                    "heartbeat": time.time()}) + "\n")
+
+
+def alert_missing_runner(data):
+    if data["runner"]["alive"]:
+        return
+    for row in data["requests"]:
+        if row["state"] not in ("preparing", "queued", "interrupted"):
+            continue
+        opts = row["options"]
+        state_dir = opts.get("state_dir", str(HOME / "state"))
+        home = opts.get("home", str(HOME))
+        rid = row["id"]
+        instance = data["runner"]["instance"] or "unknown"
+        receipt = ROOT / "runner-alerts" / (instance + "-" + rid + ".published")
+        if receipt.exists():
+            continue
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        key = "test-service-runner:" + instance + ":" + rid
+        payload = f"check: test service has no live runner request={rid} state={row['state']}; restart the service and verify recovery"
+        script = ('. "$1" || exit 1; fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1; status=0; '
+                  'if [ ! -e "$4" ] && ! fm_wake_queued_keys_locked check | grep -qxF -- "$2"; then '
+                  'fm_wake_append_locked check "$2" "$3" || status=$?; fi; '
+                  '[ "$status" -ne 0 ] || : > "$4" || status=$?; '
+                  'fm_lock_release "$FM_WAKE_QUEUE_LOCK"; exit "$status"')
+        env = {k: v for k, v in os.environ.items() if k not in {"FM_WAKE_QUEUE", "FM_WAKE_QUEUE_LOCK", "STATE"}}
+        env.update(FM_HOME=home, FM_STATE_OVERRIDE=state_dir)
+        try:
+            result = run(["bash", "-c", script, "fm-test-service-runner", str(CODE.with_name("fm-wake-lib.sh")),
+                          key, payload, str(receipt)], env=env, timeout=5)
+            if result.returncode:
+                print(f"runner alert {rid}: {result.stderr.strip()}", file=sys.stderr, flush=True)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"runner alert {rid}: {exc}", file=sys.stderr, flush=True)
+
+
 def snapshot(db):
     with (ROOT / "status.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         rows = [dict(r) for r in db.execute("SELECT * FROM requests ORDER BY queued_at,seq")]
         now = time.time()
+        runner = runner_state()
         for r in rows:
+            if r["state"] == "running" and not runner["alive"]:
+                r["state"] = "interrupted"
+            elif r["state"] == "running" and r["error"]:
+                r["state"] = "failed"
             r["options"] = json.loads(r["options"])
             r["task"] = r["options"].get("task") or (Path(r["options"]["receipt"]).parent.name if r["options"].get("receipt") else Path(r["source"]).name)
             r["wait_seconds"] = max(0, (r["started"] or now) - r["queued_at"])
             r["run_seconds"] = max(0, (r["finished"] or now) - r["started"]) if r["started"] else 0
             r["steps"] = [dict(step) for step in db.execute("SELECT name,state,started,finished,exit_code FROM steps WHERE request_id=? AND generation=? ORDER BY started,name", (r["id"], r["generation"]))]
         summary = lambda r: {key: r[key] for key in ("id", "task", "project", "sha", "state", "submitted", "queued_at", "started", "wait_seconds", "run_seconds")}
-        data = {"schema": "fm-test-service.v1", "updated": now,
+        data = {"schema": "fm-test-service.v1", "updated": runner["heartbeat"],
+                "observed_at": now, "runner": runner,
                 "queue": [r["id"] for r in rows if r["state"] in ("preparing", "queued")],
                 "running": next((r["id"] for r in rows if r["state"] == "running"), None),
                 "running_requests": [summary(r) for r in rows if r["state"] == "running"],
                 "waiting_requests": [summary(r) for r in rows if r["state"] in ("preparing", "queued")],
-                "alerts": [{"id": r["id"], "message": r["error"]} for r in rows
-                           if r["error"] and r["error"].startswith("device-unavailable:")],
+                "alerts": ([{"id": r["id"], "message": "test service runner unavailable"} for r in rows
+                            if not runner["alive"] and r["state"] in ("preparing", "queued", "interrupted")]
+                           + [{"id": r["id"], "message": r["error"]} for r in rows
+                              if r["error"] and (r["error"].startswith("device-unavailable:") or r["state"] == "failed")]),
                 "requests": rows}
         atomic_write(STATUS, json.dumps(data, indent=2) + "\n")
         return data
@@ -234,6 +300,32 @@ def step_state(db, rid, generation, name, state, exit_code=None):
         db.execute("INSERT INTO steps (request_id,generation,name,state,started) VALUES (?,?,?,?,?) ON CONFLICT(request_id,generation,name) DO UPDATE SET state=excluded.state,started=excluded.started,finished=NULL,exit_code=NULL", (rid, generation, name, state, now))
     else:
         db.execute("UPDATE steps SET state=?,finished=?,exit_code=? WHERE request_id=? AND generation=? AND name=?", (state, now, exit_code, rid, generation, name))
+    snapshot(db)
+
+
+def publish_step_failure(db, row, name, code, error):
+    """Keep the execution row active while exposing its first failed step."""
+    rid = row["id"]
+    opts = json.loads(row["options"])
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("UPDATE steps SET state='failed',finished=?,exit_code=? WHERE request_id=? AND generation=? AND name=?",
+                   (time.time(), code, rid, row["generation"], name))
+        db.execute("UPDATE requests SET error=? WHERE id=? AND error IS NULL", (error, rid))
+        sibling_running = db.execute("SELECT 1 FROM steps WHERE request_id=? AND generation=? AND state='running' LIMIT 1",
+                                     (rid, row["generation"])).fetchone()
+        if opts.get("task") and sibling_running:
+            key = f"{rid}-failure-{row['generation']}-{name}"
+            message = (f"Test service step failed: request={rid} state=failed sha={row['sha']} step={name}\n"
+                       f"first_failure={error.splitlines()[0]}\n"
+                       "Sibling steps may still be running; wait for the terminal completion message.")
+            db.execute("INSERT OR IGNORE INTO notifications (request_id,task,home,state_dir,message) VALUES (?,?,?,?,?)",
+                       (key, opts["task"], opts.get("home", str(HOME)),
+                        opts.get("state_dir", str(HOME / "state")), message))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
     snapshot(db)
 
 
@@ -319,10 +411,10 @@ def submit(args):
         snapshot(db)
         try:
             repo.parent.mkdir(parents=True, exist_ok=True)
-            clone = run(["git", "clone", "--no-local", "--quiet", str(source), str(repo)])
+            clone = run(["git", "clone", "--no-local", "--quiet", str(source), str(repo)], timeout=PREPARING_TIMEOUT)
             if clone.returncode:
                 raise RuntimeError("snapshot clone failed: " + clone.stderr.strip())
-            fetched = run(["git", "-C", str(repo), "fetch", "--quiet", str(source), args.sha])
+            fetched = run(["git", "-C", str(repo), "fetch", "--quiet", str(source), args.sha], timeout=PREPARING_TIMEOUT)
             if fetched.returncode:
                 raise RuntimeError("cannot preserve requested commit: " + fetched.stderr.strip())
             run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-original", args.sha])
@@ -505,7 +597,7 @@ def execute(db, row):
         if name.startswith("perf-"):
             inside = inside or os.path.commonpath((str(CODE.parent), str(target.resolve()))) == str(CODE.parent)
         if not inside or not target.is_file() or not os.access(target, os.X_OK):
-            step_state(watch_db, rid, row["generation"], name, "failed", 127)
+            publish_step_failure(watch_db, row, name, 127, "command missing or not executable: " + argv[0])
             watch_db.close()
             return name, 127, "command missing or not executable: " + argv[0]
         log_path = ROOT / "logs" / (rid + "-" + str(row["generation"]) + "-" + re.sub(r"[^A-Za-z0-9_-]", "_", name) + ".log")
@@ -538,7 +630,11 @@ def execute(db, row):
         if disconnected:
             code = 125
             output = "device-unavailable: " + watch_serial + " disconnected while waiting or running"
-        step_state(watch_db, rid, row["generation"], name, "passed" if code == 0 else "failed", code)
+        if code and not STOP and not disconnected and not watch_db.execute(
+                "SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+            publish_step_failure(watch_db, row, name, code, first_error(output, code, name))
+        else:
+            step_state(watch_db, rid, row["generation"], name, "passed" if code == 0 else "failed", code)
         watch_db.close()
         return name, code, output
     try:
@@ -821,20 +917,23 @@ def settle(db, row, opts, tip):
 
 def recover_preparing(db):
     for row in db.execute("SELECT * FROM requests WHERE state='preparing' ORDER BY seq").fetchall():
+        if time.time() - row["submitted"] >= PREPARING_TIMEOUT:
+            complete(db, row, "failed", "preparing timed out")
+            continue
         repo = ROOT / "repos" / row["id"]
         sha = row["original_sha"]
         try:
             if not repo.exists():
                 repo.parent.mkdir(parents=True, exist_ok=True)
-                cloned = run(["git", "clone", "--no-local", "--quiet", row["source"], str(repo)])
+                cloned = run(["git", "clone", "--no-local", "--quiet", row["source"], str(repo)], timeout=PREPARING_TIMEOUT)
                 if cloned.returncode:
                     raise RuntimeError("snapshot clone failed after restart")
-            if run(["git", "-C", str(repo), "fetch", "--quiet", row["source"], sha]).returncode:
+            if run(["git", "-C", str(repo), "fetch", "--quiet", row["source"], sha], timeout=PREPARING_TIMEOUT).returncode:
                 raise RuntimeError("requested commit unavailable after restart")
             if run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-original", sha]).returncode:
                 raise RuntimeError("cannot preserve requested commit after restart")
             db.execute("UPDATE requests SET state='queued' WHERE id=? AND state='preparing'", (row["id"],))
-        except RuntimeError as exc:
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
             complete(db, row, "failed", str(exc))
         snapshot(db)
 
@@ -904,7 +1003,14 @@ def serve():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise RuntimeError("test service is already running")
-    db.execute("UPDATE requests SET state='queued',queued_at=?,started=NULL WHERE state='running'", (time.time(),))
+    instance = uuid.uuid4().hex
+    publish_runner(instance)
+    def heartbeat():
+        while not STOP:
+            publish_runner(instance)
+            time.sleep(2)
+    threading.Thread(target=heartbeat, name="test-service-heartbeat", daemon=True).start()
+    db.execute("UPDATE requests SET state='queued',queued_at=?,started=NULL,error=NULL,generation=generation+1 WHERE state='running'", (time.time(),))
     db.execute("UPDATE steps SET state='retrying' WHERE state='running'")
     with (ROOT / "preparing.lock").open("w") as preparation_lock:
         fcntl.flock(preparation_lock, fcntl.LOCK_EX)
@@ -951,6 +1057,9 @@ def serve():
         finally:
             worker_db.close()
     while not STOP:
+        for stale in db.execute("SELECT * FROM requests WHERE state='preparing' AND submitted <= ?",
+                                (time.time() - PREPARING_TIMEOUT,)).fetchall():
+            complete(db, stale, "failed", "preparing timed out")
         for rid, (thread, _project, _suite) in list(active.items()):
             if not thread.is_alive():
                 thread.join()
@@ -1052,6 +1161,7 @@ def main():
         db = connection()
         if args.cmd == "status":
             data = snapshot(db)
+            alert_missing_runner(data)
             if args.json:
                 print(json.dumps(data, indent=2))
             else:

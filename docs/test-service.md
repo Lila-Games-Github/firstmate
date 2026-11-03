@@ -4,7 +4,10 @@
 It keeps its SQLite request database, independent Git copies, logs, result records, and `status.json` under `~/.local/state/firstmate-test-service/`.
 `FM_TEST_SERVICE_STATE` can select a different persistent directory for a separate instance or a test.
 The status file contains queue order, `running_requests` and `waiting_requests` arrays with task, SHA, state, start time, and elapsed times, plus per-request and per-step detail for the crew board.
-Its `alerts` array exposes requests that have no connected eligible phone.
+Its `runner` record carries an instance ID, runner-owned heartbeat, and live-lock verdict; `updated` is that heartbeat, while `observed_at` is only the status read time.
+If the runner is gone, a running request appears as `interrupted` until startup requeues the same ID, and a status read publishes one supervision wake for each pending or interrupted request.
+A failed step makes its request appear `failed` immediately while sibling steps finish, and a task receives a step-failure message before the terminal completion message.
+The `alerts` array exposes runner loss, failed steps, and requests that have no connected eligible phone.
 
 Install the user unit from the checked-out code root with `bin/fm-test-service.py install-unit`, then run `systemctl --user daemon-reload` and `systemctl --user enable --now fm-test-service.service`.
 The generated unit preserves the installing shell's `PATH` order, the isolated configuration path, and any set Android SDK, Java, Godot, or FrogPile queue environment variables.
@@ -12,6 +15,7 @@ It runs `check-tools` before `serve`, restarts after a failure, and stops its pr
 systemd applies drop-ins after the main unit, so an old `~/.config/systemd/user/fm-test-service.service.d/path.conf` hand repair still overrides the generated `PATH`; as a separate maintenance step after the replacement unit is installed, delete that file and run `systemctl --user daemon-reload` before restarting the service.
 Run `bin/fm-test-service.py check-tools` from the intended launch environment to see a named missing tool or Python module before starting the service.
 A request marked running at service startup returns to the queue and reruns from a fresh detached copy.
+Preparation that remains unfinished for five minutes fails so it cannot block dispatch.
 The service keeps a private copy of each submitted commit so removing a worker's checkout does not change the test target.
 
 Each project can declare `required_tools` as a map from executable names to lists of Python modules that executable must import; the startup check scans every configured project and fails before touching the request database if a requirement is missing.
