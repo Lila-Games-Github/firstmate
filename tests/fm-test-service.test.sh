@@ -121,6 +121,21 @@ cat > phone.sh <<'PHONE'
 #!/usr/bin/env bash
 set -euo pipefail
 serial=$2
+if [ -e "$HOME/cache-mode" ]; then
+  : "${FROGPILE_E2E_EXPORT_CACHE_DIR:?device cache must be configured}"
+  mkdir -p "$FROGPILE_E2E_EXPORT_CACHE_DIR"
+  exec {cache_probe}> "$FROGPILE_E2E_EXPORT_CACHE_DIR/probe.lock"
+  flock -n "$cache_probe" || { echo 'cache:concurrent' >> "$EVENTS"; exit 1; }
+  key=$(cat export-input.txt)
+  if [ -f "$FROGPILE_E2E_EXPORT_CACHE_DIR/$key.apk" ]; then
+    [ "$(cat "$FROGPILE_E2E_EXPORT_CACHE_DIR/$key.apk")" = "$key" ]
+    echo "cache:hit:$key" >> "$EVENTS"
+  else
+    echo "cache:miss:$key" >> "$EVENTS"
+    sleep .5
+    printf '%s' "$key" > "$FROGPILE_E2E_EXPORT_CACHE_DIR/$key.apk"
+  fi
+fi
 echo "phone-ticket:$serial" >> "$EVENTS"
 if [ "$serial" = any ]; then
   while :; do
@@ -154,6 +169,7 @@ sleep .2
 echo 'm31-perf-end' >> "$EVENTS"
 PERF
 chmod +x prepare.sh suite.sh phone.sh benchmark.sh m31-perf.sh
+printf 'v1\n' > export-input.txt
 git add . && git commit -qm v1
 sha1=$(git rev-parse HEAD)
 # A daemon starting during a submit must leave its partial clone alone until
@@ -239,7 +255,8 @@ echo 'FAIL fake-suite-test: expected green' >&2
 exit 1
 FAIL
 chmod +x suite.sh
-git add suite.sh && git commit -qm v2
+printf 'v2\n' > export-input.txt
+git add suite.sh export-input.txt && git commit -qm v2
 sha2=$(git rev-parse HEAD)
 for i in $(seq 1 300); do
   if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$request" "$sha1" 2>/dev/null <<'PY'
@@ -296,7 +313,38 @@ grep -q '^phone-start-v1:S22:--quick$' "$EVENTS"
 python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
 import json,sys
 path=sys.argv[1]
-data=json.load(open(path)); data['max_concurrent']=2
+data=json.load(open(path)); data['max_concurrent']=2; data['export_cache']=True
+open(path,'w').write(json.dumps(data))
+PY
+touch "$HOME/cache-mode"
+cache_one=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
+$svc wait "$cache_one" | grep -q '^passed '
+cache_two=$($svc submit fake "$PWD" "$sha1" --device-gate S21)
+$svc wait "$cache_two" | grep -q '^passed '
+cache_changed=$($svc submit fake "$PWD" "$sha2" --device-gate S22)
+$svc wait "$cache_changed" | grep -q '^passed '
+[ "$(grep -c '^cache:miss:v1$' "$EVENTS")" -eq 1 ]
+[ "$(grep -c '^cache:hit:v1$' "$EVENTS")" -eq 1 ]
+[ "$(grep -c '^cache:miss:v2$' "$EVENTS")" -eq 1 ]
+rm -f "$FM_TEST_SERVICE_STATE/export-cache/fake/"*.apk
+before_misses=$(grep -c '^cache:miss:v1$' "$EVENTS")
+cache_parallel_one=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
+for i in $(seq 1 100); do
+  [ "$(grep -c '^cache:miss:v1$' "$EVENTS")" -gt "$before_misses" ] && break
+  sleep .01
+done
+[ "$i" -lt 100 ]
+cache_parallel_two=$($svc submit fake "$PWD" "$sha1" --device-gate S21)
+$svc wait "$cache_parallel_one" | grep -q '^passed '
+$svc wait "$cache_parallel_two" | grep -q '^passed '
+[ "$(grep -c '^cache:miss:v1$' "$EVENTS")" -eq "$((before_misses + 1))" ]
+if grep -q '^cache:concurrent$' "$EVENTS"; then fail 'cache device steps overlapped'; fi
+[ "$(cat "$FM_TEST_SERVICE_STATE/export-cache/fake/v1.apk")" = v1 ]
+rm "$HOME/cache-mode"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data.pop('export_cache')
 open(path,'w').write(json.dumps(data))
 PY
 touch "$HOME/slow-phone"

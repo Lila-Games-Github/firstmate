@@ -12,6 +12,7 @@
     "prototype-game/tests/run_suite.sh"
   ],
   "max_concurrent": 4,
+  "export_cache": true,
   "device": [
     "prototype-game/tests/e2e/run_device_flow.sh",
     "--serial",

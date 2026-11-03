@@ -16,6 +16,7 @@ that message rather than keeping a wait command or status poll running.
 """
 import argparse
 import concurrent.futures
+import contextlib
 import fcntl
 import json
 import os
@@ -96,6 +97,8 @@ def config(project):
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 16:
         raise ValueError("max_concurrent must be an integer from 1 to 16")
     data["max_concurrent"] = limit
+    if not isinstance(data.get("export_cache", False), bool):
+        raise ValueError("export_cache must be a boolean")
     if "landing_repo" in data:
         data["landing_repo"] = data["landing_repo"].replace("{fm_home}", str(HOME))
     for name in ("prepare", "suite", "quick_suite", "device", "quick_device", "any_device"):
@@ -620,8 +623,20 @@ def execute(db, row):
             return name, 127, "command missing or not executable: " + argv[0]
         log_path = ROOT / "logs" / (rid + "-" + str(row["generation"]) + "-" + re.sub(r"[^A-Za-z0-9_-]", "_", name) + ".log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("wb") as log:
-            proc = subprocess.Popen(argv, cwd=work, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        with contextlib.ExitStack() as resources:
+            child_env = None
+            if name == "device" and cfg.get("export_cache"):
+                cache_root = ROOT / "export-cache"
+                cache_root.mkdir(parents=True, exist_ok=True)
+                cache_dir = cache_root / row["project"]
+                cache_dir.mkdir(exist_ok=True)
+                cache_lock = resources.enter_context((cache_root / (row["project"] + ".lock")).open("a+b"))
+                fcntl.flock(cache_lock, fcntl.LOCK_EX)
+                child_env = os.environ.copy()
+                child_env["FROGPILE_E2E_EXPORT_CACHE_DIR"] = str(cache_dir)
+            log = resources.enter_context(log_path.open("wb"))
+            proc = subprocess.Popen(argv, cwd=work, env=child_env, stdout=log,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
             processes.append(proc)
             last_phone_check = 0
             disconnected = False
