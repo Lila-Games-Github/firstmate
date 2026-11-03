@@ -18,6 +18,7 @@ import argparse
 import concurrent.futures
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -99,6 +100,18 @@ def config(project):
     data["max_concurrent"] = limit
     if not isinstance(data.get("export_cache", False), bool):
         raise ValueError("export_cache must be a boolean")
+    builds = data.get("max_concurrent_builds", 2)
+    if isinstance(builds, bool) or not isinstance(builds, int) or not 1 <= builds <= 8:
+        raise ValueError("max_concurrent_builds must be an integer from 1 to 8")
+    data["max_concurrent_builds"] = builds
+    cache_bytes = data.get("max_export_cache_bytes", 4 * 1024 ** 3)
+    if isinstance(cache_bytes, bool) or not isinstance(cache_bytes, int) or cache_bytes < 1:
+        raise ValueError("max_export_cache_bytes must be a positive integer")
+    data["max_export_cache_bytes"] = cache_bytes
+    if data.get("export_build") not in (None, "frogpile"):
+        raise ValueError("export_build must be frogpile")
+    if data.get("export_build") and not data["export_cache"]:
+        raise ValueError("export_build requires export_cache")
     if "landing_repo" in data:
         data["landing_repo"] = data["landing_repo"].replace("{fm_home}", str(HOME))
     for name in ("prepare", "suite", "quick_suite", "device", "quick_device", "any_device"):
@@ -179,6 +192,11 @@ def connection():
     )""")
     if "queued_at" not in {row[1] for row in db.execute("PRAGMA table_info(requests)")}:
         db.execute("ALTER TABLE requests ADD COLUMN queued_at REAL")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(requests)")}
+    if "build_state" not in columns:
+        db.execute("ALTER TABLE requests ADD COLUMN build_state TEXT NOT NULL DEFAULT 'pending'")
+    if "build_sha" not in columns:
+        db.execute("ALTER TABLE requests ADD COLUMN build_sha TEXT")
     db.execute("UPDATE requests SET queued_at=submitted WHERE queued_at IS NULL")
     db.execute("""CREATE TABLE IF NOT EXISTS steps (
         request_id TEXT NOT NULL, generation INTEGER NOT NULL, name TEXT NOT NULL,
@@ -291,7 +309,7 @@ def snapshot(db):
             r["wait_seconds"] = max(0, (r["started"] or now) - r["queued_at"])
             r["run_seconds"] = max(0, (r["finished"] or now) - r["started"]) if r["started"] else 0
             r["steps"] = [dict(step) for step in db.execute("SELECT name,state,started,finished,exit_code FROM steps WHERE request_id=? AND generation=? ORDER BY started,name", (r["id"], r["generation"]))]
-        summary = lambda r: {key: r[key] for key in ("id", "task", "project", "sha", "state", "submitted", "queued_at", "started", "wait_seconds", "run_seconds")}
+        summary = lambda r: {key: r[key] for key in ("id", "task", "project", "sha", "state", "build_state", "submitted", "queued_at", "started", "wait_seconds", "run_seconds")}
         data = {"schema": "fm-test-service.v1", "updated": runner["heartbeat"],
                 "observed_at": now, "runner": runner,
                 "queue": [r["id"] for r in rows if r["state"] in ("preparing", "queued")],
@@ -589,6 +607,141 @@ def release_phone(rid):
                 del PHONE_CLAIMS[phone]
 
 
+def export_directory(row):
+    # The commit partition is mandatory even when the producer's own key omits
+    # files that do not affect the APK. A rebased request cannot reuse its parent.
+    return ROOT / "export-cache" / row["project"] / row["sha"]
+
+
+def export_ready(row, key):
+    root = export_directory(row)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key):
+        return False
+    for manifest_path in (root / key / "manifest.json",):
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            apk = manifest_path.with_name("frogpile-e2e.apk")
+            digest = hashlib.sha256()
+            with apk.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            if (manifest.get("key") == manifest_path.parent.name
+                    and manifest.get("release_beacon_excluded") is True
+                    and manifest.get("package") == "com.lila.prototype.e2e"
+                    and manifest.get("schema") == 1
+                    and apk.stat().st_size >= 100_000
+                    and digest.hexdigest() == manifest.get("apk_sha256")):
+                return True
+        except (OSError, ValueError, TypeError):
+            pass
+    return False
+
+
+def build_export(row):
+    """Build in a private copy, holding only this commit's publisher lock."""
+    rid = row["id"]
+    db = connection()
+    work = ROOT / "builds" / rid
+    lock_path = ROOT / "export-cache" / row["project"] / (row["sha"] + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock:
+            while True:
+                if STOP:
+                    return
+                if db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+                    complete(db, row, "cancelled", "cancelled before export")
+                    return
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    db.execute("UPDATE requests SET build_state='waiting' WHERE id=?", (rid,))
+                    time.sleep(.2)
+            db.execute("UPDATE requests SET build_state='building' WHERE id=?", (rid,))
+            snapshot(db)
+            if work.exists():
+                shutil.rmtree(work)
+            work.parent.mkdir(parents=True, exist_ok=True)
+            cloned = run(["git", "clone", "--local", "--quiet", str(ROOT / "repos" / rid), str(work)])
+            if cloned.returncode or run(["git", "-C", str(work), "checkout", "--detach", "--quiet", row["sha"]]).returncode:
+                raise RuntimeError("cannot prepare export build copy")
+            module = work / "prototype-game/tests/e2e/device_flow.py"
+            if not module.is_file():
+                raise RuntimeError("FrogPile export builder missing in tested commit")
+            log_path = ROOT / "logs" / (rid + "-" + str(row["generation"]) + "-export-build.log")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            env = os.environ.copy()
+            env["FROGPILE_E2E_EXPORT_CACHE_DIR"] = str(export_directory(row))
+            code = ("import sys; from pathlib import Path; "
+                    "sys.path.insert(0, str(Path(sys.argv[1]).parent)); "
+                    "import device_flow; key, _apk = device_flow.prepare_export(); "
+                    "print('FM_EXPORT_KEY=' + key, flush=True)")
+            with log_path.open("wb") as log:
+                proc = subprocess.Popen([sys.executable, "-c", code, str(module)], cwd=work,
+                                        env=env, stdout=log, stderr=subprocess.STDOUT,
+                                        start_new_session=True, pass_fds=(lock.fileno(),))
+                while proc.poll() is None:
+                    if STOP or db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        try:
+                            proc.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                    time.sleep(.1)
+            if STOP:
+                return
+            if db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+                complete(db, row, "cancelled", "cancelled during export")
+                return
+            output = log_path.read_text(errors="replace")
+            keys = re.findall(r"^FM_EXPORT_KEY=([A-Za-z0-9_-]{1,128})$", output, re.M)
+            if proc.returncode or not keys or not export_ready(row, keys[-1]):
+                raise RuntimeError(first_error(output, proc.returncode or 1, "export-build"))
+            db.execute("UPDATE requests SET build_state='ready',build_sha=? WHERE id=?", (row["sha"], rid))
+            snapshot(db)
+    except Exception as exc:
+        complete(db, row, "failed", "export-build: " + str(exc))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        db.close()
+
+
+def evict_exports(db):
+    """Bound old artifacts without removing any live request's commit."""
+    cache = ROOT / "export-cache"
+    for cfg_path in CONFIG_ROOT.glob("*.json"):
+        project = cfg_path.stem
+        try:
+            budget = config(project)["max_export_cache_bytes"]
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        root = cache / project
+        if not root.is_dir():
+            continue
+        protected = {row[0] for row in db.execute(
+            "SELECT sha FROM requests WHERE project=? AND state IN ('preparing','queued','running')", (project,))}
+        entries = []
+        for entry in root.iterdir():
+            if not entry.is_dir() or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", entry.name):
+                continue
+            try:
+                size = sum(path.stat().st_size for path in entry.rglob("*") if path.is_file())
+                entries.append((entry.stat().st_mtime, entry, size))
+            except OSError:
+                continue
+        total = sum(size for _mtime, _entry, size in entries)
+        for _mtime, entry, size in sorted(entries):
+            if total <= budget:
+                break
+            if entry.name not in protected:
+                try:
+                    shutil.rmtree(entry)
+                    total -= size
+                except OSError:
+                    continue
+
+
 def execute(db, row):
     rid = row["id"]
     opts = json.loads(row["options"])
@@ -626,12 +779,24 @@ def execute(db, row):
         with contextlib.ExitStack() as resources:
             child_env = None
             if name == "device" and cfg.get("export_cache"):
-                cache_root = ROOT / "export-cache"
-                cache_root.mkdir(parents=True, exist_ok=True)
-                cache_dir = cache_root / row["project"]
-                cache_dir.mkdir(exist_ok=True)
-                cache_lock = resources.enter_context((cache_root / (row["project"] + ".lock")).open("a+b"))
-                fcntl.flock(cache_lock, fcntl.LOCK_EX)
+                cache_dir = export_directory(row) if cfg.get("export_build") else ROOT / "export-cache" / row["project"]
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                if not cfg.get("export_build"):
+                    cache_lock = resources.enter_context((ROOT / "export-cache" / (row["project"] + ".lock")).open("a+b"))
+                    watch_db.execute("UPDATE steps SET state='waiting',started=NULL WHERE request_id=? AND generation=? AND name=?",
+                                     (rid, row["generation"], name))
+                    snapshot(watch_db)
+                    while True:
+                        if STOP or watch_db.execute("SELECT cancel_requested FROM requests WHERE id=?", (rid,)).fetchone()[0]:
+                            step_state(watch_db, rid, row["generation"], name, "failed", 130)
+                            watch_db.close()
+                            return name, 130, "cancelled while waiting for export cache"
+                        try:
+                            fcntl.flock(cache_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            time.sleep(.2)
+                    step_state(watch_db, rid, row["generation"], name, "running")
                 child_env = os.environ.copy()
                 child_env["FROGPILE_E2E_EXPORT_CACHE_DIR"] = str(cache_dir)
             log = resources.enter_context(log_path.open("wb"))
@@ -1021,7 +1186,7 @@ def retest_moved(db):
             if fetched.returncode:
                 raise RuntimeError("cannot preserve rebased commit")
             run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-rebased", sha])
-            db.execute("UPDATE requests SET state='queued',sha=?,generation=generation+1,queued_at=?,started=NULL,finished=NULL,error=NULL WHERE id=?", (sha, time.time(), row["id"]))
+            db.execute("UPDATE requests SET state='queued',sha=?,generation=generation+1,queued_at=?,started=NULL,finished=NULL,error=NULL,build_state='pending',build_sha=NULL WHERE id=?", (sha, time.time(), row["id"]))
             snapshot(db)
         except Exception as exc:
             db.execute("UPDATE requests SET state='conflict',error=?,finished=? WHERE id=?", (str(exc), time.time(), row["id"]))
@@ -1057,7 +1222,10 @@ def serve():
             publish_runner(instance)
             time.sleep(2)
     threading.Thread(target=heartbeat, name="test-service-heartbeat", daemon=True).start()
-    db.execute("UPDATE requests SET state='queued',queued_at=?,started=NULL,error=NULL,generation=generation+1 WHERE state='running'", (time.time(),))
+    db.execute("UPDATE requests SET state='queued',queued_at=?,started=NULL,error=NULL,generation=generation+1,build_state='pending',build_sha=NULL WHERE state='running'", (time.time(),))
+    # Revalidate the producer's external inputs after a restart. The bytes stay
+    # cached, so a matching export is warm and can be marked ready again.
+    db.execute("UPDATE requests SET build_state='pending' WHERE state='queued'")
     db.execute("UPDATE steps SET state='retrying' WHERE state='running'")
     with (ROOT / "preparing.lock").open("w") as preparation_lock:
         fcntl.flock(preparation_lock, fcntl.LOCK_EX)
@@ -1089,6 +1257,7 @@ def serve():
     threading.Thread(target=publish_time, name="test-service-status", daemon=True).start()
     last_retest = 0
     active = {}
+    builds = {}
     def process_request(row):
         worker_db = connection()
         try:
@@ -1107,6 +1276,10 @@ def serve():
         for stale in db.execute("SELECT * FROM requests WHERE state='preparing' AND submitted <= ?",
                                 (time.time() - PREPARING_TIMEOUT,)).fetchall():
             complete(db, stale, "failed", "preparing timed out")
+        for rid, thread in list(builds.items()):
+            if not thread.is_alive():
+                thread.join()
+                del builds[rid]
         for rid, (thread, _project, _suite) in list(active.items()):
             if not thread.is_alive():
                 thread.join()
@@ -1119,7 +1292,17 @@ def serve():
             if row["cancel_requested"]:
                 complete(db, row, "cancelled", "cancelled before start")
                 continue
-            limit = config(row["project"])["max_concurrent"]
+            cfg = config(row["project"])
+            if cfg.get("export_build") and json.loads(row["options"])["device_gate"]:
+                if row["build_sha"] != row["sha"] or row["build_state"] != "ready":
+                    if row["id"] not in builds and row["build_state"] not in ("building", "waiting") \
+                            and len(builds) < cfg["max_concurrent_builds"]:
+                        db.execute("UPDATE requests SET build_state='building' WHERE id=?", (row["id"],))
+                        thread = threading.Thread(target=build_export, args=(row,), name="export-" + row["id"])
+                        builds[row["id"]] = thread
+                        thread.start()
+                    continue
+            limit = cfg["max_concurrent"]
             has_suite = json.loads(row["options"])["suite"]
             in_project = sum(1 for _thread, project, suite in active.values()
                              if project == row["project"] and suite)
@@ -1135,9 +1318,12 @@ def serve():
         if time.time() - last_retest > 5:
             retest_moved(db)
             reclaim_finished(db, active)
+            evict_exports(db)
             last_retest = time.time()
         time.sleep(.2)
     for thread, _project, _suite in active.values():
+        thread.join()
+    for thread in builds.values():
         thread.join()
     notifier.join()
     snapshot(db)

@@ -12,7 +12,10 @@
     "prototype-game/tests/run_suite.sh"
   ],
   "max_concurrent": 4,
+  "max_concurrent_builds": 2,
+  "max_export_cache_bytes": 4294967296,
   "export_cache": true,
+  "export_build": "frogpile",
   "device": [
     "prototype-game/tests/e2e/run_device_flow.sh",
     "--serial",

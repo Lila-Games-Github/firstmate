@@ -31,8 +31,13 @@ FrogPile's example requires `real-phone`, which the worker records after the rea
 `max_concurrent` limits active suite requests for that project; it defaults to one and may be set from one to sixteen.
 Set `export_cache` to `true` for a device command that honors `FROGPILE_E2E_EXPORT_CACHE_DIR` and keys exports by every build input.
 The service keeps that project's cache under its persistent state directory and passes its absolute path to each device command.
-It holds one project lock for the entire device step because FrogPile's current cache publisher can remove an entry while another request reads it.
-This serializes that project's device steps, including phone queue waits, until FrogPile publishes cache entries atomically.
+Set `export_build` to `frogpile` to run the tested commit's `device_flow.prepare_export()` before a suite or phone starts.
+This mode partitions exports by exact commit, limits simultaneous builds with `max_concurrent_builds` (default two), and keeps builds outside the suite limit.
+The cache publisher lock covers only one commit's build, so device steps on different phones can run together.
+Queued builds waiting for that lock can be cancelled; the request status exposes `build_state` as `pending`, `waiting`, `building`, or `ready`.
+Ready artifacts remain on disk across restarts; the service rechecks external build inputs on restart before using them.
+`max_export_cache_bytes` defaults to four GiB per project; old commit directories are removed oldest first while queued and running commits remain protected.
+Without `export_build`, the service holds one project lock for the whole device step because FrogPile's current cache publisher can remove an entry while another request reads it.
 The option defaults to `false`, and the FrogPile example enables it.
 An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
 A ship brief for a repository that matches exactly one configuration names that project in its test-service gate.
