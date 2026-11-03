@@ -219,6 +219,44 @@ done
 [ "$(wake_count)" = 3 ] || fail 'three cars did not emit exactly three readiness wakes'
 pass 'three cars move through the train with one quick check each'
 
+make_case move-waiting
+for id in a b c d; do car "$id"; join "$id" >/dev/null; done
+front_before=$(queue status a)
+queue_file=$(find "$CASE/home/data/landing-queue" -name queue -type f -print -quit)
+front_row_before=$(sed -n '4p' "$queue_file")
+front_wakes_before=$(wake_count)
+expect_field "$(queue move d --place 2)" place 2
+expect_field "$(queue status a)" place 1
+expect_field "$(queue status b)" place 3
+expect_field "$(queue status c)" place 4
+expect_field "$(queue status d)" status waiting-for-front
+expect_field "$(queue move c --place 2)" place 2
+expect_field "$(queue status d)" place 3
+expect_field "$(queue status b)" place 4
+[ "$(sed -n '4p' "$queue_file")" = "$front_row_before" ] || fail 'move changed the running front row'
+[ "$(wake_count)" = "$front_wakes_before" ] || fail 'move changed the front check wake'
+[ "$(printf '%s\n' "$front_before" | field status)" = "$(queue status a | field status)" ] || fail 'move interrupted the front check'
+for id in b c d; do
+  expect_field "$(queue status "$id")" status waiting-for-front
+done
+pass 'three waiting cars reorder while the running front check and other statuses stay intact'
+
+reject_move() {
+  if queue move "$1" --place "$2" > "$CASE/refusal" 2>&1; then fail "move accepted $1 at place $2"; fi
+}
+reject_move missing 2
+reject_move a 2
+reject_move b 1
+reject_move b 5
+rm -f -- "$(dirname "$queue_file")/pre-b"
+if queue move b --place 2 > "$CASE/refusal" 2>&1; then fail 'move accepted missing admission evidence'; fi
+grep -q 'admission evidence' "$CASE/refusal" || fail 'missing evidence refusal was unclear'
+printf 'changed\n' >> "$CASE/c/c.txt"
+git -C "$CASE/c" commit -qam changed
+if queue move c --place 3 > "$CASE/refusal" 2>&1; then fail 'move accepted a car with a changed head'; fi
+grep -q 'head changed since admission' "$CASE/refusal" || fail 'changed-head refusal was unclear'
+pass 'move refuses unknown, front, invalid place, missing-evidence, and changed-head cars'
+
 make_case missing-branch
 car a; join a >/dev/null
 git -C "$CASE/project" worktree remove --force "$CASE/a"

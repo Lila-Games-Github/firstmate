@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Worker-owned local landing train. Never merges, rebases, pushes, or runs tests.
-# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|reconcile> <task-id>
+# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|move|reconcile> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--gate-receipt <name>=<file>]...
 #          [--gate <name>] [--reason <text>] [--owner-task <task-id>]
+#          [--place <number>]
 # FM_HOME must explicitly select the owning home; FM_STATE_OVERRIDE and
 # FM_DATA_OVERRIDE optionally select its state and data directories.
 # Without --landing-branch, use this task's recorded landing_branch, else the
@@ -63,6 +64,11 @@
 # ready with the same id and branch re-enrolls it at the back. Landed ids stay
 # terminal. A missing branch whose recorded head is in the landing tip is landed;
 # any other missing branch becomes a failed car on reconciliation.
+# move is for firstmate only. It places an active waiting car at --place in the
+# active train (front=1), preserving every row's state and evidence. Place 1
+# and moving the current front car are refused so its running check is untouched.
+# A car whose admitted evidence is missing or whose head changed is refused.
+# Only cars whose status changes receive the existing parked-car steer.
 # baseline requires --receipt for exactly the live landing tip and records it as
 # that tip's landing-health baseline, under the same lock as fm-merge-local.sh,
 # without moving any ref. It refuses a set conflicting with one already recorded.
@@ -104,10 +110,10 @@ die() { echo "error: $*" >&2; exit 1; }
 [ "$#" -ge 2 ] || { usage >&2; exit 2; }
 ACTION=$1 ID=$2
 shift 2
-case "$ACTION" in ready|status|receipt|gate|fail|baseline|reconcile) ;; *) die "unknown queue command $ACTION" ;; esac
+case "$ACTION" in ready|status|receipt|gate|fail|baseline|move|reconcile) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
-PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE='' OWNER_TASK=''
+PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE='' OWNER_TASK='' PLACE=''
 GATE_RECEIPTS=()
 while [ "$#" -gt 0 ]; do
   [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 requires a value"
@@ -122,6 +128,7 @@ while [ "$#" -gt 0 ]; do
     --owner-task) OWNER_TASK=$2 ;;
     --gate) GATE=$2 ;;
     --gate-receipt) GATE_RECEIPTS[${#GATE_RECEIPTS[@]}]=$2 ;;
+    --place) PLACE=$2 ;;
     *) die "unknown queue option $1" ;;
   esac
   shift 2
@@ -188,6 +195,13 @@ gate_receipt_read() { # <path> <gate> <head> <target>
 gate_receipt_path() { printf '%s/gate-%s-%s-%s-%s.receipt' "$DIR" "$1" "$2" "$3" "$4"; }
 pre_target() {
   local path="$DIR/pre-$1" value
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  IFS= read -r value < "$path"
+  [[ "$value" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
+  printf '%s' "$value"
+}
+admitted_head() {
+  local path="$DIR/pre-head-$1" value
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   IFS= read -r value < "$path"
   [[ "$value" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
@@ -319,6 +333,8 @@ refresh() {
   done
 }
 
+recorded_head=-
+[ "$found" -lt 0 ] || recorded_head=${heads[found]}
 refresh
 if [ "$ACTION" = ready ]; then
   valid_branch "$BRANCH" && [ "$BRANCH" != "$LANDING" ] || die 'ready requires a task branch distinct from the landing branch'
@@ -349,6 +365,10 @@ if [ "$ACTION" = ready ]; then
     TMP=$(mktemp "$DIR/.pre.XXXXXX")
     printf '%s\n' "$TARGET" > "$TMP"
     mv -f -- "$TMP" "$DIR/pre-$ID"
+    TMP=
+    TMP=$(mktemp "$DIR/.pre-head.XXXXXX")
+    printf '%s\n' "$HEAD" > "$TMP"
+    mv -f -- "$TMP" "$DIR/pre-head-$ID"
     TMP=
     rm -f -- "$DIR/full-$ID"
   fi
@@ -407,12 +427,12 @@ assign() {
     [ "${states[i]}" = active ] || continue
     position=$((position + 1))
     places[i]=$position target_refs[i]=$ref target_shas[i]=$sha
-    if [ "${targets[i]}" != "$sha" ]; then receipts[i]=-; targets[i]=-; fi
     if [ "$position" -gt 1 ]; then
       statuses[i]='waiting-for-front'
       ref="refs/heads/${branches[i]}" sha=${heads[i]}
       continue
     fi
+    if [ "${targets[i]}" != "$sha" ]; then receipts[i]=-; targets[i]=-; fi
     statuses[i]=needs-rebase
     if [ "${bases[i]}" = "$sha" ] && git -C "$PROJECT" merge-base --is-ancestor "$sha" "${heads[i]}"; then
       if overlap_requires_full "${ids[i]}" "${heads[i]}" "$sha"; then
@@ -500,6 +520,46 @@ case "$ACTION" in
     [ "${states[found]}" != landed ] || die 'cannot fail a landed car'
     states[found]=failed reasons[found]=$REASON
     receipts[found]=- targets[found]=-
+    ;;
+  move)
+    [ "${states[found]}" = active ] || die 'only active cars can move'
+    [ "${places[found]}" -gt 1 ] || die 'the front car cannot move during its check'
+    [[ "$PLACE" =~ ^[0-9]+$ ]] || die 'move requires a numeric --place'
+    [ "$PLACE" -gt 1 ] || die 'place 1 is reserved for the current front car'
+    active_count=0
+    for ((i=0; i<count; i++)); do [ "${states[i]}" != active ] || active_count=$((active_count + 1)); done
+    [ "$PLACE" -le "$active_count" ] || die 'place exceeds the active train'
+    admission_head=$(admitted_head "$ID") || admission_head=$recorded_head
+    [ "$recorded_head" = "${heads[found]}" ] && [ "$admission_head" = "${heads[found]}" ] \
+      || die 'car head changed since admission; re-enroll with fresh evidence first'
+    admitted_target=$(pre_target "$ID") || die 'car has no ready admission evidence'
+    git -C "$PROJECT" merge-base --is-ancestor "$admitted_target" "${heads[found]}" \
+      || die 'car no longer contains its admitted target'
+    while [ "${places[found]}" -ne "$PLACE" ]; do
+      neighbor=-1
+      if [ "${places[found]}" -gt "$PLACE" ]; then
+        for ((i=found-1; i>=0; i--)); do
+          [ "${states[i]}" != active ] || { neighbor=$i; break; }
+        done
+      else
+        for ((i=found+1; i<count; i++)); do
+          [ "${states[i]}" != active ] || { neighbor=$i; break; }
+        done
+      fi
+      [ "$neighbor" -ge 0 ] || die 'cannot locate adjacent active car'
+      saved=${ids[found]}; ids[found]=${ids[neighbor]}; ids[neighbor]=$saved
+      saved=${branches[found]}; branches[found]=${branches[neighbor]}; branches[neighbor]=$saved
+      saved=${heads[found]}; heads[found]=${heads[neighbor]}; heads[neighbor]=$saved
+      saved=${states[found]}; states[found]=${states[neighbor]}; states[neighbor]=$saved
+      saved=${bases[found]}; bases[found]=${bases[neighbor]}; bases[neighbor]=$saved
+      saved=${receipts[found]}; receipts[found]=${receipts[neighbor]}; receipts[neighbor]=$saved
+      saved=${targets[found]}; targets[found]=${targets[neighbor]}; targets[neighbor]=$saved
+      saved=${notified[found]}; notified[found]=${notified[neighbor]}; notified[neighbor]=$saved
+      saved=${reasons[found]}; reasons[found]=${reasons[neighbor]}; reasons[neighbor]=$saved
+      saved=${owners[found]}; owners[found]=${owners[neighbor]}; owners[neighbor]=$saved
+      found=$neighbor
+      assign
+    done
     ;;
   baseline)
     [ -n "$RECEIPT" ] || die 'baseline requires --receipt'
