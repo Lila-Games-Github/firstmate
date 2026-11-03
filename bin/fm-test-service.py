@@ -52,6 +52,16 @@ def run(argv, **kw):
     return subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
 
 
+def prepare_run(argv, submitted):
+    remaining = submitted + PREPARING_TIMEOUT - time.time()
+    if remaining <= 0:
+        raise TimeoutError("preparing timed out")
+    try:
+        return run(argv, timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("preparing timed out") from exc
+
+
 def config(project):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", project):
         raise ValueError("invalid project name")
@@ -288,7 +298,8 @@ def snapshot(db):
                 "alerts": ([{"id": r["id"], "message": "test service runner unavailable"} for r in rows
                             if not runner["alive"] and r["state"] in ("preparing", "queued", "interrupted")]
                            + [{"id": r["id"], "message": r["error"]} for r in rows
-                              if r["error"] and (r["error"].startswith("device-unavailable:") or r["state"] == "failed")]),
+                              if r["error"] and (r["error"].startswith("device-unavailable:")
+                                                 or r["state"] == "failed" and r["finished"] is None)]),
                 "requests": rows}
         atomic_write(STATUS, json.dumps(data, indent=2) + "\n")
         return data
@@ -411,18 +422,25 @@ def submit(args):
         snapshot(db)
         try:
             repo.parent.mkdir(parents=True, exist_ok=True)
-            clone = run(["git", "clone", "--no-local", "--quiet", str(source), str(repo)], timeout=PREPARING_TIMEOUT)
+            clone = prepare_run(["git", "clone", "--no-local", "--quiet", str(source), str(repo)], submitted)
             if clone.returncode:
                 raise RuntimeError("snapshot clone failed: " + clone.stderr.strip())
-            fetched = run(["git", "-C", str(repo), "fetch", "--quiet", str(source), args.sha], timeout=PREPARING_TIMEOUT)
+            fetched = prepare_run(["git", "-C", str(repo), "fetch", "--quiet", str(source), args.sha], submitted)
             if fetched.returncode:
                 raise RuntimeError("cannot preserve requested commit: " + fetched.stderr.strip())
-            run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-original", args.sha])
-            if run(["git", "-C", str(repo), "checkout", "--detach", "--quiet", args.sha]).returncode:
+            prepare_run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-original", args.sha], submitted)
+            if prepare_run(["git", "-C", str(repo), "checkout", "--detach", "--quiet", args.sha], submitted).returncode:
                 raise RuntimeError("snapshot lacks requested commit")
-            db.execute("UPDATE requests SET state='queued' WHERE id=? AND state='preparing'", (rid,))
+            if time.time() - submitted >= PREPARING_TIMEOUT:
+                raise TimeoutError("preparing timed out")
+            updated = db.execute("UPDATE requests SET state='queued' WHERE id=? AND state='preparing'", (rid,))
+            if updated.rowcount != 1:
+                raise RuntimeError(db.execute("SELECT error FROM requests WHERE id=?", (rid,)).fetchone()[0]
+                                   or "preparation already finished")
         except Exception as exc:
-            complete(db, db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone(), "failed", str(exc))
+            current = db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone()
+            if current["state"] == "preparing":
+                complete(db, current, "failed", str(exc))
             shutil.rmtree(repo, ignore_errors=True)
             snapshot(db)
             raise
@@ -925,16 +943,20 @@ def recover_preparing(db):
         try:
             if not repo.exists():
                 repo.parent.mkdir(parents=True, exist_ok=True)
-                cloned = run(["git", "clone", "--no-local", "--quiet", row["source"], str(repo)], timeout=PREPARING_TIMEOUT)
+                cloned = prepare_run(["git", "clone", "--no-local", "--quiet", row["source"], str(repo)], row["submitted"])
                 if cloned.returncode:
                     raise RuntimeError("snapshot clone failed after restart")
-            if run(["git", "-C", str(repo), "fetch", "--quiet", row["source"], sha], timeout=PREPARING_TIMEOUT).returncode:
+            if prepare_run(["git", "-C", str(repo), "fetch", "--quiet", row["source"], sha], row["submitted"]).returncode:
                 raise RuntimeError("requested commit unavailable after restart")
-            if run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-original", sha]).returncode:
+            if prepare_run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-original", sha], row["submitted"]).returncode:
                 raise RuntimeError("cannot preserve requested commit after restart")
+            if time.time() - row["submitted"] >= PREPARING_TIMEOUT:
+                raise TimeoutError("preparing timed out")
             db.execute("UPDATE requests SET state='queued' WHERE id=? AND state='preparing'", (row["id"],))
-        except (RuntimeError, subprocess.TimeoutExpired) as exc:
-            complete(db, row, "failed", str(exc))
+        except (RuntimeError, TimeoutError) as exc:
+            current = db.execute("SELECT * FROM requests WHERE id=?", (row["id"],)).fetchone()
+            if current["state"] == "preparing":
+                complete(db, current, "failed", str(exc))
         snapshot(db)
 
 
@@ -999,10 +1021,15 @@ def serve():
     db = connection()
     # Single writer: a second daemon must not process the same request.
     lock = (ROOT / "service.lock").open("w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        raise RuntimeError("test service is already running")
+    lock_deadline = time.monotonic() + 5
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= lock_deadline:
+                raise RuntimeError("test service is already running")
+            time.sleep(.02)
     instance = uuid.uuid4().hex
     publish_runner(instance)
     def heartbeat():

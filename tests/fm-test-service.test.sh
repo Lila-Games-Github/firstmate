@@ -428,7 +428,17 @@ assert any(a['id']==rid and 'runner unavailable' in a['message'] for a in second
 PY
 grep -q "test-service-runner:.*:$restart" "$FM_STATE_OVERRIDE/.wake-queue"
 export SUITE_SLEEP=5
+python3 - "$FM_TEST_SERVICE_STATE/service.lock" "$tmp/probe-held" <<'PY' & probe=$!
+import fcntl,pathlib,sys,time
+with open(sys.argv[1], 'w') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    pathlib.Path(sys.argv[2]).touch()
+    time.sleep(.4)
+PY
+for i in $(seq 1 100); do [ -e "$tmp/probe-held" ] && break; sleep .01; done
+[ -e "$tmp/probe-held" ] || fail 'transient lock probe did not start'
 "$svc" serve > "$tmp/server2.log" 2>&1 & server=$!
+wait "$probe"
 for i in $(seq 1 300); do
   running=$(python3 - "$FM_TEST_SERVICE_STATE/status.json" "$restart" <<'PY'
 import json,sys
@@ -468,6 +478,46 @@ if $svc wait stale-preparing > "$tmp/stale-preparing.out"; then fail 'stale prep
 grep -q 'preparing timed out' "$tmp/stale-preparing.out"
 after_stale=$($svc submit fake "$PWD" "$sha1" --suite)
 $svc wait "$after_stale" | grep -q '^passed '
+# A live submit must preserve the service's timeout verdict and fail its CLI.
+real_git=$(command -v git)
+cat > "$tmp/bin/git" <<'GIT'
+#!/usr/bin/env bash
+if [ "$1" = clone ] && [ -e "$HOME/slow-clone" ]; then
+  touch "$HOME/clone-start"
+  while [ ! -e "$HOME/release-clone" ]; do sleep .05; done
+fi
+exec "$REAL_GIT" "$@"
+GIT
+chmod +x "$tmp/bin/git"
+export REAL_GIT=$real_git
+touch "$HOME/slow-clone"
+$svc submit fake "$PWD" "$sha1" --suite > "$tmp/late-submit.out" 2> "$tmp/late-submit.err" & late_submit=$!
+for i in $(seq 1 100); do [ -e "$HOME/clone-start" ] && break; sleep .05; done
+[ -e "$HOME/clone-start" ] || fail 'late submit never reached clone'
+late_id=$(python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" <<'PY'
+import sqlite3,sys,time
+with sqlite3.connect(sys.argv[1]) as db:
+    row=db.execute("SELECT id FROM requests WHERE state='preparing' ORDER BY seq DESC LIMIT 1").fetchone()
+    assert row
+    db.execute("UPDATE requests SET submitted=? WHERE id=?", (time.time()-600,row[0]))
+    print(row[0])
+PY
+)
+for i in $(seq 1 100); do
+  timed_out=$(python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$late_id" <<'PY'
+import sqlite3,sys
+with sqlite3.connect(sys.argv[1]) as db:
+    print(db.execute("SELECT COUNT(*) FROM requests WHERE id=? AND state='failed' AND error='preparing timed out'",(sys.argv[2],)).fetchone()[0])
+PY
+)
+  [ "$timed_out" -eq 1 ] && break
+  sleep .05
+done
+[ "$timed_out" -eq 1 ] || fail 'live preparation did not time out'
+touch "$HOME/release-clone"
+if wait "$late_submit"; then fail 'timed-out submit returned success'; fi
+[ ! -s "$tmp/late-submit.out" ] || fail 'timed-out submit printed request ID'
+rm "$tmp/bin/git" "$HOME/slow-clone" "$HOME/clone-start" "$HOME/release-clone"
 # A divergent edit to the same committed file reports a rebase conflict.
 git clone --no-local -q "$tmp/project" "$tmp/conflict-project"
 cd "$tmp/conflict-project"
@@ -895,6 +945,13 @@ PY
 grep -q "request=$early_fail state=failed" "$FM_STATE_OVERRIDE/notify.inbox/006.msg"
 if $svc wait "$early_fail" > "$tmp/early-fail.out"; then fail 'failed phone request passed'; fi
 await_notice "$early_fail" delivered
+$svc status --json > "$tmp/terminal-failure-status.json"
+python3 - "$tmp/terminal-failure-status.json" "$early_fail" <<'PY'
+import json,sys
+data=json.load(open(sys.argv[1]))
+assert next(r for r in data['requests'] if r['id']==sys.argv[2])['finished'] is not None
+assert not any(a['id']==sys.argv[2] for a in data['alerts'])
+PY
 rm "$HOME/fail-phone"
 echo 'ok - test service ordering, pinning, restart, records, retest, cancel, phone unlock, and four parallel suites'
 echo 'ok - terminal completions wake once across restarts, acknowledgements, failures, and cancellation'
