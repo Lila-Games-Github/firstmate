@@ -1705,9 +1705,8 @@ SH
 start_crew_cwd_tree() {
   local dir=$1 root_cwd=$2 agent_cwd=$3 root agent='' tries=0
   mkdir -p "$dir/agentbin"
-  # A symlink to a real long-running binary, so the kernel records `claude` as
-  # the executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$(command -v sleep)" "$dir/agentbin/claude"
+  fm_test_build_sleeper "$dir/agentbin/sleeper" || fail "could not build the process-identity fixture"
+  ln -sf "$dir/agentbin/sleeper" "$dir/agentbin/claude"
   # shellcheck disable=SC2016 # expanded by the root shell.
   ( cd "$root_cwd" && exec sh -c '(cd "$2" && exec "$1" 300); :' sh "$dir/agentbin/claude" "$agent_cwd" ) \
     </dev/null >/dev/null 2>&1 &

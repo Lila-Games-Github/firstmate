@@ -17,13 +17,13 @@
 # property that the verdict itself is correct.
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }
-SLEEP_BIN=$(command -v sleep) || { echo "skip: sleep not found"; exit 0; }
 
 REAL_TMUX=$(command -v tmux)
 SOCKET="fm-liveness-$$"
@@ -47,29 +47,29 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries. These are SYMLINKS to a real long-running system
-# binary, never copies: a copied platform binary fails code-signing validation
-# and is killed on macOS arm64. The symlink name is what the kernel records as
-# the executable identity, which is exactly the signal under test.
-ln -s "$SLEEP_BIN" "$LAB/bin/claude-link"
-ln -s "$SLEEP_BIN" "$LAB/bin/pi"
-ln -s "$SLEEP_BIN" "$LAB/bin/notaharness"
+# Stand-in "harness" binaries link to a native long-running executable. A
+# copied system binary fails signing on macOS arm64, and Ubuntu 26.04's Rust
+# coreutils rejects `sleep` when invoked through a harness-named symlink.
+fm_test_build_sleeper "$LAB/bin/sleeper" || fail "could not build the process-identity fixture"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/claude-link"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/pi"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
 # `omp`; the two decoys are the substrings an unanchored glob would misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/omp"
-ln -s "$SLEEP_BIN" "$LAB/bin/ompd"
-ln -s "$SLEEP_BIN" "$LAB/bin/comp"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/omp"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/ompd"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/comp"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
-ln -s "$SLEEP_BIN" "$LAB/bin/musescore"
-ln -s "$SLEEP_BIN" "$LAB/bin/amuse"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-binary"
-ln -s "$SLEEP_BIN" "$LAB/bin/muse-bind"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/muse-bin-0.1.0-R708.1"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/musescore"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/amuse"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/muse-binary"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -298,8 +298,8 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
-ln -s "$SLEEP_BIN" "$LAB/bin/cursor-agent"
-ln -s "$SLEEP_BIN" "$LAB/bin/notcursor"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/cursor-agent"
+ln -s "$LAB/bin/sleeper" "$LAB/bin/notcursor"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the

@@ -79,6 +79,17 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# Build a real long-running executable for process-identity tests. Ubuntu
+# 26.04's Rust coreutils rejects a `sleep` symlink invoked under a different
+# utility name, while copying a system binary breaks signing on macOS arm64.
+# A native binary can safely be reached through harness-named symlinks on both.
+fm_test_build_sleeper() {  # <output-path>
+  local compiler
+  compiler=$(command -v cc 2>/dev/null || command -v clang 2>/dev/null || command -v gcc 2>/dev/null) || return 1
+  printf '%s\n' '#include <unistd.h>' 'int main(void) { for (;;) sleep(60); }' |
+    "$compiler" -x c - -o "$1"
+}
+
 # --- node runtime resolution ------------------------------------------------
 #
 # A suite that needs Node must not conclude Node is absent just because it is
