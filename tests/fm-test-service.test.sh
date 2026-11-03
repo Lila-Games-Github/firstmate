@@ -53,7 +53,7 @@ chmod +x "$tmp/bin/adb"
 $svc install-unit > "$tmp/unit-path"
 grep -q '^ExecStart=".*/bin/fm-test-service.py" serve$' "$(cat "$tmp/unit-path")"
 cat > "$FM_HOME/config/test-service/fake.json" <<'JSON'
-{"prepare":["prepare.sh"],"suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"any_device":["phone.sh","--serial","any"],"phones":["S22","S21","M31"],"any_phones":["S22","S21"],"equivalent_phones":{"S22":["S21"],"S21":["S22"]},"landing_branch":"main","scenarios":{"smoke":["--smoke"]}}
+{"prepare":["prepare.sh"],"suite":["suite.sh"],"quick_suite":["suite.sh"],"device":["phone.sh","--serial","{serial}"],"any_device":["phone.sh","--serial","any"],"quick_device":["phone.sh","--serial","{serial}","--quick"],"phones":["S22","S21","M31"],"any_phones":["S22","S21","M31"],"equivalent_phones":{"S22":["S21"],"S21":["S22"]},"landing_branch":"main","scenarios":{"smoke":["--smoke"]}}
 JSON
 cd "$tmp/project"
 git init -q -b main
@@ -82,8 +82,22 @@ echo suite-end-v1
 SUITE
 cat > phone.sh <<'PHONE'
 #!/usr/bin/env bash
+set -euo pipefail
 serial=$2
-[ "$serial" != any ] || serial=S22
+echo "phone-ticket:$serial" >> "$EVENTS"
+if [ "$serial" = any ]; then
+  while :; do
+    for candidate in S22 S21 M31; do
+      [ ! -e "$HOME/vip-wait-$candidate" ] || continue
+      if [ -e "$HOME/online-devices" ] && ! grep -qx "$candidate" "$HOME/online-devices"; then continue; fi
+      exec {phone_lock}> "/tmp/frogpile-phone-$candidate.lock"
+      if flock -n "$phone_lock"; then serial=$candidate; break; fi
+      exec {phone_lock}>&-
+    done
+    [ "$serial" = any ] || break
+    sleep .05
+  done
+fi
 echo "phone-start-v1:$serial:${3:-}" >> "$EVENTS"
 if [ "$serial" = S22 ] && [ -e "$HOME/slow-phone" ]; then sleep 8; else sleep .2; fi
 echo "phone-end-v1" >> "$EVENTS"
@@ -110,7 +124,7 @@ request=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22 --scenario s
 $svc wait "$request" | grep -q "^passed $sha1"
 # Preparation finishes before the suite and phone enter their queues.
 [ "$(sed -n '1p' "$EVENTS")" = prepare-v1 ]
-[ "$(sed -n '2p' "$EVENTS")" = suite-start-v1 ] || [ "$(sed -n '2p' "$EVENTS")" = phone-start-v1:S22:--smoke ]
+[ "$(sed -n '2p' "$EVENTS")" = suite-start-v1 ] || [ "$(sed -n '2p' "$EVENTS")" = phone-ticket:S22 ]
 [ "$(grep -n 'suite-end' "$EVENTS" | cut -d: -f1)" -gt "$(grep -n 'phone-start' "$EVENTS" | cut -d: -f1)" ]
 [ "$(tail -1 "$EVENTS")" = benchmark-v1 ]
 [ "$(cat "$tmp/pass.receipt")" = "$(printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0' "$sha1")" ]
@@ -182,7 +196,11 @@ ls "$FM_TEST_SERVICE_STATE/logs/$unlocked"-0-suite.log > /dev/null
 if grep -q '1234' "$FM_TEST_SERVICE_STATE/status.json" "$FM_TEST_SERVICE_STATE"/logs/*; then exit 1; fi
 any_phone=$($svc submit fake "$PWD" "$sha1" --suite --device-gate any)
 $svc wait "$any_phone" | grep -q '^passed '
+grep -q '^phone-ticket:any$' "$EVENTS"
 grep -q '^phone-start-v1:S22:$' "$EVENTS"
+quick_any=$($svc submit fake "$PWD" "$sha1" --suite --check quick --target "$sha1" --device-gate any)
+$svc wait "$quick_any" | grep -q '^passed '
+grep -q '^phone-start-v1:S22:--quick$' "$EVENTS"
 python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
 import json,sys
 path=sys.argv[1]
@@ -201,8 +219,23 @@ concurrent_two=$($svc submit fake "$PWD" "$sha1" --device-gate any)
 $svc wait "$concurrent_two" | grep -q '^passed '
 $svc wait "$concurrent_one" | grep -q '^passed '
 grep -q '^phone-start-v1:S21:$' "$EVENTS"
-if grep -q '^phone-start-v1:M31:' "$EVENTS"; then fail 'functional any request used performance phone'; fi
+if [ "$(grep -c '^phone-ticket:any$' "$EVENTS")" -lt 3 ]; then fail 'any-phone request passed a named serial'; fi
 rm "$HOME/slow-phone"
+touch "$HOME/vip-wait-M31"
+flock /tmp/frogpile-phone-S22.lock -c 'sleep 3' & vip_s22=$!
+sleep .2
+vip_waiting=$($svc submit fake "$PWD" "$sha1" --device-gate any)
+$svc wait "$vip_waiting" | grep -q '^passed '
+wait "$vip_s22"
+[ "$(tail -2 "$EVENTS" | grep -c '^phone-start-v1:S21:$')" -eq 1 ]
+rm "$HOME/vip-wait-M31"
+flock /tmp/frogpile-phone-S22.lock -c 'sleep 3' & m31_s22=$!
+flock /tmp/frogpile-phone-S21.lock -c 'sleep 3' & m31_s21=$!
+sleep .2
+m31_any=$($svc submit fake "$PWD" "$sha1" --device-gate any)
+$svc wait "$m31_any" | grep -q '^passed '
+wait "$m31_s22" "$m31_s21"
+[ "$(tail -2 "$EVENTS" | grep -c '^phone-start-v1:M31:$')" -eq 1 ]
 flock /tmp/frogpile-phone-S22.lock -c 'sleep 4' & external_phone=$!
 sleep .2
 leased=$($svc submit fake "$PWD" "$sha1" --device-gate any)
@@ -234,11 +267,10 @@ printf 'S21\n' > "$HOME/online-devices"
 $svc wait "$disconnect" | grep -q '^passed '
 rm "$HOME/slow-phone"
 [ "$(grep -c '^phone-start-v1:S21:$' "$EVENTS")" -gt "$before_s21" ]
-printf 'S21\n' > "$HOME/online-devices"
-if $svc submit fake "$PWD" "$sha1" --device-gate M31 > "$tmp/performance.out" 2>&1; then
-  fail 'performance phone accepted for functional run'
-fi
-grep -q 'phone is not configured for functional runs' "$tmp/performance.out"
+printf 'S21\nM31\n' > "$HOME/online-devices"
+named_m31=$($svc submit fake "$PWD" "$sha1" --device-gate M31)
+$svc wait "$named_m31" | grep -q '^passed '
+grep -q '^phone-ticket:M31$' "$EVENTS"
 : > "$HOME/online-devices"
 offline=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22)
 $svc wait "$offline" > "$tmp/offline.out" && exit 1 || true
