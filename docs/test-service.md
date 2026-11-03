@@ -7,10 +7,15 @@ The status file contains queue order, `running_requests` and `waiting_requests` 
 Its `alerts` array exposes requests that have no connected eligible phone.
 
 Install the user unit from the checked-out code root with `bin/fm-test-service.py install-unit`, then run `systemctl --user daemon-reload` and `systemctl --user enable --now fm-test-service.service`.
-The generated unit runs `serve`, restarts it after a failure, and stops its process group on shutdown.
+The generated unit preserves the installing shell's `PATH` order, the isolated configuration path, and any set Android SDK, Java, Godot, or FrogPile queue environment variables.
+It runs `check-tools` before `serve`, restarts after a failure, and stops its process group on shutdown.
+systemd applies drop-ins after the main unit, so an old `~/.config/systemd/user/fm-test-service.service.d/path.conf` hand repair still overrides the generated `PATH`; as a separate maintenance step after the replacement unit is installed, delete that file and run `systemctl --user daemon-reload` before restarting the service.
+Run `bin/fm-test-service.py check-tools` from the intended launch environment to see a named missing tool or Python module before starting the service.
 A request marked running at service startup returns to the queue and reruns from a fresh detached copy.
 The service keeps a private copy of each submitted commit so removing a worker's checkout does not change the test target.
 
+Each project can declare `required_tools` as a map from executable names to lists of Python modules that executable must import; the startup check scans every configured project and fails before touching the request database if a requirement is missing.
+FrogPile declares `adb`, `godot`, `java`, and `python3` with `PIL` in its example configuration.
 Put one JSON file per project at `FM_HOME/config/test-service/PROJECT.json`.
 `FM_TEST_SERVICE_CONFIG_ROOT` can point an isolated service instance at a different configuration directory while keeping `FM_HOME` for task completion delivery.
 The file names `suite` and `device` executable argv arrays for the full pre-queue run and `quick_suite` and `quick_device` arrays for the front check, all relative to the tested checkout.

@@ -1,4 +1,5 @@
 {
+  "required_tools": {"adb": [], "godot": [], "python3": ["PIL"], "java": []},
   "prepare": [
     "scripts/godot-automation.sh",
     "--headless",
