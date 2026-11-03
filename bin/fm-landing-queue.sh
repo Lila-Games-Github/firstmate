@@ -65,7 +65,7 @@
 # terminal. A missing branch whose recorded head is in the landing tip is landed;
 # any other missing branch becomes a failed car on reconciliation.
 # move is for firstmate only. It places an active waiting car at --place in the
-# active train (bottom=1), preserving every row's state and evidence. Place 1
+# active train (front=1), preserving every row's state and evidence. Place 1
 # and moving the current front car are refused so its running check is untouched.
 # A car whose admitted evidence is missing or whose head changed is refused.
 # Only cars whose status changes receive the existing parked-car steer.
