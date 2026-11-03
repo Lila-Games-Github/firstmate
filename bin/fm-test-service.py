@@ -782,25 +782,30 @@ def execute(db, row):
 
 def complete(db, row, state, error):
     rid = row["id"]
-    sha = row["sha"]
-    result_dir = ROOT / "results" / rid
-    result_dir.mkdir(parents=True, exist_ok=True)
-    if state == "passed" and json.loads(row["options"])["suite"]:
-        opts = json.loads(row["options"])
-        if opts.get("check") == "quick":
-            receipt = "schema=fm-quick-check.v1\nsha=" + sha + "\ntarget=" + opts["target"] + "\n"
-        else:
-            receipt = "schema=fm-full-suite.v1\nsha=" + sha + "\nfailures=0\n"
-        atomic_write(result_dir / (sha + ".receipt"), receipt)
-        path = json.loads(row["options"]).get("receipt")
-        if path and sha == row["original_sha"]:
-            atomic_write(path, receipt)
-    elif state == "failed":
-        atomic_write(result_dir / (sha + ".failure.json"), json.dumps({"sha": sha, "first_failure": error}, indent=2) + "\n")
     # Publish the verdict and its frozen outbox message together. In particular,
-    # a cancelled CLI must not leave a live service without a pending wake.
+    # a late worker must not replace a timeout or cancellation with a pass receipt.
     db.execute("BEGIN IMMEDIATE")
     try:
+        current = db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone()
+        if current["state"] in TERMINAL or current["generation"] != row["generation"] or (
+                row["state"] == "preparing" and current["state"] != "preparing"):
+            db.execute("ROLLBACK")
+            return
+        sha = current["sha"]
+        result_dir = ROOT / "results" / rid
+        result_dir.mkdir(parents=True, exist_ok=True)
+        if state == "passed" and json.loads(current["options"])["suite"]:
+            opts = json.loads(current["options"])
+            if opts.get("check") == "quick":
+                receipt = "schema=fm-quick-check.v1\nsha=" + sha + "\ntarget=" + opts["target"] + "\n"
+            else:
+                receipt = "schema=fm-full-suite.v1\nsha=" + sha + "\nfailures=0\n"
+            atomic_write(result_dir / (sha + ".receipt"), receipt)
+            path = opts.get("receipt")
+            if path and sha == current["original_sha"]:
+                atomic_write(path, receipt)
+        elif state == "failed":
+            atomic_write(result_dir / (sha + ".failure.json"), json.dumps({"sha": sha, "first_failure": error}, indent=2) + "\n")
         db.execute("UPDATE requests SET state=?,error=?,finished=? WHERE id=?", (state, error, time.time(), rid))
         queue_notification(db, db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone())
         db.execute("COMMIT")

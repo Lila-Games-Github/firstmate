@@ -478,6 +478,34 @@ if $svc wait stale-preparing > "$tmp/stale-preparing.out"; then fail 'stale prep
 grep -q 'preparing timed out' "$tmp/stale-preparing.out"
 after_stale=$($svc submit fake "$PWD" "$sha1" --suite)
 $svc wait "$after_stale" | grep -q '^passed '
+# A late worker cannot turn a terminal timeout into a passing suite or receipt.
+before_late=$(grep -c 'suite-start-v1' "$EVENTS")
+before_late_end=$(grep -c 'suite-end-v1' "$EVENTS")
+late_result=$($svc submit fake "$PWD" "$sha1" --suite)
+for i in $(seq 1 300); do
+  started_late=$(grep -c 'suite-start-v1' "$EVENTS")
+  [ "$started_late" -gt "$before_late" ] && break
+  sleep .05
+done
+[ "$started_late" -gt "$before_late" ] || fail 'late-result suite never started'
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" "$late_result" <<'PY'
+import sqlite3,sys,time
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE requests SET state='failed',error='preparing timed out',finished=? WHERE id=?",
+               (time.time(),sys.argv[2]))
+PY
+if $svc wait "$late_result" > "$tmp/late-result.out"; then fail 'terminal timeout became a pass'; fi
+grep -q 'preparing timed out' "$tmp/late-result.out"
+for i in $(seq 1 300); do
+  ended_late=$(grep -c 'suite-end-v1' "$EVENTS")
+  [ "$ended_late" -gt "$before_late_end" ] && break
+  sleep .05
+done
+[ "$ended_late" -gt "$before_late_end" ] || fail 'late-result suite never ended'
+sleep .5
+[ ! -e "$FM_TEST_SERVICE_STATE/results/$late_result/$sha1.receipt" ] || fail 'late worker wrote a pass receipt'
+if $svc wait "$late_result" > "$tmp/late-result-final.out"; then fail 'late result changed to passed'; fi
+grep -q 'preparing timed out' "$tmp/late-result-final.out"
 # A live submit must preserve the service's timeout verdict and fail its CLI.
 real_git=$(command -v git)
 cat > "$tmp/bin/git" <<'GIT'
