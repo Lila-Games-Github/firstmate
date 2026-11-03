@@ -4,7 +4,7 @@
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--gate-receipt <name>=<file>]...
-#          [--gate <name>] [--reason <text>]
+#          [--gate <name>] [--reason <text>] [--owner-task <task-id>]
 # FM_HOME must explicitly select the owning home; FM_STATE_OVERRIDE and
 # FM_DATA_OVERRIDE optionally select its state and data directories.
 # Without --landing-branch, use this task's recorded landing_branch, else the
@@ -36,8 +36,9 @@
 # including one naming that same task, sends the task one durable steering
 # message through fm-send.sh (FM_SEND_IDEMPOTENT=1, a body naming the new status,
 # tip, and head), then updates or clears the marker. A failed send leaves the
-# marker for the next invocation to retry. A task without a .meta file is not
-# steered.
+# marker for the next invocation to retry. The car's recorded owner receives
+# the steer; legacy rows resolve a unique owner by project and lane branch.
+# A task without a .meta file is not steered.
 # reconcile refreshes and persists the whole queue, emitting due wakes and park
 # steers, without requiring <task-id> to be a car; it prints nothing and is a
 # no-op when the landing branch has no queue. fm-merge-local.sh runs it after
@@ -70,8 +71,9 @@
 # Durable format: data/landing-queue/<hash>/queue is a versioned TSV snapshot,
 # identified by the canonical common Git directory and landing branch. Rows in
 # append order hold id, branch, head, state, acknowledged base, receipt file,
-# receipt target, last notified event hash, and failure reason (failed rows
-# only). '-' means absent. Immutable
+# receipt target, last notified event hash, failure reason (failed rows only),
+# and owner task id. Nine-field legacy rows resolve their owner on refresh.
+# '-' means absent. Immutable
 # receipt snapshots live beside it. Queue writes are atomic and serialized by
 # state/.landing-queue-<hash>.lock using the shared recoverable lock helpers.
 # Every invocation refreshes live refs, retires heads already in the landing tip,
@@ -105,7 +107,7 @@ shift 2
 case "$ACTION" in ready|status|receipt|gate|fail|baseline|reconcile) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
-PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE=''
+PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE='' OWNER_TASK=''
 GATE_RECEIPTS=()
 while [ "$#" -gt 0 ]; do
   [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 requires a value"
@@ -117,6 +119,7 @@ while [ "$#" -gt 0 ]; do
     --target) TARGET=$2 ;;
     --receipt) RECEIPT=$2 ;;
     --reason) REASON=$2 ;;
+    --owner-task) OWNER_TASK=$2 ;;
     --gate) GATE=$2 ;;
     --gate-receipt) GATE_RECEIPTS[${#GATE_RECEIPTS[@]}]=$2 ;;
     *) die "unknown queue option $1" ;;
@@ -124,6 +127,7 @@ while [ "$#" -gt 0 ]; do
   shift 2
 done
 [ -n "$PROJECT" ] || die '--project is required'
+[ -z "$OWNER_TASK" ] || [[ "$OWNER_TASK" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid owner task id'
 valid_reason() { [ -n "$1" ] && [ "$1" != - ] && ! [[ "$1" =~ [[:cntrl:]] ]]; }
 [ -z "$REASON" ] || valid_reason "$REASON" || die '--reason must be one line without control characters'
 COMMON=$(git -C "$PROJECT" rev-parse --git-common-dir) || die 'project is not a Git checkout'
@@ -215,7 +219,7 @@ trap cleanup EXIT
 trap 'trap "" TERM INT HUP; exit 143' TERM INT HUP
 fm_lock_acquire_wait "$LOCK"
 FILE="$DIR/queue"
-ids=() branches=() heads=() states=() bases=() receipts=() targets=() notified=() reasons=()
+ids=() branches=() heads=() states=() bases=() receipts=() targets=() notified=() reasons=() owners=()
 count=0 found=-1 joined=0 requeue_reason='' waiting=0
 if [ -e "$FILE" ]; then
   [ -f "$FILE" ] && [ ! -L "$FILE" ] || die 'invalid queue snapshot'
@@ -223,10 +227,12 @@ if [ -e "$FILE" ]; then
     IFS= read -r schema && [ "$schema" = fm-landing-queue.v1 ] || die 'invalid queue schema'
     IFS= read -r repository && [ "$repository" = "$COMMON" ] || die 'queue repository mismatch'
     IFS= read -r landing && [ "$landing" = "$LANDING" ] || die 'queue landing branch mismatch'
-    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason extra; do
+    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason row_owner extra; do
       [[ "$row_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue task id'
       valid_branch "$row_branch" || die 'invalid queue branch'
       [ -n "$row_notified" ] && [ -n "$row_reason" ] && [ -z "$extra" ] || die 'incomplete queue row'
+      row_owner=${row_owner:--}
+      [ "$row_owner" = - ] || [[ "$row_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue owner task id'
       [[ "$row_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
         && [[ "$row_base" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die 'invalid queue commit'
       case "$row_receipt" in
@@ -244,12 +250,37 @@ if [ -e "$FILE" ]; then
       done
       ids[count]=$row_id branches[count]=$row_branch heads[count]=$row_head states[count]=$row_state
       bases[count]=$row_base receipts[count]=$row_receipt targets[count]=$row_target notified[count]=$row_notified
-      reasons[count]=$row_reason
+      reasons[count]=$row_reason owners[count]=$row_owner
       if [ "$row_id" = "$ID" ]; then found=$count; fi
       count=$((count + 1))
     done
   } < "$FILE"
 fi
+
+owner_for_branch() { # <branch>; only a unique task in this project can own a legacy car
+  local branch=$1 meta candidate project match=-
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    candidate=$(sed -n 's/^lane_branch=//p' "$meta" | tail -1)
+    [ "$candidate" = "$branch" ] || continue
+    project=$(sed -n 's/^project=//p' "$meta" | tail -1)
+    [ "$project" = "$PRIMARY" ] || continue
+    candidate=${meta##*/}
+    candidate=${candidate%.meta}
+    [ "$match" = - ] || return 1
+    match=$candidate
+  done
+  [ "$match" != - ] || return 1
+  printf '%s' "$match"
+}
+for ((i=0; i<count; i++)); do
+  [ "${owners[i]}" = - ] || continue
+  if owner=$(owner_for_branch "${branches[i]}"); then
+    owners[i]=$owner
+  elif [ -f "$STATE/${ids[i]}.meta" ]; then
+    owners[i]=${ids[i]}
+  fi
+done
 
 save() {
   local i reason
@@ -259,8 +290,8 @@ save() {
     for ((i=0; i<count; i++)); do
       reason=-
       [ "${states[i]}" != failed ] || reason=${reasons[i]}
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
-        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
+        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason" "${owners[i]}"
     done
   } > "$TMP"
   mv -f -- "$TMP" "$FILE"
@@ -330,6 +361,13 @@ if [ "$ACTION" = ready ]; then
     ids[count]=$ID branches[count]=$BRANCH heads[count]=$HEAD states[count]=active
     bases[count]=$(git -C "$PROJECT" merge-base "$HEAD" "$TIP") || die 'task and landing branch have no common base'
     receipts[count]=- targets[count]=- notified[count]=- reasons[count]=-
+    if [ -n "$OWNER_TASK" ]; then
+      owners[count]=$OWNER_TASK
+    elif owner=$(owner_for_branch "$BRANCH"); then
+      owners[count]=$owner
+    else
+      owners[count]=$ID
+    fi
     count=$((count + 1))
     joined=1
   else
@@ -337,20 +375,27 @@ if [ "$ACTION" = ready ]; then
     [ "${branches[found]}" = "$BRANCH" ] || die 'cannot change a queued task branch'
     if [ "${states[found]}" = failed ]; then
       ! git -C "$PROJECT" merge-base --is-ancestor "$HEAD" "$TIP" || die 'nothing to land: head is already in the landing branch'
+      moved_owner=${owners[found]}
       for ((i=found; i<count-1; i++)); do
         ids[i]=${ids[i+1]} branches[i]=${branches[i+1]} heads[i]=${heads[i+1]}
         states[i]=${states[i+1]} bases[i]=${bases[i+1]} receipts[i]=${receipts[i+1]}
-        targets[i]=${targets[i+1]} notified[i]=${notified[i+1]} reasons[i]=${reasons[i+1]}
+        targets[i]=${targets[i+1]} notified[i]=${notified[i+1]} reasons[i]=${reasons[i+1]} owners[i]=${owners[i+1]}
       done
       found=$((count - 1))
       ids[found]=$ID branches[found]=$BRANCH heads[found]=$HEAD states[found]=active
       bases[found]=$(git -C "$PROJECT" merge-base "$HEAD" "$TIP") || die 'task and landing branch have no common base'
       receipts[found]=- targets[found]=- notified[found]=- reasons[found]=-
+      owners[found]=${OWNER_TASK:-$moved_owner}
       joined=1
     fi
   fi
 fi
 [ "$found" -ge 0 ] || [ "$ACTION" = reconcile ] || die 'task has not joined the landing queue; run ready first'
+if [ -n "$OWNER_TASK" ] && [ "$found" -ge 0 ]; then
+  [ "${owners[found]}" = - ] || [ "${owners[found]}" = "$OWNER_TASK" ] \
+    || die 'queue car belongs to a different owner task'
+  owners[found]=$OWNER_TASK
+fi
 
 # Compute each live assignment from bottom to top. A receipt follows SHAs rather
 # than branch names, so a normal lower landing does not demand another suite.
@@ -516,17 +561,17 @@ if [ -n "$requeue_reason" ] && [ "$found" -ge 0 ] && [ "${places[found]}" -eq 1 
     [ "$i" -eq "$found" ] || [ "${states[i]}" != active ] || waiting=1
   done
   if [ "$waiting" -eq 1 ]; then
-    moved_id=${ids[found]} moved_branch=${branches[found]}
+    moved_id=${ids[found]} moved_branch=${branches[found]} moved_owner=${owners[found]}
     moved_head=${heads[found]} moved_base=${bases[found]}
     for ((i=found; i<count-1; i++)); do
       ids[i]=${ids[i+1]} branches[i]=${branches[i+1]} heads[i]=${heads[i+1]}
       states[i]=${states[i+1]} bases[i]=${bases[i+1]} receipts[i]=${receipts[i+1]}
-      targets[i]=${targets[i+1]} notified[i]=${notified[i+1]} reasons[i]=${reasons[i+1]}
+      targets[i]=${targets[i+1]} notified[i]=${notified[i+1]} reasons[i]=${reasons[i+1]} owners[i]=${owners[i+1]}
     done
     found=$((count - 1))
     ids[found]=$moved_id branches[found]=$moved_branch heads[found]=$moved_head
     states[found]=active bases[found]=$moved_base receipts[found]=- targets[found]=-
-    notified[found]=- reasons[found]=-
+    notified[found]=- reasons[found]=- owners[found]=$moved_owner
     assign
   elif [ "$ACTION" = gate ]; then
     die "$requeue_reason; no other car is waiting, so fix the branch, rebase and retest on a new head"
@@ -568,9 +613,9 @@ for ((i=0; i<count; i++)); do
   marker="$DIR/requeue-${ids[i]}"
   [ ! -L "$marker" ] || die "requeue marker is a symlink: $marker"
   [ -f "$marker" ] || continue
-  [ -f "$STATE/${ids[i]}.meta" ] || continue
+  [ -f "$STATE/${owners[i]}.meta" ] || continue
   requeue_message_reason=$(cat -- "$marker")
-  if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${ids[i]}" \
+  if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${owners[i]}" \
     "Landing queue: task=${ids[i]} moved to back because $requeue_message_reason. Fix your branch while waiting; run landing_queue status when you reach front, then rebase and retest." 2>&1 >/dev/null); then
     printf 'warning: could not steer %s after requeue; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
     continue
@@ -595,8 +640,9 @@ for ((i=0; i<count; i++)); do
       steer=1
       ;;
   esac
-  if [ "$steer" -eq 1 ] && [ -f "$STATE/${ids[i]}.meta" ]; then
-    if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${ids[i]}" \
+  if [ "$steer" -eq 1 ]; then
+    [ -f "$STATE/${owners[i]}.meta" ] || continue
+    if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${owners[i]}" \
       "Landing queue: task=${ids[i]} status=$current (was $parked) place=${places[i]} queue=$KEY landing=$LANDING tip=$TIP head=${heads[i]}. Run landing_queue status and continue from that status." 2>&1 >/dev/null); then
       printf 'warning: could not steer %s from %s to %s; the next queue invocation retries: %s\n' "${ids[i]}" "$parked" "$current" "$send_error" >&2
       continue
