@@ -6,7 +6,8 @@ root=$(cd "$(dirname "$0")/.." && pwd -P)
 svc=$root/bin/fm-test-service.py
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-service.XXXXXX")
 server=
-cleanup() { if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; fi; if [ "${KEEP_TEST_TMP:-0}" = 1 ]; then echo "test tmp: $tmp"; else rm -rf "$tmp"; fi; }
+submitting=
+cleanup() { if [ -n "$submitting" ]; then touch "$tmp/clone-barrier.release"; wait "$submitting" 2>/dev/null || true; fi; if [ -n "$server" ]; then kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; fi; if [ "${KEEP_TEST_TMP:-0}" = 1 ]; then echo "test tmp: $tmp"; else rm -rf "$tmp"; fi; }
 trap cleanup EXIT
 trap 'echo "failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 export HOME=$tmp/home FM_HOME=$tmp/fm FM_TEST_SERVICE_STATE=$tmp/state EVENTS=$tmp/events
@@ -154,8 +155,62 @@ PERF
 chmod +x prepare.sh suite.sh phone.sh benchmark.sh m31-perf.sh
 git add . && git commit -qm v1
 sha1=$(git rev-parse HEAD)
-printf '\necho dirty-live-tree >&2; exit 1\n' >> suite.sh
+# A daemon starting during a submit must leave its partial clone alone until
+# the submitter finishes, then run that request normally.
+FM_TEST_REAL_GIT=$(command -v git)
+export FM_TEST_REAL_GIT
+cat > "$tmp/bin/git" <<'GIT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${FM_TEST_CLONE_BARRIER:-}" ] && [ "${1:-}" = clone ]; then
+  dest=${!#}
+  "$FM_TEST_REAL_GIT" "${@:1:$#-1}" "$dest.staged"
+  mkdir "$dest"
+  : > "$FM_TEST_CLONE_BARRIER.ready"
+  until [ -e "$FM_TEST_CLONE_BARRIER.release" ]; do sleep .05; done
+  rmdir "$dest"
+  mv "$dest.staged" "$dest"
+else
+  exec "$FM_TEST_REAL_GIT" "$@"
+fi
+GIT
+chmod +x "$tmp/bin/git"
+FM_TEST_CLONE_BARRIER="$tmp/clone-barrier" "$svc" submit fake "$PWD" "$sha1" --suite > "$tmp/inflight-id" 2> "$tmp/inflight-error" & submitting=$!
+for ((attempt=0; attempt<100; attempt++)); do
+  [ -e "$tmp/clone-barrier.ready" ] && break
+  kill -0 "$submitting" 2>/dev/null || fail 'submitter exited before the clone barrier'
+  sleep .05
+done
+[ "$attempt" -lt 100 ] || fail 'submitter never reached the clone barrier'
 "$svc" serve > "$tmp/server.log" 2>&1 & server=$!
+for ((attempt=0; attempt<100; attempt++)); do
+  if [ -e "$FM_TEST_SERVICE_STATE/service.lock" ] && python3 - "$FM_TEST_SERVICE_STATE/service.lock" <<'PYLOCK'
+import fcntl, sys
+with open(sys.argv[1], 'w') as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(0)
+sys.exit(1)
+PYLOCK
+  then break; fi
+  kill -0 "$server" 2>/dev/null || fail 'service exited before startup recovery'
+  sleep .05
+done
+[ "$attempt" -lt 100 ] || fail 'service never acquired its startup lock'
+sleep .5
+python3 - "$FM_TEST_SERVICE_STATE/requests.sqlite3" <<'PY'
+import sqlite3, sys
+row = sqlite3.connect(sys.argv[1]).execute('SELECT state FROM requests').fetchone()
+assert row == ('preparing',), row
+PY
+touch "$tmp/clone-barrier.release"
+wait "$submitting" || fail "submitter failed: $(cat "$tmp/inflight-error")"
+submitting=
+inflight=$(cat "$tmp/inflight-id")
+"$svc" wait "$inflight" | grep -q "^passed $sha1"
+: > "$EVENTS"
+printf '\necho dirty-live-tree >&2; exit 1\n' >> suite.sh
 request=$($svc submit fake "$PWD" "$sha1" --suite --device-gate S22 --scenario smoke --harness benchmark.sh --receipt "$tmp/pass.receipt" --retest-on-move)
 $svc wait "$request" | grep -q "^passed $sha1"
 # Preparation finishes before the suite and phone enter their queues.

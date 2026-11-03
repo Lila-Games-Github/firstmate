@@ -304,33 +304,37 @@ def submit(args):
     db = connection()
     rid = uuid.uuid4().hex[:16]
     repo = ROOT / "repos" / rid
-    db.execute("BEGIN IMMEDIATE")
-    seq = db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM requests").fetchone()[0]
-    tip = run(["git", "-C", cfg.get("landing_repo", branch_source), "rev-parse", "--verify", "refs/heads/" + cfg["landing_branch"] + "^{commit}"])
-    branch_tip = tip.stdout.strip() if tip.returncode == 0 else None
-    submitted = time.time()
-    db.execute("INSERT INTO requests (id,seq,project,source,original_sha,sha,options,state,submitted,queued_at,branch_tip) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-               (rid, seq, args.project, str(source), args.sha.lower(), args.sha.lower(), json.dumps(opts), "preparing", submitted, submitted, branch_tip))
-    db.execute("COMMIT")
-    snapshot(db)
-    try:
-        repo.parent.mkdir(parents=True, exist_ok=True)
-        clone = run(["git", "clone", "--no-local", "--quiet", str(source), str(repo)])
-        if clone.returncode:
-            raise RuntimeError("snapshot clone failed: " + clone.stderr.strip())
-        fetched = run(["git", "-C", str(repo), "fetch", "--quiet", str(source), args.sha])
-        if fetched.returncode:
-            raise RuntimeError("cannot preserve requested commit: " + fetched.stderr.strip())
-        run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-original", args.sha])
-        if run(["git", "-C", str(repo), "checkout", "--detach", "--quiet", args.sha]).returncode:
-            raise RuntimeError("snapshot lacks requested commit")
-        db.execute("UPDATE requests SET state='queued' WHERE id=? AND state='preparing'", (rid,))
-    except Exception as exc:
-        complete(db, db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone(), "failed", str(exc))
-        shutil.rmtree(repo, ignore_errors=True)
+    # Startup recovery must wait for a live submitter before treating its
+    # partially cloned snapshot as crash residue.
+    with (ROOT / "preparing.lock").open("w") as preparation_lock:
+        fcntl.flock(preparation_lock, fcntl.LOCK_SH)
+        db.execute("BEGIN IMMEDIATE")
+        seq = db.execute("SELECT COALESCE(MAX(seq),0)+1 FROM requests").fetchone()[0]
+        tip = run(["git", "-C", cfg.get("landing_repo", branch_source), "rev-parse", "--verify", "refs/heads/" + cfg["landing_branch"] + "^{commit}"])
+        branch_tip = tip.stdout.strip() if tip.returncode == 0 else None
+        submitted = time.time()
+        db.execute("INSERT INTO requests (id,seq,project,source,original_sha,sha,options,state,submitted,queued_at,branch_tip) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                   (rid, seq, args.project, str(source), args.sha.lower(), args.sha.lower(), json.dumps(opts), "preparing", submitted, submitted, branch_tip))
+        db.execute("COMMIT")
         snapshot(db)
-        raise
-    snapshot(db)
+        try:
+            repo.parent.mkdir(parents=True, exist_ok=True)
+            clone = run(["git", "clone", "--no-local", "--quiet", str(source), str(repo)])
+            if clone.returncode:
+                raise RuntimeError("snapshot clone failed: " + clone.stderr.strip())
+            fetched = run(["git", "-C", str(repo), "fetch", "--quiet", str(source), args.sha])
+            if fetched.returncode:
+                raise RuntimeError("cannot preserve requested commit: " + fetched.stderr.strip())
+            run(["git", "-C", str(repo), "update-ref", "refs/heads/test-service-original", args.sha])
+            if run(["git", "-C", str(repo), "checkout", "--detach", "--quiet", args.sha]).returncode:
+                raise RuntimeError("snapshot lacks requested commit")
+            db.execute("UPDATE requests SET state='queued' WHERE id=? AND state='preparing'", (rid,))
+        except Exception as exc:
+            complete(db, db.execute("SELECT * FROM requests WHERE id=?", (rid,)).fetchone(), "failed", str(exc))
+            shutil.rmtree(repo, ignore_errors=True)
+            snapshot(db)
+            raise
+        snapshot(db)
     print(rid)
 
 
@@ -902,7 +906,9 @@ def serve():
         raise RuntimeError("test service is already running")
     db.execute("UPDATE requests SET state='queued',queued_at=?,started=NULL WHERE state='running'", (time.time(),))
     db.execute("UPDATE steps SET state='retrying' WHERE state='running'")
-    recover_preparing(db)
+    with (ROOT / "preparing.lock").open("w") as preparation_lock:
+        fcntl.flock(preparation_lock, fcntl.LOCK_EX)
+        recover_preparing(db)
     # Replay a crash between terminal publication and outbox insertion, including
     # requests written by older service versions, without changing queue records.
     for row in db.execute("SELECT * FROM requests WHERE state IN ('passed','failed','cancelled')").fetchall():
