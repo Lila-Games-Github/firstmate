@@ -435,13 +435,17 @@ test_lane_branch_missing_from_project_refuses() {
 }
 
 test_landing_steers_next_queue_car() {
-  local case_dir queue_env
+  local case_dir queue_env queue_file
   case_dir=$(make_case queue-hook)
   commit_task_change "$case_dir" main
   write_meta "$case_dir" "" local-only
   git -C "$case_dir/project" worktree add -qb fm/task-y2 "$case_dir/next-wt" fm/task-x1
   git -C "$case_dir/next-wt" commit -q --allow-empty -m 'next change'
+  git -C "$case_dir/project" worktree add -qb fm/alias-z3 "$case_dir/alias-wt" fm/task-y2
+  git -C "$case_dir/alias-wt" commit -q --allow-empty -m 'alias change'
   fm_write_meta "$case_dir/state/task-y2.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+  fm_write_meta "$case_dir/state/task-z3.meta" "project=$case_dir/project" 'lane_branch=fm/alias-z3' \
+    'window=sess:fm-notify' 'kind=ship' 'harness=claude'
   mkdir -p "$case_dir/bin"
   cat > "$case_dir/bin/tmux" <<'TMUX'
 #!/usr/bin/env bash
@@ -456,6 +460,7 @@ TMUX
   queue_env=(env PATH="$case_dir/bin:$PATH" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state")
   printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$case_dir/project" rev-parse fm/task-x1)" > "$case_dir/x.pre"
   printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$case_dir/project" rev-parse fm/task-y2)" > "$case_dir/y.pre"
+  printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$case_dir/project" rev-parse fm/alias-z3)" > "$case_dir/z.pre"
   "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" ready task-x1 --project "$case_dir/project" \
     --branch fm/task-x1 --head "$(git -C "$case_dir/project" rev-parse fm/task-x1)" \
     --target "$(git -C "$case_dir/project" rev-parse main)" --receipt "$case_dir/x.pre" >/dev/null \
@@ -464,7 +469,27 @@ TMUX
     --branch fm/task-y2 --head "$(git -C "$case_dir/project" rev-parse fm/task-y2)" \
     --target "$(git -C "$case_dir/project" rev-parse main)" --receipt "$case_dir/y.pre" >/dev/null \
     || fail 'queue-hook: second car could not join'
+  "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" ready alias-z3 --project "$case_dir/project" \
+    --branch fm/alias-z3 --head "$(git -C "$case_dir/project" rev-parse fm/alias-z3)" \
+    --target "$(git -C "$case_dir/project" rev-parse main)" --receipt "$case_dir/z.pre" \
+    >/dev/null || fail 'queue-hook: aliased car could not join'
+  queue_file=$(find "$case_dir/home/data/landing-queue" -name queue -type f -print -quit)
+  [ "$(tail -n +4 "$queue_file" | wc -l | tr -d ' ')" = 3 ] \
+    || fail 'queue-hook: expected three admitted cars in the queue snapshot'
+  awk -F '\t' '$1 == "alias-z3" && $10 == "task-z3" { found=1 } END { exit !found }' "$queue_file" \
+    || fail 'queue-hook: aliased car did not persist its owning task'
+  cp "$queue_file" "$case_dir/valid-queue"
+  awk -F '\t' 'BEGIN { OFS="\t" } $1 == "alias-z3" { $10="bad owner" } { print }' \
+    "$case_dir/valid-queue" > "$queue_file"
+  if "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" reconcile task-x1 \
+    --project "$case_dir/project" --landing-branch main > "$case_dir/bad-owner.out" 2>&1; then
+    fail 'queue-hook: malformed owner in queue snapshot was accepted'
+  fi
+  grep -q 'invalid queue owner task id' "$case_dir/bad-owner.out" \
+    || fail 'queue-hook: malformed owner refusal was unclear'
+  mv "$case_dir/valid-queue" "$queue_file"
   [ ! -e "$case_dir/state/task-y2.inbox" ] || fail 'queue-hook: waiting car was steered before landing'
+  [ ! -e "$case_dir/state/task-z3.inbox" ] || fail 'queue-hook: aliased waiting car was steered before landing'
 
   PATH="$case_dir/bin:$PATH" run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "queue-hook: merge failed: $(cat "$case_dir/stderr")"
@@ -474,7 +499,22 @@ TMUX
   grep -q 'task=task-y2 status=needs-quick (was waiting-for-front) place=1' "$case_dir/state/task-y2.inbox/"*.msg \
     || fail 'queue-hook: front steer did not name the next car'
   ! grep -q 'not reconciled' "$case_dir/stderr" || fail 'queue-hook: reconcile failed after landing'
-  pass 'landing a queued car steers its sleeping successor to the front once'
+  [ ! -e "$case_dir/state/task-z3.inbox" ] || fail 'queue-hook: upper aliased car was steered early'
+  awk -F '\t' 'BEGIN { OFS="\t" } $1 == "alias-z3" { NF=9 } { print }' "$queue_file" > "$case_dir/legacy-queue"
+  mv "$case_dir/legacy-queue" "$queue_file"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/project" rev-parse fm/task-y2)"
+  "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" reconcile task-x1 --project "$case_dir/project" --landing-branch main \
+    || fail 'queue-hook: second landing did not reconcile'
+  [ "$(find "$case_dir/state/task-z3.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail 'queue-hook: aliased car owner did not receive exactly one front notice'
+  grep -q 'task=alias-z3 status=needs-quick (was waiting-for-front) place=1' "$case_dir/state/task-z3.inbox/"*.msg \
+    || fail 'queue-hook: aliased front notice did not identify its car'
+  [ ! -e "$case_dir/state/alias-z3.inbox" ] || fail 'queue-hook: aliased notice went to the car id'
+  "${queue_env[@]}" "$ROOT/bin/fm-landing-queue.sh" reconcile task-x1 --project "$case_dir/project" --landing-branch main \
+    || fail 'queue-hook: repeat reconciliation failed'
+  [ "$(find "$case_dir/state/task-z3.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail 'queue-hook: repeat reconciliation duplicated the alias notice'
+  pass 'normal and legacy aliased cars reaching front in sequence each steer their owner once'
 }
 
 test_unrecorded_receipt_still_steers_next_queue_car() {
