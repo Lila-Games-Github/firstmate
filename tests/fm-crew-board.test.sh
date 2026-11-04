@@ -863,6 +863,15 @@ else
 fi
 EOF
   chmod +x "$stub/adb"
+  cat > "$stub/testfarm" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = status ] && [ -f "$FM_TEST_SERVICE_STATE/status.json" ]; then
+  cat "$FM_TEST_SERVICE_STATE/status.json"
+  exit 0
+fi
+printf '{"schema":"fm-test-service.v1","requests":[]}\n'
+EOF
+  chmod +x "$stub/testfarm"
   held=$(sleeper_in "$home/wt-alpha")
   vip=$(sleeper_in "$home/wt-beta")
   vip_two=$(sleeper_in "$home/wt-alpha")
@@ -948,6 +957,81 @@ JSON
   kill "$held" "$vip" "$vip_two" "$any" "$suite_wait" "$suite_hold" 2>/dev/null
   wait 2>/dev/null
   pass 'ticketed editor and phone queues show holders, ordered waits, and locked phone notifications'
+}
+
+test_testfarm_status_fixture_and_unavailable() {
+  local home stub stub_no_testfarm now
+  home=$(make_home testfarm_fixture)
+  now=$(date +%s)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\n'
+EOF
+  chmod +x "$stub/adb"
+  cat > "$home/testfarm-status.json" <<JSON
+{
+  "schema": "fm-test-service.v1",
+  "testfarm": "testfarm.status.v1",
+  "updated": $now,
+  "observed_at": $now,
+  "runner": {"instance": "abc123", "pid": 999, "heartbeat": $now, "alive": true},
+  "queue": ["phone-request"],
+  "running": "suite-request",
+  "running_requests": [],
+  "waiting_requests": [],
+  "alerts": [],
+  "requests": [
+    {"id": "suite-request", "task": "alpha", "state": "running", "run_seconds": 90,
+     "options": {"suite": true}, "steps": [{"name": "suite", "state": "running", "started": $((now - 90))}]},
+    {"id": "phone-request", "task": "beta", "state": "queued", "wait_seconds": 30,
+     "options": {"device_gate": "R5CT32HRVNM"}, "steps": []}
+  ],
+  "phones": [{"serial": "R5CT32HRVNM", "label": "S22", "adb": "unknown", "now": null, "waiting": [], "last": null}],
+  "tickets": {"phones": [], "suite": []}
+}
+JSON
+  cat > "$stub/testfarm" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = status ]; then
+  cat "$home/testfarm-status.json"
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "$stub/testfarm"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'testfarm fixture refresh failed'
+  assert_equals 'TEST SERVICE: 2 pending' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-heading")][0].title' "$home/state/crew-board.json")" \
+    'a real testfarm status fixture renders its pending requests'
+  assert_equals 'RUNNING: Make the widget spin · Suite' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-suite-request")][0].title' "$home/state/crew-board.json")" \
+    'running suite request row from the fixture'
+  assert_equals 'WAITING: Fix the gadget · Phone gate (VIP: R5CT32HRVNM)' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-phone-request")][0].title' "$home/state/crew-board.json")" \
+    'queued phone-gate request row from the fixture'
+  assert_equals 0 \
+    "$(jq '[.panels.test_queue[] | select(.id == "service-runner-down")] | length' "$home/state/crew-board.json")" \
+    'a live runner raises no down notice'
+
+  stub_no_testfarm="$home/stub-bin-no-testfarm"
+  mkdir -p "$stub_no_testfarm"
+  cp "$stub/adb" "$stub_no_testfarm/adb"
+  PATH="$stub_no_testfarm:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'missing testfarm refresh failed'
+  assert_equals 'TEST SERVICE: unavailable' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-heading")][0].title' "$home/state/crew-board.json")" \
+    'a missing testfarm command shows the test farm as unavailable'
+  assert_equals 'unavailable' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-state")][0].status' "$home/state/crew-board.json")" \
+    'the unavailable row carries the unavailable status'
+
+  sed -i 's/"alive": true/"alive": false/' "$home/testfarm-status.json"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'down runner refresh failed'
+  assert_equals 'Test farm runner is down' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-runner-down")][0].title' "$home/state/crew-board.json")" \
+    'a reachable farm with a dead runner raises a down notice'
+  pass 'a real testfarm status fixture renders rows, a missing command shows unavailable, and a dead runner is flagged'
 }
 
 test_suite_lock_probe() {
@@ -1628,6 +1712,7 @@ test_full_questions_and_backlog
 test_backlog_counts_from_a_capped_listing
 test_phone_testing_and_test_queue
 test_ticketed_queue_and_locked_phone
+test_testfarm_status_fixture_and_unavailable
 test_suite_lock_probe
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state

@@ -34,10 +34,27 @@ for number in range(1, 6):
 
 snapshot = base / "snapshot.json"
 snapshot.write_text(json.dumps({"schema": "fm-fleet-snapshot.v1", "tasks": []}))
+
+# A stub `testfarm` standing in for the real CLI: it serves whatever this test
+# last wrote to service/status.json, so the existing fixture-writing flow below
+# needs no change beyond routing it through the command instead of a direct read.
+bin_dir = base / "bin"
+bin_dir.mkdir()
+testfarm_stub = bin_dir / "testfarm"
+testfarm_stub.write_text(
+    "#!/usr/bin/env bash\n"
+    'if [ "$1" = status ] && [ -f "$FM_TEST_SERVICE_STATE/status.json" ]; then\n'
+    '  cat "$FM_TEST_SERVICE_STATE/status.json"\n'
+    "  exit 0\n"
+    "fi\n"
+    'printf \'{"schema":"fm-test-service.v1","requests":[]}\\n\'\n')
+testfarm_stub.chmod(0o755)
+
 env = {**os.environ, "FM_HOME": str(base), "FM_STATE_OVERRIDE": str(state),
        "FM_DATA_OVERRIDE": str(base / "data"), "FM_CREW_BOARD_PROC_ROOT": str(proc),
        "FROGPILE_SUITE_QUEUE": str(queue), "FROGPILE_SUITE_LOCK_HOLDER": str(base / "absent-holder"),
-       "FM_CREW_BOARD_PHONE_QUEUE_ROOT": str(base / "phone-queues"), "FM_TEST_SERVICE_STATE": str(service)}
+       "FM_CREW_BOARD_PHONE_QUEUE_ROOT": str(base / "phone-queues"), "FM_TEST_SERVICE_STATE": str(service),
+       "TESTFARM_STATE": str(service), "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
 
 DONE = "TEST res://tests/test_{0}.gd ...\nTEST res://tests/test_{0}.gd done in 5ms\n"
 

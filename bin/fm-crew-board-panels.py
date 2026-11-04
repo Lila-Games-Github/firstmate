@@ -7,8 +7,11 @@ Usage: fm-crew-board-panels.py <fleet-snapshot.json>
 Connected phones come from a bounded local adb query and a read-only keyguard
 probe. The test queue reads FrogPile tickets under FROGPILE_QUEUE_ROOT (default
 ~/.frogpile-queues), the full-suite holder sidecar FROGPILE_SUITE_LOCK_HOLDER,
-live Godot suite processes, and the test service's status.json when present.
-The ticket queues' arrival-ordered records remain the waiting source. The older per-phone queue and
+live Godot suite processes, and a bounded `testfarm status --json --no-probe`
+call for the standalone test farm's live requests, cached per refresh. A
+missing or failing `testfarm` command shows the TEST SERVICE panel as
+unavailable rather than stale or empty. The ticket queues' arrival-ordered
+records remain the waiting source. The older per-phone queue and
 kernel suite-lock readers remain for isolated test fixtures that set their
 legacy overrides. Daily routines come from this home's state/*-daily.check.sh
 scripts and their state/.<name>-last markers. Ready-for-you rows come from the
@@ -31,6 +34,7 @@ fm-crew-board.sh refresh.
 
 import csv
 import datetime as dt
+import functools
 import glob
 import io
 import json
@@ -970,15 +974,33 @@ def suite_processes(trees, now):
     return sorted(result, key=lambda row: row["pid"])
 
 
-def service_request_rows(snapshot):
-    """Show every live service request using the service's published status."""
-    root = Path(os.environ.get("FM_TEST_SERVICE_STATE", Path.home() / ".local/state/firstmate-test-service"))
+TESTFARM_STATUS_TIMEOUT_S = 2.0
+
+
+@functools.lru_cache(maxsize=1)
+def testfarm_status():
+    """One bounded `testfarm status --json --no-probe` call per refresh, or None when the farm is unreachable."""
     try:
-        status = json.loads((root / "status.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
+        run = subprocess.run(["testfarm", "status", "--json", "--no-probe"], capture_output=True,
+                             text=True, timeout=TESTFARM_STATUS_TIMEOUT_S, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if run.returncode:
+        return None
+    try:
+        status = json.loads(run.stdout)
+    except ValueError:
+        return None
     if not isinstance(status, dict) or status.get("schema") != "fm-test-service.v1":
-        return []
+        return None
+    return status
+
+
+def service_request_rows(snapshot):
+    """Show every live service request from testfarm's live status, or None when the farm is unreachable."""
+    status = testfarm_status()
+    if status is None:
+        return None
     requests = status.get("requests")
     if not isinstance(requests, list):
         return []
@@ -1021,13 +1043,10 @@ def service_request_rows(snapshot):
 
 def service_suite_rows(trees, now):
     """Identify service-owned suites for resource tags and editor deduplication."""
-    root = Path(os.environ.get("FM_TEST_SERVICE_STATE", Path.home() / ".local/state/firstmate-test-service"))
-    try:
-        status = json.loads((root / "status.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    status = testfarm_status()
+    if status is None:
         return [], []
-    if not isinstance(status, dict) or status.get("schema") != "fm-test-service.v1":
-        return [], []
+    root = Path(os.environ.get("TESTFARM_STATE", Path.home() / ".local/state/testfarm"))
     running, waiting = [], []
     requests = status.get("requests")
     for request in requests if isinstance(requests, list) else []:
@@ -1221,7 +1240,17 @@ def test_queue(snapshot, phones, now, tags=None):
                                   + (f" · holding {phone_label(held)}" if held else ""))
             rows.append(row)
     service_rows = service_request_rows(snapshot)
+    if service_rows is None:
+        rows.append(item("TEST SERVICE: unavailable", status="section", item_id="service-heading"))
+        rows.append(item("Test farm unavailable", "`testfarm status --json --no-probe` did not return a usable result.",
+                         "unavailable", item_id="service-state"))
+        return rows
     rows.append(item(f"TEST SERVICE: {len(service_rows)} pending", status="section", item_id="service-heading"))
+    runner = (testfarm_status() or {}).get("runner")
+    if isinstance(runner, dict) and runner.get("alive") is False:
+        rows.append(item("Test farm runner is down",
+                         "The testfarm runner is not reporting a heartbeat; running and queued requests may be stuck.",
+                         "unavailable", item_id="service-runner-down"))
     rows.extend(service_rows or [item("Idle", status="idle", item_id="service-state")])
     return rows
 
