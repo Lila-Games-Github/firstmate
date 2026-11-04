@@ -440,6 +440,11 @@ func (m *app) panelLines(spec panelSpec, width int) ([]string, []int) {
 		lastGroup = row.Group
 		lines = append(lines, m.rowLine(spec.id, row, index, width))
 		owners = append(owners, index)
+		if spec.id == "landing_queue" && row.Detail != "" {
+			lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render(
+				ansi.Truncate("    "+strings.SplitN(row.Detail, "\n", 2)[0], width, "…")))
+			owners = append(owners, index)
+		}
 		if m.expanded[spec.id] == index+1 || m.readingQuestion(spec.id, index) {
 			for _, detail := range strings.Split(m.detail(spec.id, row, width), "\n") {
 				lines = append(lines, detail)
@@ -486,6 +491,8 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 			message = "No phones connected"
 		case "landings":
 			message = "Nothing landed today"
+		case "landing_queue":
+			message = "No cars in the landing queue"
 		case "full_questions":
 			message = "No captain questions"
 		case "alerts":

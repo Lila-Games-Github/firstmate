@@ -18,7 +18,7 @@ var pages = [][]panelSpec{
 	{{"workers", "WORKERS"}, {"ready", "READY FOR YOU"}, {"feed", "FEED"}},
 	{{"bugs", "BUGS"}, {"backlog", "BACKLOG"}},
 	{{"full_questions", "CAPTAIN QUESTIONS"}},
-	{{"landings", "TODAY'S LANDINGS"}},
+	{{"landing_queue", "LANDING QUEUE"}, {"landings", "TODAY'S LANDINGS"}},
 }
 
 var railPanels = []panelSpec{{"alerts", "NOTIFICATIONS"}, {"test_queue", "TEST QUEUE"},
@@ -162,6 +162,8 @@ func (m *app) rawItems(id string) []item {
 		return m.data.Panels.TestQueue
 	case "landings":
 		return m.data.Panels.Landings
+	case "landing_queue":
+		return m.data.Panels.LandingQueue
 	case "builds":
 		return m.data.Panels.Builds
 	case "routines":

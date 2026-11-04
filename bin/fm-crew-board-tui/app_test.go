@@ -255,6 +255,41 @@ func TestAllPagesRenderLocalPanels(t *testing.T) {
 	}
 }
 
+func TestLandingQueueFitsPhoneWidthAndShowsFrontCheck(t *testing.T) {
+	m := fixtureApp(t)
+	m.width, m.height = 55, 18
+	m.data.Panels.LandingQueue = []item{
+		{Title: "widget / main", Status: "section"},
+		{ID: "front", Title: "#1 front", Status: "needs-quick", Detail: "Front check: quick-123 · running"},
+		{ID: "infra", Title: "#2 infra · infra", Status: "waiting-for-front"},
+	}
+	m.data.Panels.Landings = []item{{Title: "Landed today"}}
+	press(m, key('4'))
+	view := m.View().Content
+	for _, want := range []string{"LANDING QUEUE", "#1 front", "Front check: quick-123", "#2 infra"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("landing queue view missing %q", want)
+		}
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if lipgloss.Width(line) > m.width {
+			t.Fatalf("phone view line exceeds width: %q", line)
+		}
+	}
+	press(m, key('l'))
+	if view := m.View().Content; !strings.Contains(view, "TODAY'S LANDINGS") || !strings.Contains(view, "Landed today") {
+		t.Fatal("today's landings is not reachable on the same page")
+	}
+}
+
+func TestLandingQueueEmptyMessage(t *testing.T) {
+	m := fixtureApp(t)
+	press(m, key('4'))
+	if view := m.View().Content; !strings.Contains(view, "No cars in the landing queue") {
+		t.Fatal("empty landing queue lacks its message")
+	}
+}
+
 func TestQuestionsPageShowsOnlyCaptainQuestions(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.FullQuestions = []item{
@@ -1400,7 +1435,7 @@ func TestSelectedYellowPhaseTagIsADarkChip(t *testing.T) {
 
 func TestPageOrderAndNumberKeys(t *testing.T) {
 	want := []string{"NOW", "PLANNING", "QUESTIONS", "TESTING"}
-	first := []string{"workers", "bugs", "full_questions", "landings"}
+	first := []string{"workers", "bugs", "full_questions", "landing_queue"}
 	if strings.Join(pageNames, ",") != strings.Join(want, ",") {
 		t.Fatalf("page names = %v, want %v", pageNames, want)
 	}
