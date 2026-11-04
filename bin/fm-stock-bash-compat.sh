@@ -20,10 +20,11 @@ WATCH_CHURN_TIMEOUT=${FM_STOCK_BASH_WATCH_CHURN_TIMEOUT:-60}
 LEARNING_TIMEOUT=${FM_STOCK_BASH_LEARNING_TIMEOUT:-30}
 MERGE_TIMEOUT=${FM_STOCK_BASH_MERGE_TIMEOUT:-120}
 LANDING_TIMEOUT=${FM_STOCK_BASH_LANDING_TIMEOUT:-90}
+WORKER_TIMING_TIMEOUT=${FM_STOCK_BASH_WORKER_TIMING_TIMEOUT:-30}
 selected=all
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != --consumer ]; then
-    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing]" >&2
+    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|worker-timing]" >&2
     exit 2
   fi
   selected=$2
@@ -46,6 +47,7 @@ validate_timeout FM_STOCK_BASH_WATCH_CHURN_TIMEOUT "$WATCH_CHURN_TIMEOUT"
 validate_timeout FM_STOCK_BASH_LEARNING_TIMEOUT "$LEARNING_TIMEOUT"
 validate_timeout FM_STOCK_BASH_MERGE_TIMEOUT "$MERGE_TIMEOUT"
 validate_timeout FM_STOCK_BASH_LANDING_TIMEOUT "$LANDING_TIMEOUT"
+validate_timeout FM_STOCK_BASH_WORKER_TIMING_TIMEOUT "$WORKER_TIMING_TIMEOUT"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
@@ -132,6 +134,8 @@ run_consumer learning "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIME
 run_consumer landing "landing-queue test farm resolve and watcher sweep" "$LANDING_TIMEOUT" 8 \
   env FM_LANDING_QUEUE_TEST_ONLY=farm \
   "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
+run_consumer worker-timing "worker timing status and teardown record" "$WORKER_TIMING_TIMEOUT" 6 \
+  "$STOCK_BASH" "$ROOT/tests/fm-worker-timing.test.sh"
 run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 18 \
   "$STOCK_BASH" "$ROOT/tests/fm-merge-local.test.sh"
 [ "$ran_consumer" -eq 1 ] || {

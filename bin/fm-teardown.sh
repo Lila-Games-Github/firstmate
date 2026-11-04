@@ -1122,6 +1122,12 @@ remote_secondmate_teardown() {
       --method "$([ "$FORCE" = --force ] && echo discarded || echo secondmate-retired)" || status=1
   fi
   if [ "$status" -eq 0 ]; then
+    python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$STATE/$ID.meta" \
+      --state "$STATE" --data "$DATA" --id "$ID" --outcome not-landed \
+      --method "$([ "$FORCE" = --force ] && echo discarded || echo secondmate-retired)" || \
+      printf 'warning: worker timing record failed for %s; continuing teardown\n' "$ID" >&2
+  fi
+  if [ "$status" -eq 0 ]; then
     status_retire_presentation_task "$STATE" "$ID" || status=1
   fi
   if [ "$status" -eq 0 ]; then
@@ -1215,6 +1221,7 @@ remove_task_runtime_files() {
     "$state_dir/$id.control-relaunch" "$state_dir/$id.control-relaunch.meta-prior" \
     "$state_dir/$id.control-relaunch.brief-prior" "$state_dir/$id.control-relaunch.note" \
     "$state_dir/$id.reconcile-nudged" "$state_dir/$id.gemini-settings.json" \
+    "$state_dir/$id.timing-events.json" "$state_dir/$id.timing-events.lock" \
     "$state_dir/.$id.branch-outcome-index" || return 1
   # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
   # retired endpoint; teardown only runs after landing is confirmed, so any
@@ -1276,6 +1283,10 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
   python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
     --id "$ID" --outcome "$([ -n "$LANDED_VIA" ] && echo landed || echo not-landed)" \
     --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || exit 1
+  python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$META" --state "$STATE" --data "$DATA" \
+    --id "$ID" --outcome "$([ -n "$LANDED_VIA" ] && echo landed || echo not-landed)" \
+    --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || \
+    printf 'warning: worker timing record failed for %s; continuing teardown\n' "$ID" >&2
   status_retire_presentation_task "$STATE" "$ID" || exit 1
   remove_task_runtime_files "$STATE" "$ID" || exit 1
   if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
@@ -4103,6 +4114,9 @@ fi
 if [ -f "$META" ]; then
   python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
     --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || exit 1
+  python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$META" --state "$STATE" --data "$DATA" \
+    --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || \
+    printf 'warning: worker timing record failed for %s; continuing teardown\n' "$ID" >&2
 fi
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 remove_task_runtime_files "$STATE" "$ID" || exit 1

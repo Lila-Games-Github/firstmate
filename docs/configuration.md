@@ -533,6 +533,21 @@ The read-only `bin/fm-routing-ledger.py summary --data data --state state --from
 Because a correction can follow landing, `--state` joins learning candidates captured later by task id at review time, binding each to the incarnation whose start precedes its capture and the next incarnation's start follows it (including a still-running incarnation's `routing_started_at` in `state/<id>.meta`), without rewriting the ledger; without it only the teardown snapshot is counted.
 The summary shows cost coverage beside the median of known costs, and reports null cost per landing if any task in a rule has unknown cost.
 
+## Worker timing ledger (data/worker-timing/)
+
+`bin/fm-worker-timing.py` owns the version 1 worker timing record and its read-only report.
+The watcher records the time it first observes each appended status line in a private task sidecar, and teardown writes one durable JSON line per task incarnation to a project-specific file before removing that status log.
+Each file name combines the project directory name and a hash of its canonical path, so equal directory names remain separate projects.
+The row carries task and project identity, kind, delivery mode, selected harness, model and effort, start and end times, total wall seconds, phase seconds, waiting seconds by cause, relaunch count, failed validation rounds when the routing record has them, and an unknown reason when phase timing cannot be measured.
+Phase names in the row are planning, developing, testing, fixing and landing; `bin/fm-classify-lib.sh` remains the owner of worker phase vocabulary.
+Time spent in a declared pause, block or captain decision is assigned to a waiting cause until a resolution, working event or next phase event is observed.
+Status lines do not contain timestamps, so observed phase boundaries have watcher poll precision; several transitions seen in one poll cannot support a measured duration, and historical phase time remains unknown.
+`routing_started_at` is the spawn source, and the routing ledger's teardown time is the end source; a missing start gives a null total, never zero.
+The report command is `python3 bin/fm-worker-timing.py report --data data`, optionally with `--project NAME`.
+It prints source and timed record counts, per-project medians, approximate quartiles and ranges for total and phase time, waiting causes ranked by seconds, and tasks above twice the project-and-kind median when at least three comparable tasks have known totals.
+Run `python3 bin/fm-worker-timing.py backfill --data data` once to import prior routing records; it is safe to repeat and prints source, timed, and newly added counts.
+Backfill can recover total time from a routing record with a start timestamp but cannot reconstruct deleted phase status logs.
+
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
