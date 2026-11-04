@@ -597,9 +597,21 @@ test_lane_branch_missing_from_project_refuses
 test_known_red_lands_and_opens_one_green_task
 test_new_failure_refused
 test_receipt_missing_or_wrong_sha_refused
-test_landing_steers_next_queue_car
-test_landing_without_train_creates_no_queue
-test_unrecorded_receipt_still_steers_next_queue_car
+if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+  printf '%s\n' 'note: skipped landing successor queue check because the private testfarm checkout is unavailable'
+else
+  test_landing_steers_next_queue_car
+fi
+if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+  printf '%s\n' 'note: skipped no-train queue reconciliation because the private testfarm checkout is unavailable'
+else
+  test_landing_without_train_creates_no_queue
+fi
+if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+  printf '%s\n' 'note: skipped unrecorded receipt queue check because the private testfarm checkout is unavailable'
+else
+  test_unrecorded_receipt_still_steers_next_queue_car
+fi
 test_quick_receipt_lands_without_claiming_full_health
 
 printf 'all fm-merge-local tests passed\n'
