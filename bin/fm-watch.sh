@@ -107,6 +107,12 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: landing-queue sweep: front-check <passed|unreachable> task=<id> ...
+#                          the landing sweep settled a front check from the test
+#                          farm (bin/fm-landing-queue-sweep.sh owns what it prints)
+#   check: landing-queue sweep failed: <first output line>
+#                          the landing sweep itself could not run; surfaced once
+#                          per distinct error until a successful sweep clears it
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
@@ -2250,6 +2256,29 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  # Landing trains settle their front check from the test farm on their own
+  # cadence (bin/fm-landing-queue-sweep.sh), so the line never waits on a worker
+  # turn. Silent unless a passed check awaits landing or the farm went dark.
+  # A sweep that cannot run wakes once per distinct error, never every poll.
+  landing_rc=0
+  landing_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-landing-queue-sweep.sh" 2>&1) || landing_rc=$?
+  if [ "$landing_rc" -ne 0 ]; then
+    landing_err=$(printf '%s\n' "$landing_out" | head -n 1)
+    [ -n "$landing_err" ] || landing_err="exit $landing_rc"
+    triage_log "landing-queue sweep failed: $landing_err"
+    if [ "$(cat "$STATE/.last-landing-sweep-error" 2>/dev/null || true)" != "$landing_err" ]; then
+      printf '%s\n' "$landing_err" > "$STATE/.last-landing-sweep-error" 2>/dev/null || true
+      wake "check: landing-queue sweep failed: $landing_err"
+    fi
+  else
+    rm -f "$STATE/.last-landing-sweep-error"
+    landing_out=$(printf '%s\n' "$landing_out" | grep '^front-check ' | head -n 1 || true)
+    if [ -n "$landing_out" ]; then
+      wake "check: landing-queue sweep: $landing_out"
+    fi
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).

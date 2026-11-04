@@ -64,6 +64,9 @@ expect_field() {
 }
 wake_count() { if [ -f "$CASE/home/state/.wake-queue" ]; then wc -l < "$CASE/home/state/.wake-queue" | tr -d ' '; else echo 0; fi; }
 
+# FM_LANDING_QUEUE_TEST_ONLY=farm runs only the test farm cases below, which the
+# stock macOS Bash consumer in bin/fm-stock-bash-compat.sh selects.
+if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != farm ]; then
 make_case admission
 car a
 if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" > "$CASE/refusal" 2>&1; then
@@ -373,3 +376,218 @@ git -C "$CASE/project" branch -D fm/a >/dev/null
 expect_field "$(queue status a)" status landed
 [ "$(wake_count)" = 1 ] || fail 'landed deleted branch emitted a failure wake'
 pass 'a deleted branch whose head landed stays landed'
+fi
+
+# --- front check settled from the test farm, with no worker action -----------
+# The fixture farm prints $CASE/farm.json as `testfarm status --json --no-probe`
+# does; FM_TESTFARM_BIN points the queue at it. A worker meta and a fake tmux let
+# fm-send deliver owner messages into state/<id>.inbox.
+farm_case() {
+  make_case "$1"
+  mkdir -p "$CASE/bin" "$CASE/home/state"
+  cat > "$CASE/bin/testfarm" <<'FARM'
+#!/usr/bin/env bash
+[ "$1 $2 $3" = 'status --json --no-probe' ] || { echo "unexpected testfarm call: $*" >&2; exit 64; }
+cat "$(dirname "$0")/../farm.json"
+FARM
+  chmod +x "$CASE/bin/testfarm"
+  cat > "$CASE/bin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+case "$1" in
+  display-message) echo fakepane ;;
+  list-windows) echo fm-notify ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  send-keys) exit 1 ;;
+esac
+TMUX
+  chmod +x "$CASE/bin/tmux"
+  export FM_TESTFARM_BIN="$CASE/bin/testfarm"
+  export PATH="$CASE/bin:$ORIGINAL_PATH"
+}
+worker_meta() { fm_write_meta "$CASE/home/state/$1.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'; }
+# farm_request <id> <car> <state> [error] [submitted]: one quick request for the
+# car's current head and assigned target.
+farm_request() {
+  local id=$1 car=$2 state=$3 error=${4:-} submitted=${5:-} target
+  target=$(queue status "$car" | field target_sha)
+  [ -n "$submitted" ] || submitted=$(date +%s)
+  python3 -I -c '
+import json, sys
+rid, sha, target, state, error, submitted = sys.argv[1:7]
+print(json.dumps({"id": rid, "seq": 1, "sha": sha, "original_sha": sha, "state": state,
+  "error": error or None, "submitted": float(submitted),
+  "options": {"suite": True, "check": "quick", "target": target, "device_gate": "any"}}))
+' "$id" "$(head_of "$car")" "$target" "$state" "$error" "$submitted"
+}
+farm_json() { { printf '{"schema":"fm-test-service.v1","requests":['; (IFS=,; printf '%s' "$*"); printf ']}\n'; } > "$CASE/farm.json"; }
+inbox_count() { find "$CASE/home/state/$1.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' '; }
+ORIGINAL_PATH=$PATH
+
+farm_case farm-pass
+car a; join a >/dev/null
+worker_meta a
+farm_json "$(farm_request r-running a running)"
+[ -z "$(queue resolve sweep)" ] || fail 'a running farm request changed the car'
+expect_field "$(queue status a)" status needs-quick
+farm_json "$(farm_request r-pass a passed)"
+out=$(queue resolve sweep)
+case "$out" in "front-check passed task=a request=r-pass "*) ;; *) fail "resolve did not report the farm pass: $out" ;; esac
+status_out=$(queue status a)
+expect_field "$status_out" status ready-to-land
+expect_field "$status_out" front_request r-pass:passed
+[ "$(wake_count)" = 1 ] || fail 'a farm pass did not wake firstmate exactly once'
+[ -z "$(queue resolve sweep)" ] || fail 'a second resolve applied the same farm pass again'
+expect_field "$(quick_receipt a)" status ready-to-land
+[ "$(wake_count)" = 1 ] || fail 'a duplicate worker receipt after the farm pass woke firstmate again'
+if queue receipt a --head "$(head_of a)" --target "$BASE" --reason 'late failure' > "$CASE/refusal" 2>&1; then
+  fail 'a worker failure contradicting the farm pass was accepted'
+fi
+grep -q 'already settled this front check as passed' "$CASE/refusal" || fail 'contradicting report refusal was unclear'
+pass 'a farm pass settles the front car as ready-to-land with no worker action, and a duplicate worker receipt is a no-op'
+
+farm_case farm-fail-waiting
+car a; join a >/dev/null
+car b; join b >/dev/null
+worker_meta a
+farm_json "$(farm_request r-fail a failed $'suite: \e[31mtest_merge FAILED\e[0m\nmore')"
+out=$(queue resolve sweep)
+case "$out" in
+  "front-check failed task=a request=r-fail "*"reason=testfarm request r-fail failed: suite: test_merge FAILED more") ;;
+  *) fail "resolve did not report the sanitized farm failure: $out" ;;
+esac
+expect_field "$(queue status a)" place 2
+expect_field "$(queue status a)" front_request r-fail:failed
+expect_field "$(queue status b)" place 1
+[ "$(inbox_count a)" = 1 ] || fail 'the failed car owner did not receive exactly one reason message'
+grep -q 'moved to back because quick check failed: testfarm request r-fail failed' "$CASE/home/state/a.inbox/"*.msg \
+  || fail 'the reason message did not name the farm failure'
+dup=$(queue receipt a --head "$(head_of a)" --target "$BASE" --reason 'quick check failed') \
+  || fail 'a duplicate worker failure report after the farm failure was refused'
+expect_field "$dup" place 2
+expect_field "$(queue status b)" place 1
+[ "$(inbox_count a)" = 1 ] || fail 'a duplicate worker failure report sent another message'
+expect_field "$(quick_receipt b)" status ready-to-land
+git -C "$CASE/project" merge -q --ff-only fm/b
+prepare a
+expect_field "$(queue status a)" status needs-full
+pass 'a farm failure moves the front car back, messages its owner once, needs a full rerun later, and a duplicate worker report is a no-op'
+
+farm_case farm-fail-alone
+car a; join a >/dev/null
+worker_meta a
+farm_json "$(farm_request r-alone a conflict)"
+case "$(queue resolve sweep)" in "front-check failed task=a request=r-alone "*) ;; *) fail 'a lone farm failure was not applied' ;; esac
+expect_field "$(queue status a)" place 1
+expect_field "$(queue status a)" status needs-full
+[ "$(inbox_count a)" = 1 ] || fail 'a lone failed car owner did not receive exactly one reason message'
+grep -q 'keeps the front because quick check failed: testfarm request r-alone failed: conflict' "$CASE/home/state/a.inbox/"*.msg \
+  || fail 'the lone failure message did not name the farm failure'
+queue resolve sweep >/dev/null
+[ "$(inbox_count a)" = 1 ] || fail 'a repeat resolve messaged the lone failed car again'
+pass 'a farm failure with no car waiting keeps the front, requires a full rerun, and messages its owner once'
+
+farm_case farm-stale
+car a; join a >/dev/null
+farm_json "$(farm_request r-old a failed 'old run' 1)" "$(farm_request r-cancel a cancelled)"
+[ -z "$(queue resolve sweep)" ] || fail 'a request from before admission or a cancelled request settled the car'
+expect_field "$(queue status a)" status needs-quick
+other=$(farm_request r-other a passed)
+farm_json "${other/$(head_of a)/0000000000000000000000000000000000000000}"
+[ -z "$(queue resolve sweep)" ] || fail 'a request for another head settled the car'
+expect_field "$(queue status a)" status needs-quick
+pass 'only a quick request for the exact head and target, made after admission and not cancelled, settles the car'
+
+farm_case farm-unreachable
+car a; join a >/dev/null
+before=$(cat "$(find "$CASE/home/data/landing-queue" -name queue -type f -print -quit)")
+printf '#!/usr/bin/env bash\necho farm down >&2\nexit 3\n' > "$CASE/bin/testfarm"
+out=$(queue resolve sweep)
+case "$out" in "front-check unreachable task=a "*"wake=new reason=testfarm status exited 3") ;; *) fail "unreachable farm was not reported: $out" ;; esac
+expect_field "$(queue status a)" status needs-quick
+[ "$(cat "$(find "$CASE/home/data/landing-queue" -name queue -type f -print -quit)")" = "$before" ] \
+  || fail 'an unreachable farm changed the queue snapshot'
+grep -q 'check: landing-queue testfarm-unreachable task=a ' "$CASE/home/state/.wake-queue" \
+  || fail 'an unreachable farm did not queue a firstmate wake'
+[ "$(wake_count)" = 1 ] || fail 'an unreachable farm did not queue exactly one wake'
+case "$(queue resolve sweep)" in *'wake=repeat '*) ;; *) fail 'a repeat unreachable read was not marked repeat' ;; esac
+[ "$(wake_count)" = 1 ] || fail 'a repeat unreachable read queued another wake'
+printf '{"requests": "not a list"}\n' > "$CASE/farm.json"
+printf '#!/usr/bin/env bash\ncat "%s"\n' "$CASE/farm.json" > "$CASE/bin/testfarm"
+case "$(queue resolve sweep)" in *'reason=testfarm status did not return a request list') ;; *) fail 'a malformed farm status was not rejected' ;; esac
+FM_TESTFARM_BIN="$CASE/bin/missing-testfarm" queue resolve sweep | grep -q 'reason=testfarm command not found' \
+  || fail 'a missing farm command was not reported'
+expect_field "$(FM_TESTFARM_TIMEOUT=bogus queue status a)" status needs-quick
+FM_TESTFARM_TIMEOUT=0 queue resolve sweep | grep -q 'reason=FM_TESTFARM_TIMEOUT must be a whole number of seconds from 1 to 60' \
+  || fail 'an invalid farm timeout was not reported as an unreadable farm'
+expect_field "$(queue status a)" status needs-quick
+farm_json "$(farm_request r-back a passed)"
+case "$(queue resolve sweep)" in "front-check passed task=a "*) ;; *) fail 'the farm did not settle the car once readable again' ;; esac
+pass 'an unreachable or malformed farm leaves the car unchanged and wakes firstmate once until it is readable again'
+
+farm_case farm-sweep
+car a; join a >/dev/null
+farm_json "$(farm_request r-sweep a passed)"
+out=$(FM_HOME="$CASE/home" "$ROOT/bin/fm-landing-queue-sweep.sh")
+case "$out" in "front-check passed task=a request=r-sweep "*) ;; *) fail "the sweep did not settle the train: $out" ;; esac
+expect_field "$(queue status a)" status ready-to-land
+[ -z "$(FM_HOME="$CASE/home" "$ROOT/bin/fm-landing-queue-sweep.sh")" ] || fail 'the sweep ran again inside its cadence'
+[ -z "$(FM_HOME="$CASE/home" "$ROOT/bin/fm-landing-queue-sweep.sh" --force)" ] || fail 'a forced sweep reported an already settled train'
+[ -z "$(FM_HOME="$TMP_ROOT/no-home" "$ROOT/bin/fm-landing-queue-sweep.sh" --force)" ] || fail 'a home without trains produced output'
+pass 'the watcher sweep settles every train from its own snapshot and respects its cadence'
+
+# The real watcher poll drives the sweep and exits with one wake; stop only the
+# exact child pid this case started if it has not exited on its own.
+farm_case farm-watcher
+car a; join a >/dev/null
+farm_json "$(farm_request r-watch a passed)"
+FM_HOME="$CASE/home" FM_STATE_OVERRIDE="$CASE/home/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+  FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$CASE/watch.out" 2>&1 &
+watcher_child=$!
+i=0
+while [ "$i" -lt 150 ] && kill -0 "$watcher_child" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+if kill -0 "$watcher_child" 2>/dev/null; then kill "$watcher_child" 2>/dev/null || true; fi
+wait "$watcher_child" 2>/dev/null || true
+grep -q '^check: landing-queue sweep: front-check passed task=a request=r-watch ' "$CASE/watch.out" \
+  || fail "the watcher poll did not settle the front check and wake: $(cat "$CASE/watch.out")"
+expect_field "$(queue status a)" status ready-to-land
+pass 'the real watcher poll settles a front check from the farm and wakes firstmate'
+
+# A sweep that cannot run (here its cadence stamp is unwritable) wakes once per
+# distinct error, not on every poll.
+# Each round acknowledges what the watcher delivered, as firstmate's handling
+# turn does, so the next round starts from a clean wake queue.
+ack_delivered() {
+  local err="$CASE/drain.err" sequence generation
+  FM_HOME="$CASE/home" FM_STATE_OVERRIDE="$CASE/home/state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || return 0
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 0
+  FM_HOME="$CASE/home" FM_STATE_OVERRIDE="$CASE/home/state" "$ROOT/bin/fm-wake-drain.sh" \
+    --ack-through "$sequence" --recovery-generation "$generation" >/dev/null 2>&1
+}
+watch_round() { # <output> <tenths>
+  FM_HOME="$CASE/home" FM_STATE_OVERRIDE="$CASE/home/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$1" 2>&1 &
+  watcher_child=$!
+  i=0
+  while [ "$i" -lt "$2" ] && kill -0 "$watcher_child" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$watcher_child" 2>/dev/null; then kill "$watcher_child" 2>/dev/null || true; fi
+  wait "$watcher_child" 2>/dev/null || true
+  ack_delivered
+}
+farm_case farm-watcher-error
+car a; join a >/dev/null
+mkdir "$CASE/home/state/.last-landing-sweep"
+watch_round "$CASE/watch-1.out" 100
+watch_round "$CASE/watch-2.out" 40
+if grep -q '^check: ' "$CASE/watch-2.out"; then fail "the second round still woke: $(cat "$CASE/watch-2.out")"; fi
+grep -q '^check: landing-queue sweep failed: error: cannot record the sweep stamp ' "$CASE/watch-1.out" \
+  || fail "a failing sweep did not wake firstmate: $(cat "$CASE/watch-1.out")"
+if grep -q 'landing-queue sweep failed' "$CASE/watch-2.out"; then fail 'an unchanged sweep failure woke firstmate again'; fi
+rmdir "$CASE/home/state/.last-landing-sweep"
+farm_json "$(farm_request r-recover a passed)"
+watch_round "$CASE/watch-3.out" 150
+grep -q '^check: landing-queue sweep: front-check passed task=a request=r-recover ' "$CASE/watch-3.out" \
+  || fail "the watcher did not resume settling after the sweep recovered: $(cat "$CASE/watch-3.out")"
+[ ! -e "$CASE/home/state/.last-landing-sweep-error" ] || fail 'a successful sweep did not clear the recorded failure'
+pass 'a sweep that cannot run wakes firstmate once per distinct error and recovers on its own'
