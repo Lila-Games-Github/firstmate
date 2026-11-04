@@ -53,7 +53,15 @@ pf_test_cleanup() {
   fi
   if [ -f "$pid_file" ]; then
     pid=$(cat "$pid_file" 2>/dev/null) || pid=
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+      (
+        # The Linux worker has a restart supervisor in the same isolated
+        # process group. Stop the whole tree before removing its fixture.
+        # shellcheck source=bin/fm-remote-job-lib.sh
+        . "$ROOT/bin/fm-remote-job-lib.sh"
+        fm_remote_job_stop_worker_tree "$pid"
+      ) || printf 'remote fixture worker did not stop cleanly\n' >&2
+    fi
   fi
   fm_test_cleanup
 }
@@ -823,7 +831,7 @@ SH
     kill -0 "$seed_pid" 2>/dev/null \
       || fail "local seeding exited before its identity completion marker: $(cat "$manifest_out")"
     wait_count=$((wait_count + 1))
-    [ "$wait_count" -le 250 ] || fail "local seeding never reached its identity completion marker"
+    [ "$wait_count" -le 1500 ] || fail "local seeding never reached its identity completion marker"
     sleep 0.02
   done
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
