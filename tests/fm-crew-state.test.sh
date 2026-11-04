@@ -3282,6 +3282,74 @@ test_capped_without_sqlite_preserves_available_ids() {
   pass 'R5 capped lookup without SQLite support preserves available ids'
 }
 
+make_unreadable_overview_case() {  # <name> <branch> <own-run: 0|1>
+  local d=$TMP_ROOT/$1
+  reset_fakes
+  mkdir -p "$d/state" "$d/nm"
+  make_repo_on_branch "$d/wt" "$2"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/worker.meta" "window=fm:fm-worker" "worktree=$d/wt" "kind=ship" "harness=claude"
+  arm_idle_record "$d/state" worker
+  NM_HOME="$d/nm"
+  export NM_HOME
+  python3 - "$NM_HOME/state.sqlite" "$d/wt" "$2" "$3" "$FM_FAKE_RUN_HEAD" <<'PY'
+import sqlite3
+import sys
+
+database, worktree, branch, own_run, head = sys.argv[1:]
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.execute("INSERT INTO repos VALUES (?, ?)", ("repo", worktree))
+    db.execute("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
+               ("01OTHER", "repo", "fm/other-worker", "running", head, 1))
+    if own_run == "1":
+        db.execute("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
+                   ("01OWN", "repo", branch, "running", head, 2))
+PY
+  FM_FAKE_AXI_STATUS=$(run_running fm/other-worker)
+  FM_FAKE_AXI_HOME="repo: \"$d/wt\"
+count: 2 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  01OTHER,fm/other-worker,running,$FM_FAKE_RUN_HEAD,\"\""
+}
+
+test_local_only_no_run_uses_landing_wait() {
+  make_unreadable_overview_case local-only-no-run fm/local-only 0
+  local d=$TMP_ROOT/local-only-no-run out
+  printf 'paused: waiting for the front of the landing line\n' > "$d/state/worker.status"
+  out=$(run_crew_state "$d" worker)
+  assert_contains "$out" 'state: paused' 'local-only worker without a run keeps its declared wait'
+  assert_contains "$out" 'source: status-log' 'a malformed shared overview does not hide a no-run worker'
+  assert_contains "$out" 'waiting for the front of the landing line' 'landing wait remains visible'
+  pass 'local-only no-run worker retains landing wait'
+}
+
+test_direct_pr_no_run_uses_status() {
+  make_unreadable_overview_case direct-pr-no-run fm/direct-pr 0
+  local d=$TMP_ROOT/direct-pr-no-run out
+  printf 'blocked: waiting on another fix\n' > "$d/state/worker.status"
+  out=$(run_crew_state "$d" worker)
+  assert_contains "$out" 'state: blocked' 'direct-PR worker without a run keeps its declaration'
+  assert_contains "$out" 'source: status-log' 'a no-run direct-PR worker uses its status event'
+  assert_contains "$out" 'waiting on another fix' 'the worker reason remains visible'
+  pass 'direct-PR no-run worker retains its reason'
+}
+
+test_unreadable_overview_with_own_run_stays_visible() {
+  make_unreadable_overview_case unreadable-own-run fm/own-run 1
+  local d=$TMP_ROOT/unreadable-own-run out
+  printf 'paused: waiting on another fix\n' > "$d/state/worker.status"
+  out=$(run_crew_state "$d" worker)
+  assert_contains "$out" 'state: unknown' 'a real same-branch run cannot use status fallback'
+  assert_contains "$out" 'source: run-step' 'the broken run inventory remains authoritative'
+  assert_contains "$out" 'unreadable runs table' 'the genuine table error stays visible'
+  pass 'real unreadable run table stays visible'
+}
+
 test_live_to_terminal_inventory_disagreement_is_unknown() {
   make_competing_runs_case live-to-terminal running cancelled
   local d=$TMP_ROOT/live-to-terminal out
@@ -3693,6 +3761,9 @@ test_complete_inventory_without_python_keeps_gate
 test_complete_ambiguity_without_python_names_both_ids
 test_capped_without_python_preserves_available_ids
 test_capped_without_sqlite_preserves_available_ids
+test_local_only_no_run_uses_landing_wait
+test_direct_pr_no_run_uses_status
+test_unreadable_overview_with_own_run_stays_visible
 test_live_to_terminal_inventory_disagreement_is_unknown
 test_uninitialized_busy_worker_uses_pane
 test_uninitialized_idle_worker_uses_status

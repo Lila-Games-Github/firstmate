@@ -132,9 +132,10 @@ fm_nm_run_status_class() {  # <status_word>
 # Prints selected|id|status|candidate-ids, unknown|reason, absent (no row
 # for this branch), or unavailable (CLI has no overview table). Malformed or
 # structurally truncated tables report unknown, retaining every readable
-# same-branch candidate id.
+# same-branch candidate id, unless the complete persisted inventory proves
+# this branch has no run.
 fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
-  local selection inventory available_ids
+  local selection inventory available_ids prove_absent=0
   selection=$(printf '%s\n' "$2" | awk -v branch="$1" '
     function scalar(s) {
       sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
@@ -193,7 +194,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
     inrows { inrows = 0 }
     END {
       if (!found) print "unavailable"
-      else if (bad || counts != 1 || seen != expected || seen != shown || total < shown)
+      else if (bad || counts != 1 || seen + 0 != expected + 0 || seen + 0 != shown + 0 || total < shown)
         print "unknown|unreadable runs table; run ids: " ids
       else if (shown < total) print "incomplete|" ids
       else if (invalid_run) print "unknown|unreadable runs table; run ids: " ids
@@ -206,6 +207,13 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
   ')
   case "$selection" in
     incomplete\|*) available_ids=${selection#*|} ;;
+    unknown\|unreadable\ runs\ table\;\ run\ ids:\ *)
+      # A broken shared table cannot establish whether this branch has a run.
+      # The complete read-only inventory may establish absence; a present run
+      # keeps the table error visible rather than trusting a damaged overview.
+      available_ids=${selection##*run ids: }
+      prove_absent=1
+      ;;
     *) printf '%s\n' "$selection"; return ;;
   esac
   if ! inventory=$(python3 - "$1" "$2" "$3" "$available_ids" 2>/dev/null <<'PY'
@@ -264,6 +272,10 @@ PY
     unknown\|*) selection=$inventory ;;
     *) selection=$(fm_nm_select_run "$1" "$inventory" "$3") ;;
   esac
+  if [ "$prove_absent" = 1 ]; then
+    [ "$selection" = absent ] && printf 'absent\n' || printf 'unknown|unreadable runs table; run ids: %s\n' "$available_ids"
+    return
+  fi
   case "$selection" in
     selected\|*|unknown\|*|absent) printf '%s\n' "$selection" ;;
     *) printf 'unknown|complete same-branch run inventory unreadable; run ids: %s\n' "$available_ids" ;;
