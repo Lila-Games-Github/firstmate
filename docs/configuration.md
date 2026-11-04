@@ -664,7 +664,7 @@ Before starting it, write the product owner's Tailscale login (for example `owne
 Every page and JSON request must carry a `Tailscale-User-Login` header equal to that login, which `tailscale serve` adds for tailnet users; a missing or different login gets 403.
 The owner-only tailnet mount command is `tailscale serve --bg --set-path /crew-board http://127.0.0.1:8765` after confirming the tailnet ACL restricts access to the product owner.
 This adds `/crew-board` alongside the existing `/` proxy and does not use Funnel.
-The Decisions tab shows every open question as a card, and every card under a `For …` section (such as UI, Design, or Art) can be forwarded through the phone's share sheet or copied to the clipboard.
+The Decisions tab shows every open question as a card; every card has a Copy button that sends its label, title, and full body to the clipboard (falling back to a visible, pre-selected text box when the clipboard API is unavailable), and every card under a `For …` section (such as UI, Design, or Art) can additionally be forwarded through the phone's share sheet.
 An option tap or short reply sends a labeled note through `bin/fm-inbox.sh note` for firstmate to handle; the card remains until firstmate removes its entry. Questions without a label still show as cards but are answered from the terminal.
 The phone mode switch stores `on` or `off` in `state/crew-board-phone-mode`, with absence meaning off; it is the switch a supervising firstmate reads when adding a question, and this phone tool sends no push itself.
 The server's owner-only POST endpoints also require a same-origin request.
@@ -709,6 +709,7 @@ The QUESTIONS page has one sub-tab, CAPTAIN QUESTIONS, offering every open quest
 Only entries under `## Your decisions` count as decisions waiting on the product owner in the page tab badge and the rail notification; entries under `## For ...` remain visible with a waiting-on-team follow-up label.
 The PLANNING BACKLOG sub-tab is the one place the backlog lives: under a heading carrying the in-flight and queued counts, it lists every in-flight, held, and queued backlog item read through `bin/fm-tasks-axi.sh` with its full note, captain holds apart from other holds, and falls back to the next queued tasks, under that read's own reason, when the full list cannot be read.
 Section headings in both render as styled headings with a divider and are skipped by the cursor and by clicks; the highlighted captain question shows its full text in place without Enter, backlog rows expand with Enter, and Ctrl-f/Ctrl-b scroll long entries.
+`y` copies the highlighted question's label, title, and full body exactly as read from `data/captain-questions.md` to the system clipboard over OSC 52, showing a confirmation in the footer.
 Questions live only on this page.
 The board reports what a bounded local `adb devices -l` query sees, resolving `adb` from `PATH`, then `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `~/Android/Sdk`, and a Linuxbrew install; builds and Rocketboard bugs, which have no cheap local source, may be supplied by a firstmate-maintained `data/crew-board-cache.json`.
 That optional file uses `{"schema":"fm-crew-board-cache.v1","observed_at":"<ISO 8601>","phones":[{"id":"<adb serial>","title":"Galaxy S22","status":"locked","detail":"held by worker"}]}`.
