@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Public CLI fixtures for timestamped phase, wait, historical, and malformed data.
 set -eu
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 LAB=$(fm_test_tmproot fm-worker-timing)
@@ -90,17 +91,17 @@ pass "missing start stays unknown and malformed timing history is skipped"
 printf '%s\n' '{"schema":1,"task_id":"historical","instance_id":"old","project":"/tmp/p","kind":"ship","delivery_mode":"no-mistakes","routing":{"harness":"pi","model":"x","effort":"high"},"started_at":"1970-01-01T00:01:40+00:00","ended_at":"1970-01-01T00:03:20+00:00","wall_seconds":100,"outcome":{"landed":true,"method":"pr-merge"},"failed_rounds":2,"relaunches":1}' > "$LAB/data/routing-ledger.jsonl"
 python3 "$TOOL" backfill --data "$LAB/data" > "$LAB/backfill.txt"
 python3 "$TOOL" backfill --data "$LAB/data" > "$LAB/backfill-again.txt"
-rg -q 'routing_source=1 total_timed=1 new_records=1 phase_timed=0' "$LAB/backfill.txt" \
+grep -q 'routing_source=1 total_timed=1 new_records=1 phase_timed=0' "$LAB/backfill.txt" \
   || fail "backfill source counts incorrect"
-rg -q 'new_records=0' "$LAB/backfill-again.txt" || fail "backfill duplicated a task"
+grep -q 'new_records=0' "$LAB/backfill-again.txt" || fail "backfill duplicated a task"
 python3 "$TOOL" report --data "$LAB/data" > "$LAB/report.txt"
-rg -q 'source_records=3 total_timed=2 phase_timed=1' "$LAB/report.txt" \
+grep -q 'source_records=3 total_timed=2 phase_timed=1' "$LAB/report.txt" \
   || fail "report counts incorrect"
 mkdir -p "$LAB/bad-data"
 printf '%s\n' '{broken routing row' '{"task_id":"null-outcome","project":"/tmp/p","outcome":null,"routing":null}' \
   > "$LAB/bad-data/routing-ledger.jsonl"
 python3 "$TOOL" backfill --data "$LAB/bad-data" > "$LAB/bad-backfill.txt"
-rg -q 'routing_source=1 total_timed=0 new_records=1' "$LAB/bad-backfill.txt" \
+grep -q 'routing_source=1 total_timed=0 new_records=1' "$LAB/bad-backfill.txt" \
   || fail "malformed and null-outcome routing history was not handled"
 pass "routing backfill is idempotent and report names observed counts"
 
@@ -111,5 +112,5 @@ if python3 "$TOOL" calculate --events "$LAB/bad.json" --start 100 --end 120 \
 fi
 jq -e '.phase_seconds == null and .timing_unknown_reason != null' "$LAB/bad-result.json" >/dev/null \
   || fail "known-bad fixture was accepted as measured"
-rg -q 'invalid timing fixture' "$LAB/bad-error.txt" || fail "validator did not name rejection"
+grep -q 'invalid timing fixture' "$LAB/bad-error.txt" || fail "validator did not name rejection"
 pass "bad timestamp fixture is rejected as measured timing"

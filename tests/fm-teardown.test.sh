@@ -785,7 +785,7 @@ test_timing_malformed_ledger_does_not_stop_teardown() {
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "teardown left task metadata behind"
   python3 "$ROOT/bin/fm-worker-timing.py" report --data "$case_dir/data" \
     > "$case_dir/timing-report" || fail "malformed timing row broke the report"
-  rg -q 'source_records=2' "$case_dir/timing-report" \
+  grep -q 'source_records=2' "$case_dir/timing-report" \
     || fail "teardown did not record timing after the malformed row"
   pass "malformed timing history does not stop teardown"
 }
@@ -816,7 +816,7 @@ test_timing_record_failure_does_not_stop_teardown() {
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "timing record failure stopped teardown: $(cat "$case_dir/stderr")"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "teardown left task metadata behind"
-  rg -q 'worker timing record failed' "$case_dir/stderr" \
+  grep -q 'worker timing record failed' "$case_dir/stderr" \
     || fail "teardown did not warn about timing failure"
   pass "a timing record failure warns without stopping teardown"
 }
