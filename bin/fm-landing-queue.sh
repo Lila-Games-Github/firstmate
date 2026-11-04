@@ -60,7 +60,8 @@
 # needs-quick from the test farm itself, so the line never waits on a worker to
 # report its result. It reads `testfarm status --json --no-probe`
 # (FM_TESTFARM_BIN, default testfarm; bounded by FM_TESTFARM_TIMEOUT, default
-# 10 seconds, valid 1..60) and selects the newest non-cancelled quick request
+# 10 seconds, valid 1..60; an invalid value counts as an unreadable farm and
+# affects no other action) and selects the newest non-cancelled quick request
 # for exactly the car's head and assigned target, submitted after the car's
 # latest admission and not already applied. A passed request records the farm's
 # fm-quick-check.v1 receipt exactly as receipt --receipt does; a failed or
@@ -222,8 +223,6 @@ DIR="$DATA/landing-queue/$KEY"
 case "$ACTION" in reconcile|resolve) [ -e "$DIR/queue" ] || exit 0 ;; esac
 FARM_BIN=${FM_TESTFARM_BIN:-testfarm}
 FARM_TIMEOUT=${FM_TESTFARM_TIMEOUT:-10}
-case "$FARM_TIMEOUT" in ''|*[!0-9]*) die 'FM_TESTFARM_TIMEOUT must be a whole number of seconds' ;; esac
-[ "$FARM_TIMEOUT" -ge 1 ] && [ "$FARM_TIMEOUT" -le 60 ] || die 'FM_TESTFARM_TIMEOUT must be 1..60'
 for path in "$DATA" "$DATA/landing-queue" "$DIR"; do
   [ ! -L "$path" ] || die "queue directory is a symlink: $path"
 done
@@ -358,6 +357,12 @@ FARM_RESULT='' FARM_REQUEST='' FARM_DETAIL='' FARM_ERROR=''
 farm_query() { # <id> <head> <target>; returns 1 when the farm cannot be read
   local rc=0 line
   FARM_RESULT='' FARM_REQUEST='' FARM_DETAIL='' FARM_ERROR=''
+  # Only this read uses the bound, so a bad value never blocks other actions.
+  case "$FARM_TIMEOUT" in ''|*[!0-9]*) FARM_TIMEOUT=0 ;; esac
+  if [ "$FARM_TIMEOUT" -lt 1 ] || [ "$FARM_TIMEOUT" -gt 60 ]; then
+    FARM_ERROR='FM_TESTFARM_TIMEOUT must be a whole number of seconds from 1 to 60'
+    return 1
+  fi
   if ! command -v "$FARM_BIN" >/dev/null 2>&1; then
     FARM_ERROR="testfarm command not found: $FARM_BIN"
     return 1

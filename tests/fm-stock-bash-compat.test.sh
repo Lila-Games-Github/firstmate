@@ -37,7 +37,7 @@ case "${0##*/}" in
   fm-public-followup.test.sh) key=public-followup; count=1 ;;
   fm-watch-triage.test.sh) key=watch-churn; count=1 ;;
   fm-learning-candidate.test.sh) key=learning; count=1 ;;
-  fm-landing-queue.test.sh) key=landing; count=7 ;;
+  fm-landing-queue.test.sh) key=landing; count=8 ;;
   fm-merge-local.test.sh) key=merge; count=18 ;;
   *) exit 2 ;;
 esac

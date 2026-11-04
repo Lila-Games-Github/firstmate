@@ -129,7 +129,7 @@ run_consumer learning "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIME
   env FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
 # The watcher poll calls fm-landing-queue-sweep.sh, which runs the queue's resolve.
-run_consumer landing "landing-queue test farm resolve and watcher sweep" "$LANDING_TIMEOUT" 7 \
+run_consumer landing "landing-queue test farm resolve and watcher sweep" "$LANDING_TIMEOUT" 8 \
   env FM_LANDING_QUEUE_TEST_ONLY=farm \
   "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
 run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 18 \

@@ -2,7 +2,7 @@
 name: landing-queue
 description: >-
   Agent-only procedure for firstmate's side of the worker-owned local landing train.
-  Use on any `landing-queue ready-to-land`, `landing-queue needs-baseline`, `landing-queue failed`, `landing-queue testfarm-unreachable`, or `landing-queue sweep:` check wake.
+  Use on any `landing-queue ready-to-land`, `landing-queue needs-baseline`, `landing-queue failed`, `landing-queue testfarm-unreachable`, or `landing-queue sweep` check wake.
   Owns the status recheck, baseline recording, the landing decision under the existing merge authority, and the no-steering rule.
 user-invocable: false
 metadata:
@@ -45,9 +45,10 @@ Reserve `fail` for a car that genuinely cannot continue.
 ## sweep and testfarm-unreachable
 
 The watcher's sweep settles each front quick check from the test farm itself, so a car never waits on its worker to report; the queue tool's header owns that `resolve` contract.
-A `landing-queue sweep:` wake only announces the durable row queued beside it: `front-check passed` pairs with a `ready-to-land` row, handled as above, and `front-check unreachable` with a `testfarm-unreachable` row.
+A `landing-queue sweep: front-check` wake only announces the durable row queued beside it: `front-check passed` pairs with a `ready-to-land` row, handled as above, and `front-check unreachable` with a `testfarm-unreachable` row.
 A `landing-queue testfarm-unreachable` wake means the front car is unchanged because the farm's status could not be read, and the sweep retries on its own.
 Check the farm with `testfarm doctor` and restore its runner if it is down; escalate to the captain only when it cannot be restored, and send no queue coordination to the worker.
+A `landing-queue sweep failed:` wake means the sweep itself could not run, so no train is being settled; repair the named cause in this home, and the next successful sweep clears it.
 
 ## failed
 

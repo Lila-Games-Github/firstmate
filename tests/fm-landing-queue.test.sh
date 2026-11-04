@@ -516,6 +516,10 @@ printf '#!/usr/bin/env bash\ncat "%s"\n' "$CASE/farm.json" > "$CASE/bin/testfarm
 case "$(queue resolve sweep)" in *'reason=testfarm status did not return a request list') ;; *) fail 'a malformed farm status was not rejected' ;; esac
 FM_TESTFARM_BIN="$CASE/bin/missing-testfarm" queue resolve sweep | grep -q 'reason=testfarm command not found' \
   || fail 'a missing farm command was not reported'
+expect_field "$(FM_TESTFARM_TIMEOUT=bogus queue status a)" status needs-quick
+FM_TESTFARM_TIMEOUT=0 queue resolve sweep | grep -q 'reason=FM_TESTFARM_TIMEOUT must be a whole number of seconds from 1 to 60' \
+  || fail 'an invalid farm timeout was not reported as an unreadable farm'
+expect_field "$(queue status a)" status needs-quick
 farm_json "$(farm_request r-back a passed)"
 case "$(queue resolve sweep)" in "front-check passed task=a "*) ;; *) fail 'the farm did not settle the car once readable again' ;; esac
 pass 'an unreachable or malformed farm leaves the car unchanged and wakes firstmate once until it is readable again'
@@ -547,3 +551,43 @@ grep -q '^check: landing-queue sweep: front-check passed task=a request=r-watch 
   || fail "the watcher poll did not settle the front check and wake: $(cat "$CASE/watch.out")"
 expect_field "$(queue status a)" status ready-to-land
 pass 'the real watcher poll settles a front check from the farm and wakes firstmate'
+
+# A sweep that cannot run (here its cadence stamp is unwritable) wakes once per
+# distinct error, not on every poll.
+# Each round acknowledges what the watcher delivered, as firstmate's handling
+# turn does, so the next round starts from a clean wake queue.
+ack_delivered() {
+  local err="$CASE/drain.err" sequence generation
+  FM_HOME="$CASE/home" FM_STATE_OVERRIDE="$CASE/home/state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || return 0
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 0
+  FM_HOME="$CASE/home" FM_STATE_OVERRIDE="$CASE/home/state" "$ROOT/bin/fm-wake-drain.sh" \
+    --ack-through "$sequence" --recovery-generation "$generation" >/dev/null 2>&1
+}
+watch_round() { # <output> <tenths>
+  FM_HOME="$CASE/home" FM_STATE_OVERRIDE="$CASE/home/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$1" 2>&1 &
+  watcher_child=$!
+  i=0
+  while [ "$i" -lt "$2" ] && kill -0 "$watcher_child" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$watcher_child" 2>/dev/null; then kill "$watcher_child" 2>/dev/null || true; fi
+  wait "$watcher_child" 2>/dev/null || true
+  ack_delivered
+}
+farm_case farm-watcher-error
+car a; join a >/dev/null
+mkdir "$CASE/home/state/.last-landing-sweep"
+watch_round "$CASE/watch-1.out" 100
+watch_round "$CASE/watch-2.out" 40
+if grep -q '^check: ' "$CASE/watch-2.out"; then fail "the second round still woke: $(cat "$CASE/watch-2.out")"; fi
+grep -q '^check: landing-queue sweep failed: error: cannot record the sweep stamp ' "$CASE/watch-1.out" \
+  || fail "a failing sweep did not wake firstmate: $(cat "$CASE/watch-1.out")"
+if grep -q 'landing-queue sweep failed' "$CASE/watch-2.out"; then fail 'an unchanged sweep failure woke firstmate again'; fi
+rmdir "$CASE/home/state/.last-landing-sweep"
+farm_json "$(farm_request r-recover a passed)"
+watch_round "$CASE/watch-3.out" 150
+grep -q '^check: landing-queue sweep: front-check passed task=a request=r-recover ' "$CASE/watch-3.out" \
+  || fail "the watcher did not resume settling after the sweep recovered: $(cat "$CASE/watch-3.out")"
+[ ! -e "$CASE/home/state/.last-landing-sweep-error" ] || fail 'a successful sweep did not clear the recorded failure'
+pass 'a sweep that cannot run wakes firstmate once per distinct error and recovers on its own'

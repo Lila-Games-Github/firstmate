@@ -19,7 +19,9 @@
 # unreadable test farm for a car. Failed checks already moved their car and
 # messaged its owner, and repeat unreachable reports are already queued, so both
 # stay silent here. Prints nothing otherwise; the watcher turns any output into
-# one `check: landing-queue` wake.
+# one `check: landing-queue` wake. Exits nonzero, with one error line on
+# stderr, only when the sweep itself cannot run (bad usage, or an unwritable
+# cadence stamp); a single train's failure is skipped, never an exit status.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,8 +53,10 @@ if [ "${1:-}" != --force ] && [ -f "$STAMP" ] && [ ! -L "$STAMP" ]; then
   # A stamp from the future (clock step back) counts as due rather than wedging.
   [ "$last" -gt "$now" ] || [ $((now - last)) -ge "$SECS" ] || exit 0
 fi
-[ ! -L "$STAMP" ] || exit 0
-printf '%s\n' "$now" > "$STAMP" 2>/dev/null || exit 0
+if [ -L "$STAMP" ] || ! printf '%s\n' "$now" 2>/dev/null > "$STAMP"; then
+  echo "error: cannot record the sweep stamp $STAMP" >&2
+  exit 1
+fi
 
 for file in "$DATA"/landing-queue/*/queue; do
   [ -f "$file" ] && [ ! -L "$file" ] || continue
