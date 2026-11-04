@@ -40,7 +40,7 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
-# fm_worker_context_block owns the phase handoff and bounded-context guidance
+# fm_worker_context_block owns the context handoff and bounded-context guidance
 # rendered by fm-brief for both ship and scout workers.
 # fm_long_suite_block owns the worker-side contract for a task whose definition
 # of done requires a long-running suite: the durable reattachable job shape that
@@ -139,7 +139,14 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
 fm_worker_context_block() {  # <data-dir> <task-id>
   local note="$1/$2/phase-handoff.md"
   printf '%s\n' \
-    "   For Codex or Claude, finish the current phase, then write a short handoff to \`$note\`" \
+    '   For Codex or Claude, keep one task session across phases; use sub-agents only for' \
+    '   genuinely parallel, sizeable work inside a phase, never one sub-agent per phase.' \
+    '   Hand off when the most recent request input reaches 70% of the model context window,' \
+    '   the harness warns of context pressure or compaction, firstmate asks, or the session' \
+    '   is genuinely blocked.' \
+    '   Codex can read model_context_window and the last request input tokens from its own' \
+    '   session log or status line; Claude relies on the harness warning.' \
+    "   Then write a short handoff to \`$note\`" \
     '   naming completed work, exact files and commit, current gate or job ID, and the next action.' \
     "   Append \`blocked: phase handoff ready $note\` to the status file, then end the turn." \
     '   Firstmate relaunches this task into a fresh session with that file as its progress note;' \

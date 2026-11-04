@@ -1472,6 +1472,11 @@ test_phase_protocol_reaches_ship_and_scout_briefs() {
     assert_grep 'Phases: investigating, building, fixing, testing, validating, ready-to-merge.' "$brief" \
       "$kind brief does not name the phase vocabulary"
     assert_grep 'A phase line never wakes firstmate' "$brief" "$kind brief does not say a phase line is quiet"
+    assert_grep 'keep one task session across phases' "$brief" "$kind brief does not preserve its session across phases"
+    assert_grep 'never one sub-agent per phase' "$brief" "$kind brief permits a sub-agent per phase"
+    assert_grep 'most recent request input reaches 70% of the model context window' "$brief" "$kind brief lacks the context threshold"
+    assert_grep 'harness warns of context pressure or compaction' "$brief" "$kind brief lacks the harness warning trigger"
+    assert_grep 'Claude relies on the harness warning' "$brief" "$kind brief lacks Claude context guidance"
     # shellcheck disable=SC2016 # the backticks are literal brief text
     handoff=$(sed -n 's/^   Append `\(blocked: phase handoff ready [^`]*\)` to the status file, then end the turn\.$/\1/p' "$brief")
     assert_equals "blocked: phase handoff ready $home/data/phase-$kind/phase-handoff.md" "$handoff" \

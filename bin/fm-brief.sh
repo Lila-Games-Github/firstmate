@@ -962,7 +962,7 @@ $(phase_protocol ship)
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: continue the same stage
-   until a defined \`done:\` gate under Definition of done, except at a planned phase handoff above.
+   until a defined \`done:\` gate under Definition of done, except at a context handoff above.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
    firstmate then leaves your idle pane alone and rechecks it on a long
