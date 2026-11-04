@@ -107,6 +107,12 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: landing-queue sweep: front-check <passed|unreachable> task=<id> ...
+#                          the landing sweep settled a front check from the test
+#                          farm (bin/fm-landing-queue-sweep.sh owns what it prints)
+#   check: landing-queue sweep failed: <first output line>
+#                          the landing sweep itself could not run; surfaced once
+#                          per distinct error until a successful sweep clears it
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
