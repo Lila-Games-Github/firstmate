@@ -1599,6 +1599,11 @@ scan_signals() {
     case "$f" in
       *.status)
         fm_wake_signal_seen_current "$STATE" "$f" && continue
+        # Retain the first observation time for every newly appended status
+        # event before the watcher absorbs or publishes this signal.
+        python3 "$SCRIPT_DIR/fm-worker-timing.py" observe --state "$STATE" \
+          --id "$(basename "$f" .status)" || \
+          echo "WARNING: worker timing observation failed for $f" >&2
         fm_wake_status_adopt_legacy "$STATE" "$f" "$sig" && continue
         ;;
       *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;

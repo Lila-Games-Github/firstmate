@@ -1122,6 +1122,11 @@ remote_secondmate_teardown() {
       --method "$([ "$FORCE" = --force ] && echo discarded || echo secondmate-retired)" || status=1
   fi
   if [ "$status" -eq 0 ]; then
+    python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$STATE/$ID.meta" \
+      --state "$STATE" --data "$DATA" --id "$ID" --outcome not-landed \
+      --method "$([ "$FORCE" = --force ] && echo discarded || echo secondmate-retired)" || status=1
+  fi
+  if [ "$status" -eq 0 ]; then
     status_retire_presentation_task "$STATE" "$ID" || status=1
   fi
   if [ "$status" -eq 0 ]; then
@@ -1215,6 +1220,7 @@ remove_task_runtime_files() {
     "$state_dir/$id.control-relaunch" "$state_dir/$id.control-relaunch.meta-prior" \
     "$state_dir/$id.control-relaunch.brief-prior" "$state_dir/$id.control-relaunch.note" \
     "$state_dir/$id.reconcile-nudged" "$state_dir/$id.gemini-settings.json" \
+    "$state_dir/$id.timing-events.json" "$state_dir/$id.timing-events.lock" \
     "$state_dir/.$id.branch-outcome-index" || return 1
   # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
   # retired endpoint; teardown only runs after landing is confirmed, so any
@@ -1274,6 +1280,9 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
   fi
   remove_pr_poll_artifacts_locked "$STATE" "$ID" retain || exit 1
   python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
+    --id "$ID" --outcome "$([ -n "$LANDED_VIA" ] && echo landed || echo not-landed)" \
+    --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || exit 1
+  python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$META" --state "$STATE" --data "$DATA" \
     --id "$ID" --outcome "$([ -n "$LANDED_VIA" ] && echo landed || echo not-landed)" \
     --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || exit 1
   status_retire_presentation_task "$STATE" "$ID" || exit 1
@@ -4102,6 +4111,8 @@ fi
 # remove_firstmate_home just deleted; the parent home records that route.
 if [ -f "$META" ]; then
   python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
+    --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || exit 1
+  python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$META" --state "$STATE" --data "$DATA" \
     --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || exit 1
 fi
 status_retire_presentation_task "$STATE" "$ID" || exit 1
