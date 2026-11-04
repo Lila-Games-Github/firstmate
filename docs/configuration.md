@@ -688,7 +688,7 @@ The server's owner-only POST endpoints also require a same-origin request.
 Run `bin/fm-install-firstmate-cli.sh` to link `bin/firstmate` into `~/.local/bin`, then run `firstmate` from any working directory with that directory on `PATH`.
 Set `FM_HOME` when opening another firstmate home; the launcher otherwise uses the checkout containing its target.
 The terminal dashboard needs Go 1.27.2 or newer for its first build, plus `jq`, Python 3, and the existing fleet commands used by `bin/fm-crew-board.sh refresh`.
-It uses Bubble Tea, Lip Gloss, and Bubbles for a terminal interface with focus transitions, scrolling, text input, and activity animation; the Go source and module lockfile live under `bin/fm-crew-board-tui/`.
+It uses Bubble Tea, Lip Gloss, and Bubbles for a terminal interface with focus transitions, scrolling, text input, and activity animation; the Go source lives under `bin/fm-crew-board-tui/`, and the repository-root `go.mod` and `go.sum` own its module and lockfile.
 The launcher builds a private binary in `state/.crew-board-tui-bin` when the Go source changes, and `bin/fm-crew-board.sh stop` closes the board for that home.
 Use `bin/fm-crew-board.sh --help` for the key map, `refresh` for the JSON payload, and `show` for a text view.
 

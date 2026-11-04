@@ -77,10 +77,9 @@ jobs:
         run: bin/fm-test-run.sh --check-coverage
       - uses: actions/setup-go@v6
         with:
-          go-version-file: bin/fm-crew-board-tui/go.mod
-          cache-dependency-path: bin/fm-crew-board-tui/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
       - name: Build and test the crew board TUI
-        working-directory: bin/fm-crew-board-tui
         run: |
           go test ./...
           go build ./...
@@ -268,8 +267,8 @@ jobs:
       - uses: actions/setup-go@v6
         if: matrix.shard == 7
         with:
-          go-version-file: bin/fm-crew-board-tui/go.mod
-          cache-dependency-path: bin/fm-crew-board-tui/go.sum
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
       # The Pi extension tests read the installed Pi package's own types and
       # runtime, so without it they gate-skip and pass silently. It is a public
       # npm package and needs no credential, so CI can hold the real thing.

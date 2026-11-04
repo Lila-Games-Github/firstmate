@@ -40,6 +40,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 BOARD_SCHEMA=fm-crew-board.v1
 PAYLOAD="$STATE/crew-board.json"
 GO_DIR="$SCRIPT_DIR/fm-crew-board-tui"
+GO_MODULE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 GO_BIN="$STATE/.crew-board-tui-bin"
 
 usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; }
@@ -194,7 +195,7 @@ build_tui_if_needed() {
   local source tmp
   command -v go >/dev/null 2>&1 || fail "Go 1.27 or newer is required to build the crew board"
   if [ -x "$GO_BIN" ]; then
-    for source in "$GO_DIR"/*.go "$GO_DIR/go.mod" "$GO_DIR/go.sum"; do
+    for source in "$GO_DIR"/*.go "$GO_MODULE_DIR/go.mod" "$GO_MODULE_DIR/go.sum"; do
       [ "$source" -nt "$GO_BIN" ] && break
     done
     [ "$source" -nt "$GO_BIN" ] || return 0
