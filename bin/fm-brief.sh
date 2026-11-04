@@ -70,8 +70,8 @@
 # Local-only ship briefs use fm-landing-queue.sh for worker-owned finalization,
 # including single-car trains. Its header owns the queue and receipt protocol.
 #   --test-infra applies only to local-only ship briefs. It tells the worker to
-#   join the landing queue with `--priority infra` so the car admits directly
-#   behind the current front car, ahead of every waiting non-infra car, per the
+#   join the landing queue with `--priority infra` so the car admits ahead of
+#   every waiting non-infra car without displacing the front car, per the
 #   captain's standing rule that test-infrastructure work is proven in isolation
 #   and never waits behind product work. The queue tool's header owns ordering
 #   and durability; this flag only changes the worker's join command.

@@ -21,8 +21,10 @@
 # acknowledge their one front-of-line rebase.
 # ready also accepts --priority infra, for test-infrastructure work the captain's
 # standing rule proves in isolation and lands ahead of product work. Such a car
-# admits directly behind the current front car, ahead of every waiting non-infra
-# car, in FIFO order among other infra cars; the front car is never displaced.
+# admits behind the current front car and the unbroken run of infra cars that
+# directly follows it, ahead of every waiting non-infra car; an infra car left
+# behind product work by a requeue or move is not counted, and the front car is
+# never displaced.
 # The priority is recorded durably on the row, shown by status as priority=-
 # or priority=infra, and kept across a fail/ready re-enrollment unless that
 # later ready repeats --priority with a different value.
@@ -91,8 +93,8 @@
 # owner task id, and admission priority ('-' or infra). Nine-field legacy rows
 # resolve their owner on refresh; ten-field legacy rows default priority to '-'.
 # '-' means absent. Row order is queue order: assignment walks rows top to
-# bottom and gives each active row the next place, so an infra car's row sits
-# immediately after the front row and after any earlier infra rows. Immutable
+# bottom and gives each active row the next place, so an admitted infra car's
+# row sits after the front row and its contiguous infra run. Immutable
 # receipt snapshots live beside it. Queue writes are atomic and serialized by
 # state/.landing-queue-<hash>.lock using the shared recoverable lock helpers.
 # Every invocation refreshes live refs, retires heads already in the landing tip,
