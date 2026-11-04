@@ -794,12 +794,15 @@ done
 [ -d "$FM_TEST_SERVICE_STATE/repos/$retested" ]
 # Landing the worker's change as a new commit stops further retests.
 git cherry-pick "$worker_sha" > /dev/null
+# Settlement is published before the test copy finishes being reclaimed.
 for i in $(seq 1 300); do
-  if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$retested" "$rebased_sha" 2>/dev/null <<'PY'
+  if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$retested" "$rebased_sha" "$FM_TEST_SERVICE_STATE/repos/$retested" 2>/dev/null <<'PY'
 import json,sys
+from pathlib import Path
 row=next(r for r in json.load(open(sys.argv[1]))['requests'] if r['id']==sys.argv[2])
 assert row['options']['retest_on_move'] is False
 assert row['generation']==1 and row['sha']==sys.argv[3] and row['state']=='passed'
+assert not Path(sys.argv[4]).exists()
 PY
   then break; fi
   sleep .2
