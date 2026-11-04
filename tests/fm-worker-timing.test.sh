@@ -60,6 +60,7 @@ jq -e 'select(.task_id == "live") | .wall_seconds >= 20 and .phase_seconds.plann
   || fail "observed task was not retained with phase timing"
 pass "observed task persists phase timing by project"
 
+printf '%s' '{broken timing row' >> "$live_file"
 cat > "$LAB/state/legacy.meta" <<EOF
 project=$LAB/project
 kind=ship
@@ -70,10 +71,21 @@ printf '%s\n' '{broken routing row' > "$LAB/data/routing-ledger.jsonl"
 python3 "$TOOL" record --meta "$LAB/state/legacy.meta" --state "$LAB/state" \
   --data "$LAB/data" --id legacy --outcome landed --method pr-merge
 one=$(find "$LAB/data/worker-timing" -name '*.jsonl' -print -quit)
-jq -e '.task_id == "legacy" and .wall_seconds == null and .phase_seconds == null
-  and .timing_unknown_reason == "start time absent"' "$one" >/dev/null \
-  || fail "missing start was counted as zero"
-pass "missing start stays unknown despite malformed routing history"
+python3 - "$one" <<'PY' || fail "missing start or malformed timing ledger handling failed"
+import json
+import sys
+rows = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    try:
+        rows.append(json.loads(line))
+    except json.JSONDecodeError:
+        pass
+legacy = next(row for row in rows if row.get("task_id") == "legacy")
+assert legacy["wall_seconds"] is None
+assert legacy["phase_seconds"] is None
+assert legacy["timing_unknown_reason"] == "start time absent"
+PY
+pass "missing start stays unknown and malformed timing history is skipped"
 
 printf '%s\n' '{"schema":1,"task_id":"historical","instance_id":"old","project":"/tmp/p","kind":"ship","delivery_mode":"no-mistakes","routing":{"harness":"pi","model":"x","effort":"high"},"started_at":"1970-01-01T00:01:40+00:00","ended_at":"1970-01-01T00:03:20+00:00","wall_seconds":100,"outcome":{"landed":true,"method":"pr-merge"},"failed_rounds":2,"relaunches":1}' > "$LAB/data/routing-ledger.jsonl"
 python3 "$TOOL" backfill --data "$LAB/data" > "$LAB/backfill.txt"
@@ -84,6 +96,12 @@ rg -q 'new_records=0' "$LAB/backfill-again.txt" || fail "backfill duplicated a t
 python3 "$TOOL" report --data "$LAB/data" > "$LAB/report.txt"
 rg -q 'source_records=3 total_timed=2 phase_timed=1' "$LAB/report.txt" \
   || fail "report counts incorrect"
+mkdir -p "$LAB/bad-data"
+printf '%s\n' '{broken routing row' '{"task_id":"null-outcome","project":"/tmp/p","outcome":null,"routing":null}' \
+  > "$LAB/bad-data/routing-ledger.jsonl"
+python3 "$TOOL" backfill --data "$LAB/bad-data" > "$LAB/bad-backfill.txt"
+rg -q 'routing_source=1 total_timed=0 new_records=1' "$LAB/bad-backfill.txt" \
+  || fail "malformed and null-outcome routing history was not handled"
 pass "routing backfill is idempotent and report names observed counts"
 
 printf '%s\n' '[{"at":"broken","line":"phase: building"},{"at":110,"line":"phase: testing"}]' > "$LAB/bad.json"

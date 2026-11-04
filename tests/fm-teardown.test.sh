@@ -783,8 +783,10 @@ test_timing_malformed_ledger_does_not_stop_teardown() {
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "malformed historical timing row stopped teardown: $(cat "$case_dir/stderr")"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "teardown left task metadata behind"
-  rg -q 'worker timing record failed' "$case_dir/stderr" \
-    || fail "teardown did not report the malformed timing ledger"
+  python3 "$ROOT/bin/fm-worker-timing.py" report --data "$case_dir/data" \
+    > "$case_dir/timing-report" || fail "malformed timing row broke the report"
+  rg -q 'source_records=2' "$case_dir/timing-report" \
+    || fail "teardown did not record timing after the malformed row"
   pass "malformed timing history does not stop teardown"
 }
 
@@ -802,6 +804,21 @@ test_timing_symlinked_sidecar_does_not_stop_teardown() {
   [ "$(cat "$case_dir/data/sidecar-target")" = 'keep target content' ] \
     || fail "timing observation changed the symlink target"
   pass "symlinked timing sidecar does not stop teardown"
+}
+
+test_timing_record_failure_does_not_stop_teardown() {
+  local case_dir
+  case_dir=$(make_case timing-record-failure)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "land timing fixture"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  printf '%s\n' 'not a directory' > "$case_dir/data/worker-timing"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "timing record failure stopped teardown: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "teardown left task metadata behind"
+  rg -q 'worker timing record failed' "$case_dir/stderr" \
+    || fail "teardown did not warn about timing failure"
+  pass "a timing record failure warns without stopping teardown"
 }
 
 test_teardown_closes_the_backlog_item_itself() {
@@ -4280,6 +4297,7 @@ EOF
 test_local_only_fork_remote_allows
 test_timing_malformed_ledger_does_not_stop_teardown
 test_timing_symlinked_sidecar_does_not_stop_teardown
+test_timing_record_failure_does_not_stop_teardown
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses

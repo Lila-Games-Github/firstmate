@@ -53,6 +53,16 @@ def project_file(data, project):
     return Path(data) / "worker-timing" / (slug + "-" + hashlib.sha256(canonical.encode()).hexdigest()[:12] + ".jsonl")
 
 
+def json_rows(lines):
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            yield item
+
+
 def locked_append(path, row):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+") as stream:
@@ -63,12 +73,14 @@ def locked_append(path, row):
             fcntl.flock(stream, fcntl.LOCK_EX)
         try:
             stream.seek(0)
-            for line in stream:
-                existing = json.loads(line)
+            contents = stream.read()
+            for existing in json_rows(contents.splitlines()):
                 if (existing.get("task_id"), existing.get("instance_id"), existing.get("started_at")) == \
                         (row["task_id"], row["instance_id"], row["started_at"]):
                     return False
             stream.seek(0, os.SEEK_END)
+            if contents and not contents.endswith("\n"):
+                stream.write("\n")
             stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -217,13 +229,7 @@ def record(args):
     routing = Path(args.data) / "routing-ledger.jsonl"
     matched = None
     if routing.is_file():
-        for line in routing.read_text().splitlines():
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(item, dict):
-                continue
+        for item in json_rows(routing.read_text().splitlines()):
             instance = meta.get("routing_instance_id") or meta.get("spawn_gen")
             if item.get("task_id") == args.id and item.get("instance_id") == instance and \
                     (instance is not None or item.get("started_at") == iso(stamp(meta.get("routing_started_at")))):
@@ -252,11 +258,14 @@ def record(args):
 
 def backfill(args):
     source = Path(args.data) / "routing-ledger.jsonl"
-    rows = [json.loads(line) for line in source.read_text().splitlines()] if source.is_file() else []
+    rows = [item for item in json_rows(source.read_text().splitlines()) if item.get("task_id")] if source.is_file() else []
     added = 0
     timed = 0
     for item in rows:
-        routing = item.get("routing") or {}
+        routing = item.get("routing")
+        routing = routing if isinstance(routing, dict) else {}
+        outcome = item.get("outcome")
+        outcome = outcome if isinstance(outcome, dict) else {}
         row = {"schema": 1, "task_id": item["task_id"], "instance_id": item.get("instance_id"),
                "project": item.get("project"), "kind": item.get("kind"),
                "delivery_mode": item.get("delivery_mode"), "harness": routing.get("harness"),
@@ -265,8 +274,8 @@ def backfill(args):
                "wall_seconds": item.get("wall_seconds"), "phase_seconds": None,
                "waiting_seconds": None, "timing_unknown_reason": "historical status timestamps absent",
                "relaunches": item.get("relaunches"), "failed_validation_rounds": item.get("failed_rounds"),
-               "outcome": "landed" if item.get("outcome", {}).get("landed") else "not-landed",
-               "method": item.get("outcome", {}).get("method"), "source": "routing-ledger",
+               "outcome": "landed" if outcome.get("landed") else "not-landed",
+               "method": outcome.get("method"), "source": "routing-ledger",
                "observed_events": 0}
         added += locked_append(project_file(args.data, row["project"]), row)
         timed += row["wall_seconds"] is not None
@@ -286,7 +295,7 @@ def spread(values):
 
 def report(args):
     files = sorted((Path(args.data) / "worker-timing").glob("*.jsonl"))
-    rows = [json.loads(line) for path in files for line in path.read_text().splitlines()]
+    rows = [item for path in files for item in json_rows(path.read_text().splitlines())]
     projects = sorted({row.get("project") or "unknown" for row in rows})
     if args.project:
         projects = [project for project in projects if project == args.project or Path(project).name == args.project]
