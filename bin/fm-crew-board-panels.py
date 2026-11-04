@@ -1541,11 +1541,11 @@ def landing_queue_fields(task_id, worktree, deadline):
     return fields
 
 
-def landing_queue_resource_tags(snapshot, tags):
+def landing_queue_resource_tags(snapshot, tags, fields_by_task=None, deadline=None):
     """Record each local-only car's live landing-queue place and whether it is
     truly the front, so a stale self-reported "front" phase never outlives the
     live queue position."""
-    deadline = time.monotonic() + 2.0
+    deadline = deadline or time.monotonic() + 2.0
     for task in snapshot.get("tasks", []):
         if not isinstance(task, dict) or task.get("mode") != "local-only":
             continue
@@ -1554,6 +1554,8 @@ def landing_queue_resource_tags(snapshot, tags):
         if not task_id or not isinstance(worktree, str) or not worktree:
             continue
         fields = landing_queue_fields(task_id, worktree, deadline)
+        if fields_by_task is not None:
+            fields_by_task[task_id] = fields
         status = fields.get("status", "")
         try:
             place = int(fields.get("place", "0"))
@@ -1566,6 +1568,53 @@ def landing_queue_resource_tags(snapshot, tags):
         else:
             word = LANDING_QUEUE_FRONT_WORDS.get(status, status.upper().replace("-", " "))
             resource_tag(tags, task_id, 0, f"LANDING QUEUE FRONT \u00b7 {word}")
+
+
+def landing_queue_rows(fields_by_task, deadline):
+    """Enumerate queue identities locally, then get each car's live fields from status.
+    Reuse worker-tag reads so this adds no status call for a snapshot car."""
+    rows = []
+    for queue in sorted((DATA / "landing-queue").glob("*/queue")):
+        try:
+            with queue.open(encoding="utf-8") as source:
+                schema, common, branch = (source.readline().rstrip("\n") for _ in range(3))
+                ids = [line.split("\t", 1)[0] for line in source]
+        except (OSError, UnicodeError):
+            continue
+        if schema != "fm-landing-queue.v1" or not ids:
+            continue
+        project = str(Path(common).parent) if Path(common).name == ".git" else common
+        cars = []
+        for task_id in ids:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", task_id):
+                continue
+            fields = fields_by_task.get(task_id)
+            if not fields or fields.get("queue") != queue.parent.name:
+                fields = landing_queue_fields(task_id, project, deadline)
+            if fields.get("status") in LANDING_QUEUE_INACTIVE_STATUSES:
+                continue
+            try:
+                place = int(fields.get("place", "0"))
+            except ValueError:
+                continue
+            if place < 1 or not fields.get("status"):
+                continue
+            cars.append((place, task_id, fields))
+        if not cars:
+            continue
+        rows.append(item(f"{Path(project).name} / {branch}", status="section"))
+        for place, task_id, fields in sorted(cars):
+            priority = " · infra" if fields.get("priority") == "infra" else ""
+            detail = ""
+            if place == 1:
+                request = fields.get("front_request", "-")
+                rid, _, recorded = request.partition(":")
+                live = request_by_id(rid) if rid != "-" else None
+                state = str(live.get("state") or recorded) if live else (recorded or "none")
+                detail = f"Front check: {rid if rid != '-' else 'none'} · {state}"
+            rows.append(item(f"#{place} {task_id}{priority}", detail,
+                             fields["status"], item_id=task_id))
+    return rows
 
 
 RUNTIME_NAMES = {
@@ -2218,7 +2267,10 @@ def project(snapshot):
     allowance = allowance_entries(cache)
     resources = {}
     tests = test_queue(snapshot, phones, now, resources)
-    landing_queue_resource_tags(snapshot, resources)
+    landing_deadline = time.monotonic() + 2.0
+    landing_fields = {}
+    landing_queue_resource_tags(snapshot, resources, landing_fields, landing_deadline)
+    landing_queue = landing_queue_rows(landing_fields, landing_deadline)
     queued = tasks_axi_list("queued")
     in_flight = tasks_axi_list("in_flight")
     backlog = {
@@ -2242,6 +2294,7 @@ def project(snapshot):
         "worker_runtimes": worker_runtimes(snapshot, lanes),
         "merge_waiting": merge_waiting(snapshot),
         "landings": landed_today(snapshot) + entries(cache, "landings"),
+        "landing_queue": landing_queue,
         "builds": entries(cache, "builds"),
         "routines": daily_routines(now) + entries(cache, "routines"),
         "bugs": open_bugs(cache, snapshot),

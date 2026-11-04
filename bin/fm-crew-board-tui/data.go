@@ -80,6 +80,7 @@ type panels struct {
 	Phones         []item             `json:"phones"`
 	TestQueue      []item             `json:"test_queue"`
 	Landings       []item             `json:"landings"`
+	LandingQueue   []item             `json:"landing_queue"`
 	Builds         []item             `json:"builds"`
 	Routines       []item             `json:"routines"`
 	Bugs           []item             `json:"bugs"`
