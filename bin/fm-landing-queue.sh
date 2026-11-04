@@ -508,11 +508,16 @@ assign
 if [ "$joined" -eq 1 ]; then
   if [ "${priorities[found]}" = infra ] && [ "${places[found]}" -gt 1 ]; then
     infra_ahead=0
-    for ((i=0; i<count; i++)); do
-      [ "$i" != "$found" ] || continue
-      [ "${states[i]}" = active ] || continue
-      [ "${places[i]}" -gt 1 ] || continue
-      [ "${priorities[i]}" = infra ] || continue
+    while :; do
+      run_match=0
+      for ((i=0; i<count; i++)); do
+        [ "$i" != "$found" ] || continue
+        [ "${states[i]}" = active ] || continue
+        [ "${places[i]}" -eq "$((infra_ahead + 2))" ] || continue
+        [ "${priorities[i]}" = infra ] && run_match=1
+        break
+      done
+      [ "$run_match" -eq 1 ] || break
       infra_ahead=$((infra_ahead + 1))
     done
     shift_car_to_place "$((infra_ahead + 2))"

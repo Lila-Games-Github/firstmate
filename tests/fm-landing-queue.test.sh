@@ -341,6 +341,18 @@ expect_field "$(queue status c)" priority infra
 expect_field "$(queue status b)" place 3
 pass 're-enrolling a failed infra car keeps its priority and its position behind the front'
 
+make_case infra-stray
+for id in a b; do car "$id"; join "$id" >/dev/null; done
+car c
+expect_field "$(join c --priority infra)" place 2
+expect_field "$(queue move b --place 2)" place 2
+expect_field "$(queue status c)" place 3
+car d
+expect_field "$(join d --priority infra)" place 2
+expect_field "$(queue status b)" place 3
+expect_field "$(queue status c)" place 4
+pass 'an infra car admits ahead of waiting non-infra cars even when another infra car sits behind one'
+
 make_case infra-priority-validation
 car a
 if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --priority bogus > "$CASE/refusal" 2>&1; then
