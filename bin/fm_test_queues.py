@@ -39,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import fm_phone_queue
 import fm_queue_tickets
@@ -178,8 +179,9 @@ def command(argv, *, serial=None, keep_fds=()):
     forwarded = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
     previous = {sig: signal.getsignal(sig) for sig in forwarded}
     observed = {}
+    child_ticks = None
 
-    def signal_tree(signum):
+    def snapshot():
         if child is None:
             return
         # The child stays in the caller's group, so an external group stop also
@@ -192,19 +194,35 @@ def command(argv, *, serial=None, keep_fds=()):
                 parents[int(path.parent.name)] = int(fields[1])
             except (OSError, IndexError, ValueError):
                 continue
-        descendants = [child.pid]
+        descendants = [pid for pid, ticks in list(observed.items())
+                       if fm_queue_tickets.start_ticks(pid) == ticks]
+        if (child.returncode is None and child_ticks is not None
+                and fm_queue_tickets.start_ticks(child.pid) == child_ticks
+                and child.pid not in descendants):
+            descendants.append(child.pid)
+        visited = set()
         for pid in descendants:
-            descendants.extend(p for p, parent in parents.items() if parent == pid and p not in descendants)
-        for pid in descendants:
+            if pid in visited:
+                continue
+            visited.add(pid)
             ticks = fm_queue_tickets.start_ticks(pid)
-            if ticks is not None:
-                observed[pid] = ticks
+            if ticks is None or (pid in observed and observed[pid] != ticks):
+                continue
+            observed.setdefault(pid, ticks)
+            descendants.extend(p for p, parent in parents.items()
+                               if parent == pid and p not in visited)
+
+    def kill_known(signum):
         for pid, ticks in reversed(list(observed.items())):
             try:
                 if fm_queue_tickets.start_ticks(pid) == ticks:
                     os.kill(pid, signum)
             except ProcessLookupError:
                 pass
+
+    def signal_tree(signum):
+        snapshot()
+        kill_known(signum)
 
     def stop(signum, _frame):
         for sig in forwarded:
@@ -216,6 +234,9 @@ def command(argv, *, serial=None, keep_fds=()):
         signal.signal(sig, stop)
     try:
         child = subprocess.Popen(argv, pass_fds=tuple(keep_fds))
+        child_ticks = fm_queue_tickets.start_ticks(child.pid)
+        if child_ticks is not None:
+            observed[child.pid] = child_ticks
         if cancelled.is_set():
             signal_tree(signal.SIGTERM)
     except BaseException:
@@ -223,23 +244,24 @@ def command(argv, *, serial=None, keep_fds=()):
             signal.signal(sig, handler)
         raise
     try:
+        deadline = None
         while True:
+            if cancelled.is_set():
+                snapshot()
+                if deadline is None:
+                    deadline = time.monotonic() + 3
+                elif time.monotonic() >= deadline:
+                    kill_known(signal.SIGKILL)
             try:
                 status = child.wait(timeout=.1)
                 break
             except subprocess.TimeoutExpired:
-                if cancelled.is_set():
-                    try:
-                        status = child.wait(timeout=3)
-                    except subprocess.TimeoutExpired:
-                        signal_tree(signal.SIGKILL)
-                        status = child.wait()
-                    break
+                continue
         # A wrapper can exit before descendants. A cancelled group must lose
         # those descendants before the resource becomes available to a waiter.
         if cancelled.is_set():
             try:
-                signal_tree(signal.SIGKILL)
+                kill_known(signal.SIGKILL)
             except ProcessLookupError:
                 pass
         return 128 - status if status < 0 else status

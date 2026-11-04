@@ -8,6 +8,7 @@ trap fm_test_cleanup EXIT
 export QUEUE_TEST_ROOT="$tmp" QUEUE_CODE_ROOT="$ROOT"
 export PYTHONDONTWRITEBYTECODE=1
 python3 - "$@" <<'PY'
+import errno
 import fcntl
 import json
 import os
@@ -17,7 +18,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 CODE = Path(os.environ['QUEUE_CODE_ROOT']) / 'bin'
 CLI = CODE / 'fm-test-service.py'
@@ -416,6 +419,135 @@ time.sleep(60)
         self.assertNotEqual(child.wait(timeout=15), 0)
         self.until(lambda: tickets.start_ticks(grandchild_pid) is None, 'resistant grandchild exit')
         self.wait_acquired('next'); self.release('next')
+
+    def test_stale_unlabelled_claims_recover_without_removing_fresh_or_foreign_data(self):
+        pool = self.root / 'stale-pool'; pool.mkdir()
+        old = int(time.time()) - 7200
+        for serial in ('empty', 'timestamp', 'fresh', 'foreign', 'linked-field'):
+            (pool / serial).mkdir()
+        (pool / 'timestamp/ts').write_text(str(old))
+        (pool / 'foreign/payload').write_text('keep')
+        outside = self.root / 'other-owner'; outside.mkdir()
+        (outside / 'payload').write_text('keep outside')
+        (pool / 'linked').symlink_to(outside, target_is_directory=True)
+        (pool / 'linked-field/port').symlink_to(outside / 'payload')
+        for serial in ('empty', 'foreign', 'linked-field'):
+            os.utime(pool / serial, (old, old))
+        leases.reap(pool)
+        self.assertFalse((pool / 'empty').exists())
+        self.assertFalse((pool / 'timestamp').exists())
+        self.assertTrue((pool / 'fresh').is_dir())
+        self.assertEqual((pool / 'foreign/payload').read_text(), 'keep')
+        self.assertTrue((pool / 'linked').is_symlink())
+        self.assertTrue((pool / 'linked-field/port').is_symlink())
+        self.assertEqual((outside / 'payload').read_text(), 'keep outside')
+        for serial in ('empty', 'timestamp'):
+            leases.acquire([serial], lock_dir=pool, device=serial, label='successor')
+            self.assertTrue(leases.release(serial, lock_dir=pool, label='successor'))
+
+    def test_failed_initialization_removes_its_missing_or_partial_label_claim(self):
+        write_text = Path.write_text
+        for failure in ('timestamp', 'missing-label', 'partial-label'):
+            with self.subTest(failure=failure):
+                pool = self.root / failure
+                target = pool / 'a'
+                failed_path = target / ('ts' if failure == 'timestamp' else 'label')
+                def fail_write(path, value, *args, **kwargs):
+                    if path == failed_path:
+                        if failure == 'partial-label':
+                            write_text(path, 'partial')
+                        raise OSError(errno.ENOSPC, 'injected write failure')
+                    return write_text(path, value, *args, **kwargs)
+                with mock.patch.object(Path, 'write_text', fail_write):
+                    with self.assertRaises(OSError) as error:
+                        leases.acquire(['a'], lock_dir=pool, device='a', label='attempt')
+                self.assertEqual(error.exception.errno, errno.ENOSPC)
+                self.assertFalse(target.exists())
+                leases.acquire(['a'], lock_dir=pool, device='a', label='successor')
+                self.assertTrue(leases.release('a', lock_dir=pool, label='successor'))
+
+    def test_failed_initialization_preserves_replacements_and_unknown_contents(self):
+        write_text = Path.write_text
+        for replacement in ('directory', 'recreated-directory', 'symlink', 'foreign-file'):
+            with self.subTest(replacement=replacement):
+                pool = self.root / replacement
+                target = pool / 'a'
+                other = self.root / ('other-' + replacement); other.mkdir()
+                write_text(other / 'payload', 'other owner')
+                def fail_write(path, value, *args, **kwargs):
+                    if path == target / 'label':
+                        if replacement == 'foreign-file':
+                            write_text(target / 'payload', 'foreign')
+                        else:
+                            if replacement == 'recreated-directory':
+                                (target / 'ts').unlink()
+                                target.rmdir()
+                            else:
+                                target.rename(pool / 'original')
+                            if replacement == 'symlink':
+                                target.symlink_to(other, target_is_directory=True)
+                            else:
+                                target.mkdir()
+                                write_text(target / 'label', 'other owner')
+                                write_text(target / 'ts', 'replacement timestamp')
+                        raise OSError(errno.ENOSPC, 'injected write failure')
+                    return write_text(path, value, *args, **kwargs)
+                with mock.patch.object(Path, 'write_text', fail_write):
+                    with self.assertRaises(OSError):
+                        leases.acquire(['a'], lock_dir=pool, device='a', label='attempt')
+                self.assertEqual((other / 'payload').read_text(), 'other owner')
+                if replacement in ('directory', 'recreated-directory'):
+                    self.assertEqual((target / 'label').read_text(), 'other owner')
+                    self.assertEqual((target / 'ts').read_text(), 'replacement timestamp')
+                elif replacement == 'symlink':
+                    self.assertTrue(target.is_symlink())
+                else:
+                    self.assertEqual((target / 'payload').read_text(), 'foreign')
+                    self.assertTrue((target / 'ts').exists())
+
+    def test_cancellation_does_not_signal_a_reused_root_or_its_new_children(self):
+        root_pid, descendant_pid, new_pid = 90000001, 90000002, 90000003
+        real_glob = Path.glob
+        for reused in (False, True):
+            with self.subTest(reused=reused):
+                state = {'reaped': False}
+                handlers, sent = {}, []
+                def install(sig, handler):
+                    if callable(handler) and sig not in handlers:
+                        handlers[sig] = handler
+                def ticks(pid):
+                    if not state['reaped']:
+                        return {root_pid: 'original-root', descendant_pid: 'original-descendant'}.get(pid)
+                    return {root_pid: 'replacement-root' if reused else None,
+                            descendant_pid: 'original-descendant',
+                            new_pid: 'unrelated-child' if reused else None}.get(pid)
+                def record(pid, parent):
+                    return SimpleNamespace(parent=SimpleNamespace(name=str(pid)),
+                                           read_text=lambda: f'{pid} (fixture) S {parent}')
+                def graph(path, pattern):
+                    if path == Path('/proc') and pattern == '[0-9]*/stat':
+                        if not state['reaped']:
+                            return iter([record(descendant_pid, root_pid)])
+                        return iter([record(new_pid, root_pid)] if reused else [])
+                    return real_glob(path, pattern)
+                class Child:
+                    pid = root_pid
+                    returncode = None
+                    def wait(self, timeout=None):
+                        if not state['reaped']:
+                            handlers[signal.SIGTERM](signal.SIGTERM, None)
+                            state['reaped'] = True
+                            self.returncode = 0
+                        return 0
+                with mock.patch.object(queues.subprocess, 'Popen', return_value=Child()), \
+                     mock.patch.object(queues.signal, 'signal', side_effect=install), \
+                     mock.patch.object(queues.fm_queue_tickets, 'start_ticks', side_effect=ticks), \
+                     mock.patch.object(Path, 'glob', graph), \
+                     mock.patch.object(queues.os, 'kill', side_effect=lambda pid, sig: sent.append((pid, sig))):
+                    queues.command(['fixture'])
+                self.assertEqual({pid for pid, sig in sent if sig == signal.SIGTERM},
+                                 {root_pid, descendant_pid})
+                self.assertEqual([pid for pid, sig in sent if sig == signal.SIGKILL], [descendant_pid])
 
     def test_nested_sentinel_is_refused_without_a_ticket(self):
         self.env['FM_TEST_PHONE_QUEUE_HELD'] = 'a'
