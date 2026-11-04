@@ -641,7 +641,7 @@ test_watch_restart_attaches_to_healthy_peer() {
   is_live_non_zombie "$peer" || fail "restart killed a TERM-resistant peer unexpectedly"
   kill -KILL "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "restart arm did not fail after its attached peer ended without a successor (status $status)"
   grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$out" || fail "restart arm did not surface the attached cycle end"
@@ -748,7 +748,7 @@ test_arm_attaches_and_waits_for_live_fresh_watcher() {
   is_live_non_zombie "$armpid" || fail "arm exited while the seed watcher was still healthy"
   # After the seed dies without a successor, the attached arm must fail loudly.
   stop_seed_watcher "$wpid" "$out"
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after seed died (status $status)"
   grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "attached arm did not emit the typed cycle-end failure"
@@ -781,7 +781,7 @@ test_attached_arm_signal_is_recorded_in_cycle_ledger() {
   done
   grep -qF "watcher: attached pid=$wpid" "$armout" || fail "arm did not report attach before signal"
   kill -TERM "$armpid" 2>/dev/null || fail "could not signal the attached arm"
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -eq 143 ] || fail "attached arm did not exit with TERM status (got $status)"
   grep -q "arm_pid=$armpid.*watcher_pid=$wpid.*origin=attached.*exit_code=143.*signal=TERM.*reason=arm-interrupted" "$state/.watch-cycle-exits.log" \
@@ -863,7 +863,7 @@ test_arm_hup_cleans_child_and_temp_output() {
   grep -qF 'watcher: started pid=' "$armout" || fail "arm did not start before HUP cleanup check"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   kill -HUP "$armpid" 2>/dev/null || fail "could not send HUP to arm"
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -eq 129 ] || fail "arm did not exit with HUP status (got $status)"
   i=0
@@ -974,7 +974,7 @@ test_arm_fails_loud_when_no_fresh_watcher_confirmable() {
   touch -t 200001010000 "$state/.last-watcher-beat"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=3 "$WATCH_ARM" > "$armout" &
   armpid=$!
-  wait_for_exit "$armpid" 120
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -ne 124 ] || fail "arm never returned for an unconfirmable watcher"
   [ "$status" -ne 0 ] || fail "arm exited zero when no fresh watcher could be confirmed"
@@ -1098,7 +1098,7 @@ test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   done
   [ "$beacon_age" -lt 300 ] || fail "SIGCONT watcher did not resume through a fresh beacon"
   kill -TERM "$watcher_pid" 2>/dev/null || true
-  wait_for_exit "$armpid" 80
+  wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS"
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "terminated stopped-watcher cycle did not surface nonzero (status $status)"
   grep -Eq 'reason=(nonzero-exit|signal-exit)' "$state/.watch-cycle-exits.log" \
