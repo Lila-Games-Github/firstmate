@@ -471,7 +471,8 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshing = false
 		if msg.err != nil {
 			m.notice = msg.err.Error()
-		} else {
+		}
+		if msg.data.Schema == "fm-crew-board.v1" {
 			m.data, m.feed = msg.data, msg.feed
 			m.pruneSeen()
 			for _, specs := range pages {

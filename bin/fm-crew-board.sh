@@ -159,11 +159,13 @@ command_refresh() {
     || fail "cannot compose the crew board payload"
   validate_payload "$next" || fail "the composed crew board payload does not satisfy $BOARD_SCHEMA"
   if jq -e --slurpfile a "$next" '.rows == $a[0].rows and .panels == $a[0].panels' "$prev" >/dev/null 2>&1; then changed=0; fi
+  # Publish the successful refresh time even when rows are unchanged, so a
+  # newly opened TUI can distinguish a live board from a frozen old payload.
+  if ! { (umask 077; cp -- "$next" "$PAYLOAD.tmp.$$") && mv -f -- "$PAYLOAD.tmp.$$" "$PAYLOAD"; }; then
+    rm -f -- "$PAYLOAD.tmp.$$"
+    fail "cannot record the crew board payload"
+  fi
   if [ "$changed" -eq 1 ]; then
-    if ! { (umask 077; cp -- "$next" "$PAYLOAD.tmp.$$") && mv -f -- "$PAYLOAD.tmp.$$" "$PAYLOAD"; }; then
-      rm -f -- "$PAYLOAD.tmp.$$"
-      fail "cannot record the crew board payload"
-    fi
     printf 'changed\n'
   else
     printf 'unchanged\n'
