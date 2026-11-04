@@ -174,6 +174,15 @@ while [ ! -e "$root/release-$name" ]; do sleep .02; done
             return False
         self.until(blocked, f'process {pid} blocked in kernel lock admission')
 
+    def pause_phone_waiter(self, child):
+        with (self.root / 'state/queues/phones/queue.lock').open('a+') as mutex:
+            fcntl.flock(mutex, fcntl.LOCK_EX)
+            child.send_signal(signal.SIGSTOP)
+            def stopped():
+                fields = Path(f'/proc/{child.pid}/stat').read_text().rpartition(')')[2].split()
+                return fields[0] == 'T'
+            self.until(stopped, 'waiter stopped outside the queue mutex')
+
     def legacy_suite_waiter(self, name):
         code = '''import fcntl,sys,time
 from pathlib import Path
@@ -191,7 +200,7 @@ with (root / 'state/queues/legacy/frogpile-suite.lock').open('a+') as stream:
         for name, serial in [('any1', 'any'), ('vip1', 'a'), ('any2', 'any'), ('vip2', 'a')]:
             self.request(name, serial=serial)
         # A stopped VIP still reserves its position against a polling any caller.
-        self.children['vip1'].send_signal(signal.SIGSTOP)
+        self.pause_phone_waiter(self.children['vip1'])
         self.release('holder')
         time.sleep(.2)
         self.assertFalse(self.acquired('any1'))
@@ -207,7 +216,7 @@ with (root / 'state/queues/legacy/frogpile-suite.lock').open('a+') as stream:
         self.request('first', project='two'); self.assertEqual(self.wait_acquired('first'), 'b:b')
         self.request('second'); self.assertEqual(self.wait_acquired('second'), 'a:a')
         self.request('vip', serial='b')
-        self.children['vip'].send_signal(signal.SIGSTOP)
+        self.pause_phone_waiter(self.children['vip'])
         self.request('any')
         self.release('first'); time.sleep(.2)
         self.assertFalse(self.acquired('any'))
@@ -601,7 +610,7 @@ with fm_phone_queue.reservation('a', root=root / 'queue', legacy_root=root / 'le
         for serial in ('a', 'b'):
             self.request('hold-' + serial, serial=serial); self.wait_acquired('hold-' + serial)
         older = self.request('older', project='one')
-        older.send_signal(signal.SIGSTOP)
+        self.pause_phone_waiter(older)
         self.request('younger', project='two')
         self.release('hold-a'); self.release('hold-b')
         self.assertEqual(self.wait_acquired('younger'), 'a:a')
