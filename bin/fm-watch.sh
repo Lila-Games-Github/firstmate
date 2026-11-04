@@ -2252,6 +2252,15 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  # Landing trains settle their front check from the test farm on their own
+  # cadence (bin/fm-landing-queue-sweep.sh), so the line never waits on a worker
+  # turn. Silent unless a passed check awaits landing or the farm went dark.
+  landing_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-landing-queue-sweep.sh" 2>/dev/null) || landing_out=
+  if [ -n "$landing_out" ]; then
+    wake "check: landing-queue sweep: $(printf '%s\n' "$landing_out" | head -n 1)"
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed

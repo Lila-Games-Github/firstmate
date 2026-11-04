@@ -107,6 +107,7 @@ A worker submits the exact committed head and resumes on the completion message 
 Before joining a landing train, rebase onto the current tip and submit the full suite and phone play-through on that exact head, with the applicable benchmark as a landing gate.
 The queue requires a green full-suite receipt and every configured gate receipt with the `ready` command.
 At the front, rebase once and submit a quick check; if the new tip changed files this task touches or the quick check failed, queue status requires the full suite, phone play-through, and applicable benchmark again.
+The landing queue reads that quick check's verdict from this service itself, so the line moves without the worker's report; `bin/fm-landing-queue.sh`'s header owns that `resolve` contract.
 The front success receipt is accepted by `fm-merge-local.sh --receipt`.
 For a dispatched ship task in a configured project, use the exact `data/<task-id>/suite.receipt` path printed in its brief; the service creates that receipt on success.
 

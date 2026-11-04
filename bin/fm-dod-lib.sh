@@ -374,6 +374,7 @@ landing_queue() {
 3. At \`needs-quick\`, run the configured quick suite mapped to this task's touched files and the short phone check on exactly the rebased head.
    Submit its \`fm-quick-check.v1\` receipt with \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
    If the quick check fails, submit \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --reason <failure>\`; this requires a full rerun and moves the car to the back when another waits.
+   The queue also settles a front quick check from the test farm on its own within about a minute of its result; your report then changes nothing, so run \`landing_queue status\` and continue from what it prints.
    At \`needs-full\`, rerun the configured full suite, phone play-through, and applicable benchmark on the rebased head, then submit the \`fm-full-suite.v1\` receipt with the same command.
    At \`needs-gate\`, read the missing gate in \`reason\` and submit its passing \`fm-landing-gate.v1\` receipt with \`landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
    A changed head or target refuses either receipt; read status and check the new head at the front.

@@ -472,7 +472,7 @@ jobs:
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
-    # Eight independent consumer bounds total 17.5 minutes; leave setup headroom.
+    # Nine independent consumer bounds total 19 minutes; leave setup headroom.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6

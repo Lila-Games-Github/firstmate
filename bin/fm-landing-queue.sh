@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Worker-owned local landing train. Never merges, rebases, pushes, or runs tests.
-# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|move|reconcile> <task-id>
+# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|move|reconcile|resolve> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--gate-receipt <name>=<file>]...
@@ -34,7 +34,9 @@
 # status reconciles the whole queue and prints this car as key=value lines:
 # place (bottom=1), target_ref, target_sha, rebase_from, head, status, receipt,
 # reason (a failed car's recorded reason or this invocation's red-receipt
-# reason, else '-'), and priority ('-' or infra).
+# reason, else '-'), priority ('-' or infra), and front_request (the last test
+# farm request resolve applied to this car, as <request>:<passed|failed>, else
+# '-').
 # Use git rebase --onto <target_sha> <rebase_from> when the front base changes,
 # retaining only this car's commits, then ready --target before the last check.
 # Only the bottom car prepares final evidence on the live landing tip. Upper
@@ -54,6 +56,27 @@
 # steers, without requiring <task-id> to be a car; it prints nothing and is a
 # no-op when the landing branch has no queue. fm-merge-local.sh runs it after
 # every landing, so a landing steers its own car and advances sleeping cars.
+# resolve does everything reconcile does, then settles a front car at
+# needs-quick from the test farm itself, so the line never waits on a worker to
+# report its result. It reads `testfarm status --json --no-probe`
+# (FM_TESTFARM_BIN, default testfarm; bounded by FM_TESTFARM_TIMEOUT, default
+# 10 seconds, valid 1..60) and selects the newest non-cancelled quick request
+# for exactly the car's head and assigned target, submitted after the car's
+# latest admission and not already applied. A passed request records the farm's
+# fm-quick-check.v1 receipt exactly as receipt --receipt does; a failed or
+# conflict request takes the receipt --reason path with the farm's first failure
+# line, so the car moves to the back when another waits and its owner receives
+# one durable reason message either way. A queued or running request, or no
+# matching request, changes nothing. Each applied request is recorded with the
+# car in farm-<id> beside the queue snapshot, and status prints it as
+# front_request. A later worker receipt or quick failure for that same head and
+# target is a no-op that prints status; a report contradicting the farm's
+# verdict is refused. When the farm cannot be read the car is unchanged, and
+# resolve appends one `check: landing-queue testfarm-unreachable` wake per
+# car, head, and target until a read succeeds. resolve prints one line per
+# outcome: `front-check passed|failed|unreachable task=<id> ...`, with
+# `wake=new|repeat` on unreachable. fm-landing-queue-sweep.sh runs it for every
+# train from the watcher poll.
 # receipt requires --head, --target and --receipt. At needs-quick it accepts
 # exactly schema=fm-quick-check.v1, sha=<full head SHA>, target=<full target SHA>.
 # The service produces that receipt only after its configured touched-file suite
@@ -125,7 +148,7 @@ die() { echo "error: $*" >&2; exit 1; }
 [ "$#" -ge 2 ] || { usage >&2; exit 2; }
 ACTION=$1 ID=$2
 shift 2
-case "$ACTION" in ready|status|receipt|gate|fail|baseline|move|reconcile) ;; *) die "unknown queue command $ACTION" ;; esac
+case "$ACTION" in ready|status|receipt|gate|fail|baseline|move|reconcile|resolve) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
 PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE='' OWNER_TASK='' PLACE='' PRIORITY=''
@@ -191,17 +214,23 @@ case "$COMMON$PRIMARY$DATA$STATE" in *$'\n'*|*$'\t'*) die 'queue paths cannot co
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-landing-health-lib.sh
 . "$SCRIPT_DIR/fm-landing-health-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 KEY=$(fm_health_key "$COMMON" "$LANDING")
 HEALTH_KEY=$(fm_health_key "$PRIMARY" "$LANDING")
 DIR="$DATA/landing-queue/$KEY"
-if [ "$ACTION" = reconcile ] && [ ! -e "$DIR/queue" ]; then exit 0; fi
+case "$ACTION" in reconcile|resolve) [ -e "$DIR/queue" ] || exit 0 ;; esac
+FARM_BIN=${FM_TESTFARM_BIN:-testfarm}
+FARM_TIMEOUT=${FM_TESTFARM_TIMEOUT:-10}
+case "$FARM_TIMEOUT" in ''|*[!0-9]*) die 'FM_TESTFARM_TIMEOUT must be a whole number of seconds' ;; esac
+[ "$FARM_TIMEOUT" -ge 1 ] && [ "$FARM_TIMEOUT" -le 60 ] || die 'FM_TESTFARM_TIMEOUT must be 1..60'
 for path in "$DATA" "$DATA/landing-queue" "$DIR"; do
   [ ! -L "$path" ] || die "queue directory is a symlink: $path"
 done
 mkdir -p "$DIR"
 LOCK="$STATE/.landing-queue-$KEY.lock"
 HEALTH_LOCK="$STATE/.landing-health-$HEALTH_KEY.lock"
-TMP='' WAKE_HELD=0 HEALTH_HELD=0
+TMP='' FARM_TMP='' WAKE_HELD=0 HEALTH_HELD=0
 gate_receipt_read() { # <path> <gate> <head> <target>
   local path=$1 gate=$2 head=$3 target=$4 line lines=()
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -240,9 +269,127 @@ overlap_requires_full() { # <id> <head> <target>
   [ -z "$touched" ] && return 1
   [ -n "$(LC_ALL=C comm -12 <(printf '%s\n' "$changed") <(printf '%s\n' "$touched"))" ]
 }
+# The farm ledger farm-<id> holds one applied request per line:
+# <request>\t<head>\t<target>\t<passed|failed>.
+farm_ledger() { printf '%s/farm-%s' "$DIR" "$1"; }
+farm_recorded() { # <id> <head> <target>; prints the applied outcome
+  local ledger outcome
+  ledger=$(farm_ledger "$1")
+  [ ! -L "$ledger" ] || die "test farm ledger is a symlink: $ledger"
+  [ -f "$ledger" ] || return 1
+  outcome=$(awk -F '\t' -v head="$2" -v target="$3" '$2 == head && $3 == target { last = $4 } END { print last }' "$ledger")
+  [ -n "$outcome" ] || return 1
+  printf '%s' "$outcome"
+}
+farm_last() { # <id>; prints <request>:<outcome> or '-'
+  local ledger last
+  ledger=$(farm_ledger "$1")
+  [ -f "$ledger" ] && [ ! -L "$ledger" ] || { printf -- '-'; return 0; }
+  last=$(awk -F '\t' 'NF >= 4 { last = $1 ":" $4 } END { print last }' "$ledger")
+  printf '%s' "${last:--}"
+}
+farm_record() { # <id> <request> <head> <target> <outcome>
+  local ledger
+  ledger=$(farm_ledger "$1")
+  [ ! -L "$ledger" ] || die "test farm ledger is a symlink: $ledger"
+  TMP=$(mktemp "$DIR/.farm.XXXXXX")
+  [ ! -f "$ledger" ] || cat -- "$ledger" > "$TMP"
+  printf '%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$5" >> "$TMP"
+  mv -f -- "$TMP" "$ledger"
+  TMP=
+}
+# Select the car's quick request from one farm status read. Prints one line:
+# none | pending <request> <state> | passed <request> | failed <request> <reason>.
+# shellcheck disable=SC2016 # Python source, not shell expansions.
+FARM_SELECT='
+import json, os, re, sys
+path, head, target, admission, ledger = sys.argv[1:6]
+with open(path) as handle:
+    data = json.load(handle)
+requests = data.get("requests") if isinstance(data, dict) else None
+if not isinstance(requests, list):
+    sys.exit(3)
+since = 0.0
+try:
+    since = float(int(os.stat(admission).st_mtime))
+except OSError:
+    pass
+consumed = set()
+try:
+    with open(ledger) as handle:
+        for line in handle:
+            consumed.add(line.split("\t", 1)[0])
+except OSError:
+    pass
+best = None
+for row in requests:
+    if not isinstance(row, dict):
+        continue
+    options = row.get("options")
+    if not isinstance(options, dict) or options.get("check") != "quick" or not options.get("suite"):
+        continue
+    if row.get("sha") != head or options.get("target") != target or row.get("state") == "cancelled":
+        continue
+    rid = row.get("id")
+    if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", rid) or rid in consumed:
+        continue
+    submitted = row.get("submitted")
+    submitted = float(submitted) if isinstance(submitted, (int, float)) else 0.0
+    if submitted < since:
+        continue
+    seq = row.get("seq") if isinstance(row.get("seq"), int) else 0
+    if best is None or (submitted, seq) > best[0]:
+        best = ((submitted, seq), row)
+if best is None:
+    print("none")
+    sys.exit(0)
+row = best[1]
+state = row.get("state")
+if state == "passed":
+    print("passed", row["id"])
+elif state in ("failed", "conflict"):
+    error = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", str(row.get("error") or ""))
+    error = " ".join(re.sub(r"[\x00-\x1f\x7f]+", " ", error).split())[:300]
+    print("failed", row["id"], error or state)
+else:
+    print("pending", row["id"], re.sub(r"[^A-Za-z0-9_-]", "", str(state)) or "unknown")
+'
+FARM_RESULT='' FARM_REQUEST='' FARM_DETAIL='' FARM_ERROR=''
+farm_query() { # <id> <head> <target>; returns 1 when the farm cannot be read
+  local rc=0 line
+  FARM_RESULT='' FARM_REQUEST='' FARM_DETAIL='' FARM_ERROR=''
+  if ! command -v "$FARM_BIN" >/dev/null 2>&1; then
+    FARM_ERROR="testfarm command not found: $FARM_BIN"
+    return 1
+  fi
+  FARM_TMP=$(mktemp "$DIR/.farm-status.XXXXXX")
+  fm_run_timed "$FARM_TIMEOUT" "$FARM_BIN" status --json --no-probe > "$FARM_TMP" 2>/dev/null </dev/null || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    FARM_ERROR="testfarm status timed out after ${FARM_TIMEOUT}s"
+  elif [ "$rc" -ne 0 ]; then
+    FARM_ERROR="testfarm status exited $rc"
+  elif ! line=$(python3 -I -c "$FARM_SELECT" "$FARM_TMP" "$2" "$3" "$DIR/pre-head-$1" "$(farm_ledger "$1")" 2>/dev/null); then
+    FARM_ERROR='testfarm status did not return a request list'
+  fi
+  rm -f -- "$FARM_TMP"
+  FARM_TMP=
+  [ -z "$FARM_ERROR" ] || return 1
+  FARM_RESULT=${line%% *}
+  line=${line#"$FARM_RESULT"}
+  line=${line# }
+  FARM_REQUEST=${line%% *}
+  FARM_DETAIL=${line#"$FARM_REQUEST"}
+  FARM_DETAIL=${FARM_DETAIL# }
+  case "$FARM_RESULT" in
+    none|pending|passed) ;;
+    failed) valid_reason "$FARM_DETAIL" || FARM_DETAIL='failed' ;;
+    *) FARM_ERROR='testfarm status selection was unreadable'; return 1 ;;
+  esac
+}
 cleanup() {
   trap '' TERM INT HUP
   [ -z "$TMP" ] || rm -f -- "$TMP"
+  [ -z "$FARM_TMP" ] || rm -f -- "$FARM_TMP"
   [ "$HEALTH_HELD" -eq 0 ] || fm_lock_release "$HEALTH_LOCK" || true
   [ "$WAKE_HELD" -eq 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
   fm_lock_release "$LOCK" || true
@@ -390,7 +537,7 @@ if [ "$ACTION" = ready ]; then
     printf '%s\n' "$HEAD" > "$TMP"
     mv -f -- "$TMP" "$DIR/pre-head-$ID"
     TMP=
-    rm -f -- "$DIR/full-$ID"
+    rm -f -- "$DIR/full-$ID" "$(farm_ledger "$ID")"
   fi
   if [ "$found" -lt 0 ]; then
     for ((i=0; i<count; i++)); do
@@ -433,7 +580,8 @@ if [ "$ACTION" = ready ]; then
     fi
   fi
 fi
-[ "$found" -ge 0 ] || [ "$ACTION" = reconcile ] || die 'task has not joined the landing queue; run ready first'
+[ "$found" -ge 0 ] || [ "$ACTION" = reconcile ] || [ "$ACTION" = resolve ] \
+  || die 'task has not joined the landing queue; run ready first'
 if [ -n "$OWNER_TASK" ] && [ "$found" -ge 0 ]; then
   [ "${owners[found]}" = - ] || [ "${owners[found]}" = "$OWNER_TASK" ] \
     || die 'queue car belongs to a different owner task'
@@ -527,6 +675,37 @@ if [ "$joined" -eq 1 ]; then
   bases[found]=$(git -C "$PROJECT" merge-base "$HEAD" "${target_shas[found]}") || die 'task and target have no common base'
 fi
 
+# Settle the front car's last check from HEAD, TARGET, and RECEIPT or REASON.
+# A worker's receipt command and resolve's test farm verdict share this path.
+submit_front_result() {
+  local digest
+  [ "${states[found]}" = active ] || die 'only active cars can submit receipts'
+  [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
+  [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
+    && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
+  git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" || die 'head is not a fast-forward of the assigned target'
+  if [ -n "$REASON" ]; then
+    [ "${statuses[found]}" = needs-quick ] || die 'failure reason is for a quick check'
+    TMP=$(mktemp "$DIR/.full.XXXXXX")
+    printf '%s\n' "$REASON" > "$TMP"
+    mv -f -- "$TMP" "$DIR/full-${ids[found]}"
+    TMP=
+    requeue_reason="quick check failed: $REASON"
+  else
+    TMP=$(mktemp "$DIR/.receipt.XXXXXX")
+    cp -- "$RECEIPT" "$TMP" || die 'cannot stage receipt'
+    if [ "${statuses[found]}" = needs-full ]; then
+      fm_health_receipt_read "$TMP" "$HEAD" || die 'invalid exact-head full receipt'
+    else
+      fm_quick_receipt_read "$TMP" "$HEAD" "$TARGET" || die 'invalid exact-head quick receipt'
+    fi
+    digest=$(git hash-object -- "$TMP")
+    mv -f -- "$TMP" "$DIR/$digest.receipt"
+    TMP=
+    receipts[found]="$digest.receipt" targets[found]=$TARGET
+  fi
+}
+farm_unreachable=0 farm_failed=0 farm_line=''
 case "$ACTION" in
   ready)
     if [ "$joined" -eq 0 ] && [ -n "$TARGET" ]; then
@@ -536,32 +715,44 @@ case "$ACTION" in
     fi
     ;;
   receipt)
-    [ "${states[found]}" = active ] || die 'only active cars can submit receipts'
-    [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
-    [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
-      && [ "${bases[found]}" = "$TARGET" ] || die 'head or target changed; check status and prepare again'
-    git -C "$PROJECT" merge-base --is-ancestor "$TARGET" "$HEAD" || die 'head is not a fast-forward of the assigned target'
-    if [ -n "$REASON" ]; then
-      [ -z "$RECEIPT" ] || die 'failed quick check cannot also submit a receipt'
-      [ "${statuses[found]}" = needs-quick ] || die 'failure reason is for a quick check'
-      TMP=$(mktemp "$DIR/.full.XXXXXX")
-      printf '%s\n' "$REASON" > "$TMP"
-      mv -f -- "$TMP" "$DIR/full-$ID"
-      TMP=
-      requeue_reason="quick check failed: $REASON"
+    [ -n "$REASON" ] || [ -n "$RECEIPT" ] || die 'receipt requires --receipt or --reason'
+    [ -z "$REASON" ] || [ -z "$RECEIPT" ] || die 'failed quick check cannot also submit a receipt'
+    if farm_outcome=$(farm_recorded "${ids[found]}" "$HEAD" "$TARGET"); then
+      reported=passed
+      [ -z "$REASON" ] || reported=failed
+      [ "$farm_outcome" = "$reported" ] \
+        || die "the test farm already settled this front check as $farm_outcome; check status"
     else
-      [ -n "$RECEIPT" ] || die 'receipt requires --receipt or --reason'
-      TMP=$(mktemp "$DIR/.receipt.XXXXXX")
-      cp -- "$RECEIPT" "$TMP" || die 'cannot stage receipt'
-      if [ "${statuses[found]}" = needs-full ]; then
-        fm_health_receipt_read "$TMP" "$HEAD" || die 'invalid exact-head full receipt'
-      else
-        fm_quick_receipt_read "$TMP" "$HEAD" "$TARGET" || die 'invalid exact-head quick receipt'
+      submit_front_result
+    fi
+    ;;
+  resolve)
+    front=-1
+    for ((i=0; i<count; i++)); do
+      [ "${states[i]}" != active ] || [ "${places[i]}" -ne 1 ] || { front=$i; break; }
+    done
+    if [ "$front" -ge 0 ] && [ "${statuses[front]}" = needs-quick ]; then
+      farm_id=${ids[front]} farm_head=${heads[front]} farm_target=${target_shas[front]}
+      if ! farm_query "$farm_id" "$farm_head" "$farm_target"; then
+        farm_unreachable=1
+      elif [ "$FARM_RESULT" = passed ] || [ "$FARM_RESULT" = failed ]; then
+        found=$front HEAD=$farm_head TARGET=$farm_target
+        if [ "$FARM_RESULT" = passed ]; then
+          FARM_TMP=$(mktemp "$DIR/.farm-receipt.XXXXXX")
+          printf 'schema=fm-quick-check.v1\nsha=%s\ntarget=%s\n' "$HEAD" "$TARGET" > "$FARM_TMP"
+          RECEIPT=$FARM_TMP
+          submit_front_result
+          rm -f -- "$FARM_TMP"
+          FARM_TMP=
+        else
+          REASON="testfarm request $FARM_REQUEST failed: $FARM_DETAIL"
+          submit_front_result
+          farm_failed=1
+        fi
+        farm_record "$farm_id" "$FARM_REQUEST" "$HEAD" "$TARGET" "$FARM_RESULT"
+        farm_line="front-check $FARM_RESULT task=$farm_id request=$FARM_REQUEST head=$HEAD target=$TARGET"
+        [ "$FARM_RESULT" = passed ] || farm_line="$farm_line reason=$REASON"
       fi
-      digest=$(git hash-object -- "$TMP")
-      mv -f -- "$TMP" "$DIR/$digest.receipt"
-      TMP=
-      receipts[found]="$digest.receipt" targets[found]=$TARGET
     fi
     ;;
   gate)
@@ -697,6 +888,34 @@ if [ "$waiting" -eq 1 ]; then
   printf '%s\n' "$requeue_reason" > "$TMP"
   mv -f -- "$TMP" "$marker"
   TMP=
+elif [ "$farm_failed" -eq 1 ]; then
+  # Nobody waits, so the car keeps the front; its owner still hears why once.
+  marker="$DIR/notice-${ids[found]}"
+  [ ! -L "$marker" ] || die "notice marker is a symlink: $marker"
+  TMP=$(mktemp "$DIR/.notice.XXXXXX")
+  printf '%s\n' "$requeue_reason" > "$TMP"
+  mv -f -- "$TMP" "$marker"
+  TMP=
+fi
+if [ "$ACTION" = resolve ]; then
+  marker="$DIR/testfarm-unreachable"
+  [ ! -L "$marker" ] || die "test farm marker is a symlink: $marker"
+  if [ "$farm_unreachable" -eq 1 ]; then
+    episode="$farm_id $farm_head $farm_target"
+    farm_wake=repeat
+    if [ ! -f "$marker" ] || [ "$(cat -- "$marker")" != "$episode" ]; then
+      fm_wake_append_locked check "landing-queue-$KEY" \
+        "check: landing-queue testfarm-unreachable task=$farm_id project=$PRIMARY landing=$LANDING tip=$TIP head=$farm_head receipt=- reason=$FARM_ERROR"
+      TMP=$(mktemp "$DIR/.farm-unreachable.XXXXXX")
+      printf '%s\n' "$episode" > "$TMP"
+      mv -f -- "$TMP" "$marker"
+      TMP=
+      farm_wake=new
+    fi
+    farm_line="front-check unreachable task=$farm_id head=$farm_head target=$farm_target wake=$farm_wake reason=$FARM_ERROR"
+  else
+    rm -f -- "$marker"
+  fi
 fi
 for ((i=0; i<count; i++)); do
   case "${statuses[i]}" in
@@ -726,6 +945,20 @@ for ((i=0; i<count; i++)); do
   if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${owners[i]}" \
     "Landing queue: task=${ids[i]} moved to back because $requeue_message_reason. Fix your branch while waiting; run landing_queue status when you reach front, then rebase and retest." 2>&1 >/dev/null); then
     printf 'warning: could not steer %s after requeue; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
+    continue
+  fi
+  rm -f -- "$marker"
+done
+
+for ((i=0; i<count; i++)); do
+  marker="$DIR/notice-${ids[i]}"
+  [ ! -L "$marker" ] || die "notice marker is a symlink: $marker"
+  [ -f "$marker" ] || continue
+  [ -f "$STATE/${owners[i]}.meta" ] || continue
+  notice_reason=$(cat -- "$marker")
+  if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${owners[i]}" \
+    "Landing queue: task=${ids[i]} keeps the front because $notice_reason. Run landing_queue status: it now requires a full rerun on this head; fix your branch first if needed." 2>&1 >/dev/null); then
+    printf 'warning: could not steer %s after its front check failed; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
     continue
   fi
   rm -f -- "$marker"
@@ -768,6 +1001,10 @@ for ((i=0; i<count; i++)); do
 done
 
 [ "$ACTION" != reconcile ] || exit 0
+if [ "$ACTION" = resolve ]; then
+  [ -z "$farm_line" ] || printf '%s\n' "$farm_line"
+  exit 0
+fi
 
 printf 'queue=%s\ntask=%s\nbranch=%s\nhead=%s\nlanding_branch=%s\ntip=%s\nplace=%s\ntarget_ref=%s\ntarget_sha=%s\nrebase_from=%s\nstatus=%s\n' \
   "$KEY" "$ID" "${branches[found]}" "${heads[found]}" "$LANDING" "$TIP" "${places[found]}" \
@@ -775,3 +1012,4 @@ printf 'queue=%s\ntask=%s\nbranch=%s\nhead=%s\nlanding_branch=%s\ntip=%s\nplace=
 if [ "${receipts[found]}" = - ]; then printf 'receipt=-\n'; else printf 'receipt=%s/%s\n' "$DIR" "${receipts[found]}"; fi
 printf 'reason=%s\n' "${reasons[found]}"
 printf 'priority=%s\n' "${priorities[found]}"
+printf 'front_request=%s\n' "$(farm_last "${ids[found]}")"

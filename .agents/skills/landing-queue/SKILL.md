@@ -2,7 +2,7 @@
 name: landing-queue
 description: >-
   Agent-only procedure for firstmate's side of the worker-owned local landing train.
-  Use on any `landing-queue ready-to-land`, `landing-queue needs-baseline`, or `landing-queue failed` check wake.
+  Use on any `landing-queue ready-to-land`, `landing-queue needs-baseline`, `landing-queue failed`, `landing-queue testfarm-unreachable`, or `landing-queue sweep:` check wake.
   Owns the status recheck, baseline recording, the landing decision under the existing merge authority, and the no-steering rule.
 user-invocable: false
 metadata:
@@ -41,6 +41,13 @@ Obtain a full-suite receipt for exactly that tip commit, never for the car.
 Record it with `bin/fm-landing-queue.sh baseline <id> --receipt <tip receipt>` using the same environment and options; this records the baseline only, lands nothing, and steers the paused worker with its resolved status.
 That output's status is now `ready-to-land`, which wakes again and is handled as above, or `needs-gate` or `red-receipt`, which leave the missing gate or the extra failures to the car's own worker under the same task id.
 Reserve `fail` for a car that genuinely cannot continue.
+
+## sweep and testfarm-unreachable
+
+The watcher's sweep settles each front quick check from the test farm itself, so a car never waits on its worker to report; the queue tool's header owns that `resolve` contract.
+A `landing-queue sweep:` wake only announces the durable row queued beside it: `front-check passed` pairs with a `ready-to-land` row, handled as above, and `front-check unreachable` with a `testfarm-unreachable` row.
+A `landing-queue testfarm-unreachable` wake means the front car is unchanged because the farm's status could not be read, and the sweep retries on its own.
+Check the farm with `testfarm doctor` and restore its runner if it is down; escalate to the captain only when it cannot be restored, and send no queue coordination to the worker.
 
 ## failed
 
