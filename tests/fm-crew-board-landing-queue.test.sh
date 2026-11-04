@@ -8,6 +8,11 @@ set -u
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+  printf '%s\n' 'skip: crew board landing queue check requires the private testfarm checkout'
+  exit 0
+fi
+
 PANELS="$ROOT/bin/fm-crew-board-panels.py"
 QUEUE="$ROOT/bin/fm-landing-queue.sh"
 TMP_ROOT=$(fm_test_tmproot fm-crew-board-landing-queue)

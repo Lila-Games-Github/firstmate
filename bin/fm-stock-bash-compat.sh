@@ -131,12 +131,21 @@ run_consumer learning "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIME
   env FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
 # The watcher poll calls fm-landing-queue-sweep.sh, which runs the queue's resolve.
-run_consumer landing "landing-queue test farm resolve and watcher sweep" "$LANDING_TIMEOUT" 8 \
-  env FM_LANDING_QUEUE_TEST_ONLY=farm \
-  "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
+merge_assertions=18
+if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+  if [ "$selected" = all ] || [ "$selected" = landing ]; then
+    ran_consumer=1
+    echo '::notice::Skipping stock Bash landing queue farm checks: TESTFARM_READ_TOKEN is absent.'
+  fi
+  merge_assertions=15
+else
+  run_consumer landing "landing-queue test farm resolve and watcher sweep" "$LANDING_TIMEOUT" 8 \
+    env FM_LANDING_QUEUE_TEST_ONLY=farm \
+    "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
+fi
 run_consumer worker-timing "worker timing status and teardown record" "$WORKER_TIMING_TIMEOUT" 6 \
   "$STOCK_BASH" "$ROOT/tests/fm-worker-timing.test.sh"
-run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" 18 \
+run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" "$merge_assertions" \
   "$STOCK_BASH" "$ROOT/tests/fm-merge-local.test.sh"
 [ "$ran_consumer" -eq 1 ] || {
   echo "::error::unknown stock Bash consumer: $selected" >&2

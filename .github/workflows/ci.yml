@@ -257,7 +257,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Checkout testfarm for compatibility tests
-        if: matrix.shard == 5 && env.TESTFARM_AVAILABLE == 'true'
+        if: (matrix.shard == 4 || matrix.shard == 5) && env.TESTFARM_AVAILABLE == 'true'
         uses: actions/checkout@v6
         with:
           repository: Lila-Games-Github/lila-test-farm
@@ -315,12 +315,12 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          if [ "$FM_SERIAL_SHARD" = 5 ]; then
+          if [ "$FM_SERIAL_SHARD" = 4 ] || [ "$FM_SERIAL_SHARD" = 5 ]; then
             if [ "$TESTFARM_AVAILABLE" = true ]; then
               export TESTFARM_CHECKOUT="$GITHUB_WORKSPACE/lila-test-farm"
             else
               export FM_SKIP_TESTFARM=1
-              echo '::notice::Skipping testfarm-dependent landing queue checks: TESTFARM_READ_TOKEN is absent.'
+              echo '::notice::Skipping testfarm-dependent queue checks: TESTFARM_READ_TOKEN is absent.'
             fi
           fi
           # A missing typecheck prerequisite is a broken lane, not a valid skip.
@@ -503,10 +503,19 @@ jobs:
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
+    env:
+      TESTFARM_AVAILABLE: ${{ secrets.TESTFARM_READ_TOKEN != '' }}
     # Nine independent consumer bounds total 19 minutes; leave setup headroom.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
+      - name: Checkout testfarm for compatibility tests
+        if: env.TESTFARM_AVAILABLE == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: Lila-Games-Github/lila-test-farm
+          token: ${{ secrets.TESTFARM_READ_TOKEN }}
+          path: lila-test-farm
       - name: Run snapshot consumers with stock Bash
         shell: /bin/bash {0}
         env:
@@ -524,6 +533,13 @@ jobs:
           PATH="$(npm prefix -g)/bin:$PATH"
           export PATH
           command -v tasks-axi >/dev/null || { echo "::error::tasks-axi is required for the stock Bash regressions"; exit 1; }
+
+          if [ "$TESTFARM_AVAILABLE" = true ]; then
+            export TESTFARM_CHECKOUT="$GITHUB_WORKSPACE/lila-test-farm"
+          else
+            export FM_SKIP_TESTFARM=1
+            echo '::notice::Skipping testfarm-dependent stock Bash checks: TESTFARM_READ_TOKEN is absent.'
+          fi
 
           /bin/bash bin/fm-stock-bash-compat.sh
 
