@@ -261,6 +261,26 @@ func TestAllPagesRenderLocalPanels(t *testing.T) {
 	}
 }
 
+func TestQuestionFooterIsKeyHintAndCachePanelsShowDate(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.CachedAt = "2026-10-21T06:00:00Z"
+	m.data.Panels.Bugs = []item{{Title: "Rocketboard bug", Status: "open"}}
+	m.data.Panels.Builds = []item{{Title: "Android build", Status: "passed"}}
+	if view := m.View().Content; !strings.Contains(view, "3 questions tab") {
+		t.Fatalf("footer does not explain the 3 key: %q", view)
+	}
+	m.page = 1
+	m.focus = "bugs"
+	if view := m.renderFocused(pages[1][0], 80, 18); !strings.Contains(view, "as of 2026-10-21") {
+		t.Fatalf("bug panel omits cache date: %q", view)
+	}
+	m.page = 4
+	m.focus = "builds"
+	if view := m.renderFocused(pages[4][2], 80, 18); !strings.Contains(view, "as of 2026-10-21") {
+		t.Fatalf("build panel omits cache date: %q", view)
+	}
+}
+
 func TestLandingQueueFitsPhoneWidthAndShowsFrontCheck(t *testing.T) {
 	m := fixtureApp(t)
 	m.width, m.height = 55, 18

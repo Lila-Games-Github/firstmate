@@ -60,6 +60,8 @@ def question_lines(source):
         if line.startswith("## "):
             flush()
             section = line[3:].strip()
+            if section.startswith("For "):
+                section = re.sub(r"\s*\([^)]*\)$", "", section)
             continue
         if line.strip() == "---":
             flush()

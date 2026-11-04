@@ -139,7 +139,7 @@ with tempfile.TemporaryDirectory() as temporary:
     (home / "state").mkdir()
     (home / "data").mkdir()
     (home / "data" / "captain-questions.md").write_text("""# Open questions
-## Your decisions
+## Your decisions (each one is holding up work)
 **FL1. Choose the flash.** A full flash slows the phone. Options: (a) keep it; (b) local flash. Recommendation: (b). "FL1: a" or "FL1: b".
 ## For Design
 **D2. Update the workbook.** Please refresh it.
@@ -245,7 +245,7 @@ Recommendation: (b).
 - [ ] Which phone?
 ---
 **C. Ship it?** Options: (a) yes; (b) no. Recommendation: (a).
-## For Tarun
+## For Tarun (follow-up owner)
 - **T1. Check the build.** Please look.
 - Which phone build?
 """)
