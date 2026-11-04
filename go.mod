@@ -1,4 +1,4 @@
-module github.com/Lila-Games-Github/firstmate/bin/fm-crew-board-tui
+module github.com/Lila-Games-Github/firstmate
 
 go 1.27.2
 
