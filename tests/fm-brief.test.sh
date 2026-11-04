@@ -576,6 +576,10 @@ test_ship_project_memory_wording() {
 
 test_green_final_head_names_service_receipt() {
   local home brief plain
+  if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+    printf '%s\n' 'note: skipped green-final-head service receipt check because the private testfarm checkout is unavailable'
+    return 0
+  fi
   home="$TMP_ROOT/green-receipt-home"
   mkdir -p "$home/data" "$home/config/test-service"
   cp "$ROOT/docs/examples/fm-test-service-frogpile.json" "$home/config/test-service/some-proj.json"
@@ -1752,6 +1756,10 @@ test_open_question_check_ignores_lines_outside_section() {
 
 test_test_service_ship_receipt_guidance() {
   local home id brief receipt out status
+  if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+    printf '%s\n' 'note: skipped configured service receipt guidance because the private testfarm checkout is unavailable'
+    return 0
+  fi
   home="$TMP_ROOT/test-service-receipt-home"
   mkdir -p "$home/data" "$home/config/test-service"
   id=frogpile-unconfigured
@@ -1824,25 +1832,33 @@ test_worker_owned_finalization() {
     assert_no_grep "At \`waiting-for-front\`, \`ready-to-land\`" "$brief" 'upper worker still told to poll'
     assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
     assert_grep 'git rebase --onto <target_sha> <rebase_from>' "$brief" 'brief cannot remove a failed lower car'
-    # Execute the generated shell helper, including an apostrophe in FM_HOME.
-    helper="$home/$id-helper.sh"
-    awk '/^landing_queue\(\) \{/ { emit=1 } emit { print } emit && /^\}$/ { exit }' "$brief" > "$helper"
-    # shellcheck disable=SC1090 # Execute the generated helper being tested.
-    . "$helper"
-    git -C "$project" checkout -qb "fm/$id" proto/landing
-    git -C "$project" commit -qm "$id" --allow-empty
-    printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$project" rev-parse HEAD)" > "$home/$id.receipt"
-    out=$(cd "$project" && landing_queue ready --branch "fm/$id" --head "$(git rev-parse HEAD)" \
-      --target "$(git rev-parse proto/landing)" --receipt "$home/$id.receipt") \
-      || fail 'generated queue helper did not execute'
-    assert_contains "$out" 'landing_branch=proto/landing' 'generated helper selected the wrong landing branch'
+    if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+      printf '%s\n' 'note: skipped generated landing queue helper execution because the private testfarm checkout is unavailable'
+    else
+      # Execute the generated shell helper, including an apostrophe in FM_HOME.
+      helper="$home/$id-helper.sh"
+      awk '/^landing_queue\(\) \{/ { emit=1 } emit { print } emit && /^\}$/ { exit }' "$brief" > "$helper"
+      # shellcheck disable=SC1090 # Execute the generated helper being tested.
+      . "$helper"
+      git -C "$project" checkout -qb "fm/$id" proto/landing
+      git -C "$project" commit -qm "$id" --allow-empty
+      printf 'schema=fm-full-suite.v1\nsha=%s\nfailures=0\n' "$(git -C "$project" rev-parse HEAD)" > "$home/$id.receipt"
+      out=$(cd "$project" && landing_queue ready --branch "fm/$id" --head "$(git rev-parse HEAD)" \
+        --target "$(git rev-parse proto/landing)" --receipt "$home/$id.receipt") \
+        || fail 'generated queue helper did not execute'
+      assert_contains "$out" 'landing_branch=proto/landing' 'generated helper selected the wrong landing branch'
+    fi
   done
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" queue-validation any-project --mode no-mistakes >/dev/null
   brief="$home/data/queue-validation/brief.md"
   assert_grep 'Once your implementation is committed, start /no-mistakes yourself' "$brief" 'implementation still waits for a validation steer'
   assert_no_grep 'Firstmate will then instruct you' "$brief" 'brief retains a manual validation start'
   assert_no_grep 'Self-service landing train' "$brief" 'PR mode received a local merge queue'
-  pass 'generated ordinary and lane briefs execute worker-owned queue updates; validation starts after commit'
+  if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+    pass 'generated ordinary and lane briefs keep worker-owned queue guidance; validation starts after commit'
+  else
+    pass 'generated ordinary and lane briefs execute worker-owned queue updates; validation starts after commit'
+  fi
 }
 
 test_worker_owned_finalization

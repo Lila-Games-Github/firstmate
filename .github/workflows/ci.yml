@@ -89,6 +89,8 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
+    env:
+      TESTFARM_AVAILABLE: ${{ secrets.TESTFARM_READ_TOKEN != '' }}
     # Seven main/PR runs on 2026-09-28 measured shard 1 at 473-597s of
     # completed test time; setup/cleanup added about 18s and the 10m cap
     # cancelled healthy work. Refreshed maxima pack two shards at ~549s,
@@ -103,6 +105,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Checkout testfarm for compatibility tests
+        if: env.TESTFARM_AVAILABLE == 'true'
         uses: actions/checkout@v6
         with:
           repository: Lila-Games-Github/lila-test-farm
@@ -133,11 +136,15 @@ jobs:
           npm install -g @earendil-works/pi-coding-agent@0.87.1 typescript@5.9.3
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable parallel shard 1
-        env:
-          TESTFARM_CHECKOUT: ${{ github.workspace }}/lila-test-farm
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
+          if [ "$TESTFARM_AVAILABLE" = true ]; then
+            export TESTFARM_CHECKOUT="$GITHUB_WORKSPACE/lila-test-farm"
+          else
+            export FM_SKIP_TESTFARM=1
+            echo '::notice::Skipping testfarm-dependent brief checks: TESTFARM_READ_TOKEN is absent.'
+          fi
           bin/fm-test-run.sh --lane portable-parallel-1 \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \
             --json "$RUNNER_TEMP/fm-test/fm-test-timing-portable-parallel-1.json"
@@ -234,6 +241,8 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    env:
+      TESTFARM_AVAILABLE: ${{ secrets.TESTFARM_READ_TOKEN != '' }}
     # Refreshed weights put the longest modeled shard near 12 minutes across
     # nine runners. Preserve the existing hang tripwire until complete Linux
     # measurements establish the new healthy envelope; a model is not a timer.
@@ -248,7 +257,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Checkout testfarm for compatibility tests
-        if: matrix.shard == 5
+        if: matrix.shard == 5 && env.TESTFARM_AVAILABLE == 'true'
         uses: actions/checkout@v6
         with:
           repository: Lila-Games-Github/lila-test-farm
@@ -298,7 +307,6 @@ jobs:
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
-          TESTFARM_CHECKOUT: ${{ github.workspace }}/lila-test-farm
           # job-total rather than a literal, so shrinking or growing the matrix
           # without matching bin/fm-test-run.sh is refused instead of quietly
           # leaving a shard of the required lane unrun.
@@ -307,6 +315,14 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
+          if [ "$FM_SERIAL_SHARD" = 5 ]; then
+            if [ "$TESTFARM_AVAILABLE" = true ]; then
+              export TESTFARM_CHECKOUT="$GITHUB_WORKSPACE/lila-test-farm"
+            else
+              export FM_SKIP_TESTFARM=1
+              echo '::notice::Skipping testfarm-dependent landing queue checks: TESTFARM_READ_TOKEN is absent.'
+            fi
+          fi
           # A missing typecheck prerequisite is a broken lane, not a valid skip.
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
             --fail-on-gate-skip 'Pi extension typecheck prerequisite not found' \

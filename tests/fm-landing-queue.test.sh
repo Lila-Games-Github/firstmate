@@ -4,6 +4,11 @@ set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+  printf '%s\n' 'skip: landing queue compatibility checks require the private testfarm checkout'
+  exit 0
+fi
+
 TMP_ROOT=$(fm_test_tmproot fm-landing-queue)
 QUEUE="$ROOT/bin/fm-landing-queue.sh"
 make_case() {

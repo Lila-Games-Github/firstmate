@@ -23,4 +23,5 @@ printf 'paused: test-service request=%s\n' "$request" >> "$FM_HOME/state/$task_i
 
 The compatibility entry point needs an installed `testfarm` or `TESTFARM_CHECKOUT` pointing at a farm checkout.
 Its project configuration source is testfarm's registration; `FM_HOME/config/test-service` remains a temporary compatibility source during migration.
+CI runs the brief and landing queue compatibility checks when `TESTFARM_READ_TOKEN` can check out the private farm; without that secret it reports those checks as skipped and runs the remaining tests in each job.
 The [migration guide](https://github.com/Lila-Games-Github/lila-test-farm/blob/main/docs/MIGRATION.md) owns the cutover and cleanup sequence.
