@@ -1147,6 +1147,24 @@ func TestRailRowsStayOnEveryPageAndClicksShowDetail(t *testing.T) {
 	}
 }
 
+func TestTestServiceBuildStatesStayVisibleAtPhoneWidth(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.TestQueue = []item{
+		{Title: "TEST SERVICE: 4 pending · 1 building", Status: "section"},
+		{Title: "BUILDING · RUNNING: Export for alpha", Status: "running 1m"},
+		{Title: "READY · WAITING: Export for beta", Status: "waiting 2m"},
+		{Title: "WAITING · WAITING: Export for gamma", Status: "waiting 3m"},
+		{Title: "FALLBACK · WAITING: Export for delta", Status: "waiting 4m"},
+	}
+	lines, _ := m.panelLines(panelSpec{id: "test_queue"}, 36)
+	view := ansi.Strip(strings.Join(lines, "\n"))
+	for _, state := range []string{"1 building", "BUILDING", "READY", "WAITING", "FALLBACK"} {
+		if !strings.Contains(view, state) {
+			t.Fatalf("phone-width test service panel lost %s: %q", state, view)
+		}
+	}
+}
+
 func TestFilterAndNoteFocus(t *testing.T) {
 	m := fixtureApp(t)
 	press(m, key('/'))

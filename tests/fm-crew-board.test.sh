@@ -912,7 +912,7 @@ JSON
     'an unreadable keyguard keeps the phone state'
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.title | test("S21 FE|RZCX224VH4T"))] | length' "$home/state/crew-board.json")" \
     'an unreadable keyguard raises no notification'
-  assert_equals 'EDITOR: 1 running, 1 waiting|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 4 pending' \
+  assert_equals 'EDITOR: 1 running, 1 waiting|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 4 pending · 0 building' \
     "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'fixed resource sections and any-phone queue'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \
     'waiting 4m' 'suite ticket wait duration'
@@ -978,16 +978,22 @@ EOF
   "updated": $now,
   "observed_at": $now,
   "runner": {"instance": "abc123", "pid": 999, "heartbeat": $now, "alive": true},
-  "queue": ["phone-request"],
+  "queue": ["phone-request", "waiting-build", "ready-build", "fallback-build"],
   "running": "suite-request",
   "running_requests": [],
   "waiting_requests": [],
   "alerts": [],
   "requests": [
-    {"id": "suite-request", "task": "alpha", "state": "running", "run_seconds": 90,
+    {"id": "suite-request", "task": "alpha", "state": "running", "build_state": "building", "run_seconds": 90,
      "options": {"suite": true}, "steps": [{"name": "suite", "state": "running", "started": $((now - 90))}]},
-    {"id": "phone-request", "task": "beta", "state": "queued", "wait_seconds": 30,
-     "options": {"device_gate": "R5CT32HRVNM"}, "steps": []}
+    {"id": "phone-request", "task": "beta", "state": "queued", "build_state": "pending", "wait_seconds": 30,
+     "options": {"device_gate": "R5CT32HRVNM"}, "steps": []},
+    {"id": "waiting-build", "task": "alpha", "state": "queued", "build_state": "waiting", "wait_seconds": 20,
+     "options": {"device_gate": "any"}, "steps": []},
+    {"id": "ready-build", "task": "beta", "state": "queued", "build_state": "ready", "wait_seconds": 10,
+     "options": {"device_gate": "any"}, "steps": []},
+    {"id": "fallback-build", "task": "alpha", "state": "queued", "build_state": "fallback", "wait_seconds": 5,
+     "options": {"device_gate": "any"}, "steps": []}
   ],
   "phones": [{"serial": "R5CT32HRVNM", "label": "S22", "adb": "unknown", "now": null, "waiting": [], "last": null}],
   "tickets": {"phones": [], "suite": []}
@@ -1003,15 +1009,22 @@ exit 1
 EOF
   chmod +x "$stub/testfarm"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'testfarm fixture refresh failed'
-  assert_equals 'TEST SERVICE: 2 pending' \
+  assert_equals 'TEST SERVICE: 5 pending · 1 building' \
     "$(jq -r '[.panels.test_queue[] | select(.id == "service-heading")][0].title' "$home/state/crew-board.json")" \
     'a real testfarm status fixture renders its pending requests'
-  assert_equals 'RUNNING: Make the widget spin · Suite' \
+  assert_equals 'BUILDING · RUNNING: Make the widget spin · Suite' \
     "$(jq -r '[.panels.test_queue[] | select(.id == "service-suite-request")][0].title' "$home/state/crew-board.json")" \
     'running suite request row from the fixture'
-  assert_equals 'WAITING: Fix the gadget · Phone gate (VIP: R5CT32HRVNM)' \
+  assert_equals 'PENDING · WAITING: Fix the gadget · Phone gate (VIP: R5CT32HRVNM)' \
     "$(jq -r '[.panels.test_queue[] | select(.id == "service-phone-request")][0].title' "$home/state/crew-board.json")" \
     'queued phone-gate request row from the fixture'
+  assert_equals 'BUILDING|PENDING|WAITING|READY|FALLBACK' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | startswith("service-")) | select(.status != "section") | .title | split(" · ")[0]] | join("|")' "$home/state/crew-board.json")" \
+    'every live request shows its export build state'
+  assert_equals 5 "$(jq '[.requests[] | select(.state == "queued" or .state == "running")] | length' "$home/testfarm-status.json")" \
+    'the authoritative status fixture contains five live requests'
+  assert_equals 5 "$(jq '[.panels.test_queue[] | select(.id | startswith("service-")) | select(.status != "section")] | length' "$home/state/crew-board.json")" \
+    'the board carries all five source requests'
   assert_equals 0 \
     "$(jq '[.panels.test_queue[] | select(.id == "service-runner-down")] | length' "$home/state/crew-board.json")" \
     'a live runner raises no down notice'
@@ -1026,6 +1039,13 @@ EOF
   assert_equals 'unavailable' \
     "$(jq -r '[.panels.test_queue[] | select(.id == "service-state")][0].status' "$home/state/crew-board.json")" \
     'the unavailable row carries the unavailable status'
+
+  sed -i 's/"fm-test-service.v1"/"known-bad.v1"/' "$home/testfarm-status.json"
+  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'invalid testfarm fixture refresh failed'
+  assert_equals 'TEST SERVICE: unavailable' \
+    "$(jq -r '[.panels.test_queue[] | select(.id == "service-heading")][0].title' "$home/state/crew-board.json")" \
+    'the status validator rejects a known-bad schema'
+  sed -i 's/"known-bad.v1"/"fm-test-service.v1"/' "$home/testfarm-status.json"
 
   sed -i 's/"alive": true/"alive": false/' "$home/testfarm-status.json"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'down runner refresh failed'

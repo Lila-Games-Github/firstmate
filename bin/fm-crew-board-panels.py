@@ -1004,6 +1004,7 @@ def testfarm_status():
 
 
 TESTFARM_TERMINAL_STATES = frozenset({"passed", "failed", "cancelled", "interrupted"})
+TESTFARM_BUILD_STATES = frozenset({"pending", "waiting", "building", "ready", "fallback"})
 REQUEST_ID_RE = re.compile(r"request=([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
@@ -1079,16 +1080,19 @@ def service_request_rows(snapshot, tags):
         except (ValueError, TypeError, OverflowError):
             age = "unknown time"
         state = "running" if running else "waiting"
+        build_state = request.get("build_state")
+        build_state = build_state if isinstance(build_state, str) and build_state in TESTFARM_BUILD_STATES else ""
         if task_id and not options.get("suite"):
             word = service_request_word(options)
             if running:
                 resource_tag(tags, task_id, 0, f"TEST SERVICE: {word} {age}")
             else:
                 resource_tag(tags, task_id, 1, f"WAITING FOR TEST SERVICE: {word} #{waiter_positions[id(request)]}")
-        row = item(f"{state.upper()}: {titles.get(task, task)} · {kind}",
-                   f"Task: {task}\nKind: {kind}\nRequest: {rid}\nAge: {age}",
+        build_prefix = f"{build_state.upper()} · " if build_state else ""
+        row = item(f"{build_prefix}{state.upper()}: {titles.get(task, task)} · {kind}",
+                   f"Task: {task}\nKind: {kind}\nRequest: {rid}\nBuild: {build_state or 'unknown'}\nAge: {age}",
                    f"{state} {age}", item_id=f"service-{rid}")
-        row["phone_title"] = f"{state.upper()}: {titles.get(task, task)} · {kind_text(phone_label)}"
+        row["phone_title"] = f"{build_prefix}{state.upper()}: {titles.get(task, task)} · {kind_text(phone_label)}"
         rows.append(row)
     return rows
 
@@ -1297,7 +1301,12 @@ def test_queue(snapshot, phones, now, tags=None):
         rows.append(item("Test farm unavailable", "`testfarm status --json --no-probe` did not return a usable result.",
                          "unavailable", item_id="service-state"))
         return rows
-    rows.append(item(f"TEST SERVICE: {len(service_rows)} pending", status="section", item_id="service-heading"))
+    farm_requests = (testfarm_status() or {}).get("requests")
+    building = sum(1 for request in farm_requests if isinstance(request, dict)
+                   and request.get("state") in ("queued", "preparing", "running")
+                   and request.get("build_state") == "building") if isinstance(farm_requests, list) else 0
+    rows.append(item(f"TEST SERVICE: {len(service_rows)} pending · {building} building",
+                     status="section", item_id="service-heading"))
     runner = (testfarm_status() or {}).get("runner")
     if isinstance(runner, dict) and runner.get("alive") is False:
         rows.append(item("Test farm runner is down",
