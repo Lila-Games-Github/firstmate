@@ -32,6 +32,24 @@ export FM_CREW_STATE_BIN=$FAKE/fm-crew-state.sh
 export FM_FAKE_VERDICT=$TMP/verdict
 count_records() { find "$STATE/t1.inbox" -name '*.msg' -type f 2>/dev/null | wc -l | tr -d ' '; }
 
+assert_failure_surface() {
+  local watcher ticks=0
+  FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$TMP/watcher.log" 2>&1 &
+  watcher=$!
+  while kill -0 "$watcher" 2>/dev/null && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  if kill -0 "$watcher" 2>/dev/null; then
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    fail "watcher did not surface worker delivery failure: $(cat "$TMP/watcher.log")"
+  fi
+  wait "$watcher" || fail "failure watcher failed: $(cat "$TMP/watcher.log")"
+  [ "$(grep -c 'worker doorbell delivery failed:' "$TMP/watcher.log")" = 1 ] || fail "failure wake was not surfaced exactly once: $(cat "$TMP/watcher.log")"
+}
+
 printf 'state: parked · source: run-step · parked at document: 2 finding(s) · run: run-a\n' > "$FM_FAKE_VERDICT"
 "$ROOT/bin/fm-worker-gate-doorbell.sh" scan || fail 'first gate scan failed'
 [ "$(count_records)" = 1 ] || fail 'first gate did not create one durable record'
@@ -62,6 +80,7 @@ rm "$STATE/worker-doorbells/"*.failure
 for record in "$STATE/worker-doorbells/"*.failure; do printf '0 30 1\n' > "$record"; done
 "$ROOT/bin/fm-worker-gate-doorbell.sh" scan || fail 'gate retry failed'
 [ "$(wc -l < "$STATE/.wake-queue" | tr -d ' ')" = 1 ] || fail 'gate retry duplicated supervisor wake'
+assert_failure_surface
 rm "$STATE/.wake-queue"
 [ "$(count_records)" = 3 ] || fail 'failed gate delivery wrote a record'
 mv "$STATE/t1.meta.saved" "$STATE/t1.meta"
@@ -124,6 +143,7 @@ fi
 for record in "$STATE/worker-doorbells/"*.failure; do printf '0 30 1\n' > "$record"; done
 "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
 [ "$(wc -l < "$STATE/.wake-queue" | tr -d ' ')" = 1 ] || fail 'job retry duplicated supervisor wake'
+assert_failure_surface
 mv "$STATE/t1.meta.hidden" "$STATE/t1.meta"
 for record in "$STATE/worker-doorbells/"*.failure; do printf '0 30 1\n' > "$record"; done
 result=$(find "$STATE" -name "$id.1.result" -print | head -1)

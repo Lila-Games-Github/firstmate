@@ -1613,7 +1613,8 @@ scan_signals() {
   return 0
 }
 
-# Deliver a durably queued process-event result to firstmate. Publication is
+# Deliver a durably queued process-event result or worker delivery failure.
+# Failure publication belongs to fm-worker-doorbell-lib.sh; result publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
 # surfaced yet, then reports it through the same actionable exit every other wake
@@ -1644,12 +1645,12 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason captured="" stranded="" unstarted=""
+  local key reason captured="" stranded="" unstarted="" delivery=""
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   while IFS= read -r key; do
-    case "$key" in procevent:*) ;; *) continue ;; esac
+    case "$key" in procevent:*|worker-doorbell:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
     # A stranded source or one whose launch never proved itself is the opposite
@@ -1657,6 +1658,7 @@ procevent_surface_queued() {
     # a capture would present it as healthy, which is the shape of defect
     # these wakes exist to surface.
     case "$key" in
+      worker-doorbell:*) delivery="$delivery $key" ;;
       procevent:*:stranded:*) stranded="$stranded $key" ;;
       procevent:*:launch-failed:*) unstarted="$unstarted $key" ;;
       *) captured="$captured $key" ;;
@@ -1675,6 +1677,10 @@ procevent_surface_queued() {
   if [ -n "$unstarted" ]; then
     [ "$reason" = "check:" ] || reason="$reason;"
     reason="$reason process-event source failed to start:$unstarted"
+  fi
+  if [ -n "$delivery" ]; then
+    [ "$reason" = "check:" ] || reason="$reason;"
+    reason="$reason worker doorbell delivery failed:$delivery"
   fi
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
