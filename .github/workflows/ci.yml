@@ -102,6 +102,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Checkout testfarm for compatibility tests
+        uses: actions/checkout@v6
+        with:
+          repository: Lila-Games-Github/lila-test-farm
+          token: ${{ secrets.TESTFARM_READ_TOKEN }}
+          path: lila-test-farm
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -127,6 +133,8 @@ jobs:
           npm install -g @earendil-works/pi-coding-agent@0.87.1 typescript@5.9.3
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable parallel shard 1
+        env:
+          TESTFARM_CHECKOUT: ${{ github.workspace }}/lila-test-farm
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
@@ -239,6 +247,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Checkout testfarm for compatibility tests
+        if: matrix.shard == 5
+        uses: actions/checkout@v6
+        with:
+          repository: Lila-Games-Github/lila-test-farm
+          token: ${{ secrets.TESTFARM_READ_TOKEN }}
+          path: lila-test-farm
       - name: Install pinned ShellCheck
         run: |
           set -eu
@@ -283,6 +298,7 @@ jobs:
           npm ls -g --depth 0 @earendil-works/pi-coding-agent
       - name: Run portable serial shard ${{ matrix.shard }}
         env:
+          TESTFARM_CHECKOUT: ${{ github.workspace }}/lila-test-farm
           # job-total rather than a literal, so shrinking or growing the matrix
           # without matching bin/fm-test-run.sh is refused instead of quietly
           # leaving a shard of the required lane unrun.

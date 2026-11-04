@@ -8,9 +8,9 @@ The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md) - edit it 
 
 ## Test service
 
-Per-project test commands and phones live in gitignored `config/test-service/<project>.json` under the effective `FM_HOME`.
-The private phone PIN file is `~/.config/firstmate/test-device-pins`, with mode 600 and no PIN in the repository.
-[`docs/test-service.md`](test-service.md) owns setup, worker usage, status output, and the full configuration example.
+Test declarations live in each project repository and are registered with testfarm; see [testfarm's contract](https://github.com/Lila-Games-Github/lila-test-farm/blob/main/docs/CONTRACT.md).
+The private phone PIN file is `~/.config/testfarm/unlock-pins`, managed with `testfarm device unlock set SERIAL`.
+[`docs/test-service.md`](test-service.md) describes Firstmate's compatibility entry point and worker usage.
 
 ## Operational home layout and state
 
