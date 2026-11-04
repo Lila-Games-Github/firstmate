@@ -89,7 +89,7 @@ def question_entries(path):
         bold = re.match(r"^\*\*(.+?)\*\*", title)
         if bold:
             title = bold.group(1)
-        status = "decision" if section == "Your decisions" else (
+        status = "decision" if section.startswith("Your decisions") else (
             f"waiting on {section[4:]} (follow-up)" if section.startswith("For ") else "follow-up")
         rows.append(item(title, "\n".join(entry).strip(), status=status,
                          item_id=f"question-{len(rows)}"))
@@ -99,6 +99,8 @@ def question_entries(path):
         if line.startswith("## "):
             flush()
             section = line[3:].strip()
+            if section.startswith("For "):
+                section = re.sub(r"\s*\([^)]*\)$", "", section)
             rows.append(item(section, status="section"))
             continue
         if line.strip() == "---":

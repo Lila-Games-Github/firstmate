@@ -1173,7 +1173,9 @@ EOF
     'eight team follow-ups with zero own decisions create no decision alert'
   assert_equals 8 "$(alerts '[.full_questions[] | select(.status == "waiting on UI (follow-up)")] | length')" \
     'team questions stay visible as follow-up rows'
-  printf '## Your decisions\n\n**A. Which release?** Pick one.\n\n**B. Which store?** Pick one for the release.\n\n## For UI\n\n**C. Which layout?** UI will decide.\n' > "$home/data/captain-questions.md"
+  printf '## Your decisions (each one is holding up work)\n\n**A. Which release?** Pick one.\n\n**B. Which store?** Pick one for the release.\n\n## For UI (follow-up owner)\n\n**C. Which layout?** UI will decide.\n' > "$home/data/captain-questions.md"
+  assert_equals 2 "$(alerts '[.full_questions[] | select(.status == "decision")] | length')" 'parenthetical captain heading retains decision status'
+  assert_equals 1 "$(alerts '[.full_questions[] | select(.status == "waiting on UI (follow-up)")] | length')" 'forwarded heading omits parenthetical'
   out=$(alerts '[.alerts[] | select(.nid == "decisions:summary") | .title + " :: " + .detail] | join("")')
   assert_contains "$out" '2 decisions waiting on you :: 2 open questions are waiting for your answer.' 'one summary row for open decisions'
   assert_contains "$out" 'Open the Questions page' 'decisions row says the action'

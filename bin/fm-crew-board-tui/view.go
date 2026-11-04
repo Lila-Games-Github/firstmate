@@ -507,6 +507,11 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 	view.SetYOffset(m.panelOffset(spec, innerWidth, height, owners))
 	accent := yellow
 	title := lipgloss.NewStyle().Foreground(accent).Bold(true).Render(spec.title)
+	if (spec.id == "bugs" || spec.id == "builds") && len(rows) > 0 {
+		if observed, err := time.Parse(time.RFC3339, m.data.Panels.CachedAt); err == nil {
+			title += "  " + lipgloss.NewStyle().Foreground(muted).Render("as of "+observed.Format("2006-01-02"))
+		}
+	}
 	if spec.id == "workers" {
 		counts := phaseCounts(m.data.liveWorkers())
 		var parts []string
@@ -611,7 +616,7 @@ func (m *app) View() tea.View {
 		Width(m.width - 2).Height(1).Render(label + m.input.View())
 	footer := m.notice
 	if footer == "" {
-		footer = "3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · y copy · i note · ? help · q quit"
+		footer = "3 questions tab · j/k rows · h/l sub-tabs · Enter expand · r reply · y copy · i note · ? help · q quit"
 	}
 	if m.data.GeneratedEpoch <= 0 {
 		footer = "STALE: last refresh unknown · " + footer
