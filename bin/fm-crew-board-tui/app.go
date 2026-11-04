@@ -15,16 +15,16 @@ import (
 type panelSpec struct{ id, title string }
 
 var pages = [][]panelSpec{
-	{{"workers", "WORKERS"}, {"ready", "READY FOR YOU"}, {"feed", "FEED"}},
-	{{"bugs", "BUGS"}, {"backlog", "BACKLOG"}},
+	{{"workers", "WORKERS"}, {"ready", "READY FOR YOU"}, {"alerts", "NOTIFICATIONS"}, {"feed", "FEED"}},
+	{{"bugs", "BUGS"}, {"backlog", "BACKLOG"}, {"routines", "DAILY ROUTINES"}, {"allowance", "AI ALLOWANCE"}},
 	{{"full_questions", "CAPTAIN QUESTIONS"}},
-	{{"landing_queue", "LANDING QUEUE"}, {"landings", "TODAY'S LANDINGS"}},
+	{{"test_queue", "TEST QUEUE"}},
+	{{"landing_queue", "LANDING QUEUE"}, {"landings", "TODAY'S LANDINGS"}, {"builds", "LATEST BUILDS"}},
 }
 
-var railPanels = []panelSpec{{"alerts", "NOTIFICATIONS"}, {"test_queue", "TEST QUEUE"},
-	{"builds", "LATEST BUILDS"}, {"routines", "DAILY ROUTINES"}, {"allowance", "AI ALLOWANCE"}}
+var railPanels = []panelSpec{{"phones", "DEVICES"}}
 
-var pageNames = []string{"NOW", "PLANNING", "QUESTIONS", "TESTING"}
+var pageNames = []string{"NOW", "PLANNING", "QUESTIONS", "TESTING", "LANDING"}
 var questionLabelPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+)\.`)
 
 type tickMsg time.Time
@@ -678,7 +678,7 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "q", "ctrl+c":
 			return m, tea.Quit
-		case "1", "2", "3", "4":
+		case "1", "2", "3", "4", "5":
 			m.setPage(int(key[0] - '1'))
 			if m.slide > 0 {
 				return m, motionTick()

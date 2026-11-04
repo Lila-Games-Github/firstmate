@@ -230,7 +230,6 @@ func (m *app) renderInfoRail(width, height int) string {
 		if len(lines) > 0 {
 			lines = append(lines, "")
 		}
-		lines = append(lines, lipgloss.NewStyle().Foreground(cyan).Bold(true).Render(spec.title))
 		rows := m.rawItems(spec.id)
 		if len(rows) == 0 {
 			lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render("  none"))
@@ -242,28 +241,21 @@ func (m *app) renderInfoRail(width, height int) string {
 					Render("  "+ansi.Truncate(row.Title, max(1, inner-2), "…")))
 				continue
 			}
-			line := "  " + row.Title
-			if row.Status != "" && row.Status != "hidden" {
-				line += " · " + row.Status
+			state := "disconnected"
+			if row.ADB == "device" {
+				state = "connected · " + row.Status
+			} else if row.ADB == "" && row.Status != "" {
+				state = row.Status
 			}
-			style := lipgloss.NewStyle().Foreground(white)
-			if spec.id == "test_queue" {
-				style = phaseColor(row.Status)
-			}
-			if row.Status == "hidden" {
-				style = lipgloss.NewStyle().Foreground(muted)
-			}
-			if spec.id == "alerts" && m.isNew(row) {
-				style = lipgloss.NewStyle().Foreground(red).Bold(true)
-				line = "  NEW " + row.Title
-			}
+			line := "  " + row.Title + " · " + state
+			style := phaseColor(row.Status)
 			index := len(lines)
 			lines = append(lines, style.Render(ansi.Truncate(line, inner, "…")))
 			hits[index] = row
-			if row.Detail != "" && spec.id != "test_queue" && row.Status != "hidden" {
-				first := strings.SplitN(row.Detail, "\n", 2)[0]
-				lines = append(lines, lipgloss.NewStyle().Foreground(muted).
-					Render(ansi.Truncate("    "+first, inner, "…")))
+			if row.Status == "busy" && row.Detail != "" {
+				activity := strings.TrimPrefix(strings.SplitN(row.Detail, "\n", 2)[0], "Testing: ")
+				hits[len(lines)] = row
+				lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render(ansi.Truncate("    "+activity, inner, "…")))
 			}
 		}
 	}
@@ -271,7 +263,7 @@ func (m *app) renderInfoRail(width, height int) string {
 	m.railOffset = min(m.railOffset, max(0, len(lines)-visible))
 	end := min(len(lines), m.railOffset+visible)
 	view := make([]string, 0, visible+2)
-	view = append(view, lipgloss.NewStyle().Foreground(yellow).Bold(true).Render("INFORMATION"))
+	view = append(view, lipgloss.NewStyle().Foreground(yellow).Bold(true).Render("DEVICES"))
 	m.railHit = map[int]item{}
 	for index := m.railOffset; index < end; index++ {
 		view = append(view, lines[index])
@@ -547,10 +539,10 @@ func (m *app) renderFocused(spec panelSpec, width, height int) string {
 func (m *app) helpOverlay(width, height int) string {
 	lines := []string{
 		"VIM KEYS", "j/k rows within the panel  h/l sub-tabs",
-		"Tab cycles  s info  Ctrl-n/p scroll",
+		"Tab cycles  s devices  Ctrl-n/p scroll",
 		"Enter/o expand  O focus selected worker pane",
 		"za/Space collapse  Alt-1..9 select",
-		"1/2/3/4 pages  / filter  n next notification",
+		"1/2/3/4/5 pages  / filter  n next notification",
 		"Ctrl-f/b scroll detail  r reply  y copy question  i/: note",
 		"q/:q quit  ? close help",
 	}
