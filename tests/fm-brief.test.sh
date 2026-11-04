@@ -396,6 +396,9 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+test-infra on a no-mistakes ship brief|brief-refused-b5 some-proj --mode no-mistakes --test-infra|--test-infra applies only to local-only ship briefs
+test-infra on a direct-PR ship brief|brief-refused-b6 some-proj --mode direct-PR --test-infra|--test-infra applies only to local-only ship briefs
+test-infra on a scout brief|brief-refused-b7 some-proj --scout --test-infra|--test-infra applies only to local-only ship briefs
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
@@ -607,6 +610,23 @@ assert "schema=fm-full-suite.v1\nsha=<full tested SHA>\nfailures=0\n" in brief
 assert "fm-test-service.py submit" not in brief
 PY
   pass "fm-brief.sh: green-final-head brief names its task receipt and sanctioned producer"
+}
+
+test_test_infra_flag_sets_queue_priority() {
+  local home brief plain
+  home="$TMP_ROOT/test-infra-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" infra-receipt some-proj --mode local-only --test-infra >/dev/null \
+    || fail "test-infra brief did not scaffold"
+  brief="$home/data/infra-receipt/brief.md"
+  assert_grep "--receipt <full-suite-receipt> --priority infra" "$brief" \
+    "test-infra brief did not tell the worker to join with --priority infra"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" ordinary-join some-proj --mode local-only >/dev/null \
+    || fail "ordinary brief did not scaffold"
+  plain="$home/data/ordinary-join/brief.md"
+  assert_no_grep "--priority infra" "$plain" "ordinary brief gained the test-infra join priority"
+  pass "fm-brief.sh: --test-infra tells the worker to join the landing queue with --priority infra"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -1865,6 +1885,7 @@ test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_green_final_head_names_service_receipt
+test_test_infra_flag_sets_queue_priority
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

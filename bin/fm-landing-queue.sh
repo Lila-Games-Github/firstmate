@@ -5,26 +5,36 @@
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--gate-receipt <name>=<file>]...
 #          [--gate <name>] [--reason <text>] [--owner-task <task-id>]
-#          [--place <number>]
+#          [--place <number>] [--priority infra]
 # FM_HOME must explicitly select the owning home; FM_STATE_OVERRIDE and
 # FM_DATA_OVERRIDE optionally select its state and data directories.
 # Without --landing-branch, use this task's recorded landing_branch, else the
 # repository's origin/HEAD, main, or master. All branches must be local refs.
 #
-# ready joins at the back only with --branch, --head, --target, a green exact-head
-# full-suite --receipt, and one --gate-receipt for each configured landing gate.
+# ready joins at the back, or directly behind the front with --priority infra,
+# only with --branch, --head, --target, a green exact-head full-suite --receipt,
+# and one --gate-receipt for each configured landing gate.
 # The tested target must be an ancestor of the current landing tip and head.
 # Each gate receipt is four lines: schema=fm-landing-gate.v1, gate=<name>,
 # sha=<full head SHA>, target=<full target SHA>. A failed car must pass these
 # checks again before re-enrolling. Active cars use ready without a receipt to
 # acknowledge their one front-of-line rebase.
+# ready also accepts --priority infra, for test-infrastructure work the captain's
+# standing rule proves in isolation and lands ahead of product work. Such a car
+# admits behind the current front car and the unbroken run of infra cars that
+# directly follows it, ahead of every waiting non-infra car; an infra car left
+# behind product work by a requeue or move is not counted, and the front car is
+# never displaced.
+# The priority is recorded durably on the row, shown by status as priority=-
+# or priority=infra, and kept across a fail/ready re-enrollment unless that
+# later ready repeats --priority with a different value.
 # A head already contained in the landing tip has nothing to land and is refused.
 # After rebasing, repeat ready with --target from status to acknowledge the new
 # base. The target must still be current and an ancestor of the submitted head.
 # status reconciles the whole queue and prints this car as key=value lines:
 # place (bottom=1), target_ref, target_sha, rebase_from, head, status, receipt,
-# and reason (a failed car's recorded reason or this invocation's red-receipt
-# reason, else '-').
+# reason (a failed car's recorded reason or this invocation's red-receipt
+# reason, else '-'), and priority ('-' or infra).
 # Use git rebase --onto <target_sha> <rebase_from> when the front base changes,
 # retaining only this car's commits, then ready --target before the last check.
 # Only the bottom car prepares final evidence on the live landing tip. Upper
@@ -61,9 +71,11 @@
 # only for the current head and target.
 # fail removes a car from the active train with --reason, a single line without
 # control characters other than '-', recorded for later status calls. A later
-# ready with the same id and branch re-enrolls it at the back. Landed ids stay
-# terminal. A missing branch whose recorded head is in the landing tip is landed;
-# any other missing branch becomes a failed car on reconciliation.
+# ready with the same id and branch re-enrolls it at its priority position,
+# keeping its recorded priority unless that ready repeats --priority with a
+# different value. Landed ids stay terminal. A missing branch whose recorded
+# head is in the landing tip is landed; any other missing branch becomes a
+# failed car on reconciliation.
 # move is for firstmate only. It places an active waiting car at --place in the
 # active train (front=1), preserving every row's state and evidence. Place 1
 # and moving the current front car are refused so its running check is untouched.
@@ -78,8 +90,11 @@
 # identified by the canonical common Git directory and landing branch. Rows in
 # append order hold id, branch, head, state, acknowledged base, receipt file,
 # receipt target, last notified event hash, failure reason (failed rows only),
-# and owner task id. Nine-field legacy rows resolve their owner on refresh.
-# '-' means absent. Immutable
+# owner task id, and admission priority ('-' or infra). Nine-field legacy rows
+# resolve their owner on refresh; ten-field legacy rows default priority to '-'.
+# '-' means absent. Row order is queue order: assignment walks rows top to
+# bottom and gives each active row the next place, so an admitted infra car's
+# row sits after the front row and its contiguous infra run. Immutable
 # receipt snapshots live beside it. Queue writes are atomic and serialized by
 # state/.landing-queue-<hash>.lock using the shared recoverable lock helpers.
 # Every invocation refreshes live refs, retires heads already in the landing tip,
@@ -113,7 +128,7 @@ shift 2
 case "$ACTION" in ready|status|receipt|gate|fail|baseline|move|reconcile) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
-PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE='' OWNER_TASK='' PLACE=''
+PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE='' OWNER_TASK='' PLACE='' PRIORITY=''
 GATE_RECEIPTS=()
 while [ "$#" -gt 0 ]; do
   [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 requires a value"
@@ -129,12 +144,15 @@ while [ "$#" -gt 0 ]; do
     --gate) GATE=$2 ;;
     --gate-receipt) GATE_RECEIPTS[${#GATE_RECEIPTS[@]}]=$2 ;;
     --place) PLACE=$2 ;;
+    --priority) PRIORITY=$2 ;;
     *) die "unknown queue option $1" ;;
   esac
   shift 2
 done
 [ -n "$PROJECT" ] || die '--project is required'
 [ -z "$OWNER_TASK" ] || [[ "$OWNER_TASK" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid owner task id'
+[ -z "$PRIORITY" ] || [ "$PRIORITY" = infra ] || die 'invalid --priority value'
+[ -z "$PRIORITY" ] || [ "$ACTION" = ready ] || die '--priority is only valid for ready'
 valid_reason() { [ -n "$1" ] && [ "$1" != - ] && ! [[ "$1" =~ [[:cntrl:]] ]]; }
 [ -z "$REASON" ] || valid_reason "$REASON" || die '--reason must be one line without control characters'
 COMMON=$(git -C "$PROJECT" rev-parse --git-common-dir) || die 'project is not a Git checkout'
@@ -233,7 +251,7 @@ trap cleanup EXIT
 trap 'trap "" TERM INT HUP; exit 143' TERM INT HUP
 fm_lock_acquire_wait "$LOCK"
 FILE="$DIR/queue"
-ids=() branches=() heads=() states=() bases=() receipts=() targets=() notified=() reasons=() owners=()
+ids=() branches=() heads=() states=() bases=() receipts=() targets=() notified=() reasons=() owners=() priorities=()
 count=0 found=-1 joined=0 requeue_reason='' waiting=0
 if [ -e "$FILE" ]; then
   [ -f "$FILE" ] && [ ! -L "$FILE" ] || die 'invalid queue snapshot'
@@ -241,12 +259,14 @@ if [ -e "$FILE" ]; then
     IFS= read -r schema && [ "$schema" = fm-landing-queue.v1 ] || die 'invalid queue schema'
     IFS= read -r repository && [ "$repository" = "$COMMON" ] || die 'queue repository mismatch'
     IFS= read -r landing && [ "$landing" = "$LANDING" ] || die 'queue landing branch mismatch'
-    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason row_owner extra; do
+    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason row_owner row_priority extra; do
       [[ "$row_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue task id'
       valid_branch "$row_branch" || die 'invalid queue branch'
       [ -n "$row_notified" ] && [ -n "$row_reason" ] && [ -z "$extra" ] || die 'incomplete queue row'
       row_owner=${row_owner:--}
       [ "$row_owner" = - ] || [[ "$row_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue owner task id'
+      row_priority=${row_priority:--}
+      case "$row_priority" in -|infra) ;; *) die 'invalid queue priority' ;; esac
       [[ "$row_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
         && [[ "$row_base" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die 'invalid queue commit'
       case "$row_receipt" in
@@ -264,7 +284,7 @@ if [ -e "$FILE" ]; then
       done
       ids[count]=$row_id branches[count]=$row_branch heads[count]=$row_head states[count]=$row_state
       bases[count]=$row_base receipts[count]=$row_receipt targets[count]=$row_target notified[count]=$row_notified
-      reasons[count]=$row_reason owners[count]=$row_owner
+      reasons[count]=$row_reason owners[count]=$row_owner priorities[count]=$row_priority
       if [ "$row_id" = "$ID" ]; then found=$count; fi
       count=$((count + 1))
     done
@@ -304,8 +324,8 @@ save() {
     for ((i=0; i<count; i++)); do
       reason=-
       [ "${states[i]}" != failed ] || reason=${reasons[i]}
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
-        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason" "${owners[i]}"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
+        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason" "${owners[i]}" "${priorities[i]}"
     done
   } > "$TMP"
   mv -f -- "$TMP" "$FILE"
@@ -381,6 +401,7 @@ if [ "$ACTION" = ready ]; then
     ids[count]=$ID branches[count]=$BRANCH heads[count]=$HEAD states[count]=active
     bases[count]=$(git -C "$PROJECT" merge-base "$HEAD" "$TIP") || die 'task and landing branch have no common base'
     receipts[count]=- targets[count]=- notified[count]=- reasons[count]=-
+    priorities[count]=${PRIORITY:--}
     if [ -n "$OWNER_TASK" ]; then
       owners[count]=$OWNER_TASK
     elif owner=$(owner_for_branch "$BRANCH"); then
@@ -395,17 +416,19 @@ if [ "$ACTION" = ready ]; then
     [ "${branches[found]}" = "$BRANCH" ] || die 'cannot change a queued task branch'
     if [ "${states[found]}" = failed ]; then
       ! git -C "$PROJECT" merge-base --is-ancestor "$HEAD" "$TIP" || die 'nothing to land: head is already in the landing branch'
-      moved_owner=${owners[found]}
+      moved_owner=${owners[found]} moved_priority=${priorities[found]}
       for ((i=found; i<count-1; i++)); do
         ids[i]=${ids[i+1]} branches[i]=${branches[i+1]} heads[i]=${heads[i+1]}
         states[i]=${states[i+1]} bases[i]=${bases[i+1]} receipts[i]=${receipts[i+1]}
         targets[i]=${targets[i+1]} notified[i]=${notified[i+1]} reasons[i]=${reasons[i+1]} owners[i]=${owners[i+1]}
+        priorities[i]=${priorities[i+1]}
       done
       found=$((count - 1))
       ids[found]=$ID branches[found]=$BRANCH heads[found]=$HEAD states[found]=active
       bases[found]=$(git -C "$PROJECT" merge-base "$HEAD" "$TIP") || die 'task and landing branch have no common base'
       receipts[found]=- targets[found]=- notified[found]=- reasons[found]=-
       owners[found]=${OWNER_TASK:-$moved_owner}
+      priorities[found]=${PRIORITY:-$moved_priority}
       joined=1
     fi
   fi
@@ -451,8 +474,56 @@ assign() {
     ref="refs/heads/${branches[i]}" sha=${heads[i]}
   done
 }
+# Swap a car's full row with its active neighbor, place by place, until it
+# reaches <target place>. assign() recomputes places after every swap. Shared
+# by the move command and by infra-priority admission below.
+shift_car_to_place() { # <target place>
+  local target=$1 neighbor saved
+  while [ "${places[found]}" -ne "$target" ]; do
+    neighbor=-1
+    if [ "${places[found]}" -gt "$target" ]; then
+      for ((i=found-1; i>=0; i--)); do
+        [ "${states[i]}" != active ] || { neighbor=$i; break; }
+      done
+    else
+      for ((i=found+1; i<count; i++)); do
+        [ "${states[i]}" != active ] || { neighbor=$i; break; }
+      done
+    fi
+    [ "$neighbor" -ge 0 ] || die 'cannot locate adjacent active car'
+    saved=${ids[found]}; ids[found]=${ids[neighbor]}; ids[neighbor]=$saved
+    saved=${branches[found]}; branches[found]=${branches[neighbor]}; branches[neighbor]=$saved
+    saved=${heads[found]}; heads[found]=${heads[neighbor]}; heads[neighbor]=$saved
+    saved=${states[found]}; states[found]=${states[neighbor]}; states[neighbor]=$saved
+    saved=${bases[found]}; bases[found]=${bases[neighbor]}; bases[neighbor]=$saved
+    saved=${receipts[found]}; receipts[found]=${receipts[neighbor]}; receipts[neighbor]=$saved
+    saved=${targets[found]}; targets[found]=${targets[neighbor]}; targets[neighbor]=$saved
+    saved=${notified[found]}; notified[found]=${notified[neighbor]}; notified[neighbor]=$saved
+    saved=${reasons[found]}; reasons[found]=${reasons[neighbor]}; reasons[neighbor]=$saved
+    saved=${owners[found]}; owners[found]=${owners[neighbor]}; owners[neighbor]=$saved
+    saved=${priorities[found]}; priorities[found]=${priorities[neighbor]}; priorities[neighbor]=$saved
+    found=$neighbor
+    assign
+  done
+}
 assign
 if [ "$joined" -eq 1 ]; then
+  if [ "${priorities[found]}" = infra ] && [ "${places[found]}" -gt 1 ]; then
+    infra_ahead=0
+    while :; do
+      run_match=0
+      for ((i=0; i<count; i++)); do
+        [ "$i" != "$found" ] || continue
+        [ "${states[i]}" = active ] || continue
+        [ "${places[i]}" -eq "$((infra_ahead + 2))" ] || continue
+        [ "${priorities[i]}" = infra ] && run_match=1
+        break
+      done
+      [ "$run_match" -eq 1 ] || break
+      infra_ahead=$((infra_ahead + 1))
+    done
+    shift_car_to_place "$((infra_ahead + 2))"
+  fi
   bases[found]=$(git -C "$PROJECT" merge-base "$HEAD" "${target_shas[found]}") || die 'task and target have no common base'
 fi
 
@@ -535,31 +606,7 @@ case "$ACTION" in
     admitted_target=$(pre_target "$ID") || die 'car has no ready admission evidence'
     git -C "$PROJECT" merge-base --is-ancestor "$admitted_target" "${heads[found]}" \
       || die 'car no longer contains its admitted target'
-    while [ "${places[found]}" -ne "$PLACE" ]; do
-      neighbor=-1
-      if [ "${places[found]}" -gt "$PLACE" ]; then
-        for ((i=found-1; i>=0; i--)); do
-          [ "${states[i]}" != active ] || { neighbor=$i; break; }
-        done
-      else
-        for ((i=found+1; i<count; i++)); do
-          [ "${states[i]}" != active ] || { neighbor=$i; break; }
-        done
-      fi
-      [ "$neighbor" -ge 0 ] || die 'cannot locate adjacent active car'
-      saved=${ids[found]}; ids[found]=${ids[neighbor]}; ids[neighbor]=$saved
-      saved=${branches[found]}; branches[found]=${branches[neighbor]}; branches[neighbor]=$saved
-      saved=${heads[found]}; heads[found]=${heads[neighbor]}; heads[neighbor]=$saved
-      saved=${states[found]}; states[found]=${states[neighbor]}; states[neighbor]=$saved
-      saved=${bases[found]}; bases[found]=${bases[neighbor]}; bases[neighbor]=$saved
-      saved=${receipts[found]}; receipts[found]=${receipts[neighbor]}; receipts[neighbor]=$saved
-      saved=${targets[found]}; targets[found]=${targets[neighbor]}; targets[neighbor]=$saved
-      saved=${notified[found]}; notified[found]=${notified[neighbor]}; notified[neighbor]=$saved
-      saved=${reasons[found]}; reasons[found]=${reasons[neighbor]}; reasons[neighbor]=$saved
-      saved=${owners[found]}; owners[found]=${owners[neighbor]}; owners[neighbor]=$saved
-      found=$neighbor
-      assign
-    done
+    shift_car_to_place "$PLACE"
     ;;
   baseline)
     [ -n "$RECEIPT" ] || die 'baseline requires --receipt'
@@ -622,16 +669,17 @@ if [ -n "$requeue_reason" ] && [ "$found" -ge 0 ] && [ "${places[found]}" -eq 1 
   done
   if [ "$waiting" -eq 1 ]; then
     moved_id=${ids[found]} moved_branch=${branches[found]} moved_owner=${owners[found]}
-    moved_head=${heads[found]} moved_base=${bases[found]}
+    moved_head=${heads[found]} moved_base=${bases[found]} moved_priority=${priorities[found]}
     for ((i=found; i<count-1; i++)); do
       ids[i]=${ids[i+1]} branches[i]=${branches[i+1]} heads[i]=${heads[i+1]}
       states[i]=${states[i+1]} bases[i]=${bases[i+1]} receipts[i]=${receipts[i+1]}
       targets[i]=${targets[i+1]} notified[i]=${notified[i+1]} reasons[i]=${reasons[i+1]} owners[i]=${owners[i+1]}
+      priorities[i]=${priorities[i+1]}
     done
     found=$((count - 1))
     ids[found]=$moved_id branches[found]=$moved_branch heads[found]=$moved_head
     states[found]=active bases[found]=$moved_base receipts[found]=- targets[found]=-
-    notified[found]=- reasons[found]=- owners[found]=$moved_owner
+    notified[found]=- reasons[found]=- owners[found]=$moved_owner priorities[found]=$moved_priority
     assign
   elif [ "$ACTION" = gate ]; then
     die "$requeue_reason; no other car is waiting, so fix the branch, rebase and retest on a new head"
@@ -726,3 +774,4 @@ printf 'queue=%s\ntask=%s\nbranch=%s\nhead=%s\nlanding_branch=%s\ntip=%s\nplace=
   "${target_refs[found]}" "${target_shas[found]}" "${bases[found]}" "${statuses[found]}"
 if [ "${receipts[found]}" = - ]; then printf 'receipt=-\n'; else printf 'receipt=%s/%s\n' "$DIR" "${receipts[found]}"; fi
 printf 'reason=%s\n' "${reasons[found]}"
+printf 'priority=%s\n' "${priorities[found]}"
