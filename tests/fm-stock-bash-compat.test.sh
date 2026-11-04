@@ -40,6 +40,7 @@ case "${0##*/}" in
   fm-landing-queue.test.sh) key=landing; count=8 ;;
   fm-worker-timing.test.sh) key=worker-timing; count=6 ;;
   fm-merge-local.test.sh) key=merge; count=18 ;;
+  fm-worker-doorbell.test.sh) key=doorbell; count=5 ;;
   *) exit 2 ;;
 esac
 if [ "${FM_TEST_HANG_CONSUMER:-}" = "$key" ]; then
@@ -69,7 +70,8 @@ SH
     fm-learning-candidate.test.sh \
     fm-landing-queue.test.sh \
     fm-worker-timing.test.sh \
-    fm-merge-local.test.sh
+    fm-merge-local.test.sh \
+    fm-worker-doorbell.test.sh
   do
     cp "$tmp/tests/consumer.sh" "$tmp/tests/$file"
   done
@@ -90,6 +92,7 @@ run_fixture() {
     FM_STOCK_BASH_LANDING_TIMEOUT=1 \
     FM_STOCK_BASH_WORKER_TIMING_TIMEOUT=1 \
     FM_STOCK_BASH_MERGE_TIMEOUT=1 \
+    FM_STOCK_BASH_DOORBELL_TIMEOUT=1 \
     "$@" /bin/bash bin/fm-stock-bash-compat.sh 2>&1)
 }
 
@@ -122,8 +125,8 @@ SH
     FM_TEST_TIMEOUT_RECORD="$record" \
     /bin/bash bin/fm-stock-bash-compat.sh 2>&1) || rc=$?
   expect_code 0 "$rc" "default stock Bash compatibility fixture completes"
-  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 10 ] \
-    || fail "each of the ten stock Bash consumers needs one passing verdict"
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 11 ] \
+    || fail "each of the eleven stock Bash consumers needs one passing verdict"
   assert_contains "$out" "ok - fixture assertion 1" \
     "default oversized route completes through the public compatibility wrapper"
   assert_present "$record" "default oversized route did not receive a timeout bound"
@@ -151,7 +154,7 @@ test_every_hung_consumer_is_named_and_streamed() {
       || fail "$key must emit exactly one explicit verdict"
     assert_contains "$out" "one or more stock macOS Bash consumers failed" \
       "$key timeout produces the final compatibility verdict"
-    if [ "$key" != merge ]; then
+    if [ "$key" != merge ] && [ "$key" != doorbell ]; then
       assert_contains "$out" "later consumer completed" \
         "$key timeout does not suppress the later PR 19 consumer"
     fi
@@ -166,6 +169,7 @@ learning|PR 18 learning-candidate NUL enumeration
 landing|landing-queue test farm resolve and watcher sweep
 worker-timing|worker timing status and teardown record
 merge|PR 19 local-merge branch resolution
+doorbell|worker gate and job doorbells
 EOF
   pass "stock Bash compatibility: every hung consumer is named, streamed, and independently bounded"
 }

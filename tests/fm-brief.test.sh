@@ -231,6 +231,8 @@ test_ship_modes_generate_clean_briefs() {
       "$id: ship brief missing the durable long-suite and evidence snapshot contract"
     assert_grep "reattach through that identifier instead of re-running the suite" "$brief" \
       "$id: long-suite contract lost the durable reattachable job shape"
+    assert_grep 'fm-procevent-worker-job.sh arm' "$brief" \
+      "$id: long-suite contract omitted the background-job completion observer"
     assert_grep "full suite, phone play-through, applicable benchmark" "$brief" \
       "$id: long-suite contract lost pre-queue validation"
     assert_grep "quick test and short phone check" "$brief" \

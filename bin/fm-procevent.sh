@@ -592,6 +592,12 @@ publish_result() {  # <result-file>
   fm_procevent_source_id_valid "$id" || return 1
   adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
   [ -n "$adapter" ] || return 1
+  # Worker jobs own bounded retry and once-per-result failure escalation.
+  # Retry before acquiring the source lock: autohandle records handled itself.
+  if [ "$adapter" = worker-job ]; then
+    adapter_autohandle "$adapter" "$id" "$result"
+    case $? in 0|75) return 1 ;; esac
+  fi
   line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || return 1
   fm_procevent_source_lock_acquire "$id" || return 1
   if ! fm_procevent_is_handled "$STATE" "$id" "$seq"; then

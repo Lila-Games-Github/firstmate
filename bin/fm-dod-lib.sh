@@ -320,6 +320,7 @@ fm_long_suite_block() {
   cat <<'EOF'
 # Long-suite and evidence snapshot contract
 When the definition of done requires a long-running suite, run it as a durable job that outlives one execution session: keep its progress and its identifier outside the process that started it (a log path plus a recorded job or session identifier), and reattach through that identifier instead of re-running the suite.
+For your own background job outside the test service, register a completion observer with `FM_HOME=<firstmate-home> <firstmate-code-root>/bin/fm-procevent-worker-job.sh arm <task-id> <job-name> -- <blocking-observer-command> [args...]`; that command must wait for the existing job to end and be safe to rerun after a watcher restart.
 A required suite that is still running, or queued behind a shared suite lock, is work under way rather than a stalled task: report it as the declared external wait rule 4 defines, naming its identifier and what it is waiting on, and never abandon, duplicate, or restart it because one command call was killed, timed out, or hit an execution-session limit.
 For a test-service request, append `paused: test-service request=<request-id>` and end your turn after submission; resume on its durable completion message, without polling status or holding a waiter session.
 Evidence must describe one snapshot: every capture and artifact you cite and the final suite receipt must all name the same commit.
