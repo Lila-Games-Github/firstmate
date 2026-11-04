@@ -2246,6 +2246,17 @@ while :; do
   # published while this watcher was between cycles.
   procevent_surface_queued
 
+  # Parked no-mistakes gates belong to the worker. The classifier proves the
+  # run identity, and the inbox writer deduplicates the same gate on each poll.
+  if [ "$(age_of "$STATE/.last-worker-gate-scan")" -ge 30 ]; then
+    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-worker-gate-doorbell.sh" scan >/dev/null 2>&1; then
+      touch "$STATE/.last-worker-gate-scan"
+    else
+      wake "check: worker-gate-doorbell-delivery"
+    fi
+  fi
+
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
