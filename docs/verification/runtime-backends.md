@@ -2154,7 +2154,7 @@ bash -c '. bin/fm-backend.sh; fm_backend_agent_process herdr default:wCR:p2'
 ```
 
 ```text
-342476	/var/home/sanchith/.treehouse/firstmate-da2b8e/1/firstmate
+342476	/var/home/<user>/.treehouse/firstmate-da2b8e/1/firstmate
 ```
 
 On tmux 3.7c, on a private server whose pane shell works in `/tmp` and whose agent-named child works in a scratch directory, the reading named the child's directory, and a window absent from the session gave no reading at all:
@@ -2179,23 +2179,23 @@ This evidence supports `bin/fm-teardown.sh`'s alias resolution, which reads the 
 From a scratch git repo, `treehouse get --lease` printed the leased worktree path and recorded the same spelling in the pool state:
 
 ```text
-/home/sanchith/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test
+/home/<user>/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test
 ```
 
 Returning the physical (`pwd -P`) spelling of that same directory was refused, proving the match is by string, not by directory identity:
 
 ```sh
-treehouse return --force /var/home/sanchith/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test
+treehouse return --force /var/home/<user>/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test
 ```
 
 ```text
-worktree /var/home/sanchith/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test is not managed by treehouse
+worktree /var/home/<user>/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test is not managed by treehouse
 ```
 
 Returning the recorded `/home` spelling succeeded, and `treehouse status --json` (run from the project directory) exposed that recorded spelling in each record's `path` field:
 
 ```text
-[{"name":"1","path":"/home/sanchith/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test","status":"leased",...}]
+[{"name":"1","path":"/home/<user>/.treehouse/thproj-alias-test-66bdde/1/thproj-alias-test","status":"leased",...}]
 ```
 
 The portable regression pinning teardown's alias resolution and its refusal of genuinely different directories is in `tests/fm-teardown.test.sh` (`test_treehouse_path_alias_of_same_dir_returns_with_recorded_spelling` and `test_treehouse_genuinely_different_path_still_refuses`).
@@ -2211,24 +2211,24 @@ Read from the project directory, slot 1 (holding a live crewmate) reads `in-use`
 The output is recorded whole, because two of its fields are load-bearing for the reader: `path` is how a record is matched to the slot being asked about, and `processes` is the live reading `status` is derived from.
 
 ```sh
-cd /var/home/sanchith/LILA/firstmate && treehouse status --json
+cd /var/home/<user>/LILA/firstmate && treehouse status --json
 ```
 
 ```text
-[{"name":"1","path":"/home/sanchith/.treehouse/firstmate-da2b8e/1/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":486468,"name":"bash"},{"pid":1477527,"name":"bash"},{"pid":1544621,"name":"bash"},{"pid":1612868,"name":"bash"},{"pid":1686386,"name":"bash"},{"pid":2389370,"name":"bash"},{"pid":3404570,"name":"fish"},{"pid":3406954,"name":"claude"},{"pid":3516694,"name":"bash"},{"pid":3666347,"name":"bash"},{"pid":3998400,"name":"bash"},{"pid":3998402,"name":"no-mistakes"},{"pid":4049074,"name":"sleep"},{"pid":4052401,"name":"sleep"},{"pid":4055092,"name":"sleep"},{"pid":4055434,"name":"sleep"},{"pid":4055436,"name":"sleep"},{"pid":4055542,"name":"sleep"},{"pid":4055568,"name":"sleep"},{"pid":4056073,"name":"sleep"}]},{"name":"2","path":"/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"3","path":"/home/sanchith/.treehouse/firstmate-da2b8e/3/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"4","path":"/home/sanchith/.treehouse/firstmate-da2b8e/4/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"5","path":"/home/sanchith/.treehouse/firstmate-da2b8e/5/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"6","path":"/home/sanchith/.treehouse/firstmate-da2b8e/6/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"7","path":"/home/sanchith/.treehouse/firstmate-da2b8e/7/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]
+[{"name":"1","path":"/home/<user>/.treehouse/firstmate-da2b8e/1/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":486468,"name":"bash"},{"pid":1477527,"name":"bash"},{"pid":1544621,"name":"bash"},{"pid":1612868,"name":"bash"},{"pid":1686386,"name":"bash"},{"pid":2389370,"name":"bash"},{"pid":3404570,"name":"fish"},{"pid":3406954,"name":"claude"},{"pid":3516694,"name":"bash"},{"pid":3666347,"name":"bash"},{"pid":3998400,"name":"bash"},{"pid":3998402,"name":"no-mistakes"},{"pid":4049074,"name":"sleep"},{"pid":4052401,"name":"sleep"},{"pid":4055092,"name":"sleep"},{"pid":4055434,"name":"sleep"},{"pid":4055436,"name":"sleep"},{"pid":4055542,"name":"sleep"},{"pid":4055568,"name":"sleep"},{"pid":4056073,"name":"sleep"}]},{"name":"2","path":"/home/<user>/.treehouse/firstmate-da2b8e/2/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"3","path":"/home/<user>/.treehouse/firstmate-da2b8e/3/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"4","path":"/home/<user>/.treehouse/firstmate-da2b8e/4/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"5","path":"/home/<user>/.treehouse/firstmate-da2b8e/5/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"6","path":"/home/<user>/.treehouse/firstmate-da2b8e/6/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"7","path":"/home/<user>/.treehouse/firstmate-da2b8e/7/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]
 ```
 
-Note the spelling of `path`: treehouse records the `/home` alias it was launched through, while the task metas of the same slots record the physical `/var/home` path (`worktree=/var/home/sanchith/.treehouse/firstmate-da2b8e/1/firstmate`).
+Note the spelling of `path`: treehouse records the `/home` alias it was launched through, while the task metas of the same slots record the physical `/var/home` path (`worktree=/var/home/<user>/.treehouse/firstmate-da2b8e/1/firstmate`).
 Matching a record to a slot by string therefore finds nothing on this host, which is why `fm_slot_path_matches` compares both sides as physical directories and only falls back to the pool-relative `<pool>/<slot>/<repo>` identity when a reported spelling no longer resolves at all.
 
 Reading the same pool from INSIDE slot 2 makes the `treehouse status` process itself the live process there, and that slot flips to `in-use` with the reading process listed in its own `processes` array:
 
 ```sh
-cd /var/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate && treehouse status --json
+cd /var/home/<user>/.treehouse/firstmate-da2b8e/2/firstmate && treehouse status --json
 ```
 
 ```text
-[{"name":"1","path":"/home/sanchith/.treehouse/firstmate-da2b8e/1/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":486468,"name":"bash"},{"pid":1477527,"name":"bash"},{"pid":1544621,"name":"bash"},{"pid":1612868,"name":"bash"},{"pid":1686386,"name":"bash"},{"pid":2389370,"name":"bash"},{"pid":3404570,"name":"fish"},{"pid":3406954,"name":"claude"},{"pid":3516694,"name":"bash"},{"pid":3666347,"name":"bash"},{"pid":3998400,"name":"bash"},{"pid":3998402,"name":"no-mistakes"},{"pid":4055434,"name":"sleep"},{"pid":4055436,"name":"sleep"},{"pid":4055542,"name":"sleep"},{"pid":4055568,"name":"sleep"},{"pid":4056073,"name":"sleep"},{"pid":4056106,"name":"sleep"},{"pid":4056204,"name":"sleep"},{"pid":4056209,"name":"sleep"}]},{"name":"2","path":"/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":4056463,"name":"bash"},{"pid":4056631,"name":"treehouse"}]},{"name":"3","path":"/home/sanchith/.treehouse/firstmate-da2b8e/3/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"4","path":"/home/sanchith/.treehouse/firstmate-da2b8e/4/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"5","path":"/home/sanchith/.treehouse/firstmate-da2b8e/5/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"6","path":"/home/sanchith/.treehouse/firstmate-da2b8e/6/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"7","path":"/home/sanchith/.treehouse/firstmate-da2b8e/7/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]
+[{"name":"1","path":"/home/<user>/.treehouse/firstmate-da2b8e/1/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":486468,"name":"bash"},{"pid":1477527,"name":"bash"},{"pid":1544621,"name":"bash"},{"pid":1612868,"name":"bash"},{"pid":1686386,"name":"bash"},{"pid":2389370,"name":"bash"},{"pid":3404570,"name":"fish"},{"pid":3406954,"name":"claude"},{"pid":3516694,"name":"bash"},{"pid":3666347,"name":"bash"},{"pid":3998400,"name":"bash"},{"pid":3998402,"name":"no-mistakes"},{"pid":4055434,"name":"sleep"},{"pid":4055436,"name":"sleep"},{"pid":4055542,"name":"sleep"},{"pid":4055568,"name":"sleep"},{"pid":4056073,"name":"sleep"},{"pid":4056106,"name":"sleep"},{"pid":4056204,"name":"sleep"},{"pid":4056209,"name":"sleep"}]},{"name":"2","path":"/home/<user>/.treehouse/firstmate-da2b8e/2/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":4056463,"name":"bash"},{"pid":4056631,"name":"treehouse"}]},{"name":"3","path":"/home/<user>/.treehouse/firstmate-da2b8e/3/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"4","path":"/home/<user>/.treehouse/firstmate-da2b8e/4/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"5","path":"/home/<user>/.treehouse/firstmate-da2b8e/5/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"6","path":"/home/<user>/.treehouse/firstmate-da2b8e/6/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]},{"name":"7","path":"/home/<user>/.treehouse/firstmate-da2b8e/7/firstmate","status":"available","lease_id":"","lease_holder":"","leased_at":null,"processes":[]}]
 ```
 
 That is why the status read is always taken from the project directory, never from the slot being asked about.
@@ -2237,12 +2237,12 @@ Any process working inside a slot holds it, not only a worker: on 2026-10-23, wi
 This is the reading `bin/fm-bootstrap.sh`'s `crew_slot_hold` relies on when it re-claims the freed slot of a correctly placed worker with a process kept inside it.
 
 ```sh
-cd /var/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate && (sleep 20 &)
-cd /var/home/sanchith/LILA/firstmate && sleep 1 && treehouse status --json
+cd /var/home/<user>/.treehouse/firstmate-da2b8e/2/firstmate && (sleep 20 &)
+cd /var/home/<user>/LILA/firstmate && sleep 1 && treehouse status --json
 ```
 
 ```text
-{"name":"2","path":"/home/sanchith/.treehouse/firstmate-da2b8e/2/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":554382,"name":"sleep"}]
+{"name":"2","path":"/home/<user>/.treehouse/firstmate-da2b8e/2/firstmate","status":"in-use","lease_id":"","lease_holder":"","leased_at":null,"processes":[{"pid":554382,"name":"sleep"}]
 ```
 
 The portable regressions pinning the freed-slot report, its silence on `in-use`, its silence when the status read fails, and the alias match above are in `tests/fm-bootstrap.test.sh` (`test_recorded_slot_that_reads_free_is_reported` and `test_recorded_slot_is_identified_through_a_path_alias`).
