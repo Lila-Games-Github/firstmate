@@ -66,13 +66,14 @@ kind=ship
 mode=no-mistakes
 routing_instance_id=legacy-one
 EOF
+printf '%s\n' '{broken routing row' > "$LAB/data/routing-ledger.jsonl"
 python3 "$TOOL" record --meta "$LAB/state/legacy.meta" --state "$LAB/state" \
   --data "$LAB/data" --id legacy --outcome landed --method pr-merge
 one=$(find "$LAB/data/worker-timing" -name '*.jsonl' -print -quit)
 jq -e '.task_id == "legacy" and .wall_seconds == null and .phase_seconds == null
   and .timing_unknown_reason == "start time absent"' "$one" >/dev/null \
   || fail "missing start was counted as zero"
-pass "missing start stays unknown"
+pass "missing start stays unknown despite malformed routing history"
 
 printf '%s\n' '{"schema":1,"task_id":"historical","instance_id":"old","project":"/tmp/p","kind":"ship","delivery_mode":"no-mistakes","routing":{"harness":"pi","model":"x","effort":"high"},"started_at":"1970-01-01T00:01:40+00:00","ended_at":"1970-01-01T00:03:20+00:00","wall_seconds":100,"outcome":{"landed":true,"method":"pr-merge"},"failed_rounds":2,"relaunches":1}' > "$LAB/data/routing-ledger.jsonl"
 python3 "$TOOL" backfill --data "$LAB/data" > "$LAB/backfill.txt"

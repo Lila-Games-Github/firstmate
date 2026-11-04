@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import statistics
+import sys
 
 if os.name == "nt":
     import msvcrt
@@ -103,6 +104,8 @@ def observe(state, task, now=None):
 
 
 def _observe_locked(status, sidecar, now):
+    if sidecar.is_symlink():
+        raise ValueError("timing sidecar is a symlink")
     if not status.is_file():
         return
     if status.is_symlink():
@@ -215,7 +218,12 @@ def record(args):
     matched = None
     if routing.is_file():
         for line in routing.read_text().splitlines():
-            item = json.loads(line)
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
             instance = meta.get("routing_instance_id") or meta.get("spawn_gen")
             if item.get("task_id") == args.id and item.get("instance_id") == instance and \
                     (instance is not None or item.get("started_at") == iso(stamp(meta.get("routing_started_at")))):
@@ -224,9 +232,17 @@ def record(args):
                 break
     # The routing row is written just before this call. Attribute any final
     # lines still unseen by the watcher to that same teardown instant.
-    observe(state, args.id, now=end)
+    try:
+        observe(state, args.id, now=end)
+    except (OSError, ValueError) as error:
+        print(f"worker timing observation skipped for {args.id}: {error}", file=sys.stderr)
     sidecar = state / (args.id + ".timing-events.json")
-    events = json.loads(sidecar.read_text())["events"] if sidecar.is_file() else []
+    events = []
+    if sidecar.is_file() and not sidecar.is_symlink():
+        try:
+            events = json.loads(sidecar.read_text())["events"]
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"worker timing events skipped for {args.id}: {error}", file=sys.stderr)
     row = row_from_meta(meta, args.id, end, events, args.outcome, args.method, "teardown")
     if matched:
         row["failed_validation_rounds"] = matched.get("failed_rounds")

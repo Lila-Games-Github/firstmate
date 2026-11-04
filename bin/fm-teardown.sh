@@ -1124,7 +1124,8 @@ remote_secondmate_teardown() {
   if [ "$status" -eq 0 ]; then
     python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$STATE/$ID.meta" \
       --state "$STATE" --data "$DATA" --id "$ID" --outcome not-landed \
-      --method "$([ "$FORCE" = --force ] && echo discarded || echo secondmate-retired)" || status=1
+      --method "$([ "$FORCE" = --force ] && echo discarded || echo secondmate-retired)" || \
+      printf 'warning: worker timing record failed for %s; continuing teardown\n' "$ID" >&2
   fi
   if [ "$status" -eq 0 ]; then
     status_retire_presentation_task "$STATE" "$ID" || status=1
@@ -1284,7 +1285,8 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
     --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || exit 1
   python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$META" --state "$STATE" --data "$DATA" \
     --id "$ID" --outcome "$([ -n "$LANDED_VIA" ] && echo landed || echo not-landed)" \
-    --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || exit 1
+    --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || \
+    printf 'warning: worker timing record failed for %s; continuing teardown\n' "$ID" >&2
   status_retire_presentation_task "$STATE" "$ID" || exit 1
   remove_task_runtime_files "$STATE" "$ID" || exit 1
   if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
@@ -4113,7 +4115,8 @@ if [ -f "$META" ]; then
   python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
     --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || exit 1
   python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$META" --state "$STATE" --data "$DATA" \
-    --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || exit 1
+    --id "$ID" --outcome "$ROUTING_OUTCOME" --method "$ROUTING_METHOD" || \
+    printf 'warning: worker timing record failed for %s; continuing teardown\n' "$ID" >&2
 fi
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 remove_task_runtime_files "$STATE" "$ID" || exit 1
