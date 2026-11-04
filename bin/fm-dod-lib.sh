@@ -5,9 +5,11 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [landing-branch] prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [landing-branch] [test-infra] prints
+# the block on stdout with no trailing blank line. The caller validates the mode; an unknown
+# mode is refused rather than silently rendered as the pipeline contract. A truthy
+# [test-infra] (local-only only) tells the worker to join the landing queue with
+# `--priority infra`; omitted or "0" keeps the ordinary join command unchanged.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -336,14 +338,15 @@ fm_dod_quote() {
 
 # Shared worker handoff, also rendered on scout promotion. The queue executable
 # owns mechanics; this block supplies the task-bound invocation and next steps.
-fm_landing_queue_block() { # <task-id> [landing-branch]
-  local id=$1 landing=${2:-} root home state data queue_command queue_target=''
+fm_landing_queue_block() { # <task-id> [landing-branch] [test-infra]
+  local id=$1 landing=${2:-} test_infra=${3:-0} root home state data queue_command queue_target='' priority_arg=''
   root=${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
   home=${FM_HOME:-$root}
   state=${STATE:-${FM_STATE_OVERRIDE:-$home/state}}
   data=${DATA:-${FM_DATA_OVERRIDE:-$home/data}}
   queue_command="FM_HOME=$(fm_dod_quote "$home") FM_STATE_OVERRIDE=$(fm_dod_quote "$state") FM_DATA_OVERRIDE=$(fm_dod_quote "$data") $(fm_dod_quote "$root/bin/fm-landing-queue.sh")"
   [ -z "$landing" ] || queue_target=" --landing-branch $(fm_dod_quote "$landing")"
+  [ "$test_infra" = 0 ] || priority_arg=' --priority infra'
   cat <<EOF
 
 ## Self-service landing train
@@ -359,7 +362,7 @@ landing_queue() {
 }
 \`\`\`
 1. Once implementation is committed, rebase your branch onto the current landing tip and run the project's configured full suite, phone play-through, and every applicable landing gate on that exact head.
-   Join only when those checks pass: \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <tested-tip-sha> --receipt <full-suite-receipt>\`.
+   Join only when those checks pass: \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <tested-tip-sha> --receipt <full-suite-receipt>$priority_arg\`.
    Add \`--gate-receipt <name>=<path>\` once for each configured gate; each gate receipt uses the four-line format in the queue tool's \`--help\` and names the same head and tip.
    A changed tip refuses admission; rebase and finish pre-queue checks on the new tip before retrying.
 2. Run \`landing_queue status\` before rebasing at the front and whenever you resume waiting.
@@ -375,7 +378,7 @@ landing_queue() {
    At \`needs-gate\`, read the missing gate in \`reason\` and submit its passing \`fm-landing-gate.v1\` receipt with \`landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
    A changed head or target refuses either receipt; read status and check the new head at the front.
    A failing full receipt moves your car to the back when another car waits; fix failures before rejoining.
-   Use \`landing_queue fail --reason <failure>\` only when leaving the train. A later \`landing_queue ready\` re-enrolls a failed id and branch at the back.
+   Use \`landing_queue fail --reason <failure>\` only when leaving the train. A later \`landing_queue ready\` re-enrolls a failed id and branch at its priority position (the tool's header owns ordering).
    At \`failed\`, report \`failed:\` with the status \`reason\` and stop unless you are ready to re-enroll.
 4. At \`ready-to-land\` or \`needs-baseline\`, append \`paused: landing-queue <status>\` and end your turn without polling; a pending test-service request instead follows the submit-and-end-turn rule above.
    The queue sends your steering inbox one message when your car lands, fails, its baseline resolves, or a moved head or target returns work to you; resume then with \`landing_queue status\`.
@@ -385,8 +388,8 @@ landing_queue() {
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [landing-branch]
-  local mode=$1 id=$2 landing_branch=${3:-} meta_file
+fm_dod_block() {  # <mode> <task-id> [landing-branch] [test-infra]
+  local mode=$1 id=$2 landing_branch=${3:-} test_infra=${4:-0} meta_file
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -414,7 +417,7 @@ Use the queue's current assigned target below when rebasing.
 When it is implemented and committed, follow the self-service landing train below through landing.
 The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path.
 EOF
-      fm_landing_queue_block "$id" "$landing_branch"
+      fm_landing_queue_block "$id" "$landing_branch" "$test_infra"
       ;;
     no-mistakes)
       cat <<EOF

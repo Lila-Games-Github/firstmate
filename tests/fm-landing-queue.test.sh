@@ -307,6 +307,52 @@ queue reconcile a > "$CASE/out"
 [ ! -s "$CASE/out" ] && [ ! -e "$CASE/home/data/landing-queue" ] || fail 'reconcile created an empty train'
 pass 'reconcile without a train has no queue side effects'
 
+make_case infra-priority
+for id in a b; do car "$id"; join "$id" >/dev/null; done
+expect_field "$(queue status a)" place 1
+expect_field "$(queue status a)" priority -
+expect_field "$(queue status b)" place 2
+expect_field "$(queue status b)" priority -
+car c
+expect_field "$(join c --priority infra)" place 2
+expect_field "$(queue status c)" priority infra
+expect_field "$(queue status a)" place 1
+expect_field "$(queue status b)" place 3
+car d
+expect_field "$(join d --priority infra)" place 3
+expect_field "$(queue status d)" priority infra
+expect_field "$(queue status c)" place 2
+expect_field "$(queue status b)" place 4
+car e
+expect_field "$(join e)" place 5
+expect_field "$(queue status e)" priority -
+expect_field "$(queue status a)" place 1
+pass 'an infra car admits behind the front and ahead of waiting non-infra cars, FIFO among infra cars, non-infra cars join at the back as before'
+
+make_case infra-reenroll
+car a; join a >/dev/null
+car c; join c --priority infra >/dev/null
+car b; join b >/dev/null
+expect_field "$(queue status c)" place 2
+expect_field "$(queue fail c --reason 'fixing')" status failed
+expect_field "$(queue status b)" place 2
+expect_field "$(join c)" place 2
+expect_field "$(queue status c)" priority infra
+expect_field "$(queue status b)" place 3
+pass 're-enrolling a failed infra car keeps its priority and its position behind the front'
+
+make_case infra-priority-validation
+car a
+if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --priority bogus > "$CASE/refusal" 2>&1; then
+  fail 'ready accepted an unknown --priority value'
+fi
+grep -q 'invalid --priority value' "$CASE/refusal" || fail 'unknown priority refusal was unclear'
+if queue status a --priority infra > "$CASE/refusal" 2>&1; then
+  fail 'status accepted --priority'
+fi
+grep -q 'only valid for ready' "$CASE/refusal" || fail 'non-ready priority refusal was unclear'
+pass 'priority rejects an unknown value and any action other than ready'
+
 make_case landed-then-deleted
 car a; join a >/dev/null; quick_receipt a >/dev/null
 git -C "$CASE/project" merge -q --ff-only fm/a
