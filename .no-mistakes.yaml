@@ -29,12 +29,9 @@ document:
 # Invocation wiring is asserted by `tests/fm-lint.test.sh` and
 # `tests/fm-lint-workflows.test.sh`.
 #
+# Keep commands.test absent; the firstmate-coding-guidelines skill owns this policy.
 commands:
   lint: 'bin/fm-lint.sh'
-  test: >-
-    bash tests/fm-crew-board-phone.test.sh &&
-    bash tests/fm-watcher-lock.test.sh &&
-    (cd bin/fm-crew-board-tui && go test ./...)
 
 # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
 # The evidence is not committed to the feature or default branch.
