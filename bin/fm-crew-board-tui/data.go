@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -159,9 +160,16 @@ func elapsed(since int64, now time.Time) string {
 	}
 }
 
+var refreshTimeout = 60 * time.Second
+
 func (p paths) refresh() (board, []item, error) {
-	cmd := exec.Command(filepath.Join(p.Code, "bin", "fm-crew-board.sh"), "refresh")
+	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(p.Code, "bin", "fm-crew-board.sh"), "refresh")
 	cmd.Env = p.env()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+	cmd.WaitDelay = time.Second
 	output, refreshErr := cmd.CombinedOutput()
 	if refreshErr != nil {
 		refreshErr = fmt.Errorf("refresh: %s: %w", strings.TrimSpace(string(output)), refreshErr)

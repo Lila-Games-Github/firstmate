@@ -70,6 +70,37 @@ func TestSlowRefreshShowsStalenessThenPublishes(t *testing.T) {
 	}
 }
 
+func TestHungRefreshTimesOutAndRetries(t *testing.T) {
+	old := refreshTimeout
+	refreshTimeout = time.Second
+	t.Cleanup(func() { refreshTimeout = old })
+	m := fixtureApp(t)
+	stale := m.data
+	stale.GeneratedEpoch = time.Now().Unix() - 120
+	m.refreshing = true
+	m.lastRefresh = time.Now().Add(-9 * time.Second)
+	p := scriptRefresh(t, m, stale, "cp \"$FM_STATE_OVERRIDE/fresh.json\" \"$FM_STATE_OVERRIDE/crew-board.json\"\nsleep 30\n")
+	start := time.Now()
+	data, feed, err := p.refresh()
+	if err == nil {
+		t.Fatal("hung refresh did not report an error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("hung refresh was not bounded: %s", elapsed)
+	}
+	m.update(refreshedMsg{data, feed, err})
+	if m.refreshing || m.data.Rows[0].ID != "alpha" || m.data.GeneratedEpoch != stale.GeneratedEpoch || m.notice == "" {
+		t.Fatal("timed out refresh did not keep the last published board with an error notice")
+	}
+	if view := m.View().Content; !strings.Contains(view, "STALE") {
+		t.Fatalf("timed out refresh hid the stale age: %q", view)
+	}
+	_, cmd := m.update(tickMsg(time.Now()))
+	if !m.refreshing || cmd == nil {
+		t.Fatal("next tick did not retry after a timed out refresh")
+	}
+}
+
 func TestFailedRefreshReadsPublishedPayload(t *testing.T) {
 	m := fixtureApp(t)
 	fresh := m.data
