@@ -18,9 +18,16 @@ scripts and their state/.<name>-last markers. Ready-for-you rows come from the
 fleet snapshot: a PR whose recorded run reports green checks, a finished
 local-only branch, a scout whose current state is done and whose report file
 exists, or a captain hold whose reason names a preview. Each worker's tag names
-what it is doing: a phone or full suite it holds or waits on, else its live
-no-mistakes run's active step from a bounded local axi status read, else its
-own phase note shortened. Playbot lane rows come from local persisted state.
+what it is doing from live facts, never a stale self-reported phase alone: a
+phone, full suite, or test-service request it holds or waits on (matched by
+task id against testfarm's live status), a local-only car's live landing-queue
+place and whether it is truly the front, else its live no-mistakes run's active
+step from a bounded local axi status read, else its own phase note shortened.
+A paused worker whose last reported wait names a test-service request that has
+since finished or been cancelled shows a distinct waiting-on-a-finished-job
+state instead of repeating the stale wait; any other pause shows its own
+reason rather than a guessed cause. Playbot lane rows come from local
+persisted state.
 AI allowance uses a separately scheduled quota-axi snapshot, never the fast
 board refresh, and a failed attempt records what it reported in
 state/.crew-board-quota-error for the panel to repeat. The optional
@@ -996,8 +1003,44 @@ def testfarm_status():
     return status
 
 
-def service_request_rows(snapshot):
-    """Show every live service request from testfarm's live status, or None when the farm is unreachable."""
+TESTFARM_TERMINAL_STATES = frozenset({"passed", "failed", "cancelled", "interrupted"})
+REQUEST_ID_RE = re.compile(r"request=([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def referenced_request_id(text):
+    """The test-service request id named by a `request=<id>` status line, or ""."""
+    match = REQUEST_ID_RE.search(text or "")
+    return match.group(1) if match else ""
+
+
+def request_by_id(rid):
+    """The testfarm request record with this id, live or finished, or None."""
+    if not rid:
+        return None
+    status = testfarm_status()
+    if status is None:
+        return None
+    for request in status.get("requests") or []:
+        if isinstance(request, dict) and str(request.get("id")) == rid:
+            return request
+    return None
+
+
+def service_request_word(options):
+    if options.get("device_gate"):
+        return "PHONE"
+    if options.get("suite"):
+        return "SUITE"
+    if options.get("harness"):
+        return "HARNESS"
+    return "TEST"
+
+
+def service_request_rows(snapshot, tags):
+    """Show every live service request from testfarm's live status, or None when
+    the farm is unreachable. Also records each request's task as holding or
+    waiting on it, for workers (such as a plain phone-gate or harness request)
+    that service_suite_rows does not already tag."""
     status = testfarm_status()
     if status is None:
         return None
@@ -1005,10 +1048,12 @@ def service_request_rows(snapshot):
     if not isinstance(requests, list):
         return []
     titles = task_titles(snapshot)
+    live = [request for request in requests if isinstance(request, dict)
+            and request.get("state") in ("queued", "preparing", "running")]
+    waiters = [request for request in live if request["state"] != "running"]
+    waiter_positions = {id(request): position for position, request in enumerate(waiters, 1)}
     rows = []
-    for request in requests:
-        if not isinstance(request, dict) or request.get("state") not in ("queued", "preparing", "running"):
-            continue
+    for request in live:
         rid = str(request.get("id") or "")
         if not rid or "/" in rid or ".." in rid:
             continue
@@ -1025,7 +1070,8 @@ def service_request_rows(snapshot):
             return ", ".join(kinds) or "Unknown"
 
         kind = kind_text(str)
-        task = str(request.get("task") or "unknown task")
+        task_id = str(request.get("task") or "")
+        task = task_id or "unknown task"
         running = request["state"] == "running"
         age = request.get("run_seconds") if running else request.get("wait_seconds")
         try:
@@ -1033,6 +1079,12 @@ def service_request_rows(snapshot):
         except (ValueError, TypeError, OverflowError):
             age = "unknown time"
         state = "running" if running else "waiting"
+        if task_id and not options.get("suite"):
+            word = service_request_word(options)
+            if running:
+                resource_tag(tags, task_id, 0, f"TEST SERVICE: {word} {age}")
+            else:
+                resource_tag(tags, task_id, 1, f"WAITING FOR TEST SERVICE: {word} #{waiter_positions[id(request)]}")
         row = item(f"{state.upper()}: {titles.get(task, task)} · {kind}",
                    f"Task: {task}\nKind: {kind}\nRequest: {rid}\nAge: {age}",
                    f"{state} {age}", item_id=f"service-{rid}")
@@ -1239,7 +1291,7 @@ def test_queue(snapshot, phones, now, tags=None):
             row["phone_title"] = (f"#{position}: {titles.get(task, task)} · {phone_ticket_kind(owner, phone_label)}"
                                   + (f" · holding {phone_label(held)}" if held else ""))
             rows.append(row)
-    service_rows = service_request_rows(snapshot)
+    service_rows = service_request_rows(snapshot, tags)
     if service_rows is None:
         rows.append(item("TEST SERVICE: unavailable", status="section", item_id="service-heading"))
         rows.append(item("Test farm unavailable", "`testfarm status --json --no-probe` did not return a usable result.",
@@ -1318,8 +1370,6 @@ def pipeline_step(worktree, deadline):
 
 PHASE_WORDS = ("investigating", "building", "fixing", "testing", "validating", "ready-to-merge")
 FILLER_WORDS = {"a", "an", "the", "and", "or", "for", "on", "to", "of", "in", "with", "awaiting", "waiting"}
-PAUSE_CAUSES = (("PHONE", ("phone", "device", "adb")), ("SUITE", ("suite",)),
-                ("ART", ("art", "artist")), ("REVIEW", ("review", "reviewer")))
 
 
 def plain_note(note):
@@ -1384,7 +1434,13 @@ def question_label(task, questions):
 
 
 def state_tag(task, questions):
-    """Lead tag word naming what the worker is doing about a person: WAITING ON YOU, BLOCKED or WAITING."""
+    """The (kind, text) of what the worker is doing about a person: a captain
+    decision, a block, a deliberate pause (its own reason, or a distinct state
+    when the job it named has since finished), or ("", "") when there is
+    nothing to report. "paused" is the only kind a live resource tag (passed
+    by the caller) should replace rather than combine with, since that pause is
+    often just the worker ending its turn on an external wait a live fact
+    already explains more precisely."""
     hints = task.get("hints") or {}
     verbs = {str(d.get("verb", "")) for d in hints.get("open_decisions") or [] if isinstance(d, dict)}
     phase = (task.get("phase") or {}).get("name", "")
@@ -1392,18 +1448,18 @@ def state_tag(task, questions):
     current = task.get("current_state") or {}
     if "needs-decision" in verbs or phase == "needs-decision" or held:
         label = question_label(task, questions)
-        return f"WAITING ON YOU \u00b7 {label}" if label else "WAITING ON YOU"
+        return "decision", (f"WAITING ON YOU \u00b7 {label}" if label else "WAITING ON YOU")
     if "blocked" in verbs or phase == "blocked" or current.get("state") == "blocked":
-        return "BLOCKED"
+        return "blocked", "BLOCKED"
     if current.get("state") == "paused" or phase == "paused":
         text = " ".join(str(value or "") for value in (current.get("detail"), hints.get("last_event_text"),
-                                                       (task.get("phase") or {}).get("note"))).casefold()
-        words = set(re.findall(r"[a-z]+", text))
-        for cause, keys in PAUSE_CAUSES:
-            if words & set(keys):
-                return f"WAITING FOR {cause}"
-        return "WAITING"
-    return ""
+                                                       (task.get("phase") or {}).get("note")))
+        request = request_by_id(referenced_request_id(text))
+        if request and request.get("state") in TESTFARM_TERMINAL_STATES:
+            return "finished", f"WAITING ON FINISHED JOB ({request['state'].upper()})"
+        reason = short_note(text)
+        return "paused", (f"PAUSED \u00b7 {reason}" if reason else "PAUSED")
+    return "", ""
 
 
 def phase_tag(task):
@@ -1413,7 +1469,11 @@ def phase_tag(task):
 
 
 def worker_tags(snapshot, resources):
-    """Pick each worker's tag: its state, then a test resource, its live run step, or its phase text."""
+    """Pick each worker's tag: its state, then a live resource or landing-queue
+    fact, its live run step, or its phase text. A live resource fact replaces
+    a bare deliberate pause instead of stacking a redundant "paused" word onto
+    the fact that already explains it (for example a durable full-suite job
+    the worker is actually running, not waiting on)."""
     tags = {}
     deadline = time.monotonic() + 2.0
     questions = question_entries(DATA / "captain-questions.md")
@@ -1425,19 +1485,78 @@ def worker_tags(snapshot, resources):
         if waiting:
             tags[task_id] = pr_label(waiting)
             continue
-        state = state_tag(task, questions)
-        tag = ""
-        if task_id in resources:
+        kind, state = state_tag(task, questions)
+        live_resource = task_id in resources
+        if live_resource:
             tag = resources[task_id][1]
         else:
             tree = ((task.get("paths") or {}).get("worktree") or {}).get("path")
-            if task.get("mode") == "no-mistakes" and isinstance(tree, str) and tree:
-                tag = pipeline_step(tree, deadline)
+            tag = pipeline_step(tree, deadline) if (task.get("mode") == "no-mistakes"
+                                                    and isinstance(tree, str) and tree) else ""
             tag = tag or phase_tag(task)
+        if kind == "paused" and live_resource:
+            state = ""
         tag = " \u00b7 ".join(part for part in (state, tag) if part)
         if tag:
             tags[task_id] = tag
     return tags
+
+
+LANDING_QUEUE_FRONT_WORDS = {
+    "needs-rebase": "REBASING", "needs-full": "NEEDS FULL", "needs-quick": "NEEDS QUICK",
+    "needs-gate": "NEEDS GATE", "ready-to-land": "READY TO LAND",
+    "red-receipt": "RED RECEIPT", "needs-baseline": "NEEDS BASELINE",
+}
+LANDING_QUEUE_INACTIVE_STATUSES = frozenset({"landed", "failed"})
+
+
+def landing_queue_fields(task_id, worktree, deadline):
+    """This local-only car's live landing-queue row as key=value fields, read
+    through fm-landing-queue.sh status, or {} when it is not an active car."""
+    budget = deadline - time.monotonic()
+    if budget <= 0.05 or not worktree or not Path(worktree).is_dir():
+        return {}
+    try:
+        run = subprocess.run([str(SCRIPT_DIR / "fm-landing-queue.sh"), "status", task_id,
+                             "--project", worktree], capture_output=True, text=True,
+                             timeout=min(2.0, budget), check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if run.returncode:
+        return {}
+    fields = {}
+    for line in run.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key] = value
+    return fields
+
+
+def landing_queue_resource_tags(snapshot, tags):
+    """Record each local-only car's live landing-queue place and whether it is
+    truly the front, so a stale self-reported "front" phase never outlives the
+    live queue position."""
+    deadline = time.monotonic() + 2.0
+    for task in snapshot.get("tasks", []):
+        if not isinstance(task, dict) or task.get("mode") != "local-only":
+            continue
+        task_id = str(task.get("id") or "")
+        worktree = ((task.get("paths") or {}).get("worktree") or {}).get("path")
+        if not task_id or not isinstance(worktree, str) or not worktree:
+            continue
+        fields = landing_queue_fields(task_id, worktree, deadline)
+        status = fields.get("status", "")
+        try:
+            place = int(fields.get("place", "0"))
+        except ValueError:
+            place = 0
+        if not status or place <= 0 or status in LANDING_QUEUE_INACTIVE_STATUSES:
+            continue
+        if status == "waiting-for-front":
+            resource_tag(tags, task_id, 1, f"LANDING QUEUE #{place}")
+        else:
+            word = LANDING_QUEUE_FRONT_WORDS.get(status, status.upper().replace("-", " "))
+            resource_tag(tags, task_id, 0, f"LANDING QUEUE FRONT \u00b7 {word}")
 
 
 RUNTIME_NAMES = {
@@ -2090,6 +2209,7 @@ def project(snapshot):
     allowance = allowance_entries(cache)
     resources = {}
     tests = test_queue(snapshot, phones, now, resources)
+    landing_queue_resource_tags(snapshot, resources)
     queued = tasks_axi_list("queued")
     in_flight = tasks_axi_list("in_flight")
     backlog = {

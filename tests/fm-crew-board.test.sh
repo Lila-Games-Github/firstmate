@@ -1301,8 +1301,9 @@ test_worker_tags_name_the_state() {
   assert_equals 'BUILDING' "$(tag later)" 'a dated captain hold is parked, not waiting on the captain'
   assert_equals 'TESTING' "$(tag files)" 'keys, paths, numbers, and product-owner never become the tag'
   assert_equals 'BLOCKED · NO DEVICE' "$(tag stuck)" 'blocked reads BLOCKED'
-  assert_equals 'WAITING FOR PHONE · TESTING' "$(tag phone)" 'a pause names its plain cause'
-  assert_equals 'WAITING · TESTING' "$(tag plain)" 'a pause with no derivable cause reads WAITING'
+  assert_equals 'PAUSED · PHONE TO FREE UP · TESTING' "$(tag phone)" \
+    'a pause with no live resource match shows its own reason, not a guessed cause'
+  assert_equals 'PAUSED · UPSTREAM RELEASE · TESTING' "$(tag plain)" 'a product-decision pause shows as paused with its reason'
   assert_equals 'FIXING' "$(tag junk)" 'a junk note falls back to the phase word'
   assert_equals 'VALIDATING' "$(tag phaseonly)" 'a phase-only worker shows its phase word'
   pass 'worker tags name the worker state in plain words'
@@ -1325,6 +1326,48 @@ test_worker_tags_flag_pr_waiting_for_merge() {
   assert_equals 'null' "$(jq -r '.merge_waiting.nopr' "$home/panels.json")" 'task without a PR is not waiting'
   assert_equals 'READY-TO-MERGE' "$(jq -r '.worker_tags.merged' "$home/panels.json")" 'merged keeps its old look'
   pass 'a worker whose PR waits for a merge is flagged and a merged or PR-less one is not'
+}
+
+test_worker_tags_finished_job_and_live_phone_gate() {
+  local home snapshot stub
+  home=$(make_home worker_tag_testfarm)
+  stub="$home/stub-bin"
+  mkdir -p "$stub"
+  cat > "$stub/testfarm" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+{"schema":"fm-test-service.v1","requests":[
+  {"id":"r1","task":"cancelledreq","state":"cancelled","options":{}},
+  {"id":"r2","task":"passedreq","state":"passed","options":{}},
+  {"id":"r3","task":"liverunning","state":"running","run_seconds":65,"options":{"device_gate":"any"}},
+  {"id":"r5","task":"livewaiting","state":"queued","wait_seconds":50,"options":{"device_gate":"VIPX"}},
+  {"id":"r6","task":"pausedsuppressed","state":"running","run_seconds":65,"options":{"device_gate":"any"}}
+]}
+JSON
+EOF
+  chmod +x "$stub/testfarm"
+  snapshot="$home/snapshot.json"
+  jq -n '{schema: "fm-fleet-snapshot.v1", tasks: [
+    {id: "cancelledreq", phase: {name: "testing", note: ""},
+     current_state: {state: "paused", detail: "test-service request=r1"}},
+    {id: "passedreq", phase: {name: "validating", note: ""},
+     current_state: {state: "paused", detail: "paused: test-service request=r2"}},
+    {id: "liverunning", phase: {name: "building", note: ""}},
+    {id: "livewaiting", phase: {name: "testing", note: ""}},
+    {id: "pausedsuppressed", phase: {name: "testing", note: ""},
+     current_state: {state: "paused", detail: "test-service request=r6"}}]}' > "$snapshot"
+  PATH="$stub:/usr/bin:/bin" run_panels "$home" "$snapshot" > "$home/panels.json" || fail 'finished job projection failed'
+  assert_equals 'WAITING ON FINISHED JOB (CANCELLED) · TESTING' "$(jq -r '.worker_tags.cancelledreq' "$home/panels.json")" \
+    'a pause whose named request was cancelled shows a distinct finished-job state, not a stale wait'
+  assert_equals 'WAITING ON FINISHED JOB (PASSED) · VALIDATING' "$(jq -r '.worker_tags.passedreq' "$home/panels.json")" \
+    'a pause whose named request already passed shows a distinct finished-job state'
+  assert_equals 'TEST SERVICE: PHONE 1m' "$(jq -r '.worker_tags.liverunning' "$home/panels.json")" \
+    'a live phone-gate request (not only a full suite) is matched by task id and tags its runner'
+  assert_equals 'WAITING FOR TEST SERVICE: PHONE #1' "$(jq -r '.worker_tags.livewaiting' "$home/panels.json")" \
+    'a queued phone-gate request tags its waiter with a live position'
+  assert_equals 'TEST SERVICE: PHONE 1m' "$(jq -r '.worker_tags.pausedsuppressed' "$home/panels.json")" \
+    'a worker paused only because it is durably waiting on its own running request drops the redundant paused word'
+  pass 'a finished test-service request stands out and a live phone-gate request replaces a stale pause'
 }
 
 test_worker_tags_from_live_evidence() {
@@ -1721,6 +1764,7 @@ test_monitoring_alert_fires_only_when_down
 test_worker_tags_from_live_evidence
 test_worker_tags_name_the_state
 test_worker_tags_flag_pr_waiting_for_merge
+test_worker_tags_finished_job_and_live_phone_gate
 test_worker_runtimes_name_harness_and_model
 test_thirty_worker_refresh_budget
 test_new_status_line_keeps_stale_observation
