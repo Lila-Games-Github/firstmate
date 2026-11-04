@@ -29,6 +29,16 @@ The file also names the ordered phone serials, named scenario argument arrays, a
 Optional `landing_gates` names checks the worker must record for the exact pre-queue head and tip before `ready` accepts the car.
 FrogPile's example requires `real-phone`, which the worker records after the real-phone end-to-end check passes.
 `max_concurrent` limits active suite requests for that project; it defaults to one and may be set from one to sixteen.
+Set `export_cache` to `true`, name the project's cache environment variable in `export_cache_env`, and provide an `export_build` argv array that builds and verifies the export from the tested checkout.
+The builder must print `FM_EXPORT_KEY=<safe-key>` on success; it can use `{python}` as its executable to select the service's Python interpreter.
+The service keeps that project's cache under its persistent state directory and passes its absolute path to both the builder and device command through the configured environment variable.
+It partitions exports by exact commit, limits simultaneous builds with `max_concurrent_builds` (default two), and keeps builds outside the suite limit.
+The publisher lock covers only one commit's build; device steps on different phones can run together while the project publisher preserves readable entries during replacement.
+Queued builds waiting for that lock can be cancelled; the request status exposes `build_state` as `pending`, `waiting`, `building`, or `ready`.
+Ready artifacts remain on disk across restarts; the service rechecks external build inputs on restart before using them.
+`max_export_cache_bytes` defaults to four GiB per project; old commit directories are removed oldest first while queued and running commits remain protected.
+`export_cache`, `export_cache_env`, and `export_build` must be configured together, and cache use defaults to off.
+The FrogPile example keeps its export command and artifact verification in project configuration.
 An optional `repos` list names the Firstmate repository names that use this project's configuration; a repository whose name matches the file name needs no entry.
 A ship brief for a repository that matches exactly one configuration names that project in its test-service gate.
 Suite and phone admission use the host-wide queues exposed by `bin/fm-test-service.py queue`.

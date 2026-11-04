@@ -713,6 +713,31 @@ else:
             self.assertEqual([r['ticket'] for r in self.events(kind) if r['event'] == 'request'], before[kind])
             self.release(kind + '-hold'); self.wait_acquired(kind + '-wait'); self.release(kind + '-wait')
 
+    def test_service_queue_preserves_the_project_export_cache_environment(self):
+        project = self.root / 'cached-project'; project.mkdir()
+        scripts = {
+            'suite.sh': 'true\n',
+            'build.sh': 'mkdir -p "$PROJECT_TEST_CACHE"\nprintf cached > "$PROJECT_TEST_CACHE/ready"\nprintf "FM_EXPORT_KEY=ready\\n"\n',
+            'device.sh': 'test "$(cat "$PROJECT_TEST_CACHE/ready")" = cached\ntest "$FM_TEST_PROJECT" = one\ntest "$FM_TEST_PHONE_QUEUE_HELD" = "$1"\n',
+        }
+        for name, text in scripts.items():
+            path = project / name
+            path.write_text('#!/bin/sh\nset -eu\n' + text)
+            path.chmod(0o755)
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(project), *args], env=self.env, text=True).strip()
+        git('init', '-q', '-b', 'main'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com')
+        git('add', '.'); git('commit', '-qm', 'cached fixture'); sha = git('rev-parse', 'HEAD')
+        self.write_config('one', phones=['a'], any_phones=['a'], export_cache=True,
+                          export_cache_env='PROJECT_TEST_CACHE', export_build=['build.sh'])
+        self.service('server')
+        submitted = self.cli('submit', 'one', str(project), sha, '--device-gate', 'a')
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        result = self.cli('wait', submitted.stdout.strip())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr + self.logs_text())
+        self.assertEqual((self.root / 'state/export-cache/one' / sha / 'ready').read_text(), 'cached')
+        self.assertEqual([row['event'] for row in self.events('phone')], ['request', 'acquire', 'release'])
+
     def test_service_requests_and_direct_clients_share_one_line_across_projects(self):
         project = self.root / 'project'; project.mkdir()
         for script, text in [('suite.sh', 'echo suite'), ('device.sh', 'echo device:$1')]:

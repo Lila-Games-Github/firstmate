@@ -123,6 +123,10 @@ cat > phone.sh <<'PHONE'
 #!/usr/bin/env bash
 set -euo pipefail
 serial=$2
+if [ -n "${FROGPILE_E2E_EXPORT_CACHE_DIR:-}" ]; then
+  key=$(cat export-input.txt)
+  [ -f "$FROGPILE_E2E_EXPORT_CACHE_DIR/$key/frogpile-e2e.apk" ]
+fi
 echo "phone-ticket:$serial" >> "$EVENTS"
 if [ "$serial" = any ]; then
   while :; do
@@ -156,8 +160,87 @@ sleep .2
 echo 'm31-perf-end' >> "$EVENTS"
 PERF
 chmod +x prepare.sh suite.sh phone.sh benchmark.sh m31-perf.sh
+printf 'v1\n' > export-input.txt
+mkdir -p prototype-game/tests/e2e
+cat > prototype-game/tests/e2e/device_flow.py <<'EXPORT'
+import hashlib
+import json
+import os
+from pathlib import Path
+import time
+
+def prepare_export():
+    root = Path(os.environ['FROGPILE_E2E_EXPORT_CACHE_DIR'])
+    key = Path('export-input.txt').read_text().strip()
+    entry = root / key
+    apk = entry / 'frogpile-e2e.apk'
+    if not apk.exists():
+        with open(os.environ['EVENTS'], 'a') as events:
+            events.write('build-start:' + key + '\n')
+        if (Path(os.environ['HOME']) / 'build-fail').exists():
+            raise RuntimeError('fake export failed')
+        time.sleep(2 if (Path(os.environ['HOME']) / 'build-slow').exists() else .4)
+        entry.mkdir(parents=True, exist_ok=True)
+        apk.write_bytes(key.encode() * 100001)
+        (entry / 'manifest.json').write_text(json.dumps({
+            'schema': 1, 'key': key, 'package': 'com.lila.prototype.e2e',
+            'release_beacon_excluded': True,
+            'apk_sha256': hashlib.sha256(apk.read_bytes()).hexdigest()}) + '\n')
+        with open(os.environ['EVENTS'], 'a') as events:
+            events.write('build-end:' + key + '\n')
+    else:
+        with open(os.environ['EVENTS'], 'a') as events:
+            events.write('build-hit:' + key + '\n')
+    return key, apk
+EXPORT
+cat > export-build.sh <<'BUILDER'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - <<'PYBUILD'
+import sys
+sys.path.insert(0, 'prototype-game/tests/e2e')
+import device_flow
+key, apk = device_flow.prepare_export()
+assert apk.is_file()
+print('FM_EXPORT_KEY=' + key, flush=True)
+PYBUILD
+BUILDER
+chmod +x export-build.sh
 git add . && git commit -qm v1
 sha1=$(git rev-parse HEAD)
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data['max_concurrent_builds']=0
+open(path,'w').write(json.dumps(data))
+PY
+if "$svc" submit fake "$PWD" "$sha1" --device-gate S22 > "$tmp/invalid-build-cap.out" 2>&1; then
+  fail 'invalid build cap was accepted'
+fi
+grep -q 'max_concurrent_builds must be an integer' "$tmp/invalid-build-cap.out"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data.pop('max_concurrent_builds')
+open(path,'w').write(json.dumps(data))
+PY
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data['export_cache']=True
+open(path,'w').write(json.dumps(data))
+PY
+if "$svc" submit fake "$PWD" "$sha1" --device-gate S22 > "$tmp/invalid-cache.out" 2>&1; then
+  fail 'cache without a builder was accepted'
+fi
+grep -q 'export_cache and export_build must be configured together' "$tmp/invalid-cache.out"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data.pop('export_cache')
+open(path,'w').write(json.dumps(data))
+PY
+printf '\necho dirty-live-tree >&2; exit 1\n' >> suite.sh
 # A daemon starting during a submit must leave its partial clone alone until
 # the submitter finishes, then run that request normally.
 FM_TEST_REAL_GIT=$(command -v git)
@@ -241,7 +324,8 @@ echo 'FAIL fake-suite-test: expected green' >&2
 exit 1
 FAIL
 chmod +x suite.sh
-git add suite.sh && git commit -qm v2
+printf 'v2\n' > export-input.txt
+git add suite.sh export-input.txt && git commit -qm v2
 sha2=$(git rev-parse HEAD)
 for i in $(seq 1 300); do
   if python3 - "$FM_TEST_SERVICE_STATE/status.json" "$request" "$sha1" 2>/dev/null <<'PY'
@@ -298,7 +382,109 @@ grep -q '^phone-start-v1:S22:--quick$' "$EVENTS"
 python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
 import json,sys
 path=sys.argv[1]
+data=json.load(open(path)); data['max_concurrent']=2; data['export_cache']=True
+data['export_build']=['export-build.sh']; data['export_cache_env']='FROGPILE_E2E_EXPORT_CACHE_DIR'
+open(path,'w').write(json.dumps(data))
+PY
+# A broken export fails before a phone ticket and leaves the suite slot free.
+touch "$HOME/build-fail"
+before_tickets=$(grep -c '^phone-ticket:' "$EVENTS")
+build_failed=$($svc submit fake "$PWD" "$sha2" --device-gate S22)
+$svc wait "$build_failed" > "$tmp/build-failed.out" && exit 1 || true
+grep -q 'fake export failed' "$tmp/build-failed.out"
+[ "$(grep -c '^phone-ticket:' "$EVENTS")" -eq "$before_tickets" ]
+rm "$HOME/build-fail"
+build_one=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
+$svc wait "$build_one" | grep -q '^passed '
+build_two=$($svc submit fake "$PWD" "$sha1" --device-gate S21)
+$svc wait "$build_two" | grep -q '^passed '
+[ "$(grep -c '^build-start:v1$' "$EVENTS")" -eq 1 ]
+grep -q '^build-hit:v1$' "$EVENTS"
+build_changed=$($svc submit fake "$PWD" "$sha2" --device-gate S22)
+$svc wait "$build_changed" | grep -q '^passed '
+[ "$(grep -c '^build-start:v2$' "$EVENTS")" -ge 2 ]
+# Two exports may build while the suite limit is one.
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data['max_concurrent']=1
+open(path,'w').write(json.dumps(data))
+PY
+rm -rf "$FM_TEST_SERVICE_STATE/export-cache/fake/$sha1" "$FM_TEST_SERVICE_STATE/export-cache/fake/$sha2"
+touch "$HOME/build-slow"
+before_starts=$(grep -c '^build-start:' "$EVENTS")
+build_parallel_one=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
+build_parallel_two=$($svc submit fake "$PWD" "$sha2" --device-gate S21)
+for i in $(seq 1 200); do
+  [ "$(grep -c '^build-start:' "$EVENTS")" -ge "$((before_starts + 2))" ] && break
+  sleep .05
+done
+[ "$i" -lt 200 ]
+python3 - "$EVENTS" <<'PY'
+import sys
+lines=open(sys.argv[1]).read().splitlines()
+starts=[i for i, line in enumerate(lines) if line.startswith('build-start:')]
+assert len(starts) >= 2
+assert not any(line.startswith('build-end:') for line in lines[starts[-2]:starts[-1]])
+PY
+$svc wait "$build_parallel_one" | grep -q '^passed '
+$svc wait "$build_parallel_two" | grep -q '^passed '
+rm "$HOME/build-slow"
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
 data=json.load(open(path)); data['max_concurrent']=2
+open(path,'w').write(json.dumps(data))
+PY
+python3 - "$FM_TEST_SERVICE_STATE/status.json" "$build_one" "$sha1" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))['requests'] if r['id']==sys.argv[2])
+assert row['build_state']=='ready' and row['build_sha']==sys.argv[3]
+PY
+# Cached exports and their request records survive a daemon restart.
+kill "$server"; wait "$server"; server=
+"$svc" serve > "$tmp/server-restarted.log" 2>&1 & server=$!
+before_builds=$(grep -c '^build-start:v1$' "$EVENTS")
+build_after_restart=$($svc submit fake "$PWD" "$sha1" --device-gate S21)
+$svc wait "$build_after_restart" | grep -q '^passed '
+[ "$(grep -c '^build-start:v1$' "$EVENTS")" -eq "$before_builds" ]
+# A build for one commit does not hold another phone's device phase.
+touch "$HOME/slow-phone"
+before_s22=$(grep -c '^phone-start-v1:S22:$' "$EVENTS")
+parallel_build_one=$($svc submit fake "$PWD" "$sha1" --device-gate S22)
+for i in $(seq 1 200); do
+  [ "$(grep -c '^phone-start-v1:S22:$' "$EVENTS")" -gt "$before_s22" ] && break
+  sleep .05
+done
+[ "$i" -lt 200 ]
+parallel_build_two=$($svc submit fake "$PWD" "$sha1" --device-gate S21)
+$svc wait "$parallel_build_two" | grep -q '^passed '
+python3 - "$EVENTS" <<'PY'
+import sys
+lines=open(sys.argv[1]).read().splitlines()
+s22=max(i for i, line in enumerate(lines) if line=='phone-start-v1:S22:')
+s21=next(i for i in range(s22+1, len(lines)) if lines[i]=='phone-start-v1:S21:')
+first_end=next(i for i in range(s22+1, len(lines)) if lines[i]=='phone-end-v1')
+assert s21 < first_end
+PY
+$svc wait "$parallel_build_one" | grep -q '^passed '
+rm "$HOME/slow-phone"
+# The service evicts old commit artifacts after both requests finish.
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data['max_export_cache_bytes']=1
+open(path,'w').write(json.dumps(data))
+PY
+for i in $(seq 1 200); do
+  [ ! -d "$FM_TEST_SERVICE_STATE/export-cache/fake/$sha1" ] && [ ! -d "$FM_TEST_SERVICE_STATE/export-cache/fake/$sha2" ] && break
+  sleep .05
+done
+[ "$i" -lt 200 ]
+python3 - "$FM_HOME/config/test-service/fake.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+data=json.load(open(path)); data.pop('export_cache'); data.pop('export_build'); data.pop('export_cache_env'); data.pop('max_export_cache_bytes')
 open(path,'w').write(json.dumps(data))
 PY
 touch "$HOME/slow-phone"
