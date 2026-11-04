@@ -10,6 +10,8 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 CREW_STATE=${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
 
 case ${1-} in scan) ;; *) echo 'usage: fm-worker-gate-doorbell.sh scan' >&2; exit 2 ;; esac
+# shellcheck source=bin/fm-worker-doorbell-lib.sh
+. "$SCRIPT_DIR/fm-worker-doorbell-lib.sh"
 failed=0
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] && [ ! -L "$meta" ] || continue
@@ -25,10 +27,7 @@ for meta in "$STATE"/*.meta; do
   gate=${gate%' · run: '*}
   [ -n "$gate" ] || continue
   message="Automatic no-mistakes gate doorbell for run $run: $gate. Read the gate and respond through no-mistakes."
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 \
-    "$SCRIPT_DIR/fm-send.sh" "$task" "$message" >/dev/null 2>&1; then
-    printf 'worker gate doorbell delivery failed: %s run %s\n' "$task" "$run" >&2
-    failed=1
-  fi
+  fm_worker_doorbell_send "$task" "$message"
+  case $? in 0|75) ;; *) failed=1 ;; esac
 done
 exit "$failed"

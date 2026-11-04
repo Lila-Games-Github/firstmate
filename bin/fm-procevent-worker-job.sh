@@ -12,6 +12,9 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FM_HOME=${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
+# shellcheck source=bin/fm-worker-doorbell-lib.sh
+. "$SCRIPT_DIR/fm-worker-doorbell-lib.sh"
+
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 valid_name() { case $1 in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 source_id() {
@@ -43,7 +46,7 @@ case ${1-} in
   run)
     [ "$#" -ge 5 ] && [ "$4" = -- ] || die 'invalid registered job command'
     task=$2 name=$3
-    valid_name "$task" && valid_name "$name" || die 'invalid registered job identity'
+    if ! valid_name "$task" || ! valid_name "$name"; then die 'invalid registered job identity'; fi
     shift 4
     "$@" >/dev/null 2>&1
     rc=$?
@@ -59,13 +62,12 @@ case ${1-} in
     task=$(sed -n 's/^task: //p' "$result" | head -1)
     name=$(sed -n 's/^job: //p' "$result" | head -1)
     rc=$(sed -n 's/^exit: //p' "$result" | head -1)
-    valid_task "$task" && valid_name "$name" || die 'invalid result identity'
+    if ! valid_name "$task" || ! valid_name "$name"; then die 'invalid result identity'; fi
     [ "$(source_id "$task" "$name")" = "$id" ] || die 'source identity mismatch'
     case $seq in ''|*[!0-9]*) die 'invalid sequence' ;; esac
     case $rc in ''|*[!0-9]*) die 'invalid exit status' ;; esac
     message="Automatic background job doorbell for $name (source $id, result $seq): command exited $rc. Inspect the job result and continue."
-    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 \
-      "$SCRIPT_DIR/fm-send.sh" "$task" "$message" >/dev/null || exit 1
+    fm_worker_doorbell_send "$task" "$message" || exit $?
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-procevent.sh" handled "$id" "$seq" >/dev/null
     ;;
   *) die 'unknown command' ;;
