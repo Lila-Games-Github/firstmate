@@ -35,6 +35,128 @@ func TestFailedRefreshRetriesOnNextTick(t *testing.T) {
 	}
 }
 
+func TestSlowRefreshShowsStalenessThenPublishes(t *testing.T) {
+	old := refreshTimeout
+	refreshTimeout = 10 * time.Second
+	t.Cleanup(func() { refreshTimeout = old })
+	m := fixtureApp(t)
+	m.data.GeneratedEpoch = time.Now().Unix() - 120
+	m.refreshing = true
+	if view := m.View().Content; !strings.Contains(view, "STALE") || !strings.Contains(view, "refreshing") {
+		t.Fatalf("slow refresh has no visible stale age and progress: %q", view)
+	}
+	fresh := m.data
+	fresh.GeneratedEpoch = time.Now().Unix() + 2
+	fresh.Rows[0].ID = "new-worker"
+	p := scriptRefresh(t, m, fresh, "sleep 2\ncp \"$FM_STATE_OVERRIDE/fresh.json\" \"$FM_STATE_OVERRIDE/crew-board.json\"\n")
+	result := make(chan refreshedMsg, 1)
+	go func() {
+		data, feed, err := p.refresh()
+		result <- refreshedMsg{data, feed, err}
+	}()
+	select {
+	case msg := <-result:
+		t.Fatalf("slow refresh returned before its script finished: %v", msg.err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	select {
+	case msg := <-result:
+		if msg.err != nil {
+			t.Fatal(msg.err)
+		}
+		m.update(msg)
+	case <-time.After(8 * time.Second):
+		t.Fatal("slow refresh never completed")
+	}
+	if m.refreshing || m.data.Rows[0].ID != "new-worker" || m.data.GeneratedEpoch != fresh.GeneratedEpoch {
+		t.Fatal("completed slow refresh did not replace the visible board")
+	}
+	if view := m.View().Content; strings.Contains(view, "STALE") || strings.Contains(view, "refreshing") {
+		t.Fatalf("published slow refresh still shows stale progress: %q", view)
+	}
+}
+
+func TestHungRefreshTimesOutAndRetries(t *testing.T) {
+	old := refreshTimeout
+	refreshTimeout = time.Second
+	t.Cleanup(func() { refreshTimeout = old })
+	m := fixtureApp(t)
+	stale := m.data
+	stale.GeneratedEpoch = time.Now().Unix() - 120
+	m.refreshing = true
+	m.lastRefresh = time.Now().Add(-9 * time.Second)
+	p := scriptRefresh(t, m, stale, "cp \"$FM_STATE_OVERRIDE/fresh.json\" \"$FM_STATE_OVERRIDE/crew-board.json\"\nsleep 30\n")
+	start := time.Now()
+	data, feed, err := p.refresh()
+	if err == nil {
+		t.Fatal("hung refresh did not report an error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("hung refresh was not bounded: %s", elapsed)
+	}
+	m.update(refreshedMsg{data, feed, err})
+	if m.refreshing || m.data.Rows[0].ID != "alpha" || m.data.GeneratedEpoch != stale.GeneratedEpoch || m.notice == "" {
+		t.Fatal("timed out refresh did not keep the last published board with an error notice")
+	}
+	if view := m.View().Content; !strings.Contains(view, "STALE") {
+		t.Fatalf("timed out refresh hid the stale age: %q", view)
+	}
+	_, cmd := m.update(tickMsg(time.Now()))
+	if !m.refreshing || cmd == nil {
+		t.Fatal("next tick did not retry after a timed out refresh")
+	}
+}
+
+func TestFailedRefreshReadsPublishedPayload(t *testing.T) {
+	m := fixtureApp(t)
+	fresh := m.data
+	fresh.Rows[0].ID = "published-worker"
+	p := scriptRefresh(t, m, fresh, "cp \"$FM_STATE_OVERRIDE/fresh.json\" \"$FM_STATE_OVERRIDE/crew-board.json\"\nexit 7\n")
+	data, feed, err := p.refresh()
+	if err == nil {
+		t.Fatal("failed command lost its error")
+	}
+	m.update(refreshedMsg{data, feed, err})
+	if m.data.Rows[0].ID != "published-worker" || !strings.Contains(m.notice, "refresh:") {
+		t.Fatal("refresh error hid the last published payload")
+	}
+}
+
+func TestFailedRefreshRejectsBadPublishedPayload(t *testing.T) {
+	m := fixtureApp(t)
+	p := scriptRefresh(t, m, m.data, "printf '%s\\n' '{\"schema\":\"bad\"}' > \"$FM_STATE_OVERRIDE/crew-board.json\"\nexit 7\n")
+	data, feed, err := p.refresh()
+	if err == nil || !strings.Contains(err.Error(), "unsupported crew board schema") {
+		t.Fatalf("bad payload was not rejected: %v", err)
+	}
+	m.update(refreshedMsg{data, feed, err})
+	if m.data.Rows[0].ID != "alpha" || m.notice == "" {
+		t.Fatal("bad payload replaced the last good board without an error notice")
+	}
+}
+
+func scriptRefresh(t *testing.T, m *app, fresh board, body string) paths {
+	t.Helper()
+	code := t.TempDir()
+	if err := os.Mkdir(filepath.Join(code, "bin"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(code, "bin", "fm-crew-board.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.paths.State, "fresh.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := m.paths
+	p.Code = code
+	return p
+}
+
 func fixtureApp(t *testing.T) *app {
 	t.Helper()
 	home := t.TempDir()
@@ -42,7 +164,7 @@ func fixtureApp(t *testing.T) *app {
 	if err := os.MkdirAll(state, 0700); err != nil {
 		t.Fatal(err)
 	}
-	payload := board{Schema: "fm-crew-board.v1", Home: "test-home", Rows: []worker{
+	payload := board{Schema: "fm-crew-board.v1", Home: "test-home", GeneratedEpoch: time.Now().Unix(), Rows: []worker{
 		{ID: "alpha", Project: "widget", Title: "Make the widget spin", Phase: "testing", PhaseSince: time.Now().Unix() - 300},
 		{ID: "beta", Project: "gadget", Title: "Fix the gadget", Phase: "fixing", PhaseSince: time.Now().Unix() - 60},
 	}}

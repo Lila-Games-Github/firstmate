@@ -614,6 +614,19 @@ func (m *app) View() tea.View {
 	if footer == "" {
 		footer = "3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · y copy · i note · ? help · q quit"
 	}
+	if m.data.GeneratedEpoch <= 0 {
+		footer = "STALE: last refresh unknown · " + footer
+	} else if age := time.Since(time.Unix(m.data.GeneratedEpoch, 0)); age >= 5*time.Second {
+		status := ""
+		if m.refreshing {
+			status = " · refreshing"
+		}
+		ageText := elapsed(m.data.GeneratedEpoch, time.Now())
+		if age < time.Minute {
+			ageText = fmt.Sprintf("%ds", int(age.Seconds()))
+		}
+		footer = "STALE " + ageText + status + " · " + footer
+	}
 	footer = lipgloss.NewStyle().Foreground(muted).Render(ansi.Truncate(footer, m.width-2, "…"))
 	content := m.header() + "\n" + body + "\n" + note + "\n" + footer
 	view := tea.NewView(content)

@@ -92,10 +92,11 @@ type panels struct {
 }
 
 type board struct {
-	Schema string   `json:"schema"`
-	Home   string   `json:"home"`
-	Rows   []worker `json:"rows"`
-	Panels panels   `json:"panels"`
+	Schema         string   `json:"schema"`
+	Home           string   `json:"home"`
+	GeneratedEpoch int64    `json:"generated_epoch"`
+	Rows           []worker `json:"rows"`
+	Panels         panels   `json:"panels"`
 }
 
 type paths struct {
@@ -159,25 +160,26 @@ func elapsed(since int64, now time.Time) string {
 	}
 }
 
+var refreshTimeout = 60 * time.Second
+
 func (p paths) refresh() (board, []item, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(p.Code, "bin", "fm-crew-board.sh"), "refresh")
 	cmd.Env = p.env()
-	// Refresh starts snapshot and panel readers. Stop the whole group on timeout
-	// so its children cannot keep the command pending or publish an old payload.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
 	cmd.WaitDelay = time.Second
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return board{}, nil, fmt.Errorf("refresh: %s: %w", strings.TrimSpace(string(output)), err)
+	output, refreshErr := cmd.CombinedOutput()
+	if refreshErr != nil {
+		refreshErr = fmt.Errorf("refresh: %s: %w", strings.TrimSpace(string(output)), refreshErr)
 	}
 	value, err := p.readBoard()
 	if err != nil {
-		return board{}, nil, err
+		return board{}, nil, errors.Join(refreshErr, err)
 	}
 	feed, err := readFeed(p.State)
-	return value, feed, err
+	return value, feed, errors.Join(refreshErr, err)
 }
 
 func (p paths) sendNote(text string, selected *item) error {
