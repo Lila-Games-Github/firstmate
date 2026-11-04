@@ -36,16 +36,19 @@ func TestFailedRefreshRetriesOnNextTick(t *testing.T) {
 }
 
 func TestSlowRefreshShowsStalenessThenPublishes(t *testing.T) {
+	old := refreshTimeout
+	refreshTimeout = 10 * time.Second
+	t.Cleanup(func() { refreshTimeout = old })
 	m := fixtureApp(t)
-	m.data.GeneratedEpoch = time.Now().Unix() - 6
+	m.data.GeneratedEpoch = time.Now().Unix() - 120
 	m.refreshing = true
 	if view := m.View().Content; !strings.Contains(view, "STALE") || !strings.Contains(view, "refreshing") {
 		t.Fatalf("slow refresh has no visible stale age and progress: %q", view)
 	}
 	fresh := m.data
-	fresh.GeneratedEpoch = time.Now().Unix()
+	fresh.GeneratedEpoch = time.Now().Unix() + 2
 	fresh.Rows[0].ID = "new-worker"
-	p := scriptRefresh(t, m, fresh, "sleep 9\ncp \"$FM_STATE_OVERRIDE/fresh.json\" \"$FM_STATE_OVERRIDE/crew-board.json\"\n")
+	p := scriptRefresh(t, m, fresh, "sleep 2\ncp \"$FM_STATE_OVERRIDE/fresh.json\" \"$FM_STATE_OVERRIDE/crew-board.json\"\n")
 	result := make(chan refreshedMsg, 1)
 	go func() {
 		data, feed, err := p.refresh()
@@ -53,8 +56,8 @@ func TestSlowRefreshShowsStalenessThenPublishes(t *testing.T) {
 	}()
 	select {
 	case msg := <-result:
-		t.Fatalf("slow refresh returned before the old timeout: %v", msg.err)
-	case <-time.After(8500 * time.Millisecond):
+		t.Fatalf("slow refresh returned before its script finished: %v", msg.err)
+	case <-time.After(1500 * time.Millisecond):
 	}
 	select {
 	case msg := <-result:
@@ -62,11 +65,14 @@ func TestSlowRefreshShowsStalenessThenPublishes(t *testing.T) {
 			t.Fatal(msg.err)
 		}
 		m.update(msg)
-	case <-time.After(5 * time.Second):
+	case <-time.After(8 * time.Second):
 		t.Fatal("slow refresh never completed")
 	}
-	if m.refreshing || m.data.Rows[0].ID != "new-worker" {
+	if m.refreshing || m.data.Rows[0].ID != "new-worker" || m.data.GeneratedEpoch != fresh.GeneratedEpoch {
 		t.Fatal("completed slow refresh did not replace the visible board")
+	}
+	if view := m.View().Content; strings.Contains(view, "STALE") || strings.Contains(view, "refreshing") {
+		t.Fatalf("published slow refresh still shows stale progress: %q", view)
 	}
 }
 
