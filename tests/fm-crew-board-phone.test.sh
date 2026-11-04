@@ -35,9 +35,86 @@ setTimeout(() => console.log(JSON.stringify({pathname: location.pathname, fetche
   needs: (nodes.needs?.children ?? []).length, moreNeedsHidden: nodes['more-needs']?.hidden ?? null})), 20);
 """
 
+# Drives the decisions tab's Copy button through the real page script to prove
+# it sends the exact label, title, and full (multi-line) body to the clipboard,
+# and falls back to a selected, visible textarea when the clipboard API fails.
+COPY_HARNESS = r"""
+const [html, cardsJson, clipboardMode] = [process.argv[1], process.argv[2], process.argv[3]];
+const source = html.match(/<script>([\s\S]*)<\/script>/)[1];
+const cards = JSON.parse(cardsJson);
+function makeEl(tag) {
+  return {
+    tag, hidden: false, className: '', textContent: '', value: '', readOnly: false,
+    dataset: {}, children: [], attrs: {}, selectCalls: 0,
+    replaceChildren() { this.children = []; },
+    append(...kids) { this.children.push(...kids); },
+    get firstChild() { return this.children[0]; },
+    setAttribute(name, val) { this.attrs[name] = val; },
+    querySelectorAll() { return []; },
+    select() { this.selectCalls += 1; },
+  };
+}
+function findByText(node, label) {
+  if (!node) return null;
+  if (node.textContent === label) return node;
+  for (const child of node.children || []) {
+    const found = findByText(child, label);
+    if (found) return found;
+  }
+  return null;
+}
+function findByClass(node, cls) {
+  if (!node) return null;
+  if (node.className === cls) return node;
+  for (const child of node.children || []) {
+    const found = findByClass(child, cls);
+    if (found) return found;
+  }
+  return null;
+}
+const nodes = {};
+const document = {documentElement: makeEl('html'), getElementById: id => nodes[id] ??= makeEl('div'),
+  createElement: tag => makeEl(tag)};
+const location = {pathname: '/crew-board/', search: '', hash: ''};
+const history = {replaceState() {}};
+const clipboardCalls = [];
+const navigator = {clipboard: {writeText: async text => {
+  clipboardCalls.push(text);
+  if (clipboardMode === 'fail') throw new Error('denied');
+}}};
+const fetch = async url => {
+  if (url === 'api/decisions') return {ok: true, json: async () => ({cards})};
+  if (url === 'api/phone-mode') return {ok: true, json: async () => ({enabled: false})};
+  return {ok: true, json: async () => ({})};
+};
+new Function('document', 'location', 'history', 'fetch', 'setInterval', 'navigator', source)(
+  document, location, history, fetch, () => 0, navigator);
+nodes['decisions-tab'].onclick();
+setTimeout(async () => {
+  const copyButton = findByText(nodes['question-sections'], 'Copy');
+  if (!copyButton) { console.log(JSON.stringify({error: 'no Copy button found'})); return; }
+  await copyButton.onclick();
+  const resultText = findByClass(nodes['question-sections'], 'result')?.textContent ?? '';
+  const holder = findByClass(nodes['question-sections'], 'copy-fallback');
+  console.log(JSON.stringify({
+    clipboardCalls, resultText,
+    holderHidden: holder ? holder.hidden : null,
+    holderValue: holder ? holder.value : null,
+    holderSelectCalls: holder ? holder.selectCalls : null,
+  }));
+}, 20);
+"""
+
 
 def run_page(html, pathname, board):
     result = subprocess.run([NODE, "-e", PAGE_HARNESS, html, pathname, json.dumps(board)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def run_copy(html, cards, clipboard_mode):
+    result = subprocess.run([NODE, "-e", COPY_HARNESS, html, json.dumps(cards), clipboard_mode],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
@@ -224,6 +301,19 @@ Recommendation: (b).
                                        "link": "https://github.com/example/repo/pull/1"} for n in range(6)])
             crowded = run_page(page, "/crew-board/", many)
             assert crowded["needs"] == 5 and crowded["moreNeedsHidden"] is False, crowded
+
+            multiline_card = [{"section": "Your decisions", "label": "WA1", "title": "Pick the UI.",
+                               "body": "Context line one.\nContext line two.", "options": [],
+                               "recommendation": "", "replies": []}]
+            full_source_entry = "WA1. Pick the UI.\nContext line one.\nContext line two."
+            copied = run_copy(page, multiline_card, "ok")
+            assert copied["clipboardCalls"] == [full_source_entry], copied
+            assert copied["resultText"] == "Copied to clipboard", copied
+            fallback = run_copy(page, multiline_card, "fail")
+            assert fallback["clipboardCalls"] == [full_source_entry], fallback
+            assert fallback["holderHidden"] is False, fallback
+            assert fallback["holderValue"] == full_source_entry, fallback
+            assert fallback["holderSelectCalls"] == 1, fallback
         else:
             print("skip: node not found for the phone page script checks")
     finally:

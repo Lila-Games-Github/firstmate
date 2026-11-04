@@ -544,7 +544,7 @@ func (m *app) helpOverlay(width, height int) string {
 		"Enter/o expand  O focus selected worker pane",
 		"za/Space collapse  Alt-1..9 select",
 		"1/2/3/4 pages  / filter  n next notification",
-		"Ctrl-f/b scroll detail  r reply to question  i/: note",
+		"Ctrl-f/b scroll detail  r reply  y copy question  i/: note",
 		"q/:q quit  ? close help",
 	}
 	text := strings.Join(lines, "\n")
@@ -612,7 +612,7 @@ func (m *app) View() tea.View {
 		Width(m.width - 2).Height(1).Render(label + m.input.View())
 	footer := m.notice
 	if footer == "" {
-		footer = "3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · i note · ? help · q quit"
+		footer = "3 questions · j/k rows · h/l sub-tabs · Enter expand · r reply · y copy · i note · ? help · q quit"
 	}
 	footer = lipgloss.NewStyle().Foreground(muted).Render(ansi.Truncate(footer, m.width-2, "…"))
 	content := m.header() + "\n" + body + "\n" + note + "\n" + footer

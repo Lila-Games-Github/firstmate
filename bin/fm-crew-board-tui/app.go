@@ -750,6 +750,14 @@ func (m *app) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterActive = true
 			m.filterInput.SetValue(m.filters[m.focus])
 			return m, m.filterInput.Focus()
+		case "y":
+			target := m.selectedQuestion()
+			if target == nil {
+				m.notice = "Select a question to copy"
+				return m, nil
+			}
+			m.notice = "Copied question to clipboard"
+			return m, tea.SetClipboard(target.Detail)
 		case "i":
 			m.replyTarget = m.selectedQuestion()
 			m.inputActive = true

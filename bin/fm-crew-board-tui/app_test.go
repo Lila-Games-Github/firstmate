@@ -872,6 +872,38 @@ func TestQuestionReplyAndFullDetail(t *testing.T) {
 	}
 }
 
+func TestCopyQuestionSendsFullSourceEntryToClipboard(t *testing.T) {
+	m := fixtureApp(t)
+	full := "**WA1. Pick the UI.**\nContext line one.\nContext line two."
+	m.page, m.focus = 2, "full_questions"
+	m.data.Panels.FullQuestions = []item{{ID: "question-1", Title: "WA1. Pick the UI.", Detail: full}}
+	m.selected["full_questions"] = 0
+	command := press(m, key('y'))
+	if command == nil {
+		t.Fatal("y did not produce a clipboard command")
+	}
+	if got := fmt.Sprint(command()); got != full {
+		t.Fatalf("clipboard payload = %q, want the full source entry %q", got, full)
+	}
+	if !strings.Contains(m.notice, "Copied") {
+		t.Fatalf("no confirmation notice shown: %q", m.notice)
+	}
+}
+
+func TestCopyWithNoQuestionSelectedShowsNotice(t *testing.T) {
+	m := fixtureApp(t)
+	m.page, m.focus = 2, "full_questions"
+	m.data.Panels.FullQuestions = []item{{Title: "Your decisions", Status: "section"}}
+	delete(m.selected, "full_questions")
+	command := press(m, key('y'))
+	if command != nil {
+		t.Fatal("y on a heading should not produce a clipboard command")
+	}
+	if !strings.Contains(m.notice, "Select a question") {
+		t.Fatalf("expected a no-selection notice, got %q", m.notice)
+	}
+}
+
 func TestMouseIgnoresRowsPastThePanelWindow(t *testing.T) {
 	m := fixtureApp(t)
 	m.width, m.height = 120, 24
