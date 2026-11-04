@@ -11,13 +11,13 @@
 # into this home's private state/ directory when sources change and runs it.
 # bin/firstmate is the one-word launcher; bin/fm-install-firstmate-cli.sh adds
 # that launcher to PATH without replacing an unrelated executable.
-# In the TUI, 1/2/3/4 switch NOW/PLANNING/QUESTIONS/TESTING, j/k move
+# In the TUI, 1/2/3/4/5 switch NOW/PLANNING/QUESTIONS/TESTING/LANDING, j/k move
 # rows only within the focused panel, skipping section headings, h/l step
 # through every page's sub-tabs, including empty panels,
 # Tab/Shift-Tab cycle panels, gg/G and Ctrl-u/Ctrl-d jump within a panel, Enter/o expands a row,
 # O focuses the selected worker's recorded pane (or prints an attach command),
 # za/Space collapses a panel, Alt-1..9 selects a row, / filters,
-# s opens the information rail at full width (including on narrow terminals),
+# s opens the device rail at full width (including on narrow terminals),
 # Ctrl-n/Ctrl-p scroll its actual rows, and n opens the next new notification.
 # r replies to a selected question, i or : focuses the note line,
 # Esc leaves input, ? shows help, and q or :q quits.
