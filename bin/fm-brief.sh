@@ -154,6 +154,8 @@
 # bound to the selected private home and tracked command. It causes no completion
 # audit: a routine success does nothing, an originating lane performs bounded
 # capture only after a named qualifying signal, and curation never blocks cleanup.
+# Ship and scout briefs carry one worktree runbook section for context handoffs.
+# Secondmate charters exit before that section is rendered.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -638,6 +640,19 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+IFS= read -r -d '' RUNBOOK_SECTION <<'EOF' || true
+# Worktree runbook
+Maintain ONE living runbook in your worktree, cumulative across sessions rather than a per-session delta.
+Keep a checklist of every acceptance item marked done, pending, or blocked.
+Index the files you have touched with each file's role, and record every settled decision.
+Write the exact next action and point to only the specific spec section or source file each pending item needs.
+Update the runbook before each context handoff.
+On relaunch into a fresh session, read the runbook FIRST, then re-read only the spec or source slices for the item you are actively implementing.
+Do not re-read the whole brief or spec or re-investigate the whole implementation to re-orient.
+Verify done claims against committed code with git log and tests.
+EOF
+RUNBOOK_SECTION=${RUNBOOK_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
@@ -652,6 +667,8 @@ $TASK_SECTION
 $HERDR_SECTION
 
 $LEARNING_SECTION
+
+$RUNBOOK_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -936,6 +953,8 @@ $LANE_CONTRACT_BLOCK
 $HERDR_SECTION
 
 $LEARNING_SECTION
+
+$RUNBOOK_SECTION
 
 # Setup
 $SETUP_PREAMBLE
