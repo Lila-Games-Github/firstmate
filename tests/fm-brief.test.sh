@@ -1118,7 +1118,12 @@ test_runbook_section_reaches_workers_only() {
     assert_grep '# Worktree runbook' "$brief" "$kind brief omitted the runbook section"
     assert_grep 'checklist of every acceptance item marked done, pending, or blocked' "$brief" \
       "$kind brief omitted acceptance tracking"
-    assert_grep 'read the runbook FIRST' "$brief" "$kind brief omitted relaunch order"
+    assert_grep 'At the START of your work, check your brief for a handoff note or runbook pointer' "$brief" \
+      "$kind brief omitted fresh-session discovery"
+    assert_grep 'read the runbook it points to FIRST' "$brief" \
+      "$kind brief omitted handoff reading order"
+    assert_grep 'handoff note points the next session to it and says to read it first' "$brief" \
+      "$kind brief omitted the outbound handoff pointer"
     assert_grep 'Verify done claims against committed code with git log and tests' "$brief" \
       "$kind brief omitted committed-code verification"
   done

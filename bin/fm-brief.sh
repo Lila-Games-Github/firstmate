@@ -642,14 +642,15 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 
 IFS= read -r -d '' RUNBOOK_SECTION <<'EOF' || true
 # Worktree runbook
-Maintain ONE living runbook in your worktree, cumulative across sessions rather than a per-session delta.
+At the START of your work, check your brief for a handoff note or runbook pointer.
+If one is present, treat it as the source of truth for what is done and what remains: read the runbook it points to FIRST and resume from it.
+Re-read only the spec or source slices for the pending item you are implementing; do not re-read the whole brief or spec or re-investigate the whole implementation.
+Verify done claims against committed code with git log and tests.
+As you work, maintain ONE living runbook in your worktree, cumulative across sessions rather than a per-session delta.
 Keep a checklist of every acceptance item marked done, pending, or blocked.
 Index the files you have touched with each file's role, and record every settled decision.
 Write the exact next action and point to only the specific spec section or source file each pending item needs.
-Update the runbook before each context handoff.
-On relaunch into a fresh session, read the runbook FIRST, then re-read only the spec or source slices for the item you are actively implementing.
-Do not re-read the whole brief or spec or re-investigate the whole implementation to re-orient.
-Verify done claims against committed code with git log and tests.
+Before ending a turn that may hand off, update the runbook and make sure your handoff note points the next session to it and says to read it first.
 EOF
 RUNBOOK_SECTION=${RUNBOOK_SECTION%$'\n'}
 
