@@ -154,6 +154,8 @@
 # bound to the selected private home and tracked command. It causes no completion
 # audit: a routine success does nothing, an originating lane performs bounded
 # capture only after a named qualifying signal, and curation never blocks cleanup.
+# Ship and scout briefs carry one worktree runbook section for context handoffs.
+# Secondmate charters exit before that section is rendered.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -638,6 +640,20 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
+IFS= read -r -d '' RUNBOOK_SECTION <<'EOF' || true
+# Worktree runbook
+At the START of your work, check your brief for a handoff note or runbook pointer.
+If one is present, treat it as the source of truth for what is done and what remains: read the runbook it points to FIRST and resume from it.
+Re-read only the spec or source slices for the pending item you are implementing; do not re-read the whole brief or spec or re-investigate the whole implementation.
+Verify done claims against committed code with git log and tests.
+As you work, maintain ONE living runbook in your worktree, cumulative across sessions rather than a per-session delta.
+Keep a checklist of every acceptance item marked done, pending, or blocked.
+Index the files you have touched with each file's role, and record every settled decision.
+Write the exact next action and point to only the specific spec section or source file each pending item needs.
+Before ending a turn that may hand off, update the runbook and make sure your handoff note points the next session to it and says to read it first.
+EOF
+RUNBOOK_SECTION=${RUNBOOK_SECTION%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
@@ -652,6 +668,8 @@ $TASK_SECTION
 $HERDR_SECTION
 
 $LEARNING_SECTION
+
+$RUNBOOK_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -936,6 +954,8 @@ $LANE_CONTRACT_BLOCK
 $HERDR_SECTION
 
 $LEARNING_SECTION
+
+$RUNBOOK_SECTION
 
 # Setup
 $SETUP_PREAMBLE

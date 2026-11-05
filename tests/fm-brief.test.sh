@@ -1102,6 +1102,40 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+test_runbook_section_reaches_workers_only() {
+  local home kind brief
+  home="$TMP_ROOT/runbook-section"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    if [ "$kind" = ship ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" runbook-ship alpha --mode direct-PR >/dev/null \
+        || fail "ship runbook fixture did not scaffold"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" runbook-scout alpha --scout >/dev/null \
+        || fail "scout runbook fixture did not scaffold"
+    fi
+    brief="$home/data/runbook-$kind/brief.md"
+    assert_grep '# Worktree runbook' "$brief" "$kind brief omitted the runbook section"
+    assert_grep 'checklist of every acceptance item marked done, pending, or blocked' "$brief" \
+      "$kind brief omitted acceptance tracking"
+    assert_grep 'At the START of your work, check your brief for a handoff note or runbook pointer' "$brief" \
+      "$kind brief omitted fresh-session discovery"
+    assert_grep 'read the runbook it points to FIRST' "$brief" \
+      "$kind brief omitted handoff reading order"
+    assert_grep 'handoff note points the next session to it and says to read it first' "$brief" \
+      "$kind brief omitted the outbound handoff pointer"
+    assert_grep 'Verify done claims against committed code with git log and tests' "$brief" \
+      "$kind brief omitted committed-code verification"
+  done
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=ops \
+    "$ROOT/bin/fm-brief.sh" runbook-mate --secondmate --no-projects >/dev/null \
+    || fail "secondmate runbook fixture did not scaffold"
+  brief="$home/data/runbook-mate/brief.md"
+  assert_no_grep '# Worktree runbook' "$brief" \
+    'secondmate charter received a worker runbook section'
+  pass 'fm-brief.sh: ship and scout briefs carry the runbook section; charters do not'
+}
+
 # --- Playbot lane mode ------------------------------------------------------
 # A lane's workspace is created by Playbot, which owns its branch and bases it on
 # the landing branch's REMOTE tip. Firstmate used to countermand the scaffold's
@@ -1921,6 +1955,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_runbook_section_reaches_workers_only
 test_lane_mode_drops_the_crewmate_branch_convention
 test_lane_brief_verifies_its_base_before_working
 test_lane_brief_declares_its_delivery_contract_prominently
