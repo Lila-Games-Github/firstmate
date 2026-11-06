@@ -230,6 +230,7 @@ func (m *app) renderInfoRail(width, height int) string {
 		if len(lines) > 0 {
 			lines = append(lines, "")
 		}
+		lines = append(lines, lipgloss.NewStyle().Foreground(yellow).Bold(true).Render(spec.title))
 		rows := m.rawItems(spec.id)
 		if len(rows) == 0 {
 			lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render("  none"))
@@ -241,37 +242,42 @@ func (m *app) renderInfoRail(width, height int) string {
 					Render("  "+ansi.Truncate(row.Title, max(1, inner-2), "…")))
 				continue
 			}
-			state := "disconnected"
-			if row.ADB == "device" {
-				state = "connected · " + row.Status
-			} else if row.ADB == "" && row.Status != "" {
-				state = row.Status
+			state := row.Status
+			if spec.id == "phones" {
+				state = "disconnected"
+				if row.ADB == "device" {
+					state = "connected · " + row.Status
+				} else if row.ADB == "" && row.Status != "" {
+					state = row.Status
+				}
 			}
-			line := "  " + row.Title + " · " + state
+			line := "  " + row.Title
+			if state != "" {
+				line += " · " + state
+			}
 			style := phaseColor(row.Status)
 			index := len(lines)
 			lines = append(lines, style.Render(ansi.Truncate(line, inner, "…")))
 			hits[index] = row
-			if row.Status == "busy" && row.Detail != "" {
+			if spec.id == "phones" && row.Status == "busy" && row.Detail != "" {
 				activity := strings.TrimPrefix(strings.SplitN(row.Detail, "\n", 2)[0], "Testing: ")
 				hits[len(lines)] = row
 				lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render(ansi.Truncate("    "+activity, inner, "…")))
 			}
 		}
 	}
-	visible := max(1, height-5)
+	visible := max(1, height-4)
 	m.railOffset = min(m.railOffset, max(0, len(lines)-visible))
 	end := min(len(lines), m.railOffset+visible)
-	view := make([]string, 0, visible+2)
-	view = append(view, lipgloss.NewStyle().Foreground(yellow).Bold(true).Render("DEVICES"))
+	view := make([]string, 0, visible+1)
 	m.railHit = map[int]item{}
 	for index := m.railOffset; index < end; index++ {
 		view = append(view, lines[index])
 		if row, ok := hits[index]; ok {
-			m.railHit[6+index-m.railOffset] = row
+			m.railHit[5+index-m.railOffset] = row
 		}
 	}
-	for len(view) < visible+1 {
+	for len(view) < visible {
 		view = append(view, "")
 	}
 	view = append(view, lipgloss.NewStyle().Foreground(muted).Render(
