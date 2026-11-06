@@ -1032,6 +1032,27 @@ func TestSideRailScrollAndClickAcrossSections(t *testing.T) {
 	t.Fatalf("Ctrl-p did not return to notifications:\n%s", view)
 }
 
+func TestSideRailKeepsNotificationsAndAllowanceInMainPanel(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = []item{{Title: "Review failed build", Alert: true}}
+	m.data.Panels.Allowance = []item{{Title: "Codex", Status: "75% left"}}
+	for _, target := range []struct {
+		page           int
+		focus, content string
+	}{{0, "alerts", "Review failed build"}, {1, "allowance", "Codex"}} {
+		m.page, m.focus = target.page, target.focus
+		body := strings.Split(m.View().Content, "\n")[4 : m.height-5]
+		view := ansi.Strip(strings.Join(body, "\n"))
+		if strings.Count(view, target.content) < 2 {
+			t.Fatalf("%s must remain in both main panel and side rail:\n%s", target.focus, view)
+		}
+		press(m, key(' '))
+		if !m.collapsed[target.focus] || !strings.Contains(m.View().Content, target.content) {
+			t.Fatalf("collapsing main %s hid its side rail rows", target.focus)
+		}
+	}
+}
+
 func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Rows = append(m.data.Rows, worker{ID: "gamma", Kind: "playbot", Project: "widget",
