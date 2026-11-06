@@ -855,6 +855,24 @@ EOF
   pass "fm-spawn/fm-promote: authorized intent preserves exact words and refuses operator-address lines"
 }
 
+# Validate the delivered prompt, never the implementation source.
+worker_approach_contract_valid() {  # <launch-brief>
+  local file=$1 phrase
+  while IFS= read -r phrase; do
+    [ "$(grep -Fc -- "$phrase" "$file")" -eq 1 ] || return 1
+  done <<'EOF'
+your first deliverable before implementation is a short approach report:
+the architecture you intend to use
+the real, integrated behavior on the target device or runtime
+Never substitute isolated components, a fixed assumed position, or hand-authored synthetic fixtures for real state
+Record the approach in your worktree runbook and surface it to firstmate with a `working:` status line, then proceed
+explicitly marks the task XL or high-risk in the brief or steering
+needs-decision: approach ready for sign-off
+stop after the report until firstmate approves implementation
+briefly record and report why you judge it trivial
+EOF
+}
+
 test_spawn_refreshes_legacy_worker_roles() {
   local rec home proj fakebin kind id out brief project_kind first_line role_line supervisor_line
   rec=$(make_home worker-roles)
@@ -883,6 +901,7 @@ EOF
       assert_not_contains "$out" 'could not render' "worker role rendering failed"
       brief="$home/data/$id/launch-brief.md"
       assert_present "$brief" "$project_kind $kind did not refresh the legacy launch brief"
+      worker_approach_contract_valid "$brief" || fail "$project_kind $kind omitted or duplicated the approach contract"
       first_line=$(sed -n '1p' "$brief")
       [ "$first_line" = '# Current worker role contract' ] ||
         fail "$project_kind $kind did not put worker identity first"
@@ -903,6 +922,42 @@ EOF
     fail "Firstmate AGENTS.md does not disambiguate a launched worker before assigning the supervisor identity"
   cmp -s "$ROOT/AGENTS.md" "$home/AGENTS.md" || fail "worker spawn changed the primary contract"
   pass "fm-spawn: every legacy worker receives scoped role instructions without changing project or primary instructions"
+}
+
+test_fresh_worker_approach_contract() {
+  local rec home proj fakebin kind id source launch out count=0
+  rec=$(make_home approach-contract)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="approach-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null || fail "scout scaffold failed"
+    else
+      FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$kind" >/dev/null || fail "$kind scaffold failed"
+    fi
+    source="$home/data/$id/brief.md"
+    fill_brief_subsections "$source" "Improve integrated behavior." "Discover the approach."
+    cp "$source" "$home/source-before"
+    assert_no_grep 'your first deliverable before implementation' "$source" "$kind bloated the source scaffold with the launch contract"
+    if [ "$kind" = scout ]; then
+      out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --scout)
+    else
+      out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode "$kind" --yolo off)
+    fi
+    launch="$home/data/$id/launch-brief.md"
+    assert_present "$launch" "$kind failed to assemble its launch contract: $out"
+    worker_approach_contract_valid "$launch" || fail "$kind omitted or duplicated the approach contract"
+    cmp -s "$source" "$home/source-before" || fail "$kind launch changed the lean source brief"
+    count=$((count + 1))
+  done
+  # A duplicate in the assembled artifact must make the same validator fail.
+  cat "$launch" "$launch" > "$home/duplicate-contract.md"
+  if worker_approach_contract_valid "$home/duplicate-contract.md"; then
+    fail "known-bad duplicate contract was accepted"
+  fi
+  pass "fm-spawn: authoritative scaffold/spawn matrix expected=4 observed=$count; role rule once per launch, source copies=0; duplicate rejected"
 }
 
 # The promoted worker's base step is part of the generated ship-instructions
@@ -1066,6 +1121,7 @@ test_promotion_target_contract
 test_promotion_base_follows_landing_branch
 test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
+test_fresh_worker_approach_contract
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch

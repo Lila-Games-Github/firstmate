@@ -114,6 +114,11 @@ EOF
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
+For non-trivial work (including XL, integration, or ambiguous tasks), your first deliverable before implementation is a short approach report: the architecture you intend to use and how you will validate the real, integrated behavior on the target device or runtime.
+Never substitute isolated components, a fixed assumed position, or hand-authored synthetic fixtures for real state in that validation.
+Record the approach in your worktree runbook and surface it to firstmate with a `working:` status line, then proceed to implement.
+If firstmate explicitly marks the task XL or high-risk in the brief or steering, instead report `needs-decision: approach ready for sign-off` and stop after the report until firstmate approves implementation.
+For a trivial one-line or low-risk fix, briefly record and report why you judge it trivial, then proceed without a design report.
 EOF
 }
 
