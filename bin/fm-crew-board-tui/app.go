@@ -22,7 +22,7 @@ var pages = [][]panelSpec{
 	{{"landing_queue", "LANDING QUEUE"}, {"landings", "TODAY'S LANDINGS"}, {"builds", "LATEST BUILDS"}},
 }
 
-var railPanels = []panelSpec{{"phones", "DEVICES"}}
+var railPanels = []panelSpec{{"alerts", "NOTIFICATIONS"}, {"phones", "DEVICES"}, {"allowance", "AI ALLOWANCE"}}
 
 var pageNames = []string{"NOW", "PLANNING", "QUESTIONS", "TESTING", "LANDING"}
 var questionLabelPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+)\.`)

@@ -940,6 +940,119 @@ func TestDevicesRailShowsPhoneStateOnEveryPage(t *testing.T) {
 	}
 }
 
+func TestSideRailSectionOrder(t *testing.T) {
+	for _, width := range []int{120, 55} {
+		for _, empty := range []bool{false, true} {
+			m := fixtureApp(t)
+			m.width = width
+			if !empty {
+				m.data.Panels.Alerts = []item{{Title: "Review failed build", Status: "failed", Alert: true}}
+				m.data.Panels.Phones = []item{{Title: "Pixel 8", Status: "idle", ADB: "device"}}
+				m.data.Panels.Allowance = []item{{Title: "Codex", Status: "75% left"}}
+			}
+			if width < 100 {
+				press(m, key('s'))
+			}
+			for page := range pages {
+				m.page, m.focus = page, pages[page][0].id
+				var rail []string
+				for _, line := range strings.Split(m.View().Content, "\n")[4 : m.height-5] {
+					if width >= 100 {
+						line = ansi.Cut(line, width-max(34, width/3)-2, width)
+					}
+					rail = append(rail, ansi.Strip(line))
+				}
+				view := strings.Join(rail, "\n")
+				last := -1
+				for _, title := range []string{"NOTIFICATIONS", "DEVICES", "AI ALLOWANCE"} {
+					index := strings.Index(view, title)
+					if index <= last || strings.Count(view, title) != 1 {
+						t.Fatalf("width %d page %d empty %v: missing or unordered %s:\n%s", width, page, empty, title, view)
+					}
+					last = index
+				}
+				if !empty {
+					for _, text := range []string{"Review failed build", "Pixel 8", "connected · idle", "Codex · 75% left"} {
+						if !strings.Contains(view, text) {
+							t.Fatalf("rail missing %q:\n%s", text, view)
+						}
+					}
+					if strings.Contains(view, "disconnected") {
+						t.Fatalf("non-device row rendered as disconnected:\n%s", view)
+					}
+				} else if strings.Count(view, "none") != 3 {
+					t.Fatalf("each empty section needs a placeholder:\n%s", view)
+				}
+			}
+		}
+	}
+}
+
+func TestSideRailScrollAndClickAcrossSections(t *testing.T) {
+	m := fixtureApp(t)
+	m.height = 18
+	for index := range 12 {
+		m.data.Panels.Alerts = append(m.data.Panels.Alerts, item{Title: fmt.Sprintf("Notice %02d", index), Alert: true})
+	}
+	m.data.Panels.Phones = []item{{Title: "Pixel 8", Status: "idle", ADB: "device", Detail: "serial-one"}}
+	m.data.Panels.Allowance = []item{{Title: "Codex", Status: "75% left", Detail: "reset tomorrow"}}
+	for _, target := range []struct{ title, detail string }{{"Pixel 8", "serial-one"}, {"Codex", "reset tomorrow"}} {
+		found := false
+		for range 12 {
+			for y, line := range strings.Split(ansi.Strip(m.View().Content), "\n") {
+				if strings.Contains(line, target.title) {
+					m.Update(tea.MouseClickMsg{X: m.width - 4, Y: y})
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+			press(m, ctrl('n'))
+		}
+		if !found || !strings.Contains(m.View().Content, target.detail) {
+			t.Fatalf("scrolling and clicking %s did not open its detail", target.title)
+		}
+		press(m, special(tea.KeyEsc))
+	}
+	for range 12 {
+		press(m, ctrl('p'))
+	}
+	view := ansi.Strip(m.View().Content)
+	for y, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "Notice 00") && y > 4 {
+			m.Update(tea.MouseClickMsg{X: m.width - 4, Y: y})
+			if m.railDetail == nil || m.railDetail.Title != "Notice 00" || len(m.newAlerts()) != 11 {
+				t.Fatal("notification click did not open and acknowledge the scrolled row")
+			}
+			return
+		}
+	}
+	t.Fatalf("Ctrl-p did not return to notifications:\n%s", view)
+}
+
+func TestSideRailKeepsNotificationsAndAllowanceInMainPanel(t *testing.T) {
+	m := fixtureApp(t)
+	m.data.Panels.Alerts = []item{{Title: "Review failed build", Alert: true}}
+	m.data.Panels.Allowance = []item{{Title: "Codex", Status: "75% left"}}
+	for _, target := range []struct {
+		page           int
+		focus, content string
+	}{{0, "alerts", "Review failed build"}, {1, "allowance", "Codex"}} {
+		m.page, m.focus = target.page, target.focus
+		body := strings.Split(m.View().Content, "\n")[4 : m.height-5]
+		view := ansi.Strip(strings.Join(body, "\n"))
+		if strings.Count(view, target.content) < 2 {
+			t.Fatalf("%s must remain in both main panel and side rail:\n%s", target.focus, view)
+		}
+		press(m, key(' '))
+		if !m.collapsed[target.focus] || !strings.Contains(m.View().Content, target.content) {
+			t.Fatalf("collapsing main %s hid its side rail rows", target.focus)
+		}
+	}
+}
+
 func TestWorkersGroupedByProjectWithoutSelectingHeadings(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Rows = append(m.data.Rows, worker{ID: "gamma", Kind: "playbot", Project: "widget",
@@ -1181,11 +1294,13 @@ func TestDeviceRailRowsStayOnEveryPageAndClicksShowDetail(t *testing.T) {
 		if !strings.Contains(view, "DEVICES") || !strings.Contains(view, "Pixel 8") {
 			t.Fatalf("page %d lost device rail", page)
 		}
-		if _, ok := m.railHit[6]; !ok {
-			t.Fatalf("page %d has no clickable device row", page)
+	}
+	for y, line := range strings.Split(ansi.Strip(m.View().Content), "\n") {
+		if strings.Contains(line, "Pixel 8") {
+			m.Update(tea.MouseClickMsg{X: m.width - 4, Y: y})
+			break
 		}
 	}
-	m.Update(tea.MouseClickMsg{X: m.width - 4, Y: 6})
 	if m.railDetail == nil || !strings.Contains(m.View().Content, "serial-one") {
 		t.Fatal("device detail did not open")
 	}
