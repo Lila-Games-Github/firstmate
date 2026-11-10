@@ -4,9 +4,9 @@
 Usage: fm-crew-board-panels.py <fleet-snapshot.json>
        fm-crew-board-panels.py --refresh-allowance|--allowance-loop
 
-Registered phones and their live state come from the test farm without adb
-probes. The test queue reads the test farm's registered device list from its
-Python client and one bounded `testfarm status --json --no-probe` call for
+Registered phones and their live state come from the test farm's protected adb
+probe. The test queue reads the test farm's registered device list from its
+Python client and one bounded `testfarm status --json` call for
 live phone holders, waiters, and service requests, cached per refresh.
 DEVICES, the phone sections, and TEST SERVICE show unavailable when their farm
 sources cannot be read. FrogPile tickets under FROGPILE_QUEUE_ROOT (default
@@ -894,9 +894,9 @@ TESTFARM_STATUS_TIMEOUT_S = 2.0
 
 @functools.lru_cache(maxsize=1)
 def testfarm_status():
-    """One bounded `testfarm status --json --no-probe` call per refresh, or None when the farm is unreachable."""
+    """One bounded `testfarm status --json` probe per refresh, or None when the farm is unreachable."""
     try:
-        run = subprocess.run(["testfarm", "status", "--json", "--no-probe"], capture_output=True,
+        run = subprocess.run(["testfarm", "status", "--json"], capture_output=True,
                              text=True, timeout=TESTFARM_STATUS_TIMEOUT_S, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -931,7 +931,7 @@ def farm_phone_records():
 
 
 def farm_phone_state(farm_phone):
-    """Use only state explicitly reported by the farm's no-probe status."""
+    """Use only state explicitly reported by the farm's status."""
     adb = farm_phone.get("adb")
     if adb in ("offline", "permission-denied"):
         return adb
@@ -1270,7 +1270,7 @@ def test_queue(snapshot, phones, now, tags=None):
     service_rows = service_request_rows(snapshot, tags)
     if service_rows is None:
         rows.append(item("TEST SERVICE: unavailable", status="section", item_id="service-heading"))
-        rows.append(item("Test farm unavailable", "`testfarm status --json --no-probe` did not return a usable result.",
+        rows.append(item("Test farm unavailable", "`testfarm status --json` did not return a usable result.",
                          "unavailable", item_id="service-state"))
         return rows
     farm_requests = (testfarm_status() or {}).get("requests")

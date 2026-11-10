@@ -244,11 +244,20 @@ func (m *app) renderInfoRail(width, height int) string {
 			}
 			state := row.Status
 			if spec.id == "phones" {
-				state = "disconnected"
-				if row.ADB == "device" {
+				switch row.ADB {
+				case "device", "usable", "busy":
 					state = "connected · " + row.Status
-				} else if row.ADB == "" && row.Status != "" {
+				case "offline":
+					state = "disconnected"
+				case "unknown":
+					state = "unknown"
+					if row.Status != "" && row.Status != "unknown" {
+						state += " · " + row.Status
+					}
+				case "":
 					state = row.Status
+				default:
+					state = row.ADB
 				}
 			}
 			line := "  " + row.Title

@@ -922,17 +922,21 @@ func TestShortWideLayoutKeepsCardsInsideTheBody(t *testing.T) {
 func TestDevicesRailShowsPhoneStateOnEveryPage(t *testing.T) {
 	m := fixtureApp(t)
 	m.data.Panels.Phones = []item{
-		{Title: "Pixel 8", Status: "busy", ADB: "device", Detail: "Testing: Widget suite (basic) for 5m\nserial-one"},
-		{Title: "Galaxy S22", Status: "idle", ADB: "device"},
+		{Title: "Pixel 8", Status: "busy", ADB: "busy", Detail: "Testing: Widget suite (basic) for 5m\nserial-one"},
+		{Title: "Galaxy S22", Status: "busy", ADB: "unknown", Detail: "Testing: Phone suite for 2m\nserial-two"},
+		{Title: "POCO", Status: "idle", ADB: "usable"},
 		{Title: "Galaxy M31", Status: "offline", ADB: "offline"},
 	}
 	for page := range pages {
 		m.page, m.focus = page, pages[page][0].id
 		view := ansi.Strip(m.View().Content)
-		for _, value := range []string{"DEVICES", "Pixel 8", "connected · busy", "Widget suite", "Galaxy S22", "connected · idle", "Galaxy M31", "disconnected"} {
+		for _, value := range []string{"DEVICES", "Pixel 8 · connected · busy", "Widget suite", "Galaxy S22 · unknown · busy", "Phone suite", "POCO · connected · idle", "Galaxy M31 · disconnected"} {
 			if !strings.Contains(view, value) {
 				t.Errorf("page %d device rail missing %q", page, value)
 			}
+		}
+		if strings.Contains(view, "Galaxy S22 · disconnected") {
+			t.Errorf("page %d rendered busy phone with unknown connectivity as disconnected", page)
 		}
 		if strings.Contains(view, "INFORMATION") {
 			t.Errorf("page %d retains old rail", page)
