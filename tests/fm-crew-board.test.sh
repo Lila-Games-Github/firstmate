@@ -53,6 +53,24 @@ run_panels() {
     FM_DATA_OVERRIDE="$home/data" python3 "$ROOT/bin/fm-crew-board-panels.py" "$2"
 }
 
+make_farm_registry() {
+  local home=$1
+  mkdir -p "$home/testfarm/src/lila_test_farm" "$home/farm-config"
+  : > "$home/testfarm/src/lila_test_farm/__init__.py"
+  cat > "$home/testfarm/src/lila_test_farm/registry.py" <<'PY'
+import json
+import os
+from pathlib import Path
+
+
+def load_devices():
+    data = json.loads((Path(os.environ["TESTFARM_CONFIG"]) / "devices.json").read_text())
+    if data.get("schema") != "testfarm.devices.v1" or not isinstance(data.get("devices"), list):
+        raise ValueError("invalid device registry")
+    return data["devices"]
+PY
+}
+
 # Starts a sleeping process whose working directory is $1 and prints its pid.
 sleeper_in() { (cd "$1" && exec sleep 60) >/dev/null 2>&1 & printf '%s\n' "$!"; }
 
@@ -845,6 +863,10 @@ EOF
 test_ticketed_queue_and_locked_phone() {
   local home stub now held vip vip_two any suite_wait suite_hold boot ticks
   home=$(make_home ticketed_queue)
+  make_farm_registry "$home"
+  cat > "$home/farm-config/devices.json" <<'JSON'
+{"schema":"testfarm.devices.v1","devices":[{"serial":"R5CT32HRVNM","label":"S22","any":true},{"serial":"RZ8N71EC9ZB","label":"M31","any":true},{"serial":"RZCX224VH4T","label":"S21 FE","any":true}]}
+JSON
   mkdir -p "$home/queues/phones/tickets" "$home/queues/suite/tickets" "$home/wt-alpha" "$home/wt-beta"
   printf 'worktree=%s\n' "$home/wt-alpha" >> "$home/state/alpha.meta"
   printf 'worktree=%s\n' "$home/wt-beta" >> "$home/state/beta.meta"
@@ -902,9 +924,12 @@ EOF
   {"id":"running-suite","task":"beta","state":"running","run_seconds":90,"options":{"suite":true},"steps":[{"name":"suite","state":"running","started":$((now-90))}]},
   {"id":"phone-request","task":"beta","state":"running","run_seconds":90,"options":{"device_gate":"R5CT32HRVNM"}},
   {"id":"stray-request","task":"beta","state":"queued","wait_seconds":30,"options":{"device_gate":"UNLISTED9"}}
-]}
+],"phones":[
+  {"serial":"R5CT32HRVNM","label":"S22","adb":"unknown","now":{"ticket":"001-held","task":"alpha","since":$((now-480))},"waiting":[{"ticket":"002-vip","task":"beta","position":1,"since":$((now-180))},{"ticket":"004-vip","task":"alpha","position":2,"since":$((now-60))}]},
+  {"serial":"RZ8N71EC9ZB","label":"M31","adb":"unknown","now":null,"waiting":[]},
+  {"serial":"RZCX224VH4T","label":"S21 FE","adb":"unknown","now":null,"waiting":[]}]}
 JSON
-  PATH="$stub:/usr/bin:/bin" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'ticketed queue refresh failed'
   assert_equals locked "$(jq -r '.panels.phones[] | select(.id == "R5CT32HRVNM") | .status' "$home/state/crew-board.json")" 'keyguard is a locked state'
@@ -912,12 +937,12 @@ JSON
     'an unreadable keyguard keeps the phone state'
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.title | test("S21 FE|RZCX224VH4T"))] | length' "$home/state/crew-board.json")" \
     'an unreadable keyguard raises no notification'
-  assert_equals 'EDITOR: 1 running, 1 waiting|Galaxy S22|Galaxy M31|Galaxy S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 4 pending · 0 building' \
-    "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'fixed resource sections and any-phone queue'
+  assert_equals 'EDITOR: 1 running, 1 waiting|S22|M31|S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 4 pending · 0 building' \
+    "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'registered resource sections and any-phone queue'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \
     'waiting 4m' 'suite ticket wait duration'
-  assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "phone-R5CT32HRVNM-wait-'"$vip"'") | .status' "$home/state/crew-board.json")" \
-    'waiting 3m' 'VIP ticket wait duration'
+  assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "phone-R5CT32HRVNM-wait-002-vip") | .status' "$home/state/crew-board.json")" \
+    'waiting 3m' 'farm phone wait duration'
   assert_equals 'NEXT: Fix the gadget|#2: Make the widget spin' \
     "$(jq -r '[.panels.test_queue[] | select(.id | startswith("phone-R5CT32HRVNM-wait-")) | .title] | join("|")' "$home/state/crew-board.json")" \
     'VIP waiters stay in ticket order'
@@ -943,14 +968,16 @@ JSON
   assert_not_contains "$(cat "$home/adb-commands")" 'kill-server' 'board never disturbs adb sessions'
   assert_not_contains "$(cat "$home/adb-commands")" 'reconnect' 'board never reconnects adb sessions'
   rm -f "$home/queues/phones/tickets/002-vip.json" "$home/queues/phones/tickets/004-vip.json"
-  PATH="$stub:/usr/bin:/bin" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
+  jq '.phones[0].waiting = []' "$home/test-service/status.json" > "$home/test-service/status.new.json"
+  mv "$home/test-service/status.new.json" "$home/test-service/status.json"
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'cleared phone queue refresh failed'
   assert_equals 0 "$(jq '[.panels.alerts[] | select(.nid == "phone-locked:R5CT32HRVNM")] | length' "$home/state/crew-board.json")" \
     'a locked phone with no waiting test is quiet'
   rm -f "$home/queues/phones/tickets/001-held.json" "$home/queues/phones/tickets/003-any.json" \
     "$home/queues/phones/tickets/005-unknown.json" "$home/test-service/status.json"
-  PATH="$stub:/usr/bin:/bin" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'empty ticket queue refresh failed'
   assert_equals 0 "$(jq '[.panels.test_queue[] | select(.status | test("^(running|waiting)")) | select(.id | test("^(ticket|service)-"))] | length' "$home/state/crew-board.json")" \
@@ -1053,6 +1080,63 @@ EOF
     "$(jq -r '[.panels.test_queue[] | select(.id == "service-runner-down")][0].title' "$home/state/crew-board.json")" \
     'a reachable farm with a dead runner raises a down notice'
   pass 'a real testfarm status fixture renders rows, a missing command shows unavailable, and a dead runner is flagged'
+}
+
+test_registered_farm_devices_follow_refresh() {
+  local home stub now
+  home=$(make_home registered_farm)
+  make_farm_registry "$home"
+  stub="$home/stub-bin"
+  mkdir -p "$stub" "$home/test-service"
+  cat > "$stub/adb" <<'EOF'
+#!/usr/bin/env bash
+printf 'List of devices attached\nserial-a device model:Pixel_8\nserial-b device model:Pixel_7\nserial-d offline\n'
+EOF
+  cat > "$stub/testfarm" <<'EOF'
+#!/usr/bin/env bash
+cat "$FM_TEST_SERVICE_STATE/status.json"
+EOF
+  chmod +x "$stub/adb" "$stub/testfarm"
+  cat > "$home/farm-config/devices.json" <<'JSON'
+{"schema":"testfarm.devices.v1","devices":[{"serial":"serial-a","label":"A","any":true},{"serial":"serial-b","label":"B","any":true},{"serial":"serial-c","label":"C","any":true},{"serial":"serial-d","label":"POCO","any":false}]}
+JSON
+  now=$(date +%s)
+  cat > "$home/test-service/status.json" <<JSON
+{"schema":"fm-test-service.v1","requests":[],"phones":[
+ {"serial":"serial-a","label":"A","adb":"unknown","now":{"ticket":"held","task":"alpha","since":$((now-60))},"waiting":[{"ticket":"wait-1","task":"beta","position":1,"since":$((now-30))},{"ticket":"wait-2","task":"alpha","position":2,"since":$((now-10))}]},
+ {"serial":"serial-b","label":"B","adb":"unknown","now":null,"waiting":[]},
+ {"serial":"serial-c","label":"C","adb":"unknown","now":null,"waiting":[]},
+ {"serial":"serial-d","label":"POCO","adb":"unknown","now":null,"waiting":[]}]}
+JSON
+  cp "$home/farm-config/devices.json" "$home/farm-config/all-devices.json"
+  cp "$home/test-service/status.json" "$home/test-service/all-status.json"
+  jq '.devices = .devices[:3]' "$home/farm-config/all-devices.json" > "$home/farm-config/devices.json"
+  jq '.phones = .phones[:3]' "$home/test-service/all-status.json" > "$home/test-service/status.json"
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" \
+    FM_TEST_SERVICE_STATE="$home/test-service" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'three-device farm refresh failed'
+  assert_equals 3 "$(jq '[.panels.test_queue[] | select(.id | test("^phone-.*-heading$"))] | length' "$home/state/crew-board.json")" 'initial registered count'
+  cp "$home/farm-config/all-devices.json" "$home/farm-config/devices.json"
+  cp "$home/test-service/all-status.json" "$home/test-service/status.json"
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" \
+    FM_TEST_SERVICE_STATE="$home/test-service" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'registered farm refresh failed'
+  assert_equals 4 "$(jq '.devices | length' "$home/farm-config/devices.json")" 'registry fixture source count'
+  assert_equals 4 "$(jq '.phones | length' "$home/test-service/status.json")" 'live status fixture source count'
+  assert_equals 'A|B|C|POCO' "$(jq -r '[.panels.test_queue[] | select(.id | test("^phone-.*-heading$")) | .title] | join("|")' "$home/state/crew-board.json")" 'all registered devices appear in registration order'
+  assert_equals 4 "$(jq '[.panels.test_queue[] | select(.id | test("^phone-.*-heading$"))] | length' "$home/state/crew-board.json")" 'observed board count'
+  assert_equals 'RUNNING: Make the widget spin|NEXT: Fix the gadget|#2: Make the widget spin' \
+    "$(jq -r '[.panels.test_queue[] | select(.id | test("^phone-serial-a-(running|wait-)") ) | .title] | join("|")' "$home/state/crew-board.json")" 'farm holder and queue positions'
+  assert_equals 'Disconnected' "$(jq -r '.panels.test_queue[] | select(.id == "phone-serial-c-state") | .title' "$home/state/crew-board.json")" 'registered offline phone remains visible'
+  assert_equals 'Named requests only' "$(jq -r '.panels.test_queue[] | select(.id == "phone-serial-d-excluded") | .title' "$home/state/crew-board.json")" 'excluded shared phone remains visible'
+  jq '.devices += [{"serial":"serial-d","label":"duplicate"}]' "$home/farm-config/devices.json" > "$home/farm-config/bad.json"
+  mv "$home/farm-config/bad.json" "$home/farm-config/devices.json"
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" \
+    FM_TEST_SERVICE_STATE="$home/test-service" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'bad registry refresh failed'
+  assert_equals 1 "$(jq '[.panels.test_queue[] | select(.id == "phone-farm-unavailable")] | length' "$home/state/crew-board.json")" 'duplicate registry rejected with unavailable row'
+  assert_equals 0 "$(jq '[.panels.test_queue[] | select(.id | test("^phone-.*-heading$"))] | length' "$home/state/crew-board.json")" 'bad registry cannot leave stale phone list'
+  pass 'registered farm devices, holder, waiters, offline and exclusion states, and bad registry'
 }
 
 test_suite_lock_probe() {
@@ -1779,6 +1863,7 @@ test_backlog_counts_from_a_capped_listing
 test_phone_testing_and_test_queue
 test_ticketed_queue_and_locked_phone
 test_testfarm_status_fixture_and_unavailable
+test_registered_farm_devices_follow_refresh
 test_suite_lock_probe
 test_daily_routines_from_checks
 test_alerts_and_ready_from_real_state
