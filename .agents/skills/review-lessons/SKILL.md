@@ -40,3 +40,17 @@ Reviewer guidance is passed to the review pipeline through its supported configu
 Run `bin/fm-review-lessons.py validate data/review-playbook.json` before reporting the playbook.
 The validator rejects obvious instance-only entries, but the curator must reject semantic one-offs that evade its syntax check.
 Report pattern additions, revisions, prunes, owner routing, and input coverage in the ordinary daily lessons report.
+
+## Recurrence check
+
+Run `bin/fm-review-lessons.py recurrence --candidates state/learning-candidates --backlog data/backlog.md --archive data/done-archive.md --classes data/failure-classes.json --ledger data/recurrence-ledger.jsonl --since YYYY-MM-DD` on every daily pass, using the last successful pass date.
+The command ranks up to five earlier prevention claims per batch incident and marks scores of at least 0.20 `must judge`; similarity is a lead, not a class decision.
+For every must-judge pair and every batch incident against every class statement, ask whether the earlier record's missing check, stated without feature names, would have caught the new incident.
+Record each yes judgement by adding the candidate to that class's `members`, or create a feature-neutral class when none fits, then rerun the command.
+Record no judgements in the daily report so the curator's decision is reviewable.
+Run `bin/fm-review-lessons.py validate data/failure-classes.json --candidates state/learning-candidates` before publishing the section.
+Include the command's `## Recurrence check` section in every daily report, preserving its counts, touched classes, landed lessons, threshold outcome, and source counts.
+The command appends one idempotent line per judged recurrence to `data/recurrence-ledger.jsonl` and records raised threshold dates in the private class file.
+A judged recurrence cannot be dismissed, even if its instance is fixed; route it to the one open fix item for its class, creating that item on the first recurrence and linking the candidate to it.
+Report a repeat while a lesson fix is still open separately from a recurrence after a prevention claim.
+Keep the class file and ledger private with the same home-local lifecycle as `data/review-playbook.json`.

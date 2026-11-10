@@ -61,4 +61,47 @@ if python3 "$ROOT/bin/fm-review-lessons.py" extract --database "$TMP/state.sqlit
 fi
 grep -q 'broken.jsonl:1' "$TMP/broken.log"
 test "$(wc -l <"$TMP/out.jsonl")" -eq 15
+mkdir -p "$TMP/repeats"
+python3 - "$TMP" <<'PY'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]); store=p/'repeats'
+for identifier,when,task,cause,disposition in (
+ ('lc-earlier','2026-11-01T10:00:00Z','task-old','decoder loses values on export reload',{'outcome':'dismissed','at':'2026-11-02T10:00:00Z','reference':''}),
+ ('lc-later','2026-11-03T10:00:00Z','task-new','decoder loses values on export reload',None),
+ ('lc-other','2026-11-03T11:00:00Z','task-third','layout geometry on phone differs',None)):
+    (store/(identifier+'.json')).write_text(json.dumps({'id':identifier,'captured_at':when,
+      'incident':{'origin_task':task,'root_cause':cause,'missing_check':'roundtrip export verification'},
+      'disposition':disposition}))
+(p/'backlog.md').write_text('- [ ] lesson-f1 - open fix\n')
+(p/'archive.md').write_text('- [x] lesson-f2 - completed fix (merged 2026-11-02)\n')
+good={'classes':[{'slug':'export-roundtrip','statement':'Values change after export and reload without a roundtrip check.',
+                   'members':['lc-earlier','lc-later'],'raised':[]}]}
+(p/'classes.json').write_text(json.dumps(good))
+bad_statement=json.loads(json.dumps(good));bad_statement['classes'][0]['statement']='Check src/decoder.py on every task for this fault.'
+(p/'bad-statement.json').write_text(json.dumps(bad_statement))
+bad_task=json.loads(json.dumps(good));bad_task['classes'][0]['statement']='The fm-export-repair task did not cover this condition.'
+(p/'bad-task.json').write_text(json.dumps(bad_task))
+bad_member=json.loads(json.dumps(good));bad_member['classes'][0]['members'].append('lc-absent')
+(p/'bad-member.json').write_text(json.dumps(bad_member))
+PY
+python3 "$ROOT/bin/fm-review-lessons.py" recurrence --candidates "$TMP/repeats" --backlog "$TMP/backlog.md" \
+  --archive "$TMP/archive.md" --classes "$TMP/classes.json" --ledger "$TMP/ledger.jsonl" \
+  --since 2026-11-03 --output "$TMP/repeat-report.md"
+grep -q 'Must judge lc-later: lc-earlier' "$TMP/repeat-report.md"
+grep -q 'Batch: 2 incidents; 1 recurrences' "$TMP/repeat-report.md"
+test "$(wc -l <"$TMP/ledger.jsonl")" -eq 1
+python3 "$ROOT/bin/fm-review-lessons.py" recurrence --candidates "$TMP/repeats" --backlog "$TMP/backlog.md" \
+  --archive "$TMP/archive.md" --classes "$TMP/classes.json" --ledger "$TMP/ledger.jsonl" \
+  --since 2026-11-03 --output "$TMP/repeat-report.md"
+test "$(wc -l <"$TMP/ledger.jsonl")" -eq 1
+for bad in bad-statement bad-task bad-member; do
+  if python3 "$ROOT/bin/fm-review-lessons.py" validate "$TMP/$bad.json" --candidates "$TMP/repeats" >"$TMP/$bad.log" 2>&1; then
+    echo "invalid class file $bad was accepted" >&2
+    exit 1
+  fi
+done
+grep -q 'instance-specific' "$TMP/bad-statement.log"
+grep -q 'instance-specific' "$TMP/bad-task.log"
+grep -q 'unknown member' "$TMP/bad-member.log"
 echo 'ok - extractor emits named records, ignores positional ID reuse, and validates general playbooks'
