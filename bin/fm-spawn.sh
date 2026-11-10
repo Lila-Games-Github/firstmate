@@ -336,6 +336,8 @@
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
 #   marker FM_TASK_ID that ship and scout panes receive above.
+#   ADB_SERVER_SOCKET also survives filtering when the operator has set it or
+#   the host has the protected test-farm adb service installed.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
@@ -529,7 +531,7 @@ LAUNCH_ENV_FLOOR='HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTY
   TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH
   HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID
   CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION
-  FM_TASK_ID'
+  FM_TASK_ID ADB_SERVER_SOCKET'
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   if [ ! -f "$CONFIG/launch-env-allowlist" ] || [ ! -r "$CONFIG/launch-env-allowlist" ]; then
     echo "error: config/launch-env-allowlist must be a readable regular file" >&2
@@ -5101,6 +5103,17 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
+fi
+# The installed unit is the host's authority for the protected adb server.
+# An explicit launcher value also reaches a fresh pane on hosts without it.
+# Set the socket only if the destination shell has no operator value. This
+# covers relaunches, raw commands, secondmates, and every launch shape.
+if [ "${ADB_SERVER_SOCKET+x}" = x ] \
+    || { command -v systemctl >/dev/null 2>&1 \
+      && systemctl cat testfarm-pin-adb.service >/dev/null 2>&1; }; then
+  adb_socket=${ADB_SERVER_SOCKET-tcp:127.0.0.1:503}
+  # shellcheck disable=SC2016
+  LAUNCH='if [ -z "${ADB_SERVER_SOCKET+x}" ]; then export ADB_SERVER_SOCKET='"$(shell_quote "$adb_socket")"'; fi; '"$LAUNCH"
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'

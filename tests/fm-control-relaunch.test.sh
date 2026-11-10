@@ -143,6 +143,11 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
+  cat > "$fb/systemctl" <<'SH'
+#!/bin/sh
+[ "$*" = 'cat testfarm-pin-adb.service' ] && [ "${FM_FAKE_ADB_SERVICE:-0}" = 1 ]
+SH
+  chmod +x "$fb/systemctl"
   cat > "$fb/sleep" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_LOCK_WAITING:-}" ] || : > "$FM_FAKE_LOCK_WAITING"
@@ -352,6 +357,32 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_relaunch_uses_protected_adb_environment() {
+  local service dir out rc launch result expected
+  for service in 0 1; do
+    dir=$(new_case "adb-$service" "adb$service")
+    add_ship_task "$dir" "adb$service" claude
+    cat > "$dir/fakebin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "${ADB_SERVER_SOCKET-unset}"
+SH
+    chmod +x "$dir/fakebin/claude"
+    out=$(FM_FAKE_ADB_SERVICE="$service" run_control "$dir" "adb$service" relaunch --note 'resume work'); rc=$?
+    expect_code 0 "$rc" "adb service=$service relaunch should succeed: $out"
+    launch=$(tail -n 1 "$dir/fake/literal")
+    result=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" \
+      /bin/sh -c "$launch") || fail "adb service=$service relaunched command failed"
+    expected='unset'
+    [ "$service" = 0 ] || expected=tcp:127.0.0.1:503
+    [ "$result" = "$expected" ] || fail "adb service=$service relaunch socket: $result"
+    result=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" \
+      ADB_SERVER_SOCKET=tcp:pane:1800 /bin/sh -c "$launch") \
+      || fail "adb service=$service relaunched command with operator socket failed"
+    [ "$result" = tcp:pane:1800 ] || fail "relaunch replaced operator socket: $result"
+    pass "relaunch service=$service inherits protected adb and preserves operator socket"
+  done
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -1998,6 +2029,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_uses_protected_adb_environment
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

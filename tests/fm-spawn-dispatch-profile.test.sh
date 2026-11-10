@@ -48,6 +48,11 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/systemctl" <<'SH'
+#!/bin/sh
+[ "$*" = 'cat testfarm-pin-adb.service' ] && [ "${FM_FAKE_ADB_SERVICE:-0}" = 1 ]
+SH
+  chmod +x "$fakebin/systemctl"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -1241,6 +1246,52 @@ SH
   done
 }
 
+test_protected_adb_launch_environment() {
+  local rec id out status launch result service allowlist parent pane expected
+  for service in 0 1; do
+    for allowlist in absent present; do
+      for parent in unset custom; do
+        id="adb-$service-$allowlist-$parent"
+        rec=$(make_spawn_case "$id" codex "$id")
+        read_case_record "$rec"
+        [ "$allowlist" = absent ] || : > "$HOME_DIR/config/launch-env-allowlist"
+        cat > "$CASE_DIR/probe.sh" <<'SH'
+#!/bin/sh
+printf '%s\n' "${ADB_SERVER_SOCKET-unset}"
+SH
+        if [ "$parent" = custom ]; then
+          out=$(FM_FAKE_ADB_SERVICE="$service" ADB_SERVER_SOCKET=tcp:operator:1700 \
+            run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+            "$id" "$PROJ_DIR" --harness "/bin/sh '$CASE_DIR/probe.sh'")
+        else
+          out=$(unset ADB_SERVER_SOCKET; FM_FAKE_ADB_SERVICE="$service" \
+            run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+            "$id" "$PROJ_DIR" --harness "/bin/sh '$CASE_DIR/probe.sh'")
+        fi
+        status=$?
+        expect_code 0 "$status" "adb service=$service allowlist=$allowlist spawn: $out"
+        launch=$(tail -n 1 "$LAUNCH_LOG")
+        for pane in unset custom; do
+          if [ "$pane" = custom ]; then
+            result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin \
+              ADB_SERVER_SOCKET=tcp:pane:1800 /bin/sh -c "$launch") \
+              || fail "adb probe with pane value failed"
+            expected=tcp:pane:1800
+          else
+            result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin \
+              /bin/sh -c "$launch") || fail "adb probe without pane value failed"
+            expected='unset'
+            [ "$service" = 0 ] || expected=tcp:127.0.0.1:503
+            [ "$parent" = unset ] || expected=tcp:operator:1700
+          fi
+          [ "$result" = "$expected" ] || fail "adb service=$service allowlist=$allowlist parent=$parent pane=$pane: $result"
+        done
+      done
+      pass "protected adb service=$service allowlist=$allowlist preserves pane and launcher values"
+    done
+  done
+}
+
 test_launch_environment_invalid_config_refuses() {
   local rec id bad out status
   id=env-invalid
@@ -1301,20 +1352,20 @@ test_launch_environment_inherited_by_secondmate() {
   printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  out=$(FM_FAKE_ADB_SERVICE=1 run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "secondmate with an allowlist should spawn: $out"
   cmp -s "$HOME_DIR/config/launch-env-allowlist" "$sm/config/launch-env-allowlist" \
     || fail "secondmate did not inherit the launch environment contract"
   cat > "$FAKEBIN_DIR/codex" <<'SH'
 #!/bin/sh
-printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "$FM_TEST_ALLOWED" "$FM_HOME" "${FM_STATE_OVERRIDE-unset}"
+printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "$FM_TEST_ALLOWED" "$FM_HOME" "${FM_STATE_OVERRIDE-unset}" "${ADB_SERVER_SOCKET-unset}"
 SH
   chmod +x "$FAKEBIN_DIR/codex"
   result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
     FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
     /bin/sh -c "$(cat "$LAUNCH_LOG")") || fail "secondmate's emitted command failed"
-  [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm" ] \
+  [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm"$'\n\ntcp:127.0.0.1:503' ] \
     || fail "secondmate's environment lost filtering or explicit home assignments: $result"
   # Exercise the same inheritance owner used by local and remote transfers;
   # removal must restore absence downstream as well as copying an opt-in.
@@ -1409,6 +1460,7 @@ SH
 }
 
 test_launch_environment_allowlist
+test_protected_adb_launch_environment
 test_launch_environment_invalid_config_refuses
 test_launch_environment_inaccessible_config_refuses
 test_launch_environment_inherited_by_secondmate
