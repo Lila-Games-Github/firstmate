@@ -4,6 +4,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# These fixtures supply their own landing consumer and assert its full output.
+# The CI lane may skip private testfarm tests independently of this fixture.
+unset FM_SKIP_TESTFARM
+
 COMPAT="$ROOT/bin/fm-stock-bash-compat.sh"
 TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh"
 
