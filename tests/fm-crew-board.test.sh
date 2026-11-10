@@ -263,7 +263,7 @@ exit 99
 EOF
   cat > "$stub/testfarm" <<'EOF'
 #!/usr/bin/env bash
-[ "$*" = 'status --json --no-probe' ] || exit 9
+[ "$*" = 'status --json' ] || exit 9
 cat "$FM_TEST_SERVICE_STATE/status.json"
 EOF
   chmod +x "$stub/adb" "$stub/testfarm"
@@ -811,15 +811,17 @@ EOF
   {"id":"stray-request","task":"beta","state":"queued","wait_seconds":30,"options":{"device_gate":"UNLISTED9"}}
 ],"phones":[
   {"serial":"R5CT32HRVNM","label":"S22","adb":"unknown","now":{"ticket":"001-held","task":"alpha","since":$((now-480))},"waiting":[{"ticket":"002-vip","task":"beta","position":1,"since":$((now-180))},{"ticket":"004-vip","task":"alpha","position":2,"since":$((now-60))}]},
-  {"serial":"RZ8N71EC9ZB","label":"M31","adb":"unknown","now":null,"waiting":[]},
+  {"serial":"RZ8N71EC9ZB","label":"M31","adb":"offline","now":null,"waiting":[]},
   {"serial":"RZCX224VH4T","label":"S21 FE","adb":"unknown","now":null,"waiting":[]}]}
 JSON
   PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'ticketed queue refresh failed'
   assert_equals busy "$(jq -r '.panels.phones[] | select(.id == "R5CT32HRVNM") | .status' "$home/state/crew-board.json")" 'farm holder makes phone busy'
+  assert_equals unknown "$(jq -r '.panels.phones[] | select(.id == "R5CT32HRVNM") | .adb' "$home/state/crew-board.json")" 'busy S22 retains unknown connectivity'
+  assert_equals offline "$(jq -r '.panels.phones[] | select(.id == "RZ8N71EC9ZB") | .status' "$home/state/crew-board.json")" 'farm-reported M31 offline'
   assert_equals unknown "$(jq -r '.panels.phones[] | select(.id == "RZCX224VH4T") | .status' "$home/state/crew-board.json")" \
-    'no-probe status keeps connection unknown'
+    'farm-reported unknown connectivity stays unknown'
   assert_equals 'EDITOR: 1 running, 1 waiting|S22|M31|S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 4 pending · 0 building' \
     "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'registered resource sections and any-phone queue'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \
@@ -964,6 +966,8 @@ EOF
 test_registered_farm_devices_follow_refresh() {
   local home stub now
   home=$(make_home registered_farm)
+  local FROGPILE_QUEUE_ROOT="$home/queues"
+  export FROGPILE_QUEUE_ROOT
   make_farm_registry "$home"
   stub="$home/stub-bin"
   mkdir -p "$stub" "$home/test-service"
