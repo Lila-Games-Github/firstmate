@@ -184,15 +184,8 @@ test_note_without_selection_and_point_without_text() {
 }
 
 test_panel_projection_and_launcher() {
-  local home install_dir result stub
+  local home install_dir result
   home=$(make_home panels)
-  stub="$home/stub-bin"
-  mkdir -p "$stub"
-  cat > "$stub/adb" <<'EOF'
-#!/usr/bin/env bash
-printf 'List of devices attached\n'
-EOF
-  chmod +x "$stub/adb"
   cat > "$home/data/captain-questions.md" <<'EOF'
 # Open questions
 
@@ -202,10 +195,10 @@ EOF
   cat > "$home/data/crew-board-cache.json" <<'EOF'
 {"schema":"fm-crew-board-cache.v1","observed_at":"2026-10-21T06:00:00Z","phones":[{"title":"S22","status":"locked","detail":"held by alpha"}],"bugs":[{"title":"Rocketboard login bug","status":"in progress"},{"title":"Combat round visuals","status":"with QA"},{"title":"Pond upgrade","status":"In QA"},{"title":"Lobby crash","status":"QA failed"},{"title":"Shop prices","status":"failed QA"},{"title":"Map seam","status":"back from QA - reopened"}],"allowance":[{"title":"Claude","status":"45% remaining"}],"routines":[{"title":"Tip health","status":"green"}]}
 EOF
-  PATH="$stub:$PATH" run_board "$home" refresh >/dev/null || fail "panel refresh failed"
+  run_board "$home" refresh >/dev/null || fail "panel refresh failed"
   assert_equals 1 "$(jq '.panels.full_questions | length' "$home/state/crew-board.json")" "question count"
   assert_contains "$(jq -r '.panels.full_questions[0].detail' "$home/state/crew-board.json")" 'Blocks the Android build' "question blocker"
-  assert_equals 1 "$(jq '[.panels.phones[] | select(.title == "S22")] | length' "$home/state/crew-board.json")" "phone cache"
+  assert_equals 'Test farm unavailable' "$(jq -r '.panels.phones[0].title' "$home/state/crew-board.json")" "phone source unavailable"
   assert_equals 2 "$(jq '.panels.backlog.in_flight' "$home/state/crew-board.json")" "in-flight count from tasks-axi"
   assert_equals 'Rocketboard login bug' "$(jq -r '.panels.bugs[0].title' "$home/state/crew-board.json")" "bug cache"
   assert_equals 'Rocketboard login bug|Lobby crash|Shop prices|Map seam' "$(jq -r '[.panels.bugs[].title] | join("|")' "$home/state/crew-board.json")" "only bugs with or in QA are left out"
@@ -250,168 +243,50 @@ EOF
   pass 'bug panel merges sources, tags cards, preserves order, and handles empty sources'
 }
 
-test_local_phones_and_cache_overlay() {
-  local home stub
-  home=$(make_home phones)
+test_farm_phones_never_spawn_adb() {
+  local home stub marker
+  home=$(make_home farm_phones)
+  make_farm_registry "$home"
   stub="$home/stub-bin"
-  mkdir -p "$stub"
-  cat > "$stub/adb" <<'EOF'
+  marker="$home/adb-spawned"
+  mkdir -p "$stub" "$home/test-service"
+  cat > "$home/farm-config/devices.json" <<'JSON'
+{"schema":"testfarm.devices.v1","devices":[{"serial":"serial-one","label":"Pixel 8","any":true},{"serial":"serial-two","label":"POCO","any":false}]}
+JSON
+  cat > "$home/test-service/status.json" <<'JSON'
+{"schema":"fm-test-service.v1","requests":[],"phones":[{"serial":"serial-one","label":"Pixel 8","adb":"usable","now":null,"waiting":[]},{"serial":"serial-two","label":"POCO","adb":"offline","now":null,"waiting":[]}]}
+JSON
+  cat > "$stub/adb" <<EOF
 #!/usr/bin/env bash
-printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two device product:red model:Galaxy_S22 device:red\nserial-three unauthorized\nserial-four offline\n'
+: > "$marker"
+exit 99
 EOF
-  chmod +x "$stub/adb"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone refresh failed"
-  assert_equals 4 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "adb phone count"
-  assert_equals 'Pixel 8' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .title' "$home/state/crew-board.json")" "adb model"
-  assert_equals 'serial-one' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .detail' "$home/state/crew-board.json")" "adb serial detail"
-  assert_equals 'unauthorized' "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .status' "$home/state/crew-board.json")" "unauthorized state"
-  assert_equals 'offline' "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .status' "$home/state/crew-board.json")" "offline state"
-  cat > "$home/data/crew-board-cache.json" <<'EOF'
-{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-one","title":"Old title","status":"locked","detail":"held by worker"},{"title":"Galaxy_S22","status":"busy","detail":"reserved"},{"title":"Cache only","status":"ready","detail":"manual"}]}
-EOF
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone overlay refresh failed"
-  assert_equals 5 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "merged phone count"
-  assert_equals 4 "$(jq '[.panels.phones[] | select(.adb != null)] | length' "$home/state/crew-board.json")" "attached device rows"
-  assert_equals 1 "$(jq '[.panels.phones[] | select(.adb == null)] | length' "$home/state/crew-board.json")" "cache-only phone rows"
-  assert_equals 'locked' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .status' "$home/state/crew-board.json")" "serial overlay"
-  assert_equals 'held by worker' "$(jq -r '.panels.phones[] | select(.id == "serial-one") | .detail' "$home/state/crew-board.json")" "overlay detail"
-  assert_equals 'busy' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .status' "$home/state/crew-board.json")" "normalized title overlay"
-  assert_equals 0 "$(jq '[.panels.phones[] | select(.title == "Cache only" and .adb != null)] | length' "$home/state/crew-board.json")" "cache-only row marked attached"
-  rm -f "$home/data/crew-board-cache.json"
-  cat > "$stub/adb" <<'EOF'
+  cat > "$stub/testfarm" <<'EOF'
 #!/usr/bin/env bash
-printf 'List of devices attached\n'
+[ "$*" = 'status --json --no-probe' ] || exit 9
+cat "$FM_TEST_SERVICE_STATE/status.json"
 EOF
-  chmod +x "$stub/adb"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "device-free adb refresh failed"
-  assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "attached-phone-free adb"
-  pass "local adb phones, unavailable states, cache overlay, and missing adb"
-}
-
-test_phone_connection_states() {
-  local home stub
-  home=$(make_home phone_states)
-  stub="$home/stub-bin"
-  mkdir -p "$stub"
-  cat > "$stub/adb" <<'EOF'
-#!/usr/bin/env bash
-printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two unauthorized\nserial-three no permissions (user in plugdev group; are your udev rules wrong?); see [http://developer.android.com/tools/device.html]\nserial-four recovery\n* daemon not running; starting now at tcp:5037\n'
-EOF
-  chmod +x "$stub/adb"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "phone state refresh failed"
-  assert_equals 4 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "every adb device line becomes a row"
-  assert_equals 1 "$(jq '[.panels.phones[] | select(.adb == "device")] | length' "$home/state/crew-board.json")" "connected device rows"
-  assert_equals 1 "$(jq '[.panels.phones[] | select(.adb == "unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized device rows"
-  assert_equals 'unauthorized' "$(jq -r '.panels.phones[] | select(.adb == "unauthorized") | .status' "$home/state/crew-board.json")" "unauthorized row state"
-  assert_equals true "$(jq -r '.panels.phones[] | select(.adb == "unauthorized") | .alert' "$home/state/crew-board.json")" "unauthorized row is an alert"
-  assert_equals 'no permissions' "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .adb' "$home/state/crew-board.json")" "two-word adb state"
-  assert_equals true "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .alert' "$home/state/crew-board.json")" "no permissions row is an alert"
-  assert_equals 'serial-three' "$(jq -r '.panels.phones[] | select(.id == "serial-three") | .title' "$home/state/crew-board.json")" "no model falls back to the serial"
-  assert_equals 'recovery' "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .adb' "$home/state/crew-board.json")" "unknown adb state is kept"
-  assert_equals true "$(jq -r '.panels.phones[] | select(.id == "serial-four") | .alert' "$home/state/crew-board.json")" "unknown state row is an alert"
-  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized phone alert"
-  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-three no permissions")] | length' "$home/state/crew-board.json")" "no permissions phone alert"
-  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-four recovery")] | length' "$home/state/crew-board.json")" "recovery phone alert"
-  assert_equals 3 "$(jq '[.panels.alerts[] | select(.title | startswith("Phone "))] | length' "$home/state/crew-board.json")" "every flagged phone state explains itself in ALERTS"
-  assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Phone serial-two unauthorized") | .detail' "$home/state/crew-board.json")" 'adb reports unauthorized' "unauthorized alert reason"
-  cat > "$home/data/crew-board-cache.json" <<'EOF'
-{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-two","title":"Galaxy S22","status":"locked","detail":"held by worker"}]}
-EOF
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "unauthorized overlay refresh failed"
-  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two unauthorized" and .status == "unauthorized")] | length' "$home/state/crew-board.json")" "unauthorized alert under a cache status"
-  assert_contains "$(jq -r '.panels.alerts[] | select(.title == "Phone serial-two unauthorized") | .detail' "$home/state/crew-board.json")" 'adb reports unauthorized' "unauthorized reason under a cache status"
-  assert_equals 0 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two locked")] | length' "$home/state/crew-board.json")" "a locked phone without a waiting test is quiet"
-  cat > "$stub/adb" <<'EOF'
-#!/usr/bin/env bash
-printf 'List of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-two offline\n'
-EOF
-  chmod +x "$stub/adb"
-  cat > "$home/data/crew-board-cache.json" <<'EOF'
-{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-two","title":"Galaxy S22","status":"busy","detail":"reserved"}]}
-EOF
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "offline overlay refresh failed"
-  assert_equals 'offline' "$(jq -r '.panels.phones[] | select(.id == "serial-two") | .adb' "$home/state/crew-board.json")" "offline adb state kept under a cache status"
-  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two offline" and .status == "offline")] | length' "$home/state/crew-board.json")" "offline alert under a cache status"
-  assert_equals 0 "$(jq '[.panels.alerts[] | select(.title == "Phone serial-two busy")] | length' "$home/state/crew-board.json")" "busy cache status is not an alert"
-  rm -f "$home/data/crew-board-cache.json"
-  cat > "$stub/adb" <<'EOF'
-#!/usr/bin/env bash
-printf "adb server version (41) doesn't match this client (39); killing...\n* daemon started successfully\nList of devices attached\nserial-one device product:blue model:Pixel_8 device:blue\nserial-five offline\n"
-EOF
-  chmod +x "$stub/adb"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail "banner adb refresh failed"
-  assert_equals 2 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "client banner lines are not devices"
-  assert_equals 0 "$(jq '[.panels.phones[] | select(.id == "adb")] | length' "$home/state/crew-board.json")" "version banner became a phone row"
-  pass "connected and unauthorized phone rows are told apart and alert the captain"
-}
-
-test_phone_adb_fallbacks() {
-  local home stub tools
-  home=$(make_home phone_fallbacks)
-  stub="$home/stub-bin"
-  tools=$(tool_path "$home/tools-bin")
-  mkdir -p "$stub" "$home/nohome" "$home/sdk/platform-tools" "$home/sdkroot/platform-tools" \
-    "$home/sdkhome/Android/Sdk/platform-tools" "$home/brew/bin"
-  write_adb() {
-    printf '#!/usr/bin/env bash\nprintf "List of devices attached\\n%s device product:blue model:Pixel_8 device:blue\\n"\n' "$2" > "$1"
-    chmod +x "$1"
-  }
-  write_adb "$stub/adb" serial-path
-  write_adb "$home/sdk/platform-tools/adb" serial-android-home
-  write_adb "$home/sdkroot/platform-tools/adb" serial-android-sdk-root
-  write_adb "$home/sdkhome/Android/Sdk/platform-tools/adb" serial-home-sdk
-  write_adb "$home/brew/bin/adb" serial-brew
-  PATH="$stub:$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
-    run_board "$home" refresh >/dev/null || fail "PATH adb refresh failed"
-  assert_equals 'serial-path' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb on PATH"
-  PATH="$tools" ANDROID_HOME="$home/sdk" ANDROID_SDK_ROOT="$home/sdkroot" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
-    run_board "$home" refresh >/dev/null || fail "ANDROID_HOME adb refresh failed"
-  assert_equals 'serial-android-home' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under ANDROID_HOME"
-  PATH="$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/sdkroot" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
-    run_board "$home" refresh >/dev/null || fail "ANDROID_SDK_ROOT adb refresh failed"
-  assert_equals 'serial-android-sdk-root' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under ANDROID_SDK_ROOT"
-  PATH="$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/sdkhome" HOMEBREW_PREFIX="$home/nohome" \
-    run_board "$home" refresh >/dev/null || fail "HOME SDK adb refresh failed"
-  assert_equals 'serial-home-sdk' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb under the home Android SDK"
-  PATH="$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/brew" \
-    run_board "$home" refresh >/dev/null || fail "Linuxbrew adb refresh failed"
-  assert_equals 'serial-brew' "$(jq -r '.panels.phones[0].id' "$home/state/crew-board.json")" "adb in Linuxbrew"
-  assert_equals 'device' "$(jq -r '.panels.phones[0].adb' "$home/state/crew-board.json")" "fallback adb reports a device"
-  pass "adb resolves from PATH, the Android SDK variables and locations, and Linuxbrew"
-}
-
-test_phone_check_unavailable() {
-  local home stub tools
-  home=$(make_home phone_unavailable)
-  stub="$home/stub-bin"
-  tools=$(tool_path "$home/tools-bin")
-  mkdir -p "$stub" "$home/nohome"
-  PATH="$tools" ANDROID_HOME="$home/nohome" ANDROID_SDK_ROOT="$home/nohome" HOME="$home/nohome" HOMEBREW_PREFIX="$home/nohome" \
-    run_board "$home" refresh >/dev/null || fail "unresolvable adb refresh failed"
-  assert_equals 1 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "one row when adb cannot be found"
-  assert_equals 'Phone check' "$(jq -r '.panels.phones[0].title' "$home/state/crew-board.json")" "unanswered check row"
-  assert_equals 'unavailable' "$(jq -r '.panels.phones[0].status' "$home/state/crew-board.json")" "unanswered check state"
-  assert_equals 'unavailable' "$(jq -r '.panels.phones[0].adb' "$home/state/crew-board.json")" "unanswered check marker"
-  assert_equals true "$(jq -r '.panels.phones[0].alert' "$home/state/crew-board.json")" "unanswered check alerts"
-  assert_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'adb was not found' "missing adb reason"
-  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone check")] | length' "$home/state/crew-board.json")" "unanswered check reaches ALERTS"
-  printf '#!/usr/bin/env bash\nexit 3\n' > "$stub/adb"
-  chmod +x "$stub/adb"
-  PATH="$stub:$tools" run_board "$home" refresh >/dev/null || fail "failing adb refresh failed"
-  assert_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'exited 3' "failed adb reason"
-  assert_equals 'unavailable' "$(jq -r '.panels.phones[0].adb' "$home/state/crew-board.json")" "failed adb row"
-  printf '#!/usr/bin/env bash\nsleep 6\n' > "$stub/adb"
-  chmod +x "$stub/adb"
-  PATH="$stub:$tools" run_board "$home" refresh >/dev/null || fail "hanging adb refresh failed"
-  assert_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'did not answer within 2s' "timed-out adb reason"
-  cat > "$stub/adb" <<'EOF'
-#!/usr/bin/env bash
-printf 'List of devices attached\n'
-EOF
-  chmod +x "$stub/adb"
-  PATH="$stub:$tools" run_board "$home" refresh >/dev/null || fail "empty adb refresh failed"
-  assert_equals 0 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" "adb that answers with no devices"
-  pass "an unanswered phone check alerts with its reason instead of claiming no phones"
+  chmod +x "$stub/adb" "$stub/testfarm"
+  cat > "$home/data/crew-board-cache.json" <<'JSON'
+{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-one","title":"Old title","status":"locked","detail":"operator note"},{"id":"cache-only","title":"Cache only","status":"ready"}]}
+JSON
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" \
+    FM_TEST_SERVICE_STATE="$home/test-service" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'farm-backed phone refresh failed'
+  [ ! -e "$marker" ] || fail 'board started adb'
+  assert_equals 2 "$(jq '.panels.phones | length' "$home/state/crew-board.json")" 'only registered phones appear'
+  assert_equals 'Pixel 8|POCO' "$(jq -r '[.panels.phones[].title] | join("|")' "$home/state/crew-board.json")" 'registry labels used'
+  assert_equals 'idle|offline' "$(jq -r '[.panels.phones[].status] | join("|")' "$home/state/crew-board.json")" 'farm status controls phone state'
+  assert_not_contains "$(jq -r '.panels.phones[0].detail' "$home/state/crew-board.json")" 'operator note' 'cache cannot override farm phone facts'
+  assert_equals 1 "$(jq '[.panels.alerts[] | select(.title == "Phone POCO offline")] | length' "$home/state/crew-board.json")" 'farm offline state alerts'
+  assert_equals 'Named requests only' "$(jq -r '.panels.test_queue[] | select(.id == "phone-serial-two-excluded") | .title' "$home/state/crew-board.json")" 'shared exclusion shown'
+  rm "$home/test-service/status.json"
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" \
+    FM_TEST_SERVICE_STATE="$home/test-service" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'farm-unavailable refresh failed'
+  [ ! -e "$marker" ] || fail 'unavailable farm caused adb fallback'
+  assert_equals 'Test farm unavailable' "$(jq -r '.panels.phones[0].title' "$home/state/crew-board.json")" 'unavailable farm is explicit'
+  pass 'DEVICES and TEST QUEUE use the farm without spawning adb or stale cache phones'
 }
 
 test_bold_question_paragraphs() {
@@ -791,16 +666,24 @@ EOF
 test_phone_testing_and_test_queue() {
   local home stub queue holder waiter suite_pid suite_waiter='' blocker='' now
   home=$(make_home test_queue)
+  make_farm_registry "$home"
+  cat > "$home/farm-config/devices.json" <<'JSON'
+{"schema":"testfarm.devices.v1","devices":[{"serial":"busy-one","label":"Pixel 8","any":true},{"serial":"idle-two","label":"Galaxy S22","any":true},{"serial":"third","label":"Galaxy M31","any":true}]}
+JSON
+  mkdir -p "$home/test-service"
+  cat > "$home/test-service/status.json" <<'JSON'
+{"schema":"fm-test-service.v1","requests":[],"phones":[{"serial":"busy-one","label":"Pixel 8","adb":"usable","now":{"ticket":"held","task":"alpha","since":1},"waiting":[{"ticket":"waiting","task":"beta","position":1,"since":1}]},{"serial":"idle-two","label":"Galaxy S22","adb":"usable","now":null,"waiting":[]},{"serial":"third","label":"Galaxy M31","adb":"usable","now":null,"waiting":[]}]}
+JSON
   mkdir -p "$home/wt-alpha" "$home/wt-beta" "$home/locks"
   printf 'worktree=%s\n' "$home/wt-alpha" >> "$home/state/alpha.meta"
   printf 'worktree=%s\n' "$home/wt-beta" >> "$home/state/beta.meta"
   stub="$home/stub-bin"
   mkdir -p "$stub"
-  cat > "$stub/adb" <<'EOF'
+  cat > "$stub/testfarm" <<'EOF'
 #!/usr/bin/env bash
-printf 'List of devices attached\nbusy-one device model:Pixel_8\nidle-two device model:SM-S901E\nthird device model:SM_M315F\n'
+cat "$FM_TEST_SERVICE_STATE/status.json"
 EOF
-  chmod +x "$stub/adb"
+  chmod +x "$stub/testfarm"
   holder=$(sleeper_in "$home/wt-alpha")
   waiter=$(sleeper_in "$home/wt-beta")
   suite_pid=$(sleeper_in "$home/wt-beta")
@@ -830,14 +713,14 @@ EOF
     for _ in 1 2 3 4 5 6 7 8 9 10; do lock_waits "$suite_waiter" && break; sleep 0.1; done
     lock_waits "$suite_waiter" || suite_waiter=''
   fi
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'test queue refresh failed'
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" run_board "$home" refresh >/dev/null || fail 'test queue refresh failed'
   assert_equals busy "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'held phone is busy'
   assert_contains "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .detail' "$home/state/crew-board.json")" \
-    'Testing: Make the widget spin (sleep) for <1m; 1 waiting' 'phone holder task, held time, and queue length'
+    'Testing: alpha' 'phone holder comes from farm status'
   assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "idle-two") | .status' "$home/state/crew-board.json")" 'free phone is idle'
   assert_equals 'Galaxy S22|Galaxy M31' \
     "$(jq -r '[.panels.phones[] | select(.id == "idle-two" or .id == "third") | .title] | join("|")' "$home/state/crew-board.json")" \
-    'adb models map to friendly phone names'
+    'registry supplies phone names'
   assert_contains "$(jq -r '.panels.test_queue[0] | .title + "|" + .status' "$home/state/crew-board.json")" 'EDITOR: 1 running,' 'editor heading'
   assert_equals 'RUNNING: Fix the gadget · unknown|running 10m' \
     "$(jq -r '.panels.test_queue[1] | .title + "|" + .status' "$home/state/crew-board.json")" 'running suite by task title'
@@ -854,13 +737,15 @@ EOF
   kill "$holder" "$waiter" "$suite_pid" ${blocker:+"$blocker"} ${suite_waiter:+"$suite_waiter"} 2>/dev/null
   wait 2>/dev/null
   printf 'pid=1\ncwd=/\nstarted=1\nheartbeat=1\n' > "$home/locks/suite.holder"
-  PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'idle test queue refresh failed'
+  jq '.phones[0].now = null | .phones[0].waiting = []' "$home/test-service/status.json" > "$home/test-service/status.new.json"
+  mv "$home/test-service/status.new.json" "$home/test-service/status.json"
+  PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" run_board "$home" refresh >/dev/null || fail 'idle test queue refresh failed'
   assert_equals 0 "$(jq '[.panels.test_queue[] | select(.status | startswith("running") or startswith("waiting"))] | length' "$home/state/crew-board.json")" 'stale suite heartbeat or dead holders kept'
   assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "busy-one") | .status' "$home/state/crew-board.json")" 'dead holder kept the phone busy'
   pass 'phones show their tester and the test queue lists running and waiting suites and phone reservations'
 }
 
-test_ticketed_queue_and_locked_phone() {
+test_ticketed_queue_without_adb() {
   local home stub now held vip vip_two any suite_wait suite_hold boot ticks
   home=$(make_home ticketed_queue)
   make_farm_registry "$home"
@@ -932,11 +817,9 @@ JSON
   PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'ticketed queue refresh failed'
-  assert_equals locked "$(jq -r '.panels.phones[] | select(.id == "R5CT32HRVNM") | .status' "$home/state/crew-board.json")" 'keyguard is a locked state'
-  assert_equals idle "$(jq -r '.panels.phones[] | select(.id == "RZCX224VH4T") | .status' "$home/state/crew-board.json")" \
-    'an unreadable keyguard keeps the phone state'
-  assert_equals 0 "$(jq '[.panels.alerts[] | select(.title | test("S21 FE|RZCX224VH4T"))] | length' "$home/state/crew-board.json")" \
-    'an unreadable keyguard raises no notification'
+  assert_equals busy "$(jq -r '.panels.phones[] | select(.id == "R5CT32HRVNM") | .status' "$home/state/crew-board.json")" 'farm holder makes phone busy'
+  assert_equals unknown "$(jq -r '.panels.phones[] | select(.id == "RZCX224VH4T") | .status' "$home/state/crew-board.json")" \
+    'no-probe status keeps connection unknown'
   assert_equals 'EDITOR: 1 running, 1 waiting|S22|M31|S21 FE|ANY PHONE|PHONE TICKETS: 5 pending|TEST SERVICE: 4 pending · 0 building' \
     "$(jq -r '[.panels.test_queue[] | select(.status == "section") | .title] | join("|")' "$home/state/crew-board.json")" 'registered resource sections and any-phone queue'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "suite-wait-'"$suite_wait"'") | .status' "$home/state/crew-board.json")" \
@@ -963,18 +846,14 @@ JSON
     'service queue and running ages'
   assert_contains "$(jq -r '.panels.test_queue[] | select(.id == "service-phone-request") | .title' "$home/state/crew-board.json")" \
     'Phone gate (VIP: R5CT32HRVNM)' 'service phone gate kind'
-  assert_equals 1 "$(jq '[.panels.alerts[] | select(.nid == "phone-locked:R5CT32HRVNM")] | length' "$home/state/crew-board.json")" \
-    'a locked phone with a waiting test raises one notification'
-  assert_not_contains "$(cat "$home/adb-commands")" 'kill-server' 'board never disturbs adb sessions'
-  assert_not_contains "$(cat "$home/adb-commands")" 'reconnect' 'board never reconnects adb sessions'
+  [ ! -e "$home/adb-commands" ] || fail 'board started adb during ticketed refresh'
   rm -f "$home/queues/phones/tickets/002-vip.json" "$home/queues/phones/tickets/004-vip.json"
   jq '.phones[0].waiting = []' "$home/test-service/status.json" > "$home/test-service/status.new.json"
   mv "$home/test-service/status.new.json" "$home/test-service/status.json"
   PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
     FROGPILE_SUITE_LOCK_HOLDER="$home/queues/suite.holder" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" "$BOARD" refresh >/dev/null || fail 'cleared phone queue refresh failed'
-  assert_equals 0 "$(jq '[.panels.alerts[] | select(.nid == "phone-locked:R5CT32HRVNM")] | length' "$home/state/crew-board.json")" \
-    'a locked phone with no waiting test is quiet'
+  [ ! -e "$home/adb-commands" ] || fail 'board started adb after waiters cleared'
   rm -f "$home/queues/phones/tickets/001-held.json" "$home/queues/phones/tickets/003-any.json" \
     "$home/queues/phones/tickets/005-unknown.json" "$home/test-service/status.json"
   PATH="$stub:/usr/bin:/bin" TESTFARM_CHECKOUT="$home/testfarm" TESTFARM_CONFIG="$home/farm-config" FM_TEST_SERVICE_STATE="$home/test-service" FROGPILE_QUEUE_ROOT="$home/queues" FROGPILE_SUITE_QUEUE="$home/queues/suite" \
@@ -984,7 +863,7 @@ JSON
     'empty queues have no pending entries'
   kill "$held" "$vip" "$vip_two" "$any" "$suite_wait" "$suite_hold" 2>/dev/null
   wait 2>/dev/null
-  pass 'ticketed editor and phone queues show holders, ordered waits, and locked phone notifications'
+  pass 'ticketed editor and phone queues show holders and ordered waits without adb'
 }
 
 test_testfarm_status_fixture_and_unavailable() {
@@ -1090,7 +969,7 @@ test_registered_farm_devices_follow_refresh() {
   mkdir -p "$stub" "$home/test-service"
   cat > "$stub/adb" <<'EOF'
 #!/usr/bin/env bash
-printf 'List of devices attached\nserial-a device model:Pixel_8\nserial-b device model:Pixel_7\nserial-d offline\n'
+exit 99
 EOF
   cat > "$stub/testfarm" <<'EOF'
 #!/usr/bin/env bash
@@ -1105,8 +984,8 @@ JSON
 {"schema":"fm-test-service.v1","requests":[],"phones":[
  {"serial":"serial-a","label":"A","adb":"unknown","now":{"ticket":"held","task":"alpha","since":$((now-60))},"waiting":[{"ticket":"wait-1","task":"beta","position":1,"since":$((now-30))},{"ticket":"wait-2","task":"alpha","position":2,"since":$((now-10))}]},
  {"serial":"serial-b","label":"B","adb":"unknown","now":null,"waiting":[]},
- {"serial":"serial-c","label":"C","adb":"unknown","now":null,"waiting":[]},
- {"serial":"serial-d","label":"POCO","adb":"unknown","now":null,"waiting":[]}]}
+ {"serial":"serial-c","label":"C","adb":"offline","now":null,"waiting":[]},
+ {"serial":"serial-d","label":"POCO","adb":"offline","now":null,"waiting":[]}]}
 JSON
   cp "$home/farm-config/devices.json" "$home/farm-config/all-devices.json"
   cp "$home/test-service/status.json" "$home/test-service/all-status.json"
@@ -1127,7 +1006,7 @@ JSON
   assert_equals 4 "$(jq '[.panels.test_queue[] | select(.id | test("^phone-.*-heading$"))] | length' "$home/state/crew-board.json")" 'observed board count'
   assert_equals 'RUNNING: Make the widget spin|NEXT: Fix the gadget|#2: Make the widget spin' \
     "$(jq -r '[.panels.test_queue[] | select(.id | test("^phone-serial-a-(running|wait-)") ) | .title] | join("|")' "$home/state/crew-board.json")" 'farm holder and queue positions'
-  assert_equals 'Disconnected' "$(jq -r '.panels.test_queue[] | select(.id == "phone-serial-c-state") | .title' "$home/state/crew-board.json")" 'registered offline phone remains visible'
+  assert_equals 'Offline' "$(jq -r '.panels.test_queue[] | select(.id == "phone-serial-c-state") | .title' "$home/state/crew-board.json")" 'registered offline phone remains visible'
   assert_equals 'Named requests only' "$(jq -r '.panels.test_queue[] | select(.id == "phone-serial-d-excluded") | .title' "$home/state/crew-board.json")" 'excluded shared phone remains visible'
   jq '.devices += [{"serial":"serial-d","label":"duplicate"}]' "$home/farm-config/devices.json" > "$home/farm-config/bad.json"
   mv "$home/farm-config/bad.json" "$home/farm-config/devices.json"
@@ -1191,17 +1070,29 @@ EOF
 test_alert_rows_for_real_issues() {
   local home snapshot stub out waiter holder
   home=$(make_home real_alerts)
+  make_farm_registry "$home"
+  cat > "$home/farm-config/devices.json" <<'JSON'
+{"schema":"testfarm.devices.v1","devices":[{"serial":"serial-a","label":"Pixel 8","any":true}]}
+JSON
+  mkdir -p "$home/test-service"
+  cat > "$home/test-service/status.json" <<'JSON'
+{"schema":"fm-test-service.v1","requests":[],"phones":[{"serial":"serial-a","label":"Pixel 8","adb":"usable","now":null,"waiting":[]}]}
+JSON
   mkdir -p "$home/locks" "$home/wt-alpha"
   snapshot="$home/snapshot.json"
   stub="$home/stub-bin"
   mkdir -p "$stub"
-  printf '#!/usr/bin/env bash\nprintf "List of devices attached\\nserial-a device model:Pixel_8\\n"\n' > "$stub/adb"
-  chmod +x "$stub/adb"
+  cat > "$stub/testfarm" <<'EOF'
+#!/usr/bin/env bash
+cat "$FM_TEST_SERVICE_STATE/status.json"
+EOF
+  chmod +x "$stub/testfarm"
   touch "$home/state/.last-watcher-beat"
   # Pin the Claude auto-arm model, where a fresh beat is healthy, so the quiet
   # baseline does not depend on which harness the suite itself runs under.
   alerts() {
-    FM_SUPERVISION_MODEL=autoarm PATH="$stub:$PATH" run_panels "$home" "$snapshot" | jq -r "$1"
+    FM_SUPERVISION_MODEL=autoarm PATH="$stub:$PATH" TESTFARM_CHECKOUT="$home/testfarm" \
+      TESTFARM_CONFIG="$home/farm-config" run_panels "$home" "$snapshot" | jq -r "$1"
   }
   printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
   assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'no alerts when nothing is wrong'
@@ -1238,13 +1129,13 @@ EOF
 
   printf '{"schema":"fm-fleet-snapshot.v1","tasks":[]}\n' > "$snapshot"
   rm -f "$home/state/.wedge-escalations-default_w1_p1" "$home/state/.dead-reported-default_w2_p2"
-  printf '{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-b","title":"Galaxy S22"}]}\n' > "$home/data/crew-board-cache.json"
-  out=$(alerts '.alerts[] | select(.nid | startswith("phone-offline")) | .title + " :: " + .detail')
-  assert_contains "$out" 'Phone Galaxy S22 not connected :: adb does not list this registered phone.' 'registered phone that adb does not list'
-  assert_contains "$out" 'Plug it in' 'phone row says the action'
-  printf '{"schema":"fm-crew-board-cache.v1","phones":[{"id":"serial-a","title":"Pixel 8"}]}\n' > "$home/data/crew-board-cache.json"
+  jq '.phones[0].adb = "offline"' "$home/test-service/status.json" > "$home/test-service/status.new.json"
+  mv "$home/test-service/status.new.json" "$home/test-service/status.json"
+  out=$(alerts '.alerts[] | select(.nid | startswith("phone-state")) | .title + " :: " + .detail')
+  assert_contains "$out" 'Phone Pixel 8 offline :: The test farm reports offline' 'farm offline phone alert'
+  jq '.phones[0].adb = "usable"' "$home/test-service/status.json" > "$home/test-service/status.new.json"
+  mv "$home/test-service/status.new.json" "$home/test-service/status.json"
   assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'a connected registered phone is no alert'
-  rm -f "$home/data/crew-board-cache.json"
 
   printf '## Your decisions\n' > "$home/data/captain-questions.md"
   assert_equals '' "$(alerts '[.alerts[].title] | join("|")')" 'a register with only a heading is no alert'
@@ -1844,10 +1735,7 @@ test_narrow_terminal
 test_note_without_selection_and_point_without_text
 test_panel_projection_and_launcher
 test_bugs_merge_and_empty_sources
-test_local_phones_and_cache_overlay
-test_phone_connection_states
-test_phone_adb_fallbacks
-test_phone_check_unavailable
+test_farm_phones_never_spawn_adb
 test_bold_question_paragraphs
 test_questions_without_headings
 test_bold_question_keeps_its_options
@@ -1861,7 +1749,7 @@ test_playbot_check_unavailable
 test_full_questions_and_backlog
 test_backlog_counts_from_a_capped_listing
 test_phone_testing_and_test_queue
-test_ticketed_queue_and_locked_phone
+test_ticketed_queue_without_adb
 test_testfarm_status_fixture_and_unavailable
 test_registered_farm_devices_follow_refresh
 test_suite_lock_probe
