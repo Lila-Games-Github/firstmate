@@ -4,14 +4,14 @@
 Usage: fm-crew-board-panels.py <fleet-snapshot.json>
        fm-crew-board-panels.py --refresh-allowance|--allowance-loop
 
-Connected phones come from a bounded local adb query and a read-only keyguard
-probe. The test queue reads FrogPile tickets under FROGPILE_QUEUE_ROOT (default
+Registered phones and their live state come from the test farm without adb
+probes. The test queue reads the test farm's registered device list from its
+Python client and one bounded `testfarm status --json --no-probe` call for
+live phone holders, waiters, and service requests, cached per refresh.
+DEVICES, the phone sections, and TEST SERVICE show unavailable when their farm
+sources cannot be read. FrogPile tickets under FROGPILE_QUEUE_ROOT (default
 ~/.frogpile-queues), the full-suite holder sidecar FROGPILE_SUITE_LOCK_HOLDER,
-live Godot suite processes, and a bounded `testfarm status --json --no-probe`
-call for the standalone test farm's live requests, cached per refresh. A
-missing or failing `testfarm` command shows the TEST SERVICE panel as
-unavailable rather than stale or empty. The ticket queues' arrival-ordered
-records remain the waiting source. The older per-phone queue and
+and live Godot suite processes supply their separate rows. The older per-phone queue and
 kernel suite-lock readers remain for isolated test fixtures that set their
 legacy overrides. Daily routines come from this home's state/*-daily.check.sh
 scripts and their state/.<name>-last markers. Ready-for-you rows come from the
@@ -31,8 +31,7 @@ persisted state.
 AI allowance uses a separately scheduled quota-axi snapshot, never the fast
 board refresh, and a failed attempt records what it reported in
 state/.crew-board-quota-error for the panel to repeat. The optional
-data/crew-board-cache.json supplies phone observations
-and panels without a cheap local source (builds and Rocketboard
+data/crew-board-cache.json supplies panels without a cheap local source (builds and Rocketboard
 bugs), plus optional overlays for the other panels. The fast projection never
 queries a network service; the separately launched allowance sampler may ask
 quota-axi for provider data. Its output is embedded in crew-board.json by
@@ -44,6 +43,7 @@ import datetime as dt
 import functools
 import glob
 import io
+import importlib
 import json
 import os
 from pathlib import Path
@@ -302,20 +302,6 @@ def homebrew_binary(name):
     return None
 
 
-def adb_binary():
-    found = shutil.which("adb")
-    if found:
-        return found
-    for root in (os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT"),
-                 str(Path.home() / "Android" / "Sdk")):
-        if not root:
-            continue
-        candidate = Path(root) / "platform-tools" / "adb"
-        if candidate.is_file():
-            return str(candidate)
-    return homebrew_binary("adb")
-
-
 def quota_binary():
     found = shutil.which("quota-axi")
     if found:
@@ -323,88 +309,34 @@ def quota_binary():
     return homebrew_binary("quota-axi")
 
 
-def local_phones():
-    binary = adb_binary()
-    if binary is None:
-        return None, ("adb was not found on PATH, under ANDROID_HOME or ANDROID_SDK_ROOT, "
-                      "in ~/Android/Sdk, or in Linuxbrew")
-    try:
-        run = subprocess.run([binary, "devices", "-l"], capture_output=True,
-                             text=True, timeout=2, check=False)
-    except subprocess.TimeoutExpired:
-        return None, f"{binary} devices -l did not answer within 2s"
-    except OSError as error:
-        return None, f"{binary} devices -l could not run: {error}"
-    if run.returncode:
-        return None, f"{binary} devices -l exited {run.returncode}"
-    rows = []
-    listed = False
-    for line in run.stdout.splitlines():
-        if line.startswith("List of devices"):
-            listed = True
-            continue
-        fields = line.split()
-        if not listed or len(fields) < 2 or line.startswith("*"):
-            continue
-        serial = fields[0]
-        state = " ".join(fields[1:3]) if fields[1:3] == ["no", "permissions"] else fields[1]
-        model = next((friendly_phone(field.removeprefix("model:"))
-                      for field in fields[2:] if field.startswith("model:")), serial)
-        row = item(model, serial, "connected" if state == "device" else state,
-                   alert=state != "device", item_id=serial)
-        row["adb"] = state
-        rows.append(row)
-    if not listed:
-        return None, f"{binary} devices -l printed no device list"
-    return rows, ""
-
-
-FRIENDLY_PHONES = {"SM_S901E": "Galaxy S22", "SM_M315F": "Galaxy M31",
-                   "SM_G990B2": "Galaxy S21 FE", "SM_G990E": "Galaxy S21 FE"}
-
-
-def friendly_phone(model):
-    """Name a known adb model the way people say it, else keep the model."""
-    key = re.sub(r"[\s-]+", "_", model.strip()).upper()
-    return FRIENDLY_PHONES.get(key, model.replace("_", " "))
-
-
-def normalized_phone_title(value):
-    return re.sub(r"[\s_-]+", "", value).casefold()
-
-
-def phone_entry_match(entry, row, by_serial):
-    if by_serial:
-        return entry["id"] == row["id"]
-    return normalized_phone_title(entry["title"]) == normalized_phone_title(row["title"])
-
-
-def phone_entries(cache):
-    rows, failure = local_phones()
-    if failure:
-        row = item("Phone check", failure, "unavailable", alert=True)
+def phone_entries():
+    """Project registered phones from the farm without starting an adb client."""
+    records = farm_phone_records()
+    if records is None:
+        row = item("Test farm unavailable", "Registered devices or live phone status could not be read.",
+                   "unavailable", alert=True, item_id="farm-phones-unavailable")
         row["adb"] = "unavailable"
         return [row]
-    cached = entries(cache, "phones")
-    matched = [False] * len(rows)
-    for by_serial in (True, False):
-        for index, row in enumerate(rows):
-            if matched[index]:
-                continue
-            match = next((position for position, entry in enumerate(cached)
-                          if phone_entry_match(entry, row, by_serial)), None)
-            if match is None:
-                continue
-            entry = cached.pop(match)
-            matched[index] = True
-            row.update(status=entry["status"] or row["status"],
-                       detail=entry["detail"] or row["detail"],
-                       link=entry["link"], alert=entry["alert"] or row["alert"])
-    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ:
-        for row in rows:
-            if row.get("adb") == "device":
-                row["status"] = "connected"
-    return rows + cached
+    devices, farm_by_id = records
+    rows = []
+    for device in devices:
+        serial = device["serial"]
+        live = farm_by_id[serial]
+        state = farm_phone_state(live)
+        now = live.get("now")
+        waiting = live["waiting"]
+        detail = serial
+        if isinstance(now, dict):
+            detail = f"Testing: {now.get('task') or now.get('request') or now.get('ticket') or 'unknown'}\n{detail}"
+        if waiting:
+            detail = f"{len(waiting)} waiting\n{detail}"
+        if not device.get("any", True):
+            detail = f"Named requests only\n{detail}"
+        row = item(device["label"], detail, state,
+                   alert=state in ("offline", "permission-denied"), item_id=serial)
+        row["adb"] = live.get("adb", "unknown")
+        rows.append(row)
+    return rows
 
 
 NODE_MIN = (22, 5)
@@ -514,9 +446,30 @@ def phone_queue_root():
     return Path(os.environ.get("FROGPILE_QUEUE_ROOT", Path.home() / ".frogpile-queues")) / "phones"
 
 
-PHONE_ORDER = (("R5CT32HRVNM", "Galaxy S22"),
-               ("RZ8N71EC9ZB", "Galaxy M31"),
-               ("RZCX224VH4T", "Galaxy S21 FE"))
+@functools.lru_cache(maxsize=1)
+def registered_phones():
+    """Read the farm's device registry, preserving its registration order."""
+    checkout = Path(os.environ.get("TESTFARM_CHECKOUT", HOME / "projects/lila-test-farm"))
+    source = checkout / "src"
+    if not source.is_dir():
+        return None
+    sys.path.insert(0, str(source))
+    try:
+        registry = importlib.import_module("lila_test_farm.registry")
+        devices = registry.load_devices()
+    except (ImportError, OSError, ValueError):
+        return None
+    finally:
+        sys.path.remove(str(source))
+    seen = set()
+    for device in devices:
+        if (not isinstance(device, dict) or not isinstance(device.get("serial"), str)
+                or not device["serial"] or device["serial"] in seen
+                or not isinstance(device.get("label"), str)
+                or not device["label"] or not isinstance(device.get("any", True), bool)):
+            return None
+        seen.add(device["serial"])
+    return devices
 
 
 def suite_queue_root():
@@ -578,7 +531,8 @@ def live_tickets(queue):
 
 def phone_label(serial):
     """Phone-page name for a serial; serials never leave the terminal board."""
-    return next((re.sub(r"^Galaxy\s+", "", name) for known, name in PHONE_ORDER if known == serial), "phone")
+    return next((device["label"] for device in registered_phones() or []
+                 if device["serial"] == serial), "phone")
 
 
 def phone_ticket_kind(record, name=str):
@@ -738,54 +692,6 @@ def any_phone_waiters(trees, now):
                         "ticket_kind": phone_ticket_kind(owner),
                         "for": since_unix(owner, "requested_unix_ns", now)})
     return waiting
-
-
-def phone_activity(phones, trees, now, titles):
-    for phone in phones:
-        if phone.get("adb") in (None, "unavailable"):
-            continue
-        holder, waiting = phone_queue(phone["id"], trees, now)
-        behind = f"; {len(waiting)} waiting" if waiting else ""
-        if holder:
-            phone["detail"] = (f"Testing: {titles.get(holder['task'], holder['task'])} ({holder['kind'] or 'test'}) for "
-                               f"{holder['for']}{behind}\n{phone['detail']}")
-            if phone["status"] in ("connected", "idle"):
-                phone["status"] = "busy"
-        elif phone["status"] == "connected":
-            phone["status"] = "idle"
-            if waiting:
-                phone["detail"] = f"{len(waiting)} waiting\n{phone['detail']}"
-
-
-def keyguard_showing(binary, serial):
-    """A bounded, read-only adb query; never reconnect the shared adb server."""
-    try:
-        run = subprocess.run([binary, "-s", serial, "shell", "dumpsys", "window"],
-                             capture_output=True, text=True, timeout=1, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if run.returncode:
-        return None
-    values = re.findall(r"\b(?:mShowingLockscreen|mKeyguardShowing|isKeyguardShowing|"
-                        r"mDreamingLockscreen)\s*[:=]\s*(true|false)\b", run.stdout, re.IGNORECASE)
-    if not values:
-        return None
-    return any(value.lower() == "true" for value in values)
-
-
-def phone_locks(phones):
-    binary = adb_binary()
-    if binary is None:
-        return
-    known = {serial for serial, _name in PHONE_ORDER}
-    for phone in phones:
-        if phone.get("adb") != "device" or phone.get("id") not in known:
-            continue
-        locked = keyguard_showing(binary, phone["id"])
-        if locked is True:
-            phone["status"] = "locked"
-        elif locked is None:
-            phone["detail"] = "Keyguard status could not be read\n" + phone["detail"]
 
 
 def suite_waiters(lock):
@@ -1003,6 +909,58 @@ def testfarm_status():
     if not isinstance(status, dict) or status.get("schema") != "fm-test-service.v1":
         return None
     return status
+
+
+@functools.lru_cache(maxsize=1)
+def farm_phone_records():
+    """Return registered devices and matching live rows, or None on a bad read."""
+    devices = registered_phones()
+    farm = testfarm_status()
+    farm_rows = farm.get("phones") if farm else None
+    if devices is None or not isinstance(farm_rows, list):
+        return None
+    by_id = {}
+    for row in farm_rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("serial"), str)
+                or not isinstance(row.get("waiting"), list) or row["serial"] in by_id):
+            return None
+        by_id[row["serial"]] = row
+    if not all(device["serial"] in by_id for device in devices):
+        return None
+    return devices, by_id
+
+
+def farm_phone_state(farm_phone):
+    """Use only state explicitly reported by the farm's no-probe status."""
+    adb = farm_phone.get("adb")
+    if adb in ("offline", "permission-denied"):
+        return adb
+    if farm_phone.get("now"):
+        return "busy"
+    if adb == "usable":
+        return "idle"
+    if adb == "busy":
+        return adb
+    return "unknown"
+
+
+def farm_phone_queue(farm_phone, now):
+    current = farm_phone.get("now")
+    holder = None
+    if isinstance(current, dict):
+        task = str(current.get("task") or current.get("request") or current.get("ticket") or "Unknown task")
+        age = duration(now - current["since"]) if isinstance(current.get("since"), (int, float)) else "unknown time"
+        holder = {"task": task, "for": age, "detail": f"Ticket: {current.get('ticket') or 'none'}",
+                  "kind": current.get("step") or "test"}
+    waiting = []
+    for entry in farm_phone.get("waiting", []):
+        if not isinstance(entry, dict):
+            continue
+        task = str(entry.get("task") or entry.get("request") or entry.get("ticket") or "Unknown task")
+        age = duration(now - entry["since"]) if isinstance(entry.get("since"), (int, float)) else "unknown time"
+        waiting.append({"task": task, "for": age, "detail": f"Ticket: {entry.get('ticket') or 'none'}",
+                        "pid": entry.get("ticket") or len(waiting) + 1})
+    return holder, waiting
 
 
 TESTFARM_TERMINAL_STATES = frozenset({"passed", "failed", "cancelled", "interrupted"})
@@ -1242,29 +1200,41 @@ def test_queue(snapshot, phones, now, tags=None):
                          f"{titles.get(entry['task'], entry['task'])}",
                          f"Task: {entry['task']} for {entry.get('for', 'unknown time')}\n{entry.get('detail', '')}",
                          f"waiting {entry.get('for', 'unknown time')}", item_id=f"suite-wait-{entry['pid']}"))
+    farm_records = farm_phone_records()
+    devices, farm_by_id = farm_records if farm_records is not None else ([], {})
     if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" in os.environ:
         serials = sorted(path.name[len("frogpile-phone-"):-len(".queue")]
                          for path in Path(os.environ["FM_CREW_BOARD_PHONE_QUEUE_ROOT"]).glob("frogpile-phone-*.queue"))
         named = {phone["id"]: phone["title"] for phone in phones if phone.get("id")}
         phone_sections = [(serial, named.get(serial, serial)) for serial in serials]
     else:
-        phone_sections = PHONE_ORDER
+        phone_sections = [(device["serial"], device["label"]) for device in devices]
     phones_by_id = {phone["id"]: phone for phone in phones if phone.get("id")}
+    if farm_records is None and "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ:
+        rows.append(item("Test farm unavailable", "Registered device list or live status could not be read.",
+                         "unavailable", item_id="phone-farm-unavailable"))
+    devices_by_id = {device["serial"]: device for device in devices or []}
     for serial, name in phone_sections:
-        active, waiting = phone_queue(serial, trees, now)
+        if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" in os.environ:
+            active, waiting = phone_queue(serial, trees, now)
+        else:
+            active, waiting = farm_phone_queue(farm_by_id.get(serial, {}), now)
         short = re.sub(r"^Galaxy\s+", "", name).upper()
         if active:
-            active["detail"] = f"{active.get('ticket_kind', 'Unknown')} · {active['kind'] or 'test'} holding {serial}"
+            active["detail"] = f"{active.get('ticket_kind', 'Test')} · {active['kind'] or 'test'} holding {serial}\n{active.get('detail', '')}"
             if active["task"] in task_ids:
                 resource_tag(tags, active["task"], 0, f"{short} {resource_word(active['kind'])} {active['for']}")
         for position, entry in enumerate(waiting, 1):
-            entry["detail"] = f"{entry.get('ticket_kind', 'Unknown')} · {entry['kind'] or 'test'} waiting for {serial}"
+            entry["detail"] = f"{entry.get('ticket_kind', 'Test')} · {entry.get('kind') or 'test'} waiting for {serial}\n{entry.get('detail', '')}"
             if entry["task"] in task_ids:
                 resource_tag(tags, entry["task"], 1, f"WAITING FOR {short} #{position}")
-        state = phones_by_id.get(serial, {}).get("status", "disconnected")
-        if state not in ("idle", "busy", "locked", "unavailable"):
-            state = "disconnected"
+        state = (phones_by_id.get(serial, {}).get("status", "disconnected")
+                 if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" in os.environ
+                 else farm_phone_state(farm_by_id.get(serial, {})))
         group(name, active, waiting, f"phone-{serial}", state)
+        if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ and not devices_by_id[serial].get("any", True):
+            rows.append(item("Named requests only", "Excluded from shared any-phone runs.",
+                             "excluded", item_id=f"phone-{serial}-excluded"))
     any_waiting = any_phone_waiters(trees, now)
     if any_waiting:
         for entry in any_waiting:
@@ -1947,38 +1917,14 @@ def alert_entries(snapshot, cache, phones, allowance):
     if summary:
         alerts.append(summary)
     for phone in phones:
-        adb = phone.get("adb")
-        if adb is None and phone.get("title"):
-            alerts.append(alert_row(f"Phone {phone['title']} not connected",
-                                    "adb does not list this registered phone", None,
-                                    "Tests that need it cannot run.",
-                                    "Plug it in and unlock it, or ask firstmate to stop using it.",
-                                    "not connected", phone.get("id", ""), "phone-offline", "offline"))
-        if adb == "unavailable":
-            alerts.append(item(phone["title"], phone["detail"], phone["status"], alert=True))
-            continue
-        if adb not in (None, "device"):
-            alerts.append(item(f"Phone {phone['title']} {adb}",
-                               f"adb reports {adb}, so the phone cannot take tests",
-                               adb, alert=True))
-        if phone["status"] == "locked" and phone.get("id"):
-            _holder, waiting = phone_queue(phone["id"], task_worktrees(snapshot), now)
-            if waiting:
-                alerts.append(item(f"{phone['title']} locked: test waiting",
-                                   "Unlock the phone so its queued test can start.", "locked", alert=True,
-                                   nid=f"phone-locked:{phone['id']}",
-                                   sig=",".join(str(entry["pid"]) for entry in waiting)))
         if phone["status"] == "unavailable":
+            alerts.append(item(phone["title"], phone["detail"], "unavailable", alert=True,
+                               nid="testfarm:phones", sig="unavailable"))
+        elif phone["status"] in ("offline", "permission-denied"):
             alerts.append(item(f"Phone {phone['title']} {phone['status']}",
-                               phone["detail"], phone["status"], alert=True))
-    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ and not any(
-            phone.get("adb") == "unavailable" for phone in phones):
-        known = {phone.get("id") for phone in phones if phone.get("id")}
-        for serial, name in PHONE_ORDER:
-            if serial not in known:
-                alerts.append(item(f"Phone {name} not connected",
-                                   "adb does not list this registered phone", "disconnected", alert=True,
-                                   nid=f"phone-offline:{serial}", sig="disconnected"))
+                               f"The test farm reports {phone['status']}; tests cannot use this phone.",
+                               phone["status"], alert=True,
+                               nid=f"phone-state:{phone['id']}", sig=phone["status"]))
     for row in allowance:
         if row.get("quota") == "unavailable":
             alerts.append(item(row["title"], row["detail"], row["status"], alert=True))
@@ -2262,10 +2208,8 @@ def landed_today(snapshot):
 def project(snapshot):
     cache = source_cache()
     now = time.time()
-    phones = phone_entries(cache)
+    phones = phone_entries()
     lanes, playbot_failure = playbot_workers()
-    phone_activity(phones, task_worktrees(snapshot), now, task_titles(snapshot))
-    phone_locks(phones)
     allowance = allowance_entries(cache)
     resources = {}
     tests = test_queue(snapshot, phones, now, resources)
