@@ -41,7 +41,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | [`fm-open-questions-lib.sh`](../bin/fm-open-questions-lib.sh) | Own a ship brief's open design-question dependency section (read only within its heading) and the dispatch refusal `fm-spawn.sh` applies to it, including for projects whose registry entry declares a register |
 | [`fm-dod-lib.sh`](../bin/fm-dod-lib.sh) | Own ship/scout worker role scope, ship definitions of done, the long-suite and evidence snapshot contract, and the no-mistakes `--intent` contract |
 | `fm-learning-candidate.sh` | Capture durable development incidents and curate, route, deduplicate, dispose, or summarize them without changing a destination |
-| `fm-review-lessons.py`   | Extract read-only review-round and escaped-defect evidence for the `review-lessons` pass and validate its review playbook |
+| `fm-review-lessons.py`   | Extract review evidence, validate curated files, and report judged recurrences for the `review-lessons` pass |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-herdr-lab-viewer.py` | The pty engine behind `fm-herdr-lab.sh viewer`: one real foreground Herdr client on a non-zero window grid |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |

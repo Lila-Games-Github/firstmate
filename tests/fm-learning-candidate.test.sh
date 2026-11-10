@@ -992,13 +992,27 @@ test_routes_and_no_one_off_skill_gate() {
 }
 
 test_lifecycle_dispositions_and_deduplication() {
-  local home dismissed documented promoted followup canonical duplicate json rc
+  local home recurrence_home dismissed recurrence documented promoted followup canonical duplicate json rc
   home=$(make_home lifecycle)
   dismissed=$(capture_candidate "$home" dismissed-case FrogPile workflow-gap-blocker \
     "one local outage had no reusable prevention")
   run_learning "$home" disposition "$dismissed" --curator curator-dismiss \
     --status dismissed --note "The cause was already removed and cannot recur" >/dev/null \
     || fail "unclassified dismissal failed"
+
+  recurrence_home=$(make_home recurrence-lifecycle)
+  recurrence=$(capture_candidate "$recurrence_home" recurrence-case FrogPile workflow-gap-blocker \
+    "a known failure returned after the prevention claim")
+  printf '{"date":"2026-08-28","candidate":"%s","class":"returning-failure","earlier_claim":"lc-earlier","kind_of_claim":"dismissed"}\n' \
+    "$recurrence" >"$recurrence_home/data/recurrence-ledger.jsonl"
+  set +e
+  run_learning "$recurrence_home" disposition "$recurrence" --curator curator-dismiss \
+    --status dismissed --note "This instance is fixed" >"$recurrence_home/recurrence.out" 2>"$recurrence_home/recurrence.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a judged recurrence was dismissed"
+  assert_grep 'recurrence cannot be dismissed' "$recurrence_home/recurrence.err" \
+    "recurrence dismissal did not name its class-level routing rule"
 
   documented=$(capture_candidate "$home" documented-case FrogPile escaped-defect \
     "quest completion behavior escaped tests")

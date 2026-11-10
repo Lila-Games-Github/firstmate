@@ -53,6 +53,8 @@
 #     --curator <curator-id>
 #     --status <dismissed|documented|promoted|follow-up>
 #     --note <reason> [--reference <document-pr-or-follow-up>]
+# Dismissal refuses candidates recorded in data/recurrence-ledger.jsonl.
+# A judged recurrence is routed to its class's single open fix item.
 #
 #   fm-learning-candidate.sh dedupe <duplicate-id> --into <canonical-id>
 #     --curator <curator-id> --reason <reason>
@@ -1112,6 +1114,12 @@ disposition_command() {
   fi
   [ "$(printf '%s\n' "$RECORD_JSON" | jq -r '.lifecycle_state')" = unresolved ] \
     || die "only an unresolved candidate can receive a disposition"
+  if [ "$outcome" = dismissed ] && [ -f "$FM_HOME/data/recurrence-ledger.jsonl" ]; then
+    if jq -e --arg candidate "$id" 'select(.candidate == $candidate)' \
+      "$FM_HOME/data/recurrence-ledger.jsonl" >/dev/null; then
+      die "recurrence cannot be dismissed: $id; route it to its class-level fix item"
+    fi
+  fi
   if [ "$outcome" != dismissed ]; then
     [ "$(printf '%s\n' "$RECORD_JSON" | jq -r '.classification != null')" = true ] \
       || die "$outcome requires a recorded classification"
