@@ -21,11 +21,12 @@ LEARNING_TIMEOUT=${FM_STOCK_BASH_LEARNING_TIMEOUT:-30}
 MERGE_TIMEOUT=${FM_STOCK_BASH_MERGE_TIMEOUT:-120}
 LANDING_TIMEOUT=${FM_STOCK_BASH_LANDING_TIMEOUT:-90}
 WORKER_TIMING_TIMEOUT=${FM_STOCK_BASH_WORKER_TIMING_TIMEOUT:-30}
+TEARDOWN_FARM_TIMEOUT=${FM_STOCK_BASH_TEARDOWN_FARM_TIMEOUT:-90}
 DOORBELL_TIMEOUT=${FM_STOCK_BASH_DOORBELL_TIMEOUT:-90}
 selected=all
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != --consumer ]; then
-    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|worker-timing|doorbell]" >&2
+    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|worker-timing|teardown-farm|doorbell]" >&2
     exit 2
   fi
   selected=$2
@@ -49,6 +50,7 @@ validate_timeout FM_STOCK_BASH_LEARNING_TIMEOUT "$LEARNING_TIMEOUT"
 validate_timeout FM_STOCK_BASH_MERGE_TIMEOUT "$MERGE_TIMEOUT"
 validate_timeout FM_STOCK_BASH_LANDING_TIMEOUT "$LANDING_TIMEOUT"
 validate_timeout FM_STOCK_BASH_WORKER_TIMING_TIMEOUT "$WORKER_TIMING_TIMEOUT"
+validate_timeout FM_STOCK_BASH_TEARDOWN_FARM_TIMEOUT "$TEARDOWN_FARM_TIMEOUT"
 validate_timeout FM_STOCK_BASH_DOORBELL_TIMEOUT "$DOORBELL_TIMEOUT"
 
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -147,6 +149,9 @@ else
 fi
 run_consumer worker-timing "worker timing status and teardown record" "$WORKER_TIMING_TIMEOUT" 6 \
   "$STOCK_BASH" "$ROOT/tests/fm-worker-timing.test.sh"
+run_consumer teardown-farm "teardown testfarm request ownership" "$TEARDOWN_FARM_TIMEOUT" 5 \
+  env FM_TEARDOWN_TEST_ONLY=farm \
+  "$STOCK_BASH" "$ROOT/tests/fm-teardown.test.sh"
 run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" "$merge_assertions" \
   "$STOCK_BASH" "$ROOT/tests/fm-merge-local.test.sh"
 run_consumer doorbell "worker gate and job doorbells" "$DOORBELL_TIMEOUT" 5 \

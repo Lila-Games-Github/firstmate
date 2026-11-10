@@ -190,12 +190,15 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--reconcile-slot] [--landed-via <commit>[,<commit>...]]
+# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--reconcile-slot] [--landed-via <commit>[,<commit>...]] [--cancel-test-requests]
 #   --landed-via is lane-only and requires at least one commit already on the
 #   recorded landing branch in the recorded project clone. It retains Playbot.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --cancel-test-requests explicitly cancels this task's non-terminal testfarm
+#   requests before cleanup. Cancellation must be confirmed terminal by a fresh
+#   status read; --force never bypasses this request ownership guard.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -351,12 +354,15 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 if [ "${1:-}" = --help ]; then
   cat <<'HELP'
-Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--reconcile-slot] [--landed-via <commit>[,<commit>...]]
+Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--reconcile-slot] [--landed-via <commit>[,<commit>...]] [--cancel-test-requests]
   --landed-via  Retire a lane record using commits on its recorded local landing branch.
                 Requires at least one commit; applies only to kind=lane.
   --force       Discard this task's unlanded work when explicitly authorized.
+  --cancel-test-requests  Cancel this task's live testfarm requests, then require terminal confirmation.
 HELP
   exit 0
 fi
@@ -369,12 +375,14 @@ FORCE=
 LEGACY_RECORD_GIVEN=0
 RECONCILE_SLOT=0
 LANDED_VIA=
+CANCEL_TEST_REQUESTS=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     --reconcile-slot) RECONCILE_SLOT=1 ;;
+    --cancel-test-requests) CANCEL_TEST_REQUESTS=1 ;;
     --landed-via)
       shift
       if [ "$#" -eq 0 ] || [ -z "$1" ]; then
@@ -1332,6 +1340,94 @@ ORCA_PATH_MATCH_VERIFIED=0
 CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
+
+# Testfarm's request row owns its completion route until it reaches a terminal
+# state. Retiring the task first would remove the inbox that receives a failure.
+# The farm CLI's --no-probe status path reads requests without starting adb.
+testfarm_pending_for_task() {
+  local farm_bin=$1 timeout=$2 status_file=$3 pending_file=$4 rc=0
+  ADB_SERVER_SOCKET=tcp:127.0.0.1:503 \
+    fm_run_timed "$timeout" "$farm_bin" status --json --no-probe \
+    > "$status_file" 2>/dev/null </dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "REFUSED: testfarm status failed (exit $rc); cannot prove task $ID has no live requests" >&2
+    return 1
+  fi
+  if ! python3 -I -c '
+import json, re, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    data = json.load(stream)
+rows = data.get("requests") if isinstance(data, dict) else None
+if not isinstance(rows, list):
+    raise ValueError("testfarm status has no request list")
+with open(sys.argv[3], "w", encoding="utf-8") as out:
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("task"), str):
+            raise ValueError("testfarm request has no task owner")
+        if row["task"] != sys.argv[2]:
+            continue
+        rid, state = row.get("id"), row.get("state")
+        if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", rid):
+            raise ValueError("task request has an invalid id")
+        if not isinstance(state, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", state):
+            raise ValueError("task request has an invalid state")
+        if state not in ("passed", "failed", "cancelled", "conflict"):
+            print(rid, state, file=out)
+' "$status_file" "$ID" "$pending_file" 2>/dev/null; then
+    echo "REFUSED: testfarm status is unreadable; cannot prove task $ID has no live requests" >&2
+    return 1
+  fi
+}
+
+guard_testfarm_requests() {
+  local farm_bin=${FM_TESTFARM_BIN:-testfarm} timeout=${FM_TESTFARM_TIMEOUT:-5}
+  local status_file pending_file request state rc=0
+  if ! command -v "$farm_bin" >/dev/null 2>&1; then
+    if [ -n "${FM_TESTFARM_BIN:-}" ] || [ "$CANCEL_TEST_REQUESTS" = 1 ]; then
+      echo "REFUSED: configured testfarm command is unavailable: $farm_bin" >&2
+      return 1
+    fi
+    return 0
+  fi
+  case "$timeout" in ''|*[!0-9]*) timeout=0 ;; esac
+  if [ "$timeout" -lt 1 ] || [ "$timeout" -gt 60 ]; then
+    echo 'REFUSED: FM_TESTFARM_TIMEOUT must be 1 to 60 seconds' >&2
+    return 1
+  fi
+  status_file=$(mktemp "${TMPDIR:-/tmp}/fm-testfarm-status.XXXXXX") || return 1
+  pending_file=$(mktemp "${TMPDIR:-/tmp}/fm-testfarm-pending.XXXXXX") || { rm -f "$status_file"; return 1; }
+  if ! testfarm_pending_for_task "$farm_bin" "$timeout" "$status_file" "$pending_file"; then
+    rm -f "$status_file" "$pending_file"
+    return 1
+  fi
+  if [ -s "$pending_file" ] && [ "$CANCEL_TEST_REQUESTS" = 1 ]; then
+    while read -r request state; do
+      ADB_SERVER_SOCKET=tcp:127.0.0.1:503 \
+        fm_run_timed "$timeout" "$farm_bin" cancel "$request" </dev/null >/dev/null || { rc=$?; break; }
+    done < "$pending_file"
+    if [ "$rc" -ne 0 ]; then
+      echo "REFUSED: testfarm could not cancel request $request (exit $rc)" >&2
+      rm -f "$status_file" "$pending_file"
+      return 1
+    fi
+    if ! testfarm_pending_for_task "$farm_bin" "$timeout" "$status_file" "$pending_file"; then
+      rm -f "$status_file" "$pending_file"
+      return 1
+    fi
+  fi
+  if [ -s "$pending_file" ]; then
+    echo "REFUSED: task $ID still owns non-terminal testfarm requests:" >&2
+    while read -r request state; do
+      printf '  %s (%s)\n' "$request" "$state" >&2
+    done < "$pending_file"
+    echo 'Wait for completion or rerun with --cancel-test-requests to cancel them explicitly.' >&2
+    rc=1
+  fi
+  rm -f "$status_file" "$pending_file"
+  return "$rc"
+}
+
+guard_testfarm_requests || exit 1
 EXPECTED_TREEHOUSE_PROJECT_LOCK=
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
    && fm_treehouse_pool_slot "$PROJ" "$WT"; then
