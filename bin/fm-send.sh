@@ -209,6 +209,9 @@
 # including handled records, for durable producers replaying an uncertain send.
 # Such producers must freeze the body and include a unique logical request id;
 # ordinary repeated sends remain distinct when this option is absent.
+# A plain-text FM_SEND_IDEMPOTENT send to a kind=lane task is delivered into
+# that Playbot lane's chat by bin/fm-lane-send.sh, whose header owns the exit
+# contract; without that option a lane target is refused as before.
 set -eu
 
 FM_SEND_ORIGINAL_ARGS=("$@")
@@ -437,6 +440,16 @@ fm_send_resolve_target() { # <raw-target>
 }
 
 RAW_TARGET=$1
+# A Playbot lane has no shell endpoint or steering inbox: a durable producer's
+# plain-text notice to one (FM_SEND_IDEMPOTENT=1) goes into the lane's chat
+# through bin/fm-lane-send.sh, which owns that delivery and its exit contract.
+# Every other send to a lane keeps the unresolved-target refusal below.
+if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ] && [ "$#" -eq 2 ] && [ "${2#--}" = "$2" ]; then
+  LANE_META=$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)
+  if [ -n "$LANE_META" ] && [ "$(fm_meta_get "$LANE_META" kind)" = lane ]; then
+    exec "$SCRIPT_DIR/fm-lane-send.sh" "$LANE_META" "$2"
+  fi
+fi
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift

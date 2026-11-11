@@ -1234,7 +1234,7 @@ remove_task_runtime_files() {
   # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
   # retired endpoint; teardown only runs after landing is confirmed, so any
   # leftover unhandled steer here is moot rather than unlanded work.
-  rm -rf "$state_dir/$id.inbox"
+  rm -rf "$state_dir/$id.inbox" "$state_dir/$id.lane-sent"
 }
 
 # Lane tasks have no shell backend endpoint to close. Keep their record

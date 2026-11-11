@@ -213,6 +213,12 @@ A worker that genuinely never began leaves its row untouched, so the pair holds 
 If that record is missing the poll reports the observation state as unreadable and remains armed, because it cannot prove that the executing snapshot still owns the live check generation or that the task was delivered.
 Firstmate's task teardown removes the poll artifacts with the matching task identity.
 
+A lane has no shell endpoint or steering inbox, so a test-service completion for a `kind=lane` task is delivered into the lane's own chat instead.
+The test service's completion hook calls `bin/fm-send.sh` as a durable producer, and fm-send hands that notice to `bin/fm-lane-send.sh`, which sends it through `send_message` addressed only by the lane's recorded `playbot_project`, `playbot_workspace`, and `playbot_thread`, so the worker resumes without firstmate relaying the result.
+A `queued` or `unknown` verdict is never resent, on the rules below, and an `unknown` one also queues a firstmate check wake to confirm the chat by hand.
+A `failed` verdict, a lane-tool error, or a record missing its project or thread reports the delivery as failed, so the test service retries and then raises its usual undelivered-completion check wake.
+`bin/fm-lane-send.sh`'s header owns that exit contract, and an ordinary steer to a lane is still refused.
+
 For a terminal dispatch with an explicit `taskId`, an existing dispatchable backlog item and durable brief can supply a task that has not been spawned through a shell harness.
 When its metadata is absent, dispatch creates a private `kind=lane` identity before sending, retaining the selected workspace, thread, landing branch, spawn incarnation, and the caller's explicit `mode` under the task locks.
 Dispatch requires that explicit `mode` (`no-mistakes`, `direct-PR`, or `local-only`) whenever `taskId` arms a new lane identity and refuses instead of defaulting one, because `bin/fm-merge-local.sh` only ever lands a recorded `mode=local-only` lane; `no-mistakes` and `direct-PR` lanes ship through their own existing pipelines.
