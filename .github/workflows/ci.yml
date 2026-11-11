@@ -257,7 +257,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Checkout testfarm for compatibility tests
-        if: (matrix.shard == 4 || matrix.shard == 5) && env.TESTFARM_AVAILABLE == 'true'
+        if: env.TESTFARM_AVAILABLE == 'true'
         uses: actions/checkout@v6
         with:
           repository: Lila-Games-Github/lila-test-farm
@@ -315,13 +315,11 @@ jobs:
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/fm-test"
-          if [ "$FM_SERIAL_SHARD" = 4 ] || [ "$FM_SERIAL_SHARD" = 5 ]; then
-            if [ "$TESTFARM_AVAILABLE" = true ]; then
-              export TESTFARM_CHECKOUT="$GITHUB_WORKSPACE/lila-test-farm"
-            else
-              export FM_SKIP_TESTFARM=1
-              echo '::notice::Skipping testfarm-dependent queue checks: TESTFARM_READ_TOKEN is absent.'
-            fi
+          if [ "$TESTFARM_AVAILABLE" = true ]; then
+            export TESTFARM_CHECKOUT="$GITHUB_WORKSPACE/lila-test-farm"
+          else
+            export FM_SKIP_TESTFARM=1
+            echo '::notice::Skipping testfarm-dependent queue checks: TESTFARM_READ_TOKEN is absent.'
           fi
           # A missing typecheck prerequisite is a broken lane, not a valid skip.
           bin/fm-test-run.sh --lane "$FM_SERIAL_LANE" \
