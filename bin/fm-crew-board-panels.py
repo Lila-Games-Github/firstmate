@@ -1547,10 +1547,18 @@ def landing_queue_rows(fields_by_task, deadline):
     Reuse worker-tag reads so this adds no status call for a snapshot car."""
     rows = []
     for queue in sorted((DATA / "landing-queue").glob("*/queue")):
+        unread = []
         try:
             with queue.open(encoding="utf-8") as source:
                 schema, common, branch = (source.readline().rstrip("\n") for _ in range(3))
-                ids = [line.split("\t", 1)[0] for line in source]
+                # Column four is the recorded state; landed and failed rows are
+                # terminal, so they never cost a status call.
+                ids = []
+                for line in source:
+                    cols = line.rstrip("\n").split("\t")
+                    if len(cols) > 3 and cols[3] in LANDING_QUEUE_INACTIVE_STATUSES:
+                        continue
+                    ids.append(cols[0])
         except (OSError, UnicodeError):
             continue
         if schema != "fm-landing-queue.v1" or not ids:
@@ -1563,6 +1571,9 @@ def landing_queue_rows(fields_by_task, deadline):
             fields = fields_by_task.get(task_id)
             if not fields or fields.get("queue") != queue.parent.name:
                 fields = landing_queue_fields(task_id, project, deadline)
+                if not fields and deadline - time.monotonic() <= 0.05:
+                    unread.append(task_id)
+                    continue
             if fields.get("status") in LANDING_QUEUE_INACTIVE_STATUSES:
                 continue
             try:
@@ -1572,9 +1583,13 @@ def landing_queue_rows(fields_by_task, deadline):
             if place < 1 or not fields.get("status"):
                 continue
             cars.append((place, task_id, fields))
-        if not cars:
+        if not cars and not unread:
             continue
         rows.append(item(f"{Path(project).name} / {branch}", status="section"))
+        if unread:
+            rows.append(item("Landing queue could not be fully read",
+                             f"Out of time; {len(unread)} active car(s) not checked: "
+                             + ", ".join(unread[:5]), "unreadable"))
         for place, task_id, fields in sorted(cars):
             priority = " · infra" if fields.get("priority") == "infra" else ""
             detail = ""
