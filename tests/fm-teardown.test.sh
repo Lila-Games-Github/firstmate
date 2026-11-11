@@ -176,7 +176,33 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
+  cat > "$fakebin/testfarm" <<'SH'
+#!/usr/bin/env bash
+case_dir=$(dirname "$(dirname "$0")")
+printf '%s socket=%s\n' "$*" "${ADB_SERVER_SOCKET:-unset}" >> "$case_dir/farm-calls"
+case "${1:-}" in
+  status)
+    [ "${2:-} ${3:-}" = '--json --no-probe' ] || exit 2
+    cat "$case_dir/farm-status.json" ;;
+  cancel)
+    [ "${FM_FAKE_FARM_CANCEL_STAYS_RUNNING:-0}" != 1 ] || exit 0
+    python3 - "$case_dir/farm-status.json" "$2" <<'PY'
+import json, sys
+path, rid = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    data = json.load(stream)
+for row in data["requests"]:
+    if row["id"] == rid:
+        row["state"] = "cancelled"
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(data, stream)
+PY
+    ;;
+  *) exit 2 ;;
+esac
+SH
+  printf '%s\n' '{"schema":"fm-test-service.v1","requests":[]}' > "$case_dir/farm-status.json"
+  chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes" "$fakebin/testfarm"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
   git init -q --bare "$case_dir/origin.git"
@@ -695,6 +721,91 @@ run_teardown() {
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+test_live_farm_request_refuses_before_cleanup() {
+  local case_dir
+  case_dir=$(make_case farm-running)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "land farm fixture"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  cat > "$case_dir/farm-status.json" <<'JSON'
+{"schema":"fm-test-service.v1","requests":[{"id":"other-run","task":"other-task","state":"running"},{"id":"own-run","task":"task-x1","state":"running"},{"id":"own-wait","task":"task-x1","state":"waiting"}]}
+JSON
+  if run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail 'teardown accepted live testfarm requests'
+  fi
+  assert_grep 'own-run (running)' "$case_dir/stderr" 'running request not named'
+  assert_grep 'own-wait (waiting)' "$case_dir/stderr" 'waiting request not named'
+  assert_no_grep 'other-run' "$case_dir/stderr" 'another task request was attributed to this task'
+  [ -f "$case_dir/state/task-x1.meta" ] || fail 'live request refusal removed task metadata'
+  [ -d "$case_dir/wt" ] || fail 'live request refusal removed worktree'
+  assert_grep 'status --json --no-probe socket=tcp:127.0.0.1:503' "$case_dir/farm-calls" 'farm status did not use the protected no-probe read'
+  pass 'live testfarm requests refuse teardown before cleanup'
+}
+
+test_terminal_farm_requests_allow_cleanup() {
+  local case_dir
+  case_dir=$(make_case farm-terminal)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "land farm fixture"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  cat > "$case_dir/farm-status.json" <<'JSON'
+{"schema":"fm-test-service.v1","requests":[{"id":"pass","task":"task-x1","state":"passed"},{"id":"fail","task":"task-x1","state":"failed"},{"id":"cancel","task":"task-x1","state":"cancelled"},{"id":"conflict","task":"task-x1","state":"conflict"}]}
+JSON
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "terminal requests stopped teardown: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail 'terminal request teardown left metadata'
+  pass 'terminal testfarm requests allow teardown'
+}
+
+test_explicit_farm_cancellation_allows_cleanup() {
+  local case_dir
+  case_dir=$(make_case farm-cancel)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "land farm fixture"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  cat > "$case_dir/farm-status.json" <<'JSON'
+{"schema":"fm-test-service.v1","requests":[{"id":"own-prep","task":"task-x1","state":"preparing"},{"id":"own-run","task":"task-x1","state":"running"},{"id":"other-run","task":"other-task","state":"running"}]}
+JSON
+  run_teardown "$case_dir" --cancel-test-requests > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "explicit cancellation stopped teardown: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail 'cancelled request teardown left metadata'
+  assert_grep 'cancel own-prep socket=tcp:127.0.0.1:503' "$case_dir/farm-calls" 'preparing request was not cancelled'
+  assert_grep 'cancel own-run socket=tcp:127.0.0.1:503' "$case_dir/farm-calls" 'running request was not cancelled'
+  assert_no_grep 'cancel other-run' "$case_dir/farm-calls" 'another task request was cancelled'
+  [ "$(jq -r '[.requests[] | select(.task == "task-x1" and .state == "cancelled")] | length' "$case_dir/farm-status.json")" = 2 ] \
+    || fail 'farm did not confirm two terminal cancellations'
+  pass 'explicit testfarm cancellation permits teardown after terminal confirmation'
+}
+
+test_unconfirmed_farm_cancellation_retains_task() {
+  local case_dir
+  case_dir=$(make_case farm-cancel-unconfirmed)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "land farm fixture"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  printf '%s\n' '{"schema":"fm-test-service.v1","requests":[{"id":"own-run","task":"task-x1","state":"running"}]}' > "$case_dir/farm-status.json"
+  if FM_FAKE_FARM_CANCEL_STAYS_RUNNING=1 run_teardown "$case_dir" --cancel-test-requests > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail 'teardown accepted an unconfirmed cancellation'
+  fi
+  [ -f "$case_dir/state/task-x1.meta" ] || fail 'unconfirmed cancellation removed task metadata'
+  assert_grep 'own-run (running)' "$case_dir/stderr" 'unconfirmed cancellation was not named'
+  pass 'unconfirmed cancellation retains the task'
+}
+
+test_absent_farm_keeps_teardown_available() {
+  local case_dir
+  case_dir=$(make_case farm-absent)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "land farm fixture"
+  git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  rm "$case_dir/fakebin/testfarm"
+  FM_TEARDOWN_TEST_PATH=/usr/bin:/bin \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "absent farm stopped teardown: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail 'absent farm teardown left metadata'
+  pass 'teardown works without a configured testfarm command'
 }
 
 # Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
@@ -4294,9 +4405,23 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+if [ "${FM_TEARDOWN_TEST_ONLY:-}" = farm ]; then
+  test_live_farm_request_refuses_before_cleanup
+  test_terminal_farm_requests_allow_cleanup
+  test_explicit_farm_cancellation_allows_cleanup
+  test_unconfirmed_farm_cancellation_retains_task
+  test_absent_farm_keeps_teardown_available
+  exit 0
+fi
+
 test_local_only_fork_remote_allows
 test_timing_malformed_ledger_does_not_stop_teardown
 test_timing_symlinked_sidecar_does_not_stop_teardown
+test_live_farm_request_refuses_before_cleanup
+test_terminal_farm_requests_allow_cleanup
+test_explicit_farm_cancellation_allows_cleanup
+test_unconfirmed_farm_cancellation_retains_task
+test_absent_farm_keeps_teardown_available
 test_timing_record_failure_does_not_stop_teardown
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
