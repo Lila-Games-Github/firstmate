@@ -593,6 +593,9 @@ The concurrency check pauses teardown after its successful idle read, redispatch
 On 2026-07-29, Playbot 0.80.0 on Windows was verified to expose `threads:openThread`, `threads:send`, `threads:archiveThread`, and `codex:mcpServers:reload` through its Electron IPC bridge.
 The installed application persisted the Playbot chat id and Codex session id together in `workspace_threads`, while the Codex rollout recorded a stable completed turn id and final agent message before the Stop hook returned.
 
+On 2026-11-11, Playbot 0.145.0 on Linux answered `codex:mcpServers:list` and `codex:mcpServers:reload` with `No handler registered`, while `mcpServers:list` returned the `playbot_lanes` record and `mcpServers:reload` reloaded it.
+Against that running application, `node --no-warnings bin/fm-playbot-lanes.mjs setup` returned `"ready": true` with `"toolCount": 25`, `"expectedToolCount": 25`, and `"reload": "reloaded 1 MCP server record(s)"`, and an immediate rerun returned `"changed": false`.
+
 The focused verification command was:
 
 ```text

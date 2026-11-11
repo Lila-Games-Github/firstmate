@@ -3794,6 +3794,29 @@ async function playbotInvoke(channel, payload) {
   return withPlaybotPage((client) => client.evaluate(`window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(payload)})`));
 }
 
+// Playbot renamed its MCP server IPC channels from `codex:mcpServers:*` to
+// `mcpServers:*` (0.145.0 serves only the unprefixed names). A missing-handler
+// rejection runs no Playbot code, so trying the current name first and falling
+// back to the legacy name only on that rejection is side-effect free on both.
+const MCP_SERVER_CHANNEL_PREFIXES = ["mcpServers", "codex:mcpServers"];
+let detectedMcpServerChannelPrefix = null;
+
+async function mcpServersInvoke(operation, payload) {
+  const prefixes = detectedMcpServerChannelPrefix ? [detectedMcpServerChannelPrefix] : MCP_SERVER_CHANNEL_PREFIXES;
+  let lastError;
+  for (const prefix of prefixes) {
+    try {
+      const result = await playbotInvoke(`${prefix}:${operation}`, payload);
+      detectedMcpServerChannelPrefix = prefix;
+      return result;
+    } catch (error) {
+      if (!/No handler registered/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 // These readers enumerate detected projects and peek existing sessions; they do
 // not activate a project, resume a chat, or start an engine instance.
 //
@@ -6441,7 +6464,7 @@ async function install() {
   let schemaVersion = null;
   let reloadSucceeded = false;
   try {
-    const servers = await playbotInvoke("codex:mcpServers:reload", undefined);
+    const servers = await mcpServersInvoke("reload", undefined);
     reload = Array.isArray(servers) ? `reloaded ${servers.length} MCP server record(s)` : "reload requested";
     schemaVersion = MCP_SCHEMA_VERSION;
     reloadSucceeded = true;
@@ -7284,7 +7307,7 @@ async function doctor() {
   let chatCreation = null;
   try {
     renderer = await withPlaybotPage(async () => true);
-    const servers = await playbotInvoke("codex:mcpServers:list", undefined);
+    const servers = await mcpServersInvoke("list", undefined);
     mcpServer = Array.isArray(servers) ? servers.find((server) => server.name === SERVER_NAME) ?? null : null;
   } catch {
     renderer = false;
@@ -7313,6 +7336,7 @@ async function doctor() {
     codexDb: codexDbPath(),
     renderer,
     mcpServer,
+    mcpServerChannels: detectedMcpServerChannelPrefix,
     buildIdentity,
     installation,
     chatCreation,

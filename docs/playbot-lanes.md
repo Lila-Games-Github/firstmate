@@ -15,6 +15,9 @@ Passing `-` instead of inline JSON reads the arguments object from standard inpu
 The exact captain phrase `Ahoy Playbot!` loads the internal `ahoy-playbot` skill and runs the `setup` command.
 Setup checks readiness first and makes no changes when the integration is already healthy.
 When readiness fails, it installs the MCP definition and hooks, asks the running Playbot process to reload its MCP servers, and checks again without restarting Playbot.
+Playbot 0.145.0 serves its MCP server IPC as `mcpServers:list` and `mcpServers:reload`, while earlier builds served `codex:mcpServers:list` and `codex:mcpServers:reload`.
+Setup tries the unprefixed channel first and falls back to the `codex:`-prefixed one only when Playbot rejects the first as an unregistered handler, which runs no Playbot code, so either build reloads without a restart.
+The `doctor` command reports the channel family it reached as `mcpServerChannels`.
 This initialization never creates, selects, messages, closes, or archives a chat, and it never starts an agent session.
 It reports ready only when Playbot DevTools is reachable, exactly one owned PreToolUse hook and Stop hook are installed, and Playbot reports the enabled MCP with no error and the expected tool count.
 The configured controller root is diagnostic identity for Playbot-chat callers and does not need to be open as a Playbot project for normal-terminal control.

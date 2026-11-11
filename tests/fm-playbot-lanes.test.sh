@@ -1388,6 +1388,9 @@ const sendDropFile = path.join(process.env.FIXTURE_ROOT, 'send-drop-key');
 const steerResponseFile = path.join(process.env.FIXTURE_ROOT, 'steer-response');
 const refreshFailureFile = path.join(process.env.FIXTURE_ROOT, 'refresh-failure');
 const mcpSchemaVersionFile = path.join(process.env.FIXTURE_ROOT, 'mcp-schema-version');
+// "current" serves the unprefixed mcpServers:* channels of Playbot 0.145.0 and
+// rejects the legacy codex:mcpServers:* names as missing handlers.
+const mcpChannelsFile = path.join(process.env.FIXTURE_ROOT, 'mcp-channels');
 // The same drop mechanism aimed at the snapshot Playbot returns WITH a completed
 // write, so the post-action reads can be driven without touching the pre-action
 // read in the same tool call.
@@ -1704,8 +1707,12 @@ async function electronInvoke(channel, payload) {
         snapshot: projected(snapshot),
       };
     }
-    if (channel === 'codex:mcpServers:list' || channel === 'codex:mcpServers:reload') {
-      if (channel === 'codex:mcpServers:reload') fs.writeFileSync(mcpSchemaVersionFile, '0.9.0\n');
+    if (/^(codex:)?mcpServers:(list|reload)$/.test(channel)) {
+      // Playbot 0.145.0 serves only the unprefixed channels; earlier builds
+      // serve only the codex:-prefixed ones.
+      const current = readFileOr(mcpChannelsFile, '') === 'current';
+      if (channel.startsWith('codex:') === current) throw new Error(`No handler registered for '${channel}'`);
+      if (channel.endsWith(':reload')) fs.writeFileSync(mcpSchemaVersionFile, '0.9.0\n');
       return [{
         name: 'playbot_lanes',
         enabled: true,
@@ -2025,6 +2032,30 @@ if (value.ready !== true || value.changed !== false) process.exit(1);
 if (calls.some(call => call.channel === 'codex:mcpServers:reload')) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads stale MCP schemas exactly once"
+
+printf 'current\n' > "$FIXTURE_ROOT/mcp-channels"
+printf '0.3.0\n' > "$FIXTURE_ROOT/mcp-schema-version"
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
+OUT="$setup_out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "setup did not reload through the unprefixed mcpServers channels of a current Playbot"
+const fs = require('node:fs');
+const value = JSON.parse(process.env.OUT);
+const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
+const mcpCalls = calls.map(call => call.channel).filter(channel => /mcpServers:/.test(channel));
+if (value.ready !== true || value.changed !== true) process.exit(1);
+if (value.checks.renderer !== true || value.checks.mcpEnabled !== true || value.checks.toolCount !== value.checks.expectedToolCount) process.exit(1);
+if (value.installation.reloadSucceeded !== true || !value.installation.reload.startsWith('reloaded ')) process.exit(1);
+if (value.diagnostics.mcpServerChannels !== 'mcpServers') process.exit(1);
+if (mcpCalls.some(channel => channel.startsWith('codex:'))) process.exit(1);
+if (mcpCalls.filter(channel => channel === 'mcpServers:reload').length !== 1) process.exit(1);
+NODE
+rm -f "$FIXTURE_ROOT/mcp-channels"
+out=$(node --no-warnings "$SCRIPT" doctor)
+OUT="$out" node --no-warnings <<'NODE' || fail "doctor did not fall back to the legacy codex:mcpServers channels"
+const value = JSON.parse(process.env.OUT);
+if (value.mcpServerChannels !== 'codex:mcpServers' || value.mcpServer?.toolCount !== 25) process.exit(1);
+NODE
+pass "fm-playbot-lanes: setup reloads through current unprefixed MCP channels and falls back to legacy ones"
 
 worker_json=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$worker_path")
 
