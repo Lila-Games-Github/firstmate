@@ -2891,25 +2891,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
   OPEN_QUESTIONS_DECLARED=0
   if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ]; then
-    PROJECT_REGISTERS=$("$FM_ROOT/bin/fm-project-mode.sh" --declared-registers "$PROJ_ABS") || {
-      echo "error: refusing to dispatch $ID: the registry's open-questions declaration for $PROJ_ABS is invalid" >&2
-      exit 1
-    }
-    if [ -n "$PROJECT_REGISTERS" ] && ! fm_oq_brief_declares "$BRIEF"; then
-      echo "error: refusing to dispatch $ID: its project declares an open-questions register ($(printf '%s' "$PROJECT_REGISTERS" | tr '\n' ' ')) but $BRIEF has no '# Open-question dependencies' section; re-scaffold it with bin/fm-brief.sh" >&2
-      exit 1
-    fi
-    if fm_oq_brief_declares "$BRIEF"; then
-      OPEN_QUESTIONS_DECLARED=1
-      fm_oq_brief_check "$BRIEF" "$(date +%Y-%m-%d)" || {
-        echo "error: refusing to dispatch $ID while its open-question dependencies are not settled" >&2
-        exit 1
-      }
-      if [ -n "$PROJECT_REGISTERS" ] && ! printf '%s\n' "$PROJECT_REGISTERS" | grep -Fqx -- "$FM_OQ_REGISTER"; then
-        echo "error: refusing to dispatch $ID: $BRIEF names register $FM_OQ_REGISTER but its project declares $(printf '%s' "$PROJECT_REGISTERS" | tr '\n' ' ')" >&2
-        exit 1
-      fi
-    fi
+    fm_oq_dispatch_check "$ID" "$BRIEF" "$(date +%Y-%m-%d)" "$PROJ_ABS" || exit 1
+    OPEN_QUESTIONS_DECLARED=$FM_OQ_DECLARED
   fi
   if ! fm_preflight_markers_check "$BRIEF"; then
     echo "error: $BRIEF has a malformed dispatch preflight marker: $FM_PREFLIGHT_REASON (bin/fm-dispatch-preflight-lib.sh owns the marker forms)" >&2

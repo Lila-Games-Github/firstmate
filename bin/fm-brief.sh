@@ -29,8 +29,9 @@
 #   placeholder firstmate replaces with every register question the work depends
 #   on. bin/fm-open-questions-lib.sh owns the line forms; fm-spawn.sh refuses
 #   dispatch while any named question is still open without a scoped provisional
-#   default carrying its authorization date. Lane briefs for a declared project are
-#   refused because Playbot dispatch does not check the section.
+#   default carrying its authorization date. Lane briefs get the same section, and
+#   Playbot lane dispatch of a task with this durable brief applies the same check
+#   (docs/playbot-lanes.md).
 #   --open-questions <register> declares the register, as a path relative to the
 #   project root, for a project the registry does not declare. For a declared
 #   project it must name one of its declared registers, which is also required to
@@ -331,10 +332,6 @@ fi
 }
 if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
   [ "$KIND" = ship ] || { echo "error: --open-questions applies only to ship briefs" >&2; exit 1; }
-  [ "$LANE" -eq 0 ] || {
-    echo "error: --open-questions requires fm-spawn dispatch; Playbot lane intake does not check open-question dependencies" >&2
-    exit 1
-  }
   case "/$OPEN_QUESTIONS/" in
     //|//*|*/../*|*"
 "*)
@@ -355,10 +352,6 @@ if [ "$KIND" = ship ] && [ -n "${POS[1]:-}" ]; then
     case "$DECLARED_REGISTERS" in
       *__invalid__*) echo "error: the registry declaration of ${POS[1]}'s open-questions register is invalid; fix data/projects.md before scaffolding" >&2; exit 1 ;;
     esac
-    [ "$LANE" -eq 0 ] || {
-      echo "error: ${POS[1]} declares an open-questions register, and Playbot lane intake does not check open-question dependencies; dispatch it through fm-spawn" >&2
-      exit 1
-    }
     if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
       printf '%s\n' "$DECLARED_REGISTERS" | grep -Fqx -- "$OPEN_QUESTIONS" || {
         echo "error: --open-questions '$OPEN_QUESTIONS' is not a register declared for ${POS[1]} (declared: $(printf '%s' "$DECLARED_REGISTERS" | tr '\n' ' '))" >&2
@@ -1024,7 +1017,9 @@ FrogPile's \`tests/task_evidence/*.log\` files are gitignored; when this task re
 
 $DOD
 EOF
-if [ "$LANE" -eq 1 ]; then
+if [ "$LANE" -eq 1 ] && [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
+  echo "scaffolded: $BRIEF (ship lane, mode=$MODE; replace {TASK}, {FIRSTMATE_SPEC}, and {OPEN_QUESTION_DEPENDENCIES})"
+elif [ "$LANE" -eq 1 ]; then
   echo "scaffolded: $BRIEF (ship lane, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
 elif [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK}, {FIRSTMATE_SPEC}, and {OPEN_QUESTION_DEPENDENCIES})"
