@@ -5130,6 +5130,12 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+# Herdr starts each pane with the server's interactive shell. The composed
+# launch is bash syntax, so run it under bash even when that shell is fish.
+# Keep this after the environment prefix so its expansions also run in bash.
+if [ "$BACKEND" = herdr ]; then
+  LAUNCH="bash -c $(shell_quote "$LAUNCH")"
+fi
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3

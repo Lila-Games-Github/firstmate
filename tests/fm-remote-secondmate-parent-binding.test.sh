@@ -219,9 +219,15 @@ cmp -s "$REMOTE_HOME/.fm-secondmate-parent" <(
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \
   || fail "real remote secondmate launch failed"
 
-DELIVERED_LINE=$(grep -F 'FM_PUBLIC_FOLLOWUP_PRIMARY_HOME' "$HERDR_LOG" | tail -1 || true)
-DELIVERED=$(printf '%s\n' "$DELIVERED_LINE" | tr ' ' '\n' \
-  | sed -n "s/^FM_PUBLIC_FOLLOWUP_PRIMARY_HOME='\{0,1\}\([^']*\)'\{0,1\}\$/\1/p" | tail -1)
+DELIVERED_LINE=$(sed -n 's/^pane send-text [^ ]* //p' "$HERDR_LOG" | tail -1)
+[ -n "$DELIVERED_LINE" ] || fail 'the remote launch sent no command to the Herdr pane'
+cat > "$FAKEBIN/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_PUBLIC_FOLLOWUP_PRIMARY_HOME-}"
+SH
+chmod +x "$FAKEBIN/codex"
+DELIVERED=$(PATH="$FAKEBIN:$PATH" bash -c "$DELIVERED_LINE") \
+  || fail 'the remote launch command did not execute in the isolated pane probe'
 [ -n "$DELIVERED" ] || fail "the remote launch did not deliver a primary-home binding to assert against"
 case "$DELIVERED" in
   "$REMOTE_ROOT") : ;;

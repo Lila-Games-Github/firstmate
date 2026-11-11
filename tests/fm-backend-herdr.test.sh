@@ -12,6 +12,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=tests/herdr-test-safety.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
@@ -189,6 +191,9 @@ case "$cmd $sub" in
     ;;
   "pane list")
     jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    ;;
+  "pane get")
+    printf '{"result":{"pane":{"foreground_cwd":"%s"}}}\n' "${FM_FAKE_PANE_PATH:-/tmp}"
     ;;
   "pane close")
     pane=${3:-}
@@ -5204,6 +5209,67 @@ test_wait_transition_clean_timeout_returns_1() {
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
+test_spawn_launch_runs_under_bash_from_any_herdr_pane_shell() {
+  local dir fake home project worktree log out launch setup shell result fish_bin
+  local -a pane_shells=(/bin/sh /bin/bash)
+  dir="$TMP_ROOT/spawn-shell"
+  mkdir -p "$dir"
+  fake=$(make_herdr_statefake "$dir")
+  fm_fake_exit0 "$fake" treehouse
+  cat > "$fake/systemctl" <<'SH'
+#!/bin/sh
+[ "$*" = 'cat testfarm-pin-adb.service' ]
+SH
+  chmod +x "$fake/systemctl"
+  home="$dir/home"
+  project="$dir/project"
+  worktree="$dir/worktree"
+  log="$dir/herdr.log"
+  : > "$log"
+  fm_test_spawn_home "$home" codex
+  printf 'off\n' > "$home/config/herdr-presentation-spaces"
+  printf 'FM_TEST_ALLOWED\n' > "$home/config/launch-env-allowlist"
+  fm_git_worktree "$project" "$worktree" shell-worker
+  fm_test_spawn_brief "$home" shell-worker
+  cat > "$dir/probe.sh" <<'SH'
+#!/bin/sh
+printf '%s|%s|%s|%s\n' "${ADB_SERVER_SOCKET-unset}" "${FM_TEST_ALLOWED-unset}" \
+  "${GOTMPDIR-unset}" "${FM_TASK_ID-unset}"
+SH
+  # shellcheck disable=SC2016
+  out=$(unset ADB_SERVER_SOCKET; FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$dir/state.json" \
+    HERDR_SESSION=fm-shell-test FM_TEST_ALLOWED='quoted value; $(false)' \
+    fm_test_run_spawn "$home" "$worktree" "$fake" shell-worker "$project" \
+      --backend herdr --harness "/bin/sh '$dir/probe.sh'" --mode no-mistakes --yolo off) \
+    || fail "fake Herdr spawn failed: $out"
+  launch=$(awk -F '\037' '$2 == "pane" && $3 == "send-text" { print $5 }' "$log" | tail -1)
+  [ -n "$launch" ] || fail 'spawn sent no launch input to the fake Herdr pane'
+  setup=$(awk -F '\037' '$2 == "pane" && $3 == "run" && $5 ~ /^export / { print $5 }' "$log")
+  [ -n "$setup" ] || fail 'spawn sent no prelaunch exports to the fake Herdr pane'
+  fish_bin=$(command -v fish || true)
+  [ -z "$fish_bin" ] || pane_shells+=("$fish_bin")
+  [ ! -x /bin/zsh ] || pane_shells+=(/bin/zsh)
+  for shell in "${pane_shells[@]}"; do
+    [ -x "$shell" ] || continue
+    # shellcheck disable=SC2016
+    result=$(env -i HOME="$home/user-home" PATH="$fake:$PATH" \
+      FM_TEST_ALLOWED='quoted value; $(false)' "$shell" -c "$setup"$'\n'"$launch") \
+      || fail "Herdr launch failed from $shell"
+    # shellcheck disable=SC2016
+    [ "$result" = 'tcp:127.0.0.1:503|quoted value; $(false)|/tmp/fm-shell-worker/gotmp|shell-worker' ] \
+      || fail "Herdr launch environment changed under $shell: $result"
+  done
+  # shellcheck disable=SC2016
+  result=$(env -i HOME="$home/user-home" PATH="$fake:$PATH" \
+    ADB_SERVER_SOCKET=tcp:pane:1800 FM_TEST_ALLOWED='quoted value; $(false)' \
+    "${fish_bin:-/bin/sh}" -c "$setup"$'\n'"$launch") \
+    || fail 'Herdr launch with an operator socket failed'
+  # shellcheck disable=SC2016
+  [ "$result" = 'tcp:pane:1800|quoted value; $(false)|/tmp/fm-shell-worker/gotmp|shell-worker' ] \
+    || fail "Herdr launch replaced the pane's operator socket: $result"
+  pass 'fm-spawn Herdr launch: available pane shells execute the same protected launch'
+}
+
 test_version_check_accepts_current_protocol
 test_version_check_refuses_old_protocol
 test_version_check_refuses_missing_herdr
@@ -5411,3 +5477,4 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_spawn_launch_runs_under_bash_from_any_herdr_pane_shell
