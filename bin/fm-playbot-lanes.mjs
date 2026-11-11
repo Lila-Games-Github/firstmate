@@ -5624,6 +5624,65 @@ function laneIdentityBoundElsewhere(state, taskId, worker) {
   }
 }
 
+// Open-question dependencies gate lane dispatch exactly as they gate fm-spawn.sh:
+// bin/fm-open-questions-lib.sh's fm_oq_dispatch_check owns the registry lookup,
+// the section and line forms, and every refusal message. It applies to a task
+// whose durable brief exists in the controller home. Without a worktree it runs
+// the brief check over every Playbot project root's repository before anything is
+// created; with one it also checks the register against that dispatch workspace.
+// Returns null when the brief declares no section, else the declaring repository.
+function laneOpenQuestionsCheck(taskId, projectRootPaths, worktree = null) {
+  const brief = path.join(controllerRoot(), "data", taskId, "brief.md");
+  if (!fs.existsSync(brief)) return null;
+  const lib = path.join(path.dirname(supervisionSelfScript()), "fm-open-questions-lib.sh");
+  const env = { ...process.env, FM_HOME: controllerRoot(), FM_DATA_OVERRIDE: path.join(controllerRoot(), "data") };
+  delete env.FM_ROOT_OVERRIDE;
+  const result = spawnSync("bash", [
+    "-c",
+    `. "$1" || { echo "error: open-question library could not be loaded" >&2; exit 2; }
+id=$2 brief=$3 worktree=$4
+shift 4
+fm_oq_dispatch_check "$id" "$brief" "$(date +%Y-%m-%d)" "$@" || exit 3
+[ "$FM_OQ_DECLARED" -eq 1 ] || exit 0
+if [ -n "$worktree" ]; then
+  fm_oq_register_check "$worktree" || { echo "error: refusing to dispatch $id: its open-question dependencies do not match the register on the dispatch base" >&2; exit 3; }
+fi
+printf '%s\\n' "$FM_OQ_PROJECT_DIR"`,
+    "fm-playbot-lane-open-questions", lib, taskId, brief, worktree ?? "", ...projectRootPaths,
+  ], { env, encoding: "utf8", timeout: 20_000 });
+  if (result.error || result.signal || result.status !== 0) {
+    const detail = String(result.stderr ?? "").trim().split("\n").filter(Boolean)
+      .map((line) => line.replace(/^error: /, "")).join("; ")
+      || (result.error ? supervisionErrorDetail(result.error) : `exit ${result.status ?? result.signal}`);
+    throw new Error(`firstmate task '${taskId}' cannot dispatch to a lane: ${detail}`);
+  }
+  return String(result.stdout).trim() || null;
+}
+
+// A registry clone path and its register path name the repository's top level,
+// while a Playbot project root may be a subdirectory of it (FrogPile's root is
+// ProjectWhite/prototype-game), so both sides are compared at the git top level.
+function laneRepositoryTop(rootPath) {
+  try {
+    return String(git(rootPath, ["rev-parse", "--show-toplevel"])).trim() || rootPath;
+  } catch {
+    return rootPath;
+  }
+}
+
+function laneOpenQuestionsProjectDirs(project) {
+  return [...new Set(project.roots.map((root) => laneRepositoryTop(root.path)))];
+}
+
+// The dispatch workspace's repository top level that holds the declaring
+// project's register.
+function laneOpenQuestionsWorktree(project, workspace, declaringRoot) {
+  const projectRoot = project.roots.find((candidate) => laneRepositoryTop(candidate.path) === declaringRoot);
+  const root = workspace?.roots.find((candidate) => candidate.projectRootId === projectRoot?.id);
+  if (!root?.path) throw new Error(`the dispatch workspace has no root for ${declaringRoot}, so its open-question register cannot be checked`);
+  return laneRepositoryTop(root.path);
+}
+
 // Runs before any workspace or chat exists, so an ineligible task is refused
 // without leaving a Playbot pair behind. The lock-held recheck stays authoritative.
 function preflightTerminalLaneIdentity(taskId, worker) {
@@ -6880,6 +6939,11 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     if (requestedTaskId !== null && !supervisionTaskIdValid(requestedTaskId)) {
       throw new Error(`taskId '${requestedTaskId}' cannot key a watcher poll; use a firstmate task id of up to 64 characters from A-Z, a-z, 0-9, dot, dash, and underscore, not starting with a dot`);
     }
+    // A task's durable brief must settle its open-question dependencies before
+    // anything is created; the register itself is checked on the dispatch base.
+    const openQuestionsRoot = requestedTaskId !== null
+      ? laneOpenQuestionsCheck(requestedTaskId, laneOpenQuestionsProjectDirs(project))
+      : null;
     // Inspect the destination before resolving a title or creating a chat.
     if (engineDependent && !wantsNewWorkspace) {
       const existing = args.thread ? resolveThreadInProject(project, args.workspace, args.thread) : null;
@@ -6950,6 +7014,21 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
         throw new Error(`Chat ${worker.thread_id} was created in workspace ${worker.workspace_id}, but dispatch stopped before sending because the workspace's registered branch could not be read back: ${reason}${stop} The chat still exists: once workspace ${worker.workspace_id} reads back, deliver this task with send_message against chat ${worker.thread_id} rather than dispatching again.`);
       }
       warnings.push(`Workspace ${worker.workspace_id} could not be read back (${reason}), so workspace is null and no branch was observed; read it with get_workspace_freshness before relying on a branch name.`);
+    }
+    if (openQuestionsRoot) {
+      try {
+        if (!workspace) throw new Error("the dispatch workspace could not be read back, so its open-question register cannot be checked");
+        laneOpenQuestionsCheck(requestedTaskId, laneOpenQuestionsProjectDirs(project), laneOpenQuestionsWorktree(project, workspace, openQuestionsRoot));
+      } catch (error) {
+        if (!createdChat) throw error;
+        const reason = supervisionErrorDetail(error);
+        const stop = reason.endsWith(".") ? "" : ".";
+        const created = wantsNewWorkspace
+          ? `Workspace ${worker.workspace_id} and chat ${worker.thread_id} were created`
+          : `Chat ${worker.thread_id} was created in workspace ${worker.workspace_id}`;
+        const exist = wantsNewWorkspace ? "Both still exist" : "The chat still exists";
+        throw new Error(`${created}, but dispatch stopped before sending because the open-question register check failed: ${reason}${stop} ${exist}: once the register on its base names every dependency, dispatch task '${requestedTaskId}' with workspace ${worker.workspace_id} and thread ${worker.thread_id} rather than creating another worker.`);
+      }
     }
     const engineReport = engineDependent
       ? await requireEngineReadiness(resolveProject(project.id), resolveWorkspace(resolveProject(project.id), worker.workspace_id), createdChat ? worker : null, { requiresGraphicalCapture })

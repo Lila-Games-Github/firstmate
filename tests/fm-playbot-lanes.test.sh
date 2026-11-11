@@ -3980,6 +3980,128 @@ assert_grep 'state: in_flight' "$FIXTURE_ROOT/lane-rollback-row.out" "rollback l
 pass "fm-playbot-lanes: failed backlog commit rolls back its lane identity and retry starts supervision"
 FM_HOME_FIXTURE=$lane_rollback_original_home
 
+# A lane task's durable brief settles its open-question dependencies before
+# dispatch, through the same bin/fm-open-questions-lib.sh gate as fm-spawn.sh.
+lane_oq_original_home=$FM_HOME_FIXTURE
+FM_HOME_FIXTURE="$FIXTURE_ROOT/lane-oq-home"
+mkdir -p "$FM_HOME_FIXTURE/state" "$FM_HOME_FIXTURE/data" "$FM_HOME_FIXTURE/config"
+lane_oq_worktree="$FIXTURE_ROOT/worker/.worktrees/alt"
+mkdir -p "$lane_oq_worktree/docs"
+printf -- '- **OQ-076 - reward settlement:** open\n- **OQ-159 - settlement transactions:** open\n' > "$lane_oq_worktree/docs/open-questions.md"
+# shellcheck disable=SC2016 # Literal backticks are registry syntax.
+printf -- '- worker-game [local-only] - the worker project at `%s` open-questions `docs/open-questions.md` (added 2026-01-01)\n' \
+  "$FIXTURE_ROOT/worker" > "$FM_HOME_FIXTURE/data/projects.md"
+lane_oq_today=$(date +%Y-%m-%d)
+lane_oq_task() {  # <task-id> <brief-kind>
+  mkdir -p "$FM_HOME_FIXTURE/data/$1"
+  printf 'Lane open-question brief\nExecution contract: workspace=lane\n' > "$FM_HOME_FIXTURE/data/$1/brief.md"
+  case "$2" in
+    missing) ;;
+    open) printf '\n# Open-question dependencies\nOpen-question register: docs/open-questions.md\nOpen question OQ-076: provisional default authorized %s: one item per success, expedition only\nOpen question OQ-159: open\n' "$lane_oq_today" >> "$FM_HOME_FIXTURE/data/$1/brief.md" ;;
+    absent) printf '\n# Open-question dependencies\nOpen-question register: docs/open-questions.md\nOpen question OQ-074: resolved %s: rewards page\n' "$lane_oq_today" >> "$FM_HOME_FIXTURE/data/$1/brief.md" ;;
+    settled) printf '\n# Open-question dependencies\nOpen-question register: docs/open-questions.md\nOpen question OQ-076: provisional default authorized %s: one item per success, expedition only\nOpen question OQ-159: resolved %s: settlement page\n' "$lane_oq_today" "$lane_oq_today" >> "$FM_HOME_FIXTURE/data/$1/brief.md" ;;
+  esac
+  tasks-axi add "$1" "Lane open questions $2" --kind ship --queue \
+    --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage lane open-question task $1"
+}
+lane_oq_refusal() {  # <task-id> <expected-message> <label>
+  local before result
+  before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
+  result=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Lane open-question task\",\"taskId\":\"$1\",\"mode\":\"local-only\"}")
+  OUT="$result" EXPECTED="$2" node --no-warnings <<'NODE' || fail "$3 did not refuse with its cause: $result"
+const message = JSON.parse(process.env.OUT).error?.message ?? "";
+if (!message.includes(process.env.EXPECTED)) process.exit(1);
+NODE
+  [ "$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")" = "$before" ] || fail "$3 still contacted Playbot"
+  assert_absent "$FM_HOME_FIXTURE/state/$1.meta" "$3 still recorded a lane identity"
+  assert_absent "$FM_HOME_FIXTURE/state/$1.check.sh" "$3 still armed a poll"
+  tasks-axi show "$1" --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE_ROOT/lane-oq-row.out" \
+    || fail "could not read $3 backlog row"
+  assert_grep 'state: queued' "$FIXTURE_ROOT/lane-oq-row.out" "$3 moved its backlog row"
+}
+lane_oq_task fm-lane-oq-missing missing
+lane_oq_refusal fm-lane-oq-missing "has no '# Open-question dependencies' section" "lane brief without the section"
+lane_oq_task fm-lane-oq-open open
+lane_oq_refusal fm-lane-oq-open "still-open design question(s): OQ-159;" "lane brief with a still-open question"
+lane_oq_task fm-lane-oq-absent absent
+lane_oq_refusal fm-lane-oq-absent "open question OQ-074 does not appear in register docs/open-questions.md" "lane brief naming a question absent from its register"
+lane_oq_task fm-lane-oq-settled settled
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Lane open-question task\",\"taskId\":\"fm-lane-oq-settled\",\"mode\":\"local-only\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "settled lane open-question dependencies did not dispatch: $out"
+if (JSON.parse(process.env.OUT).result?.structuredContent?.supervision?.armed !== true) process.exit(1);
+NODE
+# A project the registry declares no register for keeps its existing behavior.
+: > "$FM_HOME_FIXTURE/data/projects.md"
+lane_oq_task fm-lane-oq-plain missing
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":$worker_json,\"thread\":\"chat-worker-alt\",\"message\":\"Lane plain task\",\"taskId\":\"fm-lane-oq-plain\",\"mode\":\"local-only\"}")
+OUT="$out" node --no-warnings <<'NODE' || fail "an undeclared project's lane dispatch changed: $out"
+if (JSON.parse(process.env.OUT).result?.structuredContent?.supervision?.armed !== true) process.exit(1);
+NODE
+rm -f "$lane_oq_worktree/docs/open-questions.md"
+rmdir "$lane_oq_worktree/docs" 2>/dev/null || true
+pass "fm-playbot-lanes: lane dispatch refuses unsettled open-question dependencies and accepts settled or undeclared ones"
+
+# FrogPile's shape: the Playbot project root is a subdirectory of the registered
+# clone, whose register path is relative to the repository top level.
+lane_oq_repo="$FIXTURE_ROOT/oq-sub-repo"
+git init --initial-branch=main "$lane_oq_repo" >/dev/null || fail "could not create the subdirectory-root repository"
+mkdir -p "$lane_oq_repo/game/docs"
+printf -- '- **OQ-076 - reward settlement:** open\n' > "$lane_oq_repo/game/docs/open-questions.md"
+# shellcheck disable=SC2016 # Literal backticks are registry syntax.
+printf -- '- sub-game [local-only] - the game in game/ of the repo at `%s` open-questions `game/docs/open-questions.md` (added 2026-01-01)\n' \
+  "$lane_oq_repo" > "$FM_HOME_FIXTURE/data/projects.md"
+lane_oq_db() {  # <insert|delete>
+  FIXTURE_ROOT="$FIXTURE_ROOT" REPO="$lane_oq_repo" ACTION="$1" node --no-warnings <<'NODE'
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = '2026-07-29T12:00:00.000Z';
+if (process.env.ACTION === 'insert') {
+  const root = path.join(process.env.REPO, 'game');
+  db.prepare('INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?)').run('project-oq-sub', 'oq-sub-game', 'root-oq-sub', 'active', now, now);
+  db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?)').run('repo-oq-sub', 'oq-sub-game', root, 'main');
+  db.prepare('INSERT INTO project_roots VALUES (?, ?, ?, ?)').run('root-oq-sub', 'project-oq-sub', 'repo-oq-sub', 0);
+  db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('ws-oq-sub', 'project-oq-sub', null, 'local', 1, 'active', now, now);
+  db.prepare('INSERT INTO workspace_roots VALUES (?, ?, ?, ?)').run('ws-oq-sub', 'root-oq-sub', root, 'main');
+  db.prepare(`INSERT INTO workspace_threads (id, workspace_id, title, position, is_active, session_id, approval_mode,
+    plan_mode, ephemeral, draft_input, pending_queue_json, agent_status, has_unread, last_user_activity_at, created_at, updated_at, archived)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run('chat-oq-sub', 'ws-oq-sub', 'Sub game', 0, 1, 'oq-sub-session', 'full-access', 0, 0, '', null, 'ready', 0, now, now, now, 0);
+} else {
+  db.prepare('DELETE FROM workspace_threads WHERE id = ?').run('chat-oq-sub');
+  db.prepare('DELETE FROM workspace_roots WHERE workspace_id = ?').run('ws-oq-sub');
+  db.prepare('DELETE FROM workspaces WHERE id = ?').run('ws-oq-sub');
+  db.prepare('DELETE FROM project_roots WHERE id = ?').run('root-oq-sub');
+  db.prepare('DELETE FROM repositories WHERE id = ?').run('repo-oq-sub');
+  db.prepare('DELETE FROM projects WHERE id = ?').run('project-oq-sub');
+}
+db.close();
+NODE
+}
+lane_oq_db insert || fail "could not register the subdirectory-root Playbot project"
+lane_oq_sub_refusal() {  # <task-id> <expected-message> <label>
+  local before result
+  before=$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")
+  result=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"project\":\"oq-sub-game\",\"thread\":\"chat-oq-sub\",\"message\":\"Sub game task\",\"taskId\":\"$1\",\"mode\":\"local-only\"}")
+  OUT="$result" EXPECTED="$2" node --no-warnings <<'NODE' || fail "$3 did not refuse with its cause: $result"
+const message = JSON.parse(process.env.OUT).error?.message ?? "";
+if (!message.includes(process.env.EXPECTED)) process.exit(1);
+NODE
+  [ "$(wc -l < "$FIXTURE_ROOT/ipc-calls.jsonl")" = "$before" ] || fail "$3 still contacted Playbot"
+  assert_absent "$FM_HOME_FIXTURE/state/$1.meta" "$3 still recorded a lane identity"
+}
+lane_oq_task fm-lane-oq-sub-missing missing
+lane_oq_sub_refusal fm-lane-oq-sub-missing "has no '# Open-question dependencies' section" "subdirectory-root lane brief without the section"
+mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-oq-sub-absent"
+printf 'Sub lane brief\n\n# Open-question dependencies\nOpen-question register: game/docs/open-questions.md\nOpen question OQ-074: resolved %s: rewards page\n' "$lane_oq_today" \
+  > "$FM_HOME_FIXTURE/data/fm-lane-oq-sub-absent/brief.md"
+tasks-axi add fm-lane-oq-sub-absent "Lane open questions sub absent" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage the subdirectory-root absent task"
+lane_oq_sub_refusal fm-lane-oq-sub-absent "open question OQ-074 does not appear in register game/docs/open-questions.md" "subdirectory-root register check"
+lane_oq_db delete || fail "could not remove the subdirectory-root Playbot project"
+pass "fm-playbot-lanes: a Playbot root inside the registered clone matches its register at the repository top level"
+FM_HOME_FIXTURE=$lane_oq_original_home
+
 # Ordinary spawn metadata is append-only and need not satisfy lane-file
 # exclusivity. Dispatch must preserve that existing task record byte for byte.
 FM_HOME_FIXTURE="$FIXTURE_ROOT/lane-spawn-compat-home"

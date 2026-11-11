@@ -1674,7 +1674,7 @@ test_open_question_dependencies_gate_dispatch() {
   FM_HOME="$OQ_HOME" "$ROOT/bin/fm-brief.sh" oq-plain some-proj --mode no-mistakes >/dev/null 2>&1
   assert_no_grep 'Open-question' "$OQ_HOME/data/oq-plain/brief.md" "a brief without --open-questions gained the section"
 
-  for args in '--scout' '--mode local-only --lane --landing-branch main' '--mode local-only --open-questions' ; do
+  for args in '--scout' '--mode local-only --open-questions' ; do
     id="oq-refused-$RANDOM"
     # shellcheck disable=SC2086 # Deliberate word splitting of the flag set.
     out=$(FM_HOME="$OQ_HOME" "$ROOT/bin/fm-brief.sh" "$id" some-proj $args --open-questions x 2>&1); out_status=$?
@@ -1772,12 +1772,22 @@ test_registry_declared_register_scaffolds_section() {
   [ "$status" -ne 0 ] || fail "a conflicting explicit register was accepted"
   [ ! -e "$home/data/oq-reg-conflict/brief.md" ] || fail "a conflicting register still wrote a brief"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-lane prototype-game --mode local-only --lane --landing-branch main 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "a lane brief for a declared project was scaffolded without the check"
+  expect_code 0 "$status" "a lane brief for a declared project should scaffold: $out"
+  brief="$home/data/oq-reg-lane/brief.md"
+  grep -qx 'Execution contract: workspace=lane' "$brief" || fail "declared-project lane scaffold is not a lane brief"
+  grep -qx '# Open-question dependencies' "$brief" || fail "declared-project lane brief got no section"
+  grep -qx 'Open-question register: docs/wiki/open-questions.md' "$brief" || fail "declared-project lane brief got the wrong register"
+  grep -qx '{OPEN_QUESTION_DEPENDENCIES}' "$brief" || fail "declared-project lane brief lacks the dependency placeholder"
+  assert_contains "$out" '{OPEN_QUESTION_DEPENDENCIES}' "lane scaffold output does not name the placeholder"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-lane-plain plain --mode local-only --lane --landing-branch main 2>&1); status=$?
+  expect_code 0 "$status" "undeclared project lane scaffold failed: $out"
+  assert_no_grep 'Open-question' "$home/data/oq-reg-lane-plain/brief.md" "an undeclared project's lane brief gained the section"
+  assert_not_contains "$out" '{OPEN_QUESTION_DEPENDENCIES}' "undeclared lane scaffold output named the placeholder"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oq-reg-plain plain --mode local-only 2>&1); status=$?
   expect_code 0 "$status" "undeclared project scaffold failed: $out"
   assert_no_grep 'Open-question' "$home/data/oq-reg-plain/brief.md" "an undeclared project gained the section"
-  pass "fm-brief.sh: a registry-declared register adds the section automatically; undeclared projects are unchanged"
+  pass "fm-brief.sh: a registry-declared register adds the section automatically, lane briefs included; undeclared projects are unchanged"
 }
 
 # Only the dependency section counts: task text and the captain's intent that

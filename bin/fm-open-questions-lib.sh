@@ -20,10 +20,11 @@
 # Only lines inside that section, up to the next top-level heading outside a fenced
 # block, are read; task text and the captain's intent never count.
 # A project whose data/projects.md entry declares a register (see
-# bin/fm-project-mode.sh) gets the section from bin/fm-brief.sh automatically, and
-# bin/fm-spawn.sh refuses fresh ship dispatch when the section is missing or names
-# a register that project did not declare.
-# bin/fm-spawn.sh refuses fresh dispatch of a brief that declares a register while
+# bin/fm-project-mode.sh) gets the section from bin/fm-brief.sh automatically,
+# lane briefs included, and fresh dispatch (bin/fm-spawn.sh, and Playbot lane
+# dispatch of a task with a durable brief) refuses when the section is missing or
+# names a register that project did not declare.
+# Fresh dispatch refuses a brief that declares a register while
 # the placeholder remains, a line is malformed or duplicated, `none` is mixed with
 # dependency lines, or any named question is still `open`. After the dispatch
 # worktree is on its landing base, it also refuses when the register file is
@@ -34,6 +35,8 @@
 # question and to the register the worker will read.
 
 FM_OQ_PLACEHOLDER='{OPEN_QUESTION_DEPENDENCIES}'
+
+FM_OQ_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 FM_OQ_HEADING='# Open-question dependencies'
 
@@ -161,6 +164,53 @@ EOF
     bad=1
   fi
   [ "$bad" -eq 0 ]
+}
+
+# Fresh-dispatch gate shared by bin/fm-spawn.sh and Playbot lane dispatch
+# (bin/fm-playbot-lanes.mjs). Reads the registers the registry declares for each
+# project directory (bin/fm-project-mode.sh --declared-registers), refuses a brief
+# without the section when any is declared, runs fm_oq_brief_check, and refuses a
+# register that project did not declare. Sets FM_OQ_DECLARED (1 when the brief
+# carries the section) and FM_OQ_PROJECT_DIR (the directory whose registry entry
+# declares FM_OQ_REGISTER, else the first one given); the caller then runs
+# fm_oq_register_check against that directory's dispatch worktree.
+fm_oq_dispatch_check() { # <task-id> <brief> <today YYYY-MM-DD> <project-dir>...
+  local id=$1 brief=$2 today=$3 dir found registers=''
+  shift 3
+  # shellcheck disable=SC2034 # Read by the caller after this returns.
+  FM_OQ_DECLARED=0
+  # shellcheck disable=SC2034 # Read by the caller after this returns.
+  FM_OQ_PROJECT_DIR=${1:-}
+  for dir in "$@"; do
+    found=$("$FM_OQ_LIB_DIR/fm-project-mode.sh" --declared-registers "$dir") || {
+      echo "error: refusing to dispatch $id: the registry's open-questions declaration for $dir is invalid" >&2
+      return 1
+    }
+    [ -n "$found" ] && registers="${registers}${found}"$'\n'
+  done
+  registers=$(printf '%s' "$registers" | awk 'NF && !seen[$0]++')
+  if [ -n "$registers" ] && ! fm_oq_brief_declares "$brief"; then
+    echo "error: refusing to dispatch $id: its project declares an open-questions register ($(printf '%s' "$registers" | tr '\n' ' ')) but $brief has no '# Open-question dependencies' section; re-scaffold it with bin/fm-brief.sh" >&2
+    return 1
+  fi
+  fm_oq_brief_declares "$brief" || return 0
+  # shellcheck disable=SC2034 # Read by the caller after this returns.
+  FM_OQ_DECLARED=1
+  fm_oq_brief_check "$brief" "$today" || {
+    echo "error: refusing to dispatch $id while its open-question dependencies are not settled" >&2
+    return 1
+  }
+  [ -n "$registers" ] || return 0
+  if ! printf '%s\n' "$registers" | grep -Fqx -- "$FM_OQ_REGISTER"; then
+    echo "error: refusing to dispatch $id: $brief names register $FM_OQ_REGISTER but its project declares $(printf '%s' "$registers" | tr '\n' ' ')" >&2
+    return 1
+  fi
+  for dir in "$@"; do
+    "$FM_OQ_LIB_DIR/fm-project-mode.sh" --declared-registers "$dir" | grep -Fqx -- "$FM_OQ_REGISTER" || continue
+    # shellcheck disable=SC2034 # Read by the caller after this returns.
+    FM_OQ_PROJECT_DIR=$dir
+    break
+  done
 }
 
 # Check the declared register against the dispatch worktree after
