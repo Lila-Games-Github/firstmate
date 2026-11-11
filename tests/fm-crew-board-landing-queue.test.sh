@@ -131,3 +131,42 @@ EOF
 }
 
 test_landing_queue_place_and_front_beat_stale_phase
+
+test_landing_queue_many_landed_rows_do_not_hide_active_car() {
+  local home project a queue sha i out
+  home=$(mktemp -d "$TMP_ROOT/landing-queue-landed.XXXXXX")
+  mkdir -p "$home/state" "$home/data" "$home/stub-bin"
+  printf '#!/usr/bin/env bash\nprintf %s\n' "'{\"schema\":\"fm-test-service.v1\",\"requests\":[]}'" > "$home/stub-bin/testfarm"
+  chmod +x "$home/stub-bin/testfarm"
+  project="$home/project"
+  git init -q -b main "$project"
+  printf 'first\n' > "$project/shared.txt"
+  git -C "$project" add .
+  git -C "$project" -c user.name=t -c user.email=t@example.invalid commit -qm baseline
+  a="$home/a"
+  git -C "$project" worktree add -qb fm/a "$a" main
+  printf 'a\n' > "$a/a.txt"
+  git -C "$a" add .
+  git -C "$a" -c user.name=t -c user.email=t@example.invalid commit -qm a
+  full_receipt "$a" > "$home/a.full"
+  FM_HOME="$home" "$QUEUE" ready a --project "$project" --landing-branch main \
+    --branch fm/a --head "$(git -C "$a" rev-parse HEAD)" --target "$(git -C "$project" rev-parse main)" \
+    --receipt "$home/a.full" >/dev/null || fail 'active car failed to join the landing queue'
+  queue=$(find "$home/data/landing-queue" -name queue -type f -print -quit)
+  sha=$(git -C "$project" rev-parse main)
+  {
+    head -n 3 "$queue"
+    for i in $(seq 1 100); do
+      printf 'old-%s\tfm/old-%s\t%s\tlanded\t%s\t%s.receipt\t%s\t%s\t-\t-\t-\n' "$i" "$i" "$sha" "$sha" "$sha" "$sha" "$sha"
+    done
+    tail -n +4 "$queue"
+  } > "$queue.new"
+  mv "$queue.new" "$queue"
+  jq -n '{schema: "fm-fleet-snapshot.v1", tasks: []}' > "$home/snapshot.json"
+  run_panels "$home" "$home/snapshot.json" > "$home/panels.json" || fail 'projection with many landed rows failed'
+  out=$(jq -r '[.landing_queue[] | select(.status != "section") | .title + ":" + .status] | join("|")' "$home/panels.json")
+  assert_equals '#1 a:needs-quick' "$out" 'the one active car shows behind 100 landed rows'
+  pass 'a queue of many landed rows still shows its active car'
+}
+
+test_landing_queue_many_landed_rows_do_not_hide_active_car
