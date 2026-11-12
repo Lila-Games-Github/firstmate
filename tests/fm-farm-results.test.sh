@@ -118,7 +118,8 @@ test_unhooked_result_delivered_once() {
   rc=$?
   expect_code 0 "$rc" "sweep should succeed: $(cat "$dir/err")"
   [ "$(records "$dir" t1)" = 1 ] || fail "an unhooked result should land in its task inbox once, got $(records "$dir" t1)"
-  body=$(. "$ROOT/bin/fm-task-inbox-lib.sh"; fm_task_inbox_body "$dir/home/state/t1.inbox/001.msg")
+  # A child shell, so the sourced library's own variables never shadow this test's.
+  body=$(bash -c '. "$1" && fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$dir/home/state/t1.inbox/001.msg")
   assert_equals "$(expected_body r1 failed - 'suite: 2 failed')" "$body" "the sweep must send the farm's exact completion body"
   run_sweep "$dir"
   [ "$(records "$dir" t1)" = 1 ] || fail "a repeat sweep must not deliver the same result twice"
