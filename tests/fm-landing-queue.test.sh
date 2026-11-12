@@ -98,6 +98,98 @@ expect_field "$(join a --gate-receipt real-phone="$CASE/real-phone.gate" --gate-
 expect_field "$(quick_receipt a)" status ready-to-land
 pass 'configured phone and benchmark gates are required before joining'
 
+make_case docs-only-phone-exemption
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"documentation_path_globs":["**/*.md"]}
+EOF
+git -C "$CASE/project" worktree add -qb fm/docs "$CASE/docs-only" main
+mkdir -p "$CASE/docs-only/docs"
+printf 'guide\n' > "$CASE/docs-only/docs/guide.md"
+git -C "$CASE/docs-only" add .
+git -C "$CASE/docs-only" commit -qm docs
+full_receipt docs
+out=$(queue ready docs --branch fm/docs --head "$(head_of docs)" --target "$BASE" --receipt "$CASE/docs.full")
+expect_field "$out" status needs-quick
+expect_field "$out" gate_exemption 'real-phone: all changed paths match documentation_path_globs'
+queue_file=$(find "$CASE/home/data/landing-queue" -name queue -type f -print -quit)
+[ "$(tail -1 "$queue_file" | cut -f 12)" = 'real-phone: all changed paths match documentation_path_globs' ] \
+  || fail 'docs exemption was not persisted on the queue row'
+expect_field "$(quick_receipt docs)" status ready-to-land
+pass 'a docs-only car admits on its suite receipt and records the phone exemption'
+
+make_case docs-other-gate-required
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone","m31"],"documentation_path_globs":["**/*.md"]}
+EOF
+git -C "$CASE/project" worktree add -qb fm/guide "$CASE/guide" main
+printf 'guide\n' > "$CASE/guide/guide.md"
+git -C "$CASE/guide" add .
+git -C "$CASE/guide" commit -qm guide
+if join guide > "$CASE/refusal" 2>&1; then fail 'docs-only car skipped a non-phone gate'; fi
+grep -q 'requires pre-queue landing gate: m31' "$CASE/refusal" || fail 'docs-only car lacked benchmark refusal'
+pass 'docs-only exemption preserves other configured gates'
+
+make_case docs-front-full
+mkdir -p "$CASE/home/config/test-service" "$CASE/project/docs"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"documentation_path_globs":["**/*.md"]}
+EOF
+printf 'one\ntwo\nthree\n' > "$CASE/project/docs/guide.md"
+git -C "$CASE/project" add .
+git -C "$CASE/project" commit -qm guide-baseline
+BASE=$(tip)
+git -C "$CASE/project" worktree add -qb fm/frontdocs "$CASE/frontdocs" main
+sed -i 's/one/changed-one/' "$CASE/frontdocs/docs/guide.md"
+git -C "$CASE/frontdocs" commit -qam docs-edit
+join frontdocs >/dev/null
+sed -i 's/three/changed-three/' "$CASE/project/docs/guide.md"
+git -C "$CASE/project" commit -qam tip-docs-edit
+prepare frontdocs
+expect_field "$(queue status frontdocs)" status needs-full
+expect_field "$(full_front frontdocs)" status ready-to-land
+pass 'a docs-only full front rerun keeps its phone exemption'
+
+make_case mixed-phone-required
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"documentation_path_globs":["**/*.md"]}
+EOF
+git -C "$CASE/project" worktree add -qb fm/mixed "$CASE/docs" main
+printf 'guide\n' > "$CASE/docs/guide.md"
+printf 'code\n' > "$CASE/docs/code.txt"
+git -C "$CASE/docs" add .
+git -C "$CASE/docs" commit -qm mixed
+if join mixed > "$CASE/refusal" 2>&1; then fail 'mixed car skipped real-phone'; fi
+grep -q 'requires pre-queue landing gate: real-phone' "$CASE/refusal" || fail 'mixed car lacked phone refusal'
+pass 'one non-documentation path keeps the phone gate'
+
+for extension in gd tscn; do
+  make_case "docs-non-markdown-$extension"
+  mkdir -p "$CASE/home/config/test-service"
+  cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"documentation_path_globs":["**/*.md"]}
+EOF
+  git -C "$CASE/project" worktree add -qb fm/nonmarkdown "$CASE/docs" main
+  mkdir -p "$CASE/docs/docs"
+  printf 'scene\n' > "$CASE/docs/docs/scene.$extension"
+  git -C "$CASE/docs" add .
+  git -C "$CASE/docs" commit -qm nonmarkdown
+  if join nonmarkdown > "$CASE/refusal" 2>&1; then fail "docs/$extension skipped real-phone"; fi
+  grep -q 'requires pre-queue landing gate: real-phone' "$CASE/refusal" || fail "docs/$extension lacked phone refusal"
+done
+pass '.gd and .tscn files under docs retain the phone gate'
+
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"documentation_path_globs":["../unsafe/*.md"]}
+EOF
+if python3 "$ROOT/bin/fm-docs-gate.py" "$CASE/home/config/test-service" project "$CASE/project" "$BASE" "$(head_of nonmarkdown)" > "$CASE/bad-config.out" 2>&1; then
+  fail 'unsafe documentation glob was accepted'
+fi
+grep -q 'must list safe relative globs' "$CASE/bad-config.out" || fail 'bad glob rejection was unclear'
+pass 'an unsafe documentation glob is rejected'
+
 make_case concurrent-old-tip
 car a
 car b

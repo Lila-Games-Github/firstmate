@@ -49,6 +49,9 @@
   "landing_gates": [
     "real-phone"
   ],
+  "documentation_path_globs": [
+    "**/*.md"
+  ],
   "repos": [
     "frogpile",
     "FrogPile",
