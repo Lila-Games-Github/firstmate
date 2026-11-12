@@ -118,6 +118,19 @@ queue_file=$(find "$CASE/home/data/landing-queue" -name queue -type f -print -qu
 expect_field "$(quick_receipt docs)" status ready-to-land
 pass 'a docs-only car admits on its suite receipt and records the phone exemption'
 
+make_case docs-other-gate-required
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone","m31"],"documentation_path_globs":["**/*.md"]}
+EOF
+git -C "$CASE/project" worktree add -qb fm/guide "$CASE/guide" main
+printf 'guide\n' > "$CASE/guide/guide.md"
+git -C "$CASE/guide" add .
+git -C "$CASE/guide" commit -qm guide
+if join guide > "$CASE/refusal" 2>&1; then fail 'docs-only car skipped a non-phone gate'; fi
+grep -q 'requires pre-queue landing gate: m31' "$CASE/refusal" || fail 'docs-only car lacked benchmark refusal'
+pass 'docs-only exemption preserves other configured gates'
+
 make_case docs-front-full
 mkdir -p "$CASE/home/config/test-service" "$CASE/project/docs"
 cat > "$CASE/home/config/test-service/project.json" <<'EOF'
