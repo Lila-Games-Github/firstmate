@@ -591,7 +591,17 @@ test_green_final_head_names_service_receipt() {
   assert_grep "Final-head health: green" "$brief" "green brief lost its health marker"
   assert_grep "$home/data/green-receipt/suite.receipt" "$brief" "green brief omitted its task receipt path"
   assert_grep "fm-test-service.py submit some-proj" "$brief" "green brief omitted the configured pass-record producer"
-  assert_grep "--task 'green-receipt' --suite --device-gate any --receipt" "$brief" "green brief omitted service receipt arguments"
+  assert_grep "--task 'green-receipt' --suite --receipt" "$brief" "green brief omitted the suite-only receipt submission"
+  assert_grep "--task 'green-receipt' --device-gate any" "$brief" "green brief omitted the phone-gate submission"
+  assert_no_grep "--task 'green-receipt' --suite --device-gate any" "$brief" "green brief still submits suite and phone gate together"
+  python3 - "$brief" <<'PY' || fail "green brief does not order static checks, suite-only, then phone gate"
+import sys
+b = open(sys.argv[1]).read()
+i = b.index("static checks locally")
+j = b.index("--task 'green-receipt' --suite --receipt")
+k = b.index("--task 'green-receipt' --device-gate any")
+assert i < j < k
+PY
   assert_grep "FM_HOME='$home'" "$brief" "green brief omitted the explicit service home"
   assert_grep "the service sends your steering inbox" "$brief" "green brief omitted the completion delivery"
   assert_no_grep 'fm-test-service.py wait <request-id>' "$brief" "green brief still holds a service waiter"
