@@ -4,9 +4,10 @@ record which tasks are waiting on an open farm request.
 
 Usage: fm-farm-results.py sweep [--force]
 
-bin/fm-watch.sh runs `sweep` every poll; it does real work at most once per
-FM_FARM_RESULTS_SECS (default 30, valid 5..600) per home, tracked by the epoch
-in state/.last-farm-results-sweep, and --force skips that cadence. One sweep
+bin/fm-watch.sh runs `sweep` from its poll once the stamp below is due; the
+sweep does real work at most once per FM_FARM_RESULTS_SECS (default 30, valid
+5..600) per home, tracked by the epoch in state/.last-farm-results-sweep, and
+--force skips that cadence. One sweep
 reads `testfarm status --json --no-probe` once (FM_TESTFARM_BIN, default
 testfarm; bounded by FM_TESTFARM_TIMEOUT, default 10 seconds, valid 1..60), the
 same request store bin/fm-landing-queue.sh resolve reads, and only requests

@@ -282,6 +282,11 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # sweep (bin/fm-farm-results.py) lists those requests and owns the file's contract.
 FARM_OPEN_MAX_AGE=${FM_FARM_OPEN_MAX_AGE:-300}
 case "$FARM_OPEN_MAX_AGE" in ''|*[!0-9]*) FARM_OPEN_MAX_AGE=300 ;; esac
+# The sweep's own cadence (FM_FARM_RESULTS_SECS, 5..600, default 30) is checked
+# here too, so the poll starts no interpreter between due sweeps.
+FARM_RESULTS_SECS=${FM_FARM_RESULTS_SECS:-30}
+case "$FARM_RESULTS_SECS" in ''|*[!0-9]*) FARM_RESULTS_SECS=30 ;; esac
+{ [ "$FARM_RESULTS_SECS" -ge 5 ] && [ "$FARM_RESULTS_SECS" -le 600 ]; } || FARM_RESULTS_SECS=30
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -2327,22 +2332,24 @@ while :; do
   # and open requests are listed for the stale triage (bin/fm-farm-results.py).
   # Silent unless a result could not be delivered; a sweep that cannot run
   # wakes once per distinct error, never every poll.
-  farm_rc=0
-  farm_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    python3 "$SCRIPT_DIR/fm-farm-results.py" sweep 2>&1) || farm_rc=$?
-  if [ "$farm_rc" -ne 0 ]; then
-    farm_err=$(printf '%s\n' "$farm_out" | head -n 1)
-    [ -n "$farm_err" ] || farm_err="exit $farm_rc"
-    triage_log "farm-results sweep failed: $farm_err"
-    if [ "$(cat "$STATE/.last-farm-results-error" 2>/dev/null || true)" != "$farm_err" ]; then
-      printf '%s\n' "$farm_err" > "$STATE/.last-farm-results-error" 2>/dev/null || true
-      wake "check: farm-results sweep failed: $farm_err"
-    fi
-  else
-    rm -f "$STATE/.last-farm-results-error"
-    farm_out=$(printf '%s\n' "$farm_out" | grep '^farm-result ' | paste -sd ';' - || true)
-    if [ -n "$farm_out" ]; then
-      wake "check: farm-results: $farm_out"
+  if [ "$(age_of "$STATE/.last-farm-results-sweep")" -ge "$FARM_RESULTS_SECS" ]; then
+    farm_rc=0
+    farm_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      python3 "$SCRIPT_DIR/fm-farm-results.py" sweep 2>&1) || farm_rc=$?
+    if [ "$farm_rc" -ne 0 ]; then
+      farm_err=$(printf '%s\n' "$farm_out" | head -n 1)
+      [ -n "$farm_err" ] || farm_err="exit $farm_rc"
+      triage_log "farm-results sweep failed: $farm_err"
+      if [ "$(cat "$STATE/.last-farm-results-error" 2>/dev/null || true)" != "$farm_err" ]; then
+        printf '%s\n' "$farm_err" > "$STATE/.last-farm-results-error" 2>/dev/null || true
+        wake "check: farm-results sweep failed: $farm_err"
+      fi
+    else
+      rm -f "$STATE/.last-farm-results-error"
+      farm_out=$(printf '%s\n' "$farm_out" | grep '^farm-result ' | paste -sd ';' - || true)
+      if [ -n "$farm_out" ]; then
+        wake "check: farm-results: $farm_out"
+      fi
     fi
   fi
 
