@@ -24,10 +24,11 @@ WORKER_TIMING_TIMEOUT=${FM_STOCK_BASH_WORKER_TIMING_TIMEOUT:-30}
 TEARDOWN_FARM_TIMEOUT=${FM_STOCK_BASH_TEARDOWN_FARM_TIMEOUT:-90}
 DOORBELL_TIMEOUT=${FM_STOCK_BASH_DOORBELL_TIMEOUT:-90}
 LANE_SEND_TIMEOUT=${FM_STOCK_BASH_LANE_SEND_TIMEOUT:-90}
+FARM_RESULTS_TIMEOUT=${FM_STOCK_BASH_FARM_RESULTS_TIMEOUT:-90}
 selected=all
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != --consumer ]; then
-    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|worker-timing|teardown-farm|doorbell|lane-send]" >&2
+    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|worker-timing|teardown-farm|doorbell|lane-send|farm-results]" >&2
     exit 2
   fi
   selected=$2
@@ -54,6 +55,7 @@ validate_timeout FM_STOCK_BASH_WORKER_TIMING_TIMEOUT "$WORKER_TIMING_TIMEOUT"
 validate_timeout FM_STOCK_BASH_TEARDOWN_FARM_TIMEOUT "$TEARDOWN_FARM_TIMEOUT"
 validate_timeout FM_STOCK_BASH_DOORBELL_TIMEOUT "$DOORBELL_TIMEOUT"
 validate_timeout FM_STOCK_BASH_LANE_SEND_TIMEOUT "$LANE_SEND_TIMEOUT"
+validate_timeout FM_STOCK_BASH_FARM_RESULTS_TIMEOUT "$FARM_RESULTS_TIMEOUT"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
@@ -160,6 +162,9 @@ run_consumer doorbell "worker gate and job doorbells" "$DOORBELL_TIMEOUT" 5 \
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-worker-doorbell.test.sh"
 run_consumer lane-send "lane test-service completion delivery" "$LANE_SEND_TIMEOUT" 6 \
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-lane-send.test.sh"
+# The watcher poll calls fm-farm-results.py, which delivers through fm-send.sh.
+run_consumer farm-results "watcher farm-result delivery and submit label" "$FARM_RESULTS_TIMEOUT" 7 \
+  env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-farm-results.test.sh"
 [ "$ran_consumer" -eq 1 ] || {
   echo "::error::unknown stock Bash consumer: $selected" >&2
   exit 2

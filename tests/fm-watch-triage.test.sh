@@ -2247,6 +2247,74 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- an idle crew whose own test-farm request is open: quiet until it finishes -
+# A worker waits on a farm request by design, so neither the immediate
+# not-working surface nor a declared pause's long-cadence recheck may fire while
+# the farm-results sweep lists its request as open. A list older than its bound
+# proves nothing (known-bad), so that same idle pane surfaces as before.
+test_nonterminal_stale_open_farm_request_quiet() {
+  local dir state fakebin out capture_file window key pane_hash sig pid back statusf
+  dir=$(make_case nonterminal-stale-farm-open); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/farmwait.status"
+  window="test:fm-farmwait"
+  printf 'idle, waiting on the farm' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/farmwait.meta"
+  printf 'working: submitted the suite\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-farmwait_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, waiting on the farm")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf 'fm-farm-open.v1\nfarmwait r-open running\n' > "$state/.farm-open-requests"
+  # The sweep's own farm read fails, so it leaves this open-request list alone.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/fake-testfarm"
+  chmod +x "$fakebin/fake-testfarm"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_TESTFARM_BIN="$fakebin/fake-testfarm" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher surfaced an idle crew with an open farm request: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] && [ ! -s "$state/.wake-queue" ] || fail "an open farm request must keep an idle crew quiet"
+  grep -F "open test-farm request" "$state/.watch-triage.log" >/dev/null || fail "the quiet absorb should be logged"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional quiet-phase stop"
+
+  # A declared pause past its recheck cadence also stays quiet while the request is open.
+  printf 'paused: test-service request=r-open\n' > "$statusf"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-farmwait_status"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · test-service request=r-open'
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_TESTFARM_BIN="$fakebin/fake-testfarm" FM_PAUSE_RESURFACE_SECS=240
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher rechecked a declared farm wait while its request was open: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] && [ ! -s "$state/.wake-queue" ] || fail "a declared farm wait must not be rechecked while its request is open"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional paused-phase stop"
+
+  # Known-bad: the same list, too old to trust, no longer silences the pane.
+  printf 'working: submitted the suite\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-farmwait_status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  rm -f "$state/.stale-$key" "$state/.paused-$key" "$state/.paused-rechecked-$key"
+  back=$(( $(date +%s) - 1000 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/.farm-open-requests"
+  else touch -m -d "@$back" "$state/.farm-open-requests"; fi
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_TESTFARM_BIN="$fakebin/fake-testfarm" FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "an idle crew behind a stale open-request list was not surfaced"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "a stale open-request list must not silence the stale wake"
+  pass "an idle crew with an open farm request stays quiet, and a stale request list does not silence it"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -5721,6 +5789,7 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_nonterminal_stale_open_farm_request_quiet
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle

@@ -12,6 +12,8 @@ The testfarm contract owns project declarations, submission commands, request st
 The crew board reads testfarm's `status.json` through the existing `~/.local/state/firstmate-test-service` link; the `fm-test-service.v1` status schema remains supported.
 
 A worker submits its committed SHA with `--task`, then ends the turn until testfarm delivers the completion message to its steering inbox.
+The entry point refuses a submit without a task label, because firstmate finds every result by that label.
+`bin/fm-farm-results.py`, run from the watcher poll, delivers any finished result its task does not already hold, whatever delivery hook the request carried, without ever sending the same result twice, and lists open requests so an idle worker or Playbot lane waiting on one raises no stale or idle alarm until the request finishes; its header owns the contract.
 For a full-suite gate, use the receipt path printed in the task brief.
 
 ```sh

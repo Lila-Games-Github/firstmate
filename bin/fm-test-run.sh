@@ -294,7 +294,7 @@ family_for_basename() {
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|fm-stock-bash-compat.test.sh|\
-    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-playbot-lanes.test.sh|fm-lane-send.test.sh|\
+    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-playbot-lanes.test.sh|fm-lane-send.test.sh|fm-farm-results.test.sh|\
     fm-calm-claude-mod.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
@@ -732,6 +732,7 @@ tests/fm-daemon.test.sh 27262
 tests/fm-dispatch-resolve.test.sh 4397
 tests/fm-documentation-audiences.test.sh 847
 tests/fm-extension-binding.test.sh 9053
+tests/fm-farm-results.test.sh 9007
 tests/fm-fleet-snapshot-view.test.sh 17465
 tests/fm-fleet-sync.test.sh 35983
 tests/fm-gate-refuse.test.sh 5328
