@@ -4818,7 +4818,16 @@ check_is_registered fm-autoarm-turn || fail "the poll disarmed a worker that had
 # must fire once for the completion and retire.
 set_thread_turn "$turn_thread" working 2026-08-25T09:00:00.000Z || fail "could not start the completed-turn worker"
 set_thread_turn "$turn_thread" ready 2026-08-25T09:30:00.000Z || fail "could not finish the completed-turn worker"
+# Idle while its own test-farm request is open is the designed wait: the poll
+# stays quiet and armed until the request finishes. A list too old to trust
+# (known-bad) silences nothing, so the ordinary stop report follows below.
+printf 'fm-farm-open.v1\nfm-autoarm-turn r-open running\n' > "$FM_HOME_FIXTURE/state/.farm-open-requests"
 poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-turn.check.sh")
+[ -z "$poll_line" ] || fail "the poll fired for a lane waiting on its open farm request: $poll_line"
+check_is_registered fm-autoarm-turn || fail "the poll retired a lane waiting on its open farm request"
+touch -m -t 202001010000 "$FM_HOME_FIXTURE/state/.farm-open-requests"
+poll_line=$(bash "$FM_HOME_FIXTURE/state/fm-autoarm-turn.check.sh")
+rm -f "$FM_HOME_FIXTURE/state/.farm-open-requests"
 case "$poll_line" in
   *"playbot lane fm-autoarm-turn"*"stopped without a card"*"status ready"*"retired itself"*) ;;
   *) fail "a worker that ran and finished back on its starting status was not reported: $poll_line" ;;

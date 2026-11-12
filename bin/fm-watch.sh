@@ -113,6 +113,12 @@
 #   check: landing-queue sweep failed: <first output line>
 #                          the landing sweep itself could not run; surfaced once
 #                          per distinct error until a successful sweep clears it
+#   check: farm-results: farm-result undelivered task=<id> request=<id>: <why>
+#                          a finished test-farm result could not be sent to its
+#                          task (bin/fm-farm-results.py owns what it prints)
+#   check: farm-results sweep failed: <first output line>
+#                          the farm-results sweep itself could not run; surfaced
+#                          once per distinct error until a successful sweep
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
@@ -272,6 +278,10 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# A task waiting on an open test-farm request is idle by design; the farm-results
+# sweep (bin/fm-farm-results.py) lists those requests and owns the file's contract.
+FARM_OPEN_MAX_AGE=${FM_FARM_OPEN_MAX_AGE:-300}
+case "$FARM_OPEN_MAX_AGE" in ''|*[!0-9]*) FARM_OPEN_MAX_AGE=300 ;; esac
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -1162,6 +1172,16 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fi
       ;;
   esac
+}
+
+# farm_request_open: 0 iff the farm-results sweep's fresh open-request list names
+# <task>. A list older than FARM_OPEN_MAX_AGE proves nothing, so a farm or sweep
+# that stops answering returns the task to the ordinary stale alarms.
+farm_request_open() {  # <task>
+  local f="$STATE/.farm-open-requests"
+  [ -n "$1" ] && [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  [ "$(age_of "$f")" -le "$FARM_OPEN_MAX_AGE" ] || return 1
+  awk -v t="$1" 'NR > 1 && $1 == t { found = 1 } END { exit !found }' "$f" 2>/dev/null
 }
 
 # busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
@@ -2303,6 +2323,29 @@ while :; do
     fi
   fi
 
+  # Finished test-farm results reach their tasks whatever hook the request had,
+  # and open requests are listed for the stale triage (bin/fm-farm-results.py).
+  # Silent unless a result could not be delivered; a sweep that cannot run
+  # wakes once per distinct error, never every poll.
+  farm_rc=0
+  farm_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    python3 "$SCRIPT_DIR/fm-farm-results.py" sweep 2>&1) || farm_rc=$?
+  if [ "$farm_rc" -ne 0 ]; then
+    farm_err=$(printf '%s\n' "$farm_out" | head -n 1)
+    [ -n "$farm_err" ] || farm_err="exit $farm_rc"
+    triage_log "farm-results sweep failed: $farm_err"
+    if [ "$(cat "$STATE/.last-farm-results-error" 2>/dev/null || true)" != "$farm_err" ]; then
+      printf '%s\n' "$farm_err" > "$STATE/.last-farm-results-error" 2>/dev/null || true
+      wake "check: farm-results sweep failed: $farm_err"
+    fi
+  else
+    rm -f "$STATE/.last-farm-results-error"
+    farm_out=$(printf '%s\n' "$farm_out" | grep '^farm-result ' | paste -sd ';' - || true)
+    if [ -n "$farm_out" ]; then
+      wake "check: farm-results: $farm_out"
+    fi
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -2610,7 +2653,15 @@ EOF
       if [ "$n" -ge 2 ] && [ "$busy_now" -ne 0 ]; then
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
-        if [ "$kind" = secondmate ]; then
+        if [ "$kind" != secondmate ] && ! status_is_captain_relevant "$last" && farm_request_open "$task"; then
+          # Idle while its own test-farm request is open is the designed wait,
+          # in every mode: stay quiet, keep the stale bookkeeping as it is, and
+          # restart a running wedge timer so the ordinary triage resumes from a
+          # fresh window once the request finishes and its result is delivered.
+          # A captain-relevant status still takes the ordinary path below.
+          [ ! -e "$ssf" ] || date +%s > "$ssf"
+          triage_log "absorbed stale (open test-farm request, quiet until it finishes): $w"
+        elif [ "$kind" = secondmate ]; then
           case "$(pause_state_class "$w" "$task")" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;

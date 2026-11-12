@@ -6129,7 +6129,27 @@ function supervisionRolloutAcceptanceMs(row, messageKey, acceptanceMs) {
 // pending_input, which keeps firing every interval on purpose: a parked card is
 // resolved by the supervisor answering it, so that repeated wake is actionable
 // where a queue firstmate has already seen is not.
-function supervisionPollDecision(taskId, threadId, previous, row = threadRowById(threadId)) {
+// A lane idle while its own test-farm request is open is waiting by design, so
+// the poll stays quiet and never retires until that request finishes.
+// bin/fm-farm-results.py owns the open-request list; like the watcher's stale
+// triage, a list older than FM_FARM_OPEN_MAX_AGE seconds (default 300) proves
+// nothing, so a farm or sweep that stops answering returns the ordinary wakes.
+function supervisionFarmRequestOpen(state, taskId) {
+  const file = path.join(state, ".farm-open-requests");
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile()) return false;
+    const raw = process.env.FM_FARM_OPEN_MAX_AGE ?? "";
+    const maxAge = /^[0-9]+$/.test(raw) ? Number(raw) : 300;
+    const age = (Date.now() - stat.mtimeMs) / 1000;
+    if (age < -5 || age > maxAge) return false;
+    return fs.readFileSync(file, "utf8").split("\n").slice(1).some((line) => line.split(" ")[0] === taskId);
+  } catch {
+    return false;
+  }
+}
+
+function supervisionPollDecision(taskId, threadId, previous, row = threadRowById(threadId), farmRequestOpen = false) {
   const messages = row ? queuedMessages(row.pending_queue_json) : [];
   const queued = messages === null ? null : messages.length;
   const taskQueued = Array.isArray(messages)
@@ -6174,6 +6194,7 @@ function supervisionPollDecision(taskId, threadId, previous, row = threadRowById
       remember: true,
     };
   }
+  if (farmRequestOpen) return { ...observed, line: null, retire: false, remember: false };
   const changed = !supervisionSameObservation(previous, observed);
   if (!changed && !(delivered && row && afterAcceptance)) {
     return { ...observed, line: null, retire: false, remember: false };
@@ -6251,7 +6272,7 @@ async function supervisionPoll(argv) {
       }
       if ((previous.generation ?? null) !== generation) return { line: null };
       try {
-        const decision = supervisionPollDecision(task, thread, previous);
+        const decision = supervisionPollDecision(task, thread, previous, undefined, supervisionFarmRequestOpen(state, task));
         let line = decision.line;
         if (decision.retire) {
           const retirement = supervisionRetire(state, task);
