@@ -13,7 +13,8 @@
 #
 # ready joins at the back, or behind the front with --priority infra or unblock,
 # only with --branch, --head, --target, a green exact-head full-suite --receipt,
-# and one --gate-receipt for each configured landing gate.
+# and one --gate-receipt for each configured landing gate, except real-phone
+# when every changed path matches documentation_path_globs in project config.
 # The tested target must be an ancestor of the current landing tip and head.
 # Each gate receipt is four lines: schema=fm-landing-gate.v1, gate=<name>,
 # sha=<full head SHA>, target=<full target SHA>. A failed car must pass these
@@ -131,8 +132,9 @@
 # identified by the canonical common Git directory and landing branch. Rows in
 # append order hold id, branch, head, state, acknowledged base, receipt file,
 # receipt target, last notified event hash, failure reason (failed rows only),
-# owner task id, and admission priority ('-', infra, or unblock). Nine-field legacy rows
-# resolve their owner on refresh; ten-field legacy rows default priority to '-'.
+# owner task id, admission priority ('-', infra, or unblock), and docs-only
+# phone-gate exemption reason. Nine-field legacy rows resolve their owner on
+# refresh; ten-field legacy rows default priority to '-'.
 # '-' means absent. Row order is queue order: assignment walks rows top to
 # bottom and gives each active row the next place, so an admitted infra car's
 # row sits after the front row and its contiguous infra run. Immutable
@@ -209,6 +211,25 @@ GATES=()
 if [ -n "$GATES_OUTPUT" ]; then
   while IFS= read -r gate_name; do GATES[${#GATES[@]}]=$gate_name; done <<< "$GATES_OUTPUT"
 fi
+DOCS_CONFIG_ROOT=${FM_TEST_SERVICE_CONFIG_ROOT:-$FM_HOME/config/test-service}
+phone_gate_configured=0
+for gate_name in ${GATES[@]+"${GATES[@]}"}; do
+  [ "$gate_name" != real-phone ] || phone_gate_configured=1
+done
+docs_only_exempt() { # <head> <target>; fail closed on invalid configuration
+  local outcome=0
+  [ "$phone_gate_configured" -eq 1 ] || return 1
+  python3 "$SCRIPT_DIR/fm-docs-gate.py" "$DOCS_CONFIG_ROOT" "$REPO_NAME" "$PROJECT" "$2" "$1" || outcome=$?
+  [ "$outcome" -ne 2 ] || die 'invalid documentation path glob configuration or Git diff'
+  [ "$outcome" -eq 0 ]
+}
+exemption_reason() { # <head> <target>
+  if docs_only_exempt "$1" "$2"; then
+    printf '%s' 'real-phone: all changed paths match documentation_path_globs'
+  else
+    printf '%s' -
+  fi
+}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 if [ -z "$LANDING" ] && [ -f "$STATE/$ID.meta" ]; then
@@ -441,10 +462,11 @@ if [ -e "$FILE" ]; then
     IFS= read -r schema && [ "$schema" = fm-landing-queue.v1 ] || die 'invalid queue schema'
     IFS= read -r repository && [ "$repository" = "$COMMON" ] || die 'queue repository mismatch'
     IFS= read -r landing && [ "$landing" = "$LANDING" ] || die 'queue landing branch mismatch'
-    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason row_owner row_priority extra; do
+    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason row_owner row_priority row_exemption extra; do
       [[ "$row_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue task id'
       valid_branch "$row_branch" || die 'invalid queue branch'
       [ -n "$row_notified" ] && [ -n "$row_reason" ] && [ -z "$extra" ] || die 'incomplete queue row'
+      case "${row_exemption:--}" in -|'real-phone: all changed paths match documentation_path_globs') ;; *) die 'invalid gate exemption' ;; esac
       row_owner=${row_owner:--}
       [ "$row_owner" = - ] || [[ "$row_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue owner task id'
       row_priority=${row_priority:--}
@@ -499,15 +521,23 @@ for ((i=0; i<count; i++)); do
 done
 
 save() {
-  local i reason
+  local i reason exemption tested_target
   TMP=$(mktemp "$DIR/.queue.XXXXXX")
   {
     printf 'fm-landing-queue.v1\n%s\n%s\n' "$COMMON" "$LANDING"
     for ((i=0; i<count; i++)); do
       reason=-
       [ "${states[i]}" != failed ] || reason=${reasons[i]}
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
-        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason" "${owners[i]}" "${priorities[i]}"
+      exemption=-
+      if [ "${states[i]}" = active ]; then
+        tested_target=$(pre_target "${ids[i]}" || true)
+        if [ "${places[i]:-0}" -eq 1 ] && git -C "$PROJECT" merge-base --is-ancestor "${target_shas[i]}" "${heads[i]}"; then
+          tested_target=${target_shas[i]}
+        fi
+        [ -z "$tested_target" ] || exemption=$(exemption_reason "${heads[i]}" "$tested_target")
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
+        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason" "${owners[i]}" "${priorities[i]}" "$exemption"
     done
   } > "$TMP"
   mv -f -- "$TMP" "$FILE"
@@ -551,6 +581,7 @@ if [ "$ACTION" = ready ]; then
     fm_health_receipt_read "$RECEIPT" "$HEAD" || die 'ready requires a valid exact-head full-suite receipt'
     [ "$FM_HEALTH_COUNT" -eq 0 ] || die 'ready requires a green full-suite receipt'
     for gate_name in ${GATES[@]+"${GATES[@]}"}; do
+      if [ "$gate_name" = real-phone ] && docs_only_exempt "$HEAD" "$TARGET"; then continue; fi
       gate_pass=0
       for entry in ${GATE_RECEIPTS[@]+"${GATE_RECEIPTS[@]}"}; do
         [ "${entry%%=*}" = "$gate_name" ] || continue
@@ -563,6 +594,8 @@ if [ "$ACTION" = ready ]; then
       known=0
       for gate_name in ${GATES[@]+"${GATES[@]}"}; do [ "${entry%%=*}" != "$gate_name" ] || known=1; done
       [ "$known" -eq 1 ] || die "unconfigured pre-queue gate: ${entry%%=*}"
+      gate_receipt_read "${entry#*=}" "${entry%%=*}" "$HEAD" "$TARGET" \
+        || die "invalid pre-queue gate receipt: ${entry%%=*}"
     done
     TMP=$(mktemp "$DIR/.pre.XXXXXX")
     printf '%s\n' "$TARGET" > "$TMP"
@@ -892,6 +925,7 @@ for ((i=0; i<count; i++)); do
   [ "${statuses[i]}" = ready-to-land ] || continue
   overlap_requires_full "${ids[i]}" "${heads[i]}" "${target_shas[i]}" || continue
   for gate_name in ${GATES[@]+"${GATES[@]}"}; do
+    if [ "$gate_name" = real-phone ] && docs_only_exempt "${heads[i]}" "${target_shas[i]}"; then continue; fi
     if ! gate_receipt_read "$(gate_receipt_path "${ids[i]}" "$gate_name" "${heads[i]}" "${target_shas[i]}")" \
       "$gate_name" "${heads[i]}" "${target_shas[i]}"; then
       statuses[i]=needs-gate
@@ -1093,4 +1127,14 @@ printf 'queue=%s\ntask=%s\nbranch=%s\nhead=%s\nlanding_branch=%s\ntip=%s\nplace=
 if [ "${receipts[found]}" = - ]; then printf 'receipt=-\n'; else printf 'receipt=%s/%s\n' "$DIR" "${receipts[found]}"; fi
 printf 'reason=%s\n' "${reasons[found]}"
 printf 'priority=%s\n' "${priorities[found]}"
+tested_target=$(pre_target "${ids[found]}" || true)
+if [ "${states[found]}" = active ] && [ "${places[found]}" -eq 1 ] \
+  && git -C "$PROJECT" merge-base --is-ancestor "${target_shas[found]}" "${heads[found]}"; then
+  tested_target=${target_shas[found]}
+fi
+if [ -n "$tested_target" ]; then
+  printf 'gate_exemption=%s\n' "$(exemption_reason "${heads[found]}" "$tested_target")"
+else
+  printf 'gate_exemption=-\n'
+fi
 printf 'front_request=%s\n' "$(farm_last "${ids[found]}")"
