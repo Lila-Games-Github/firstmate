@@ -41,7 +41,7 @@ case "${0##*/}" in
   fm-public-followup.test.sh) key=public-followup; count=1 ;;
   fm-watch-triage.test.sh) key=watch-churn; count=1 ;;
   fm-learning-candidate.test.sh) key=learning; count=1 ;;
-  fm-landing-queue.test.sh) key=landing; count=8 ;;
+  fm-landing-queue.test.sh) key=landing; count=12 ;;
   fm-worker-timing.test.sh) key=worker-timing; count=6 ;;
   fm-teardown.test.sh) key=teardown-farm; count=5 ;;
   fm-merge-local.test.sh) key=merge; count=18 ;;
@@ -176,7 +176,7 @@ oversized|Bearings oversized parsed-backlog route
 public-followup|public-followup empty-lock register
 watch-churn|watcher churn deferral
 learning|PR 18 learning-candidate NUL enumeration
-landing|landing-queue test farm resolve and watcher sweep
+landing|landing-queue test farm resolve, watcher sweep, and front step-back
 worker-timing|worker timing status and teardown record
 teardown-farm|teardown testfarm request ownership
 merge|PR 19 local-merge branch resolution

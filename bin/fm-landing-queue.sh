@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Worker-owned local landing train. Never merges, rebases, pushes, or runs tests.
-# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|move|reconcile|resolve> <task-id>
+# Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|move|step-back|reconcile|resolve> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--gate-receipt <name>=<file>]...
 #          [--gate <name>] [--reason <text>] [--owner-task <task-id>]
-#          [--place <number>] [--priority infra]
+#          [--place <number>] [--priority infra|unblock]
 # FM_HOME must explicitly select the owning home; FM_STATE_OVERRIDE and
 # FM_DATA_OVERRIDE optionally select its state and data directories.
 # Without --landing-branch, use this task's recorded landing_branch, else the
 # repository's origin/HEAD, main, or master. All branches must be local refs.
 #
-# ready joins at the back, or directly behind the front with --priority infra,
+# ready joins at the back, or behind the front with --priority infra or unblock,
 # only with --branch, --head, --target, a green exact-head full-suite --receipt,
 # and one --gate-receipt for each configured landing gate.
 # The tested target must be an ancestor of the current landing tip and head.
@@ -25,8 +25,12 @@
 # directly follows it, ahead of every waiting non-infra car; an infra car left
 # behind product work by a requeue or move is not counted, and the front car is
 # never displaced.
-# The priority is recorded durably on the row, shown by status as priority=-
-# or priority=infra, and kept across a fail/ready re-enrollment unless that
+# --priority unblock is for a car other cars are waiting on, such as the fix for
+# a check that fails everywhere. It admits directly behind the front car and any
+# unblock cars already directly behind it, so ahead of infra and ordinary cars;
+# an infra car's run behind the front counts unblock cars as well as infra cars.
+# The priority is recorded durably on the row, shown by status as priority=-,
+# priority=infra, or priority=unblock, and kept across a fail/ready re-enrollment unless that
 # later ready repeats --priority with a different value.
 # A head already contained in the landing tip has nothing to land and is refused.
 # After rebasing, repeat ready with --target from status to acknowledge the new
@@ -34,7 +38,7 @@
 # status reconciles the whole queue and prints this car as key=value lines:
 # place (bottom=1), target_ref, target_sha, rebase_from, head, status, receipt,
 # reason (a failed car's recorded reason or this invocation's red-receipt
-# reason, else '-'), priority ('-' or infra), and front_request (the last test
+# reason, else '-'), priority ('-', infra, or unblock), and front_request (the last test
 # farm request resolve applied to this car, as <request>:<passed|failed>, else
 # '-').
 # Use git rebase --onto <target_sha> <rebase_from> when the front base changes,
@@ -105,6 +109,19 @@
 # and moving the current front car are refused so its running check is untouched.
 # A car whose admitted evidence is missing or whose head changed is refused.
 # Only cars whose status changes receive the existing parked-car steer.
+# step-back is for firstmate only. It sends the active front car to place 2,
+# behind the next active car, without a failed mark, for a front car whose
+# check is held up by something that is not its own fault. A car not at the
+# front, or a front car with no other active car waiting, is refused. The car
+# keeps its branch, owner, priority, admission evidence, full-rerun requirement,
+# gate receipts, and test farm ledger; only its front-check receipt is cleared,
+# so it redoes its front check when it returns to the front, even against an
+# unchanged target. A stepback-<id> marker beside the queue snapshot records
+# the step-back: farm ledger outcomes and quick requests from before it never
+# settle the returning car's check. Its owner receives one durable steer
+# naming the step-back and the optional --reason (a stepped-<id> marker retries
+# a failed send on the next invocation); the new front car gets the existing
+# parked-car steer. A later fail and fresh ready clears the marker.
 # baseline requires --receipt for exactly the live landing tip and records it as
 # that tip's landing-health baseline, under the same lock as fm-merge-local.sh,
 # without moving any ref. It refuses a set conflicting with one already recorded.
@@ -114,7 +131,7 @@
 # identified by the canonical common Git directory and landing branch. Rows in
 # append order hold id, branch, head, state, acknowledged base, receipt file,
 # receipt target, last notified event hash, failure reason (failed rows only),
-# owner task id, and admission priority ('-' or infra). Nine-field legacy rows
+# owner task id, and admission priority ('-', infra, or unblock). Nine-field legacy rows
 # resolve their owner on refresh; ten-field legacy rows default priority to '-'.
 # '-' means absent. Row order is queue order: assignment walks rows top to
 # bottom and gives each active row the next place, so an admitted infra car's
@@ -149,7 +166,7 @@ die() { echo "error: $*" >&2; exit 1; }
 [ "$#" -ge 2 ] || { usage >&2; exit 2; }
 ACTION=$1 ID=$2
 shift 2
-case "$ACTION" in ready|status|receipt|gate|fail|baseline|move|reconcile|resolve) ;; *) die "unknown queue command $ACTION" ;; esac
+case "$ACTION" in ready|status|receipt|gate|fail|baseline|move|step-back|reconcile|resolve) ;; *) die "unknown queue command $ACTION" ;; esac
 [[ "$ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid task id'
 [ -n "${FM_HOME:-}" ] || die 'FM_HOME must explicitly select the owning home'
 PROJECT='' LANDING='' BRANCH='' HEAD='' TARGET='' RECEIPT='' REASON='' GATE='' OWNER_TASK='' PLACE='' PRIORITY=''
@@ -175,7 +192,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$PROJECT" ] || die '--project is required'
 [ -z "$OWNER_TASK" ] || [[ "$OWNER_TASK" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid owner task id'
-[ -z "$PRIORITY" ] || [ "$PRIORITY" = infra ] || die 'invalid --priority value'
+case "$PRIORITY" in ''|infra|unblock) ;; *) die 'invalid --priority value' ;; esac
 [ -z "$PRIORITY" ] || [ "$ACTION" = ready ] || die '--priority is only valid for ready'
 valid_reason() { [ -n "$1" ] && [ "$1" != - ] && ! [[ "$1" =~ [[:cntrl:]] ]]; }
 [ -z "$REASON" ] || valid_reason "$REASON" || die '--reason must be one line without control characters'
@@ -271,12 +288,23 @@ overlap_requires_full() { # <id> <head> <target>
 # The farm ledger farm-<id> holds one applied request per line:
 # <request>\t<head>\t<target>\t<passed|failed>.
 farm_ledger() { printf '%s/farm-%s' "$DIR" "$1"; }
+# A step-back marker stepback-<id> holds two lines: the farm ledger's line count
+# and the epoch second at the step-back. Older ledger lines and older requests
+# never settle the car's later front check.
+stepback_field() { # <id> <line>; prints that marker line, else 0
+  local path="$DIR/stepback-$1" value
+  [ ! -L "$path" ] || die "step-back marker is a symlink: $path"
+  value=$( { [ -f "$path" ] && sed -n "$2p" "$path"; } || true)
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s' "$value"
+}
 farm_recorded() { # <id> <head> <target>; prints the applied outcome
-  local ledger outcome
+  local ledger outcome skip
   ledger=$(farm_ledger "$1")
   [ ! -L "$ledger" ] || die "test farm ledger is a symlink: $ledger"
   [ -f "$ledger" ] || return 1
-  outcome=$(awk -F '\t' -v head="$2" -v target="$3" '$2 == head && $3 == target { last = $4 } END { print last }' "$ledger")
+  skip=$(stepback_field "$1" 1)
+  outcome=$(awk -F '\t' -v head="$2" -v target="$3" -v skip="$skip" 'NR > skip && $2 == head && $3 == target { last = $4 } END { print last }' "$ledger")
   [ -n "$outcome" ] || return 1
   printf '%s' "$outcome"
 }
@@ -302,7 +330,7 @@ farm_record() { # <id> <request> <head> <target> <outcome>
 # shellcheck disable=SC2016 # Python source, not shell expansions.
 FARM_SELECT='
 import json, os, re, sys
-path, head, target, admission, ledger = sys.argv[1:6]
+path, head, target, admission, ledger, stepped = sys.argv[1:7]
 with open(path) as handle:
     data = json.load(handle)
 requests = data.get("requests") if isinstance(data, dict) else None
@@ -320,6 +348,7 @@ try:
             consumed.add(line.split("\t", 1)[0])
 except OSError:
     pass
+stepped = int(stepped)
 best = None
 for row in requests:
     if not isinstance(row, dict):
@@ -334,7 +363,7 @@ for row in requests:
         continue
     submitted = row.get("submitted")
     submitted = float(submitted) if isinstance(submitted, (int, float)) else 0.0
-    if submitted < since:
+    if submitted < since or (stepped and submitted <= stepped):
         continue
     seq = row.get("seq") if isinstance(row.get("seq"), int) else 0
     if best is None or (submitted, seq) > best[0]:
@@ -355,7 +384,7 @@ else:
 '
 FARM_RESULT='' FARM_REQUEST='' FARM_DETAIL='' FARM_ERROR=''
 farm_query() { # <id> <head> <target>; returns 1 when the farm cannot be read
-  local rc=0 line
+  local rc=0 line stepped_at
   FARM_RESULT='' FARM_REQUEST='' FARM_DETAIL='' FARM_ERROR=''
   # Only this read uses the bound, so a bad value never blocks other actions.
   case "$FARM_TIMEOUT" in ''|*[!0-9]*) FARM_TIMEOUT=0 ;; esac
@@ -367,13 +396,14 @@ farm_query() { # <id> <head> <target>; returns 1 when the farm cannot be read
     FARM_ERROR="testfarm command not found: $FARM_BIN"
     return 1
   fi
+  stepped_at=$(stepback_field "$1" 2)
   FARM_TMP=$(mktemp "$DIR/.farm-status.XXXXXX")
   fm_run_timed "$FARM_TIMEOUT" "$FARM_BIN" status --json --no-probe > "$FARM_TMP" 2>/dev/null </dev/null || rc=$?
   if [ "$rc" -eq 124 ]; then
     FARM_ERROR="testfarm status timed out after ${FARM_TIMEOUT}s"
   elif [ "$rc" -ne 0 ]; then
     FARM_ERROR="testfarm status exited $rc"
-  elif ! line=$(python3 -I -c "$FARM_SELECT" "$FARM_TMP" "$2" "$3" "$DIR/pre-head-$1" "$(farm_ledger "$1")" 2>/dev/null); then
+  elif ! line=$(python3 -I -c "$FARM_SELECT" "$FARM_TMP" "$2" "$3" "$DIR/pre-head-$1" "$(farm_ledger "$1")" "$stepped_at" 2>/dev/null); then
     FARM_ERROR='testfarm status did not return a request list'
   fi
   rm -f -- "$FARM_TMP"
@@ -418,7 +448,7 @@ if [ -e "$FILE" ]; then
       row_owner=${row_owner:--}
       [ "$row_owner" = - ] || [[ "$row_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue owner task id'
       row_priority=${row_priority:--}
-      case "$row_priority" in -|infra) ;; *) die 'invalid queue priority' ;; esac
+      case "$row_priority" in -|infra|unblock) ;; *) die 'invalid queue priority' ;; esac
       [[ "$row_head" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
         && [[ "$row_base" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die 'invalid queue commit'
       case "$row_receipt" in
@@ -542,7 +572,7 @@ if [ "$ACTION" = ready ]; then
     printf '%s\n' "$HEAD" > "$TMP"
     mv -f -- "$TMP" "$DIR/pre-head-$ID"
     TMP=
-    rm -f -- "$DIR/full-$ID" "$(farm_ledger "$ID")"
+    rm -f -- "$DIR/full-$ID" "$(farm_ledger "$ID")" "$DIR/stepback-$ID"
   fi
   if [ "$found" -lt 0 ]; then
     for ((i=0; i<count; i++)); do
@@ -661,21 +691,25 @@ shift_car_to_place() { # <target place>
 }
 assign
 if [ "$joined" -eq 1 ]; then
-  if [ "${priorities[found]}" = infra ] && [ "${places[found]}" -gt 1 ]; then
-    infra_ahead=0
+  # A priority car admits behind the front and the unbroken run of cars it may
+  # not pass: unblock cars for an unblock car, unblock or infra cars for infra.
+  if [ "${priorities[found]}" != - ] && [ "${places[found]}" -gt 1 ]; then
+    run_ahead=0
     while :; do
       run_match=0
       for ((i=0; i<count; i++)); do
         [ "$i" != "$found" ] || continue
         [ "${states[i]}" = active ] || continue
-        [ "${places[i]}" -eq "$((infra_ahead + 2))" ] || continue
-        [ "${priorities[i]}" = infra ] && run_match=1
+        [ "${places[i]}" -eq "$((run_ahead + 2))" ] || continue
+        case "${priorities[found]}:${priorities[i]}" in
+          unblock:unblock|infra:unblock|infra:infra) run_match=1 ;;
+        esac
         break
       done
       [ "$run_match" -eq 1 ] || break
-      infra_ahead=$((infra_ahead + 1))
+      run_ahead=$((run_ahead + 1))
     done
-    shift_car_to_place "$((infra_ahead + 2))"
+    shift_car_to_place "$((run_ahead + 2))"
   fi
   bases[found]=$(git -C "$PROJECT" merge-base "$HEAD" "${target_shas[found]}") || die 'task and target have no common base'
 fi
@@ -710,7 +744,7 @@ submit_front_result() {
     receipts[found]="$digest.receipt" targets[found]=$TARGET
   fi
 }
-farm_unreachable=0 farm_failed=0 farm_line=''
+farm_unreachable=0 farm_failed=0 farm_line='' stepped_back=0
 case "$ACTION" in
   ready)
     if [ "$joined" -eq 0 ] && [ -n "$TARGET" ]; then
@@ -804,6 +838,18 @@ case "$ACTION" in
       || die 'car no longer contains its admitted target'
     shift_car_to_place "$PLACE"
     ;;
+  step-back)
+    [ "${states[found]}" = active ] || die 'only an active car can step back'
+    [ "${places[found]}" -eq 1 ] || die 'only the front car can step back; use move for a waiting car'
+    behind=0
+    for ((i=0; i<count; i++)); do
+      [ "$i" -eq "$found" ] || [ "${states[i]}" != active ] || behind=1
+    done
+    [ "$behind" -eq 1 ] || die 'no other car is waiting, so the front car has nothing to step behind'
+    receipts[found]=- targets[found]=-
+    shift_car_to_place 2
+    stepped_back=1
+    ;;
   baseline)
     [ -n "$RECEIPT" ] || die 'baseline requires --receipt'
     fm_lock_acquire_wait "$HEALTH_LOCK"
@@ -886,6 +932,20 @@ fi
 # do not ring again for an unchanged readiness/failure event.
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=1
+if [ "$stepped_back" -eq 1 ]; then
+  for marker in "$DIR/stepback-$ID" "$DIR/stepped-$ID"; do
+    [ ! -L "$marker" ] || die "step-back marker is a symlink: $marker"
+  done
+  ledger_lines=0
+  [ ! -f "$(farm_ledger "$ID")" ] || ledger_lines=$(wc -l < "$(farm_ledger "$ID")" | tr -d ' ')
+  TMP=$(mktemp "$DIR/.stepback.XXXXXX")
+  printf '%s\n%s\n' "$ledger_lines" "$(date +%s)" > "$TMP"
+  mv -f -- "$TMP" "$DIR/stepback-$ID"
+  TMP=$(mktemp "$DIR/.stepped.XXXXXX")
+  printf '%s\n' "${REASON:--}" > "$TMP"
+  mv -f -- "$TMP" "$DIR/stepped-$ID"
+  TMP=
+fi
 if [ "$waiting" -eq 1 ]; then
   marker="$DIR/requeue-$moved_id"
   [ ! -L "$marker" ] || die "requeue marker is a symlink: $marker"
@@ -950,6 +1010,22 @@ for ((i=0; i<count; i++)); do
   if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${owners[i]}" \
     "Landing queue: task=${ids[i]} moved to back because $requeue_message_reason. Fix your branch while waiting; run landing_queue status when you reach front, then rebase and retest." 2>&1 >/dev/null); then
     printf 'warning: could not steer %s after requeue; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
+    continue
+  fi
+  rm -f -- "$marker"
+done
+
+for ((i=0; i<count; i++)); do
+  marker="$DIR/stepped-${ids[i]}"
+  [ ! -L "$marker" ] || die "step-back marker is a symlink: $marker"
+  [ -f "$marker" ] || continue
+  [ -f "$STATE/${owners[i]}.meta" ] || continue
+  stepped_reason=$(cat -- "$marker")
+  stepped_because=''
+  [ "$stepped_reason" = - ] || stepped_because=" because $stepped_reason"
+  if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${owners[i]}" \
+    "Landing queue: task=${ids[i]} stepped back from the front to place 2$stepped_because. It is not failed and keeps its admission evidence; it must redo its front check when it returns to the front. Run landing_queue status and continue from that status." 2>&1 >/dev/null); then
+    printf 'warning: could not steer %s after its step-back; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
     continue
   fi
   rm -f -- "$marker"

@@ -145,7 +145,7 @@ if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
   fi
   merge_assertions=15
 else
-  run_consumer landing "landing-queue test farm resolve and watcher sweep" "$LANDING_TIMEOUT" 8 \
+  run_consumer landing "landing-queue test farm resolve, watcher sweep, and front step-back" "$LANDING_TIMEOUT" 12 \
     env FM_LANDING_QUEUE_TEST_ONLY=farm \
     "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
 fi

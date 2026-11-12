@@ -361,6 +361,18 @@ expect_field "$(queue status b)" place 3
 expect_field "$(queue status c)" place 4
 pass 'an infra car admits ahead of waiting non-infra cars even when another infra car sits behind one'
 
+make_case unblock-priority
+for id in a b; do car "$id"; join "$id" >/dev/null; done
+car i; expect_field "$(join i --priority infra)" place 2
+car u; expect_field "$(join u --priority unblock)" place 2
+expect_field "$(queue status u)" priority unblock
+car v; expect_field "$(join v --priority unblock)" place 3
+car j; expect_field "$(join j --priority infra)" place 5
+expect_field "$(queue status a)" place 1
+expect_field "$(queue status i)" place 4
+expect_field "$(queue status b)" place 6
+pass 'an unblock car admits directly behind the front, FIFO among unblock cars, and infra cars queue behind unblock cars'
+
 make_case infra-priority-validation
 car a
 if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" --priority bogus > "$CASE/refusal" 2>&1; then
@@ -596,3 +608,90 @@ grep -q '^check: landing-queue sweep: front-check passed task=a request=r-recove
   || fail "the watcher did not resume settling after the sweep recovered: $(cat "$CASE/watch-3.out")"
 [ ! -e "$CASE/home/state/.last-landing-sweep-error" ] || fail 'a successful sweep did not clear the recorded failure'
 pass 'a sweep that cannot run wakes firstmate once per distinct error and recovers on its own'
+
+# --- firstmate steps the front car back without failing it --------------------
+evidence_digest() { # <car>: every admission and history record the car keeps
+  local dir
+  dir=$(dirname "$(find "$CASE/home/data/landing-queue" -name queue -type f -print -quit)")
+  for name in pre-$1 pre-head-$1 full-$1 farm-$1; do
+    printf '%s:' "$name"
+    if [ -f "$dir/$name" ]; then cat -- "$dir/$name"; else printf 'absent\n'; fi
+  done
+}
+farm_case stepback
+car a; join a --priority infra >/dev/null
+car b; join b >/dev/null
+worker_meta a; worker_meta b
+farm_json "$(farm_request r-a a passed)"
+case "$(queue resolve sweep)" in "front-check passed task=a request=r-a "*) ;; *) fail 'the front check did not pass before the step-back' ;; esac
+expect_field "$(queue status a)" status ready-to-land
+evidence_before=$(evidence_digest a)
+wakes_before=$(wake_count)
+out=$(queue step-back a --reason 'the stall fix must land first')
+expect_field "$out" place 2
+expect_field "$out" status waiting-for-front
+expect_field "$out" receipt -
+expect_field "$out" reason -
+expect_field "$out" priority infra
+expect_field "$out" front_request r-a:passed
+expect_field "$(queue status b)" place 1
+expect_field "$(queue status b)" status needs-quick
+[ "$(evidence_digest a)" = "$evidence_before" ] || fail 'step-back changed the admission evidence or farm history'
+[ "$(wake_count)" = "$wakes_before" ] || fail 'step-back woke firstmate as if the car had failed'
+[ "$(inbox_count a)" = 1 ] || fail 'the stepped-back owner did not receive exactly one message'
+grep -q 'task=a stepped back from the front to place 2 because the stall fix must land first. It is not failed' \
+  "$CASE/home/state/a.inbox/"*.msg || fail 'the step-back message did not name the step-back and its reason'
+[ "$(inbox_count b)" = 1 ] || fail 'the new front car did not receive its parked-car message'
+queue status a >/dev/null; queue status b >/dev/null
+[ "$(inbox_count a)" = 1 ] || fail 'a later invocation messaged the stepped-back car again'
+pass 'step-back sends the front car to place 2 with its evidence and history intact, unfailed, and messages its owner once'
+
+if queue step-back a > "$CASE/refusal" 2>&1; then fail 'step-back accepted a car that is not at the front'; fi
+grep -q 'only the front car can step back' "$CASE/refusal" || fail 'non-front refusal was unclear'
+if queue step-back missing > "$CASE/refusal" 2>&1; then fail 'step-back accepted an unknown car'; fi
+[ "$(queue status a | field place)" = 2 ] || fail 'a refused step-back moved a car'
+make_case stepback-alone
+car a; join a >/dev/null
+if queue step-back a > "$CASE/refusal" 2>&1; then fail 'step-back accepted a front car with nobody waiting'; fi
+grep -q 'no other car is waiting' "$CASE/refusal" || fail 'lone-car refusal was unclear'
+expect_field "$(queue status a)" status needs-quick
+car b; join b >/dev/null
+queue fail a --reason 'leaving' >/dev/null
+if queue step-back a > "$CASE/refusal" 2>&1; then fail 'step-back accepted a failed car'; fi
+pass 'step-back refuses a waiting car, an unknown car, a lone front car, and a failed car'
+
+# Back at the front against the same target, the car must check again: neither
+# its old receipt, its applied farm pass, nor a request made before it stepped
+# back settles it.
+farm_case stepback-recheck
+car a; join a >/dev/null
+car b; join b >/dev/null
+worker_meta a
+farm_json "$(farm_request r-a a passed)"
+queue resolve sweep >/dev/null
+expect_field "$(queue status a)" status ready-to-land
+late_at=$(date +%s)
+farm_json "$(farm_request r-a a passed)" "$(farm_request r-late a running '' "$late_at")"
+queue step-back a >/dev/null
+expect_field "$(queue fail b --reason 'its own fix needed')" status failed
+expect_field "$(queue status a)" place 1
+expect_field "$(queue status a)" status needs-quick
+farm_json "$(farm_request r-a a passed)" "$(farm_request r-late a passed '' "$late_at")"
+[ -z "$(queue resolve sweep)" ] || fail 'a request from before the step-back settled the returning car'
+expect_field "$(queue status a)" status needs-quick
+expect_field "$(quick_receipt a)" status ready-to-land
+pass 'a stepped-back car returning against the same target redoes its quick check'
+
+farm_case stepback-farm-recheck
+car a; join a >/dev/null
+car b; join b >/dev/null
+queue step-back a >/dev/null
+expect_field "$(quick_receipt b)" status ready-to-land
+git -C "$CASE/project" merge -q --ff-only fm/b
+expect_field "$(queue status a)" status needs-rebase
+prepare a
+expect_field "$(queue status a)" status needs-quick
+farm_json "$(farm_request r-new a passed '' "$(( $(date +%s) + 5 ))")"
+case "$(queue resolve sweep)" in "front-check passed task=a request=r-new "*) ;; *) fail 'a fresh farm check did not settle the returning car' ;; esac
+expect_field "$(queue status a)" status ready-to-land
+pass 'a stepped-back car returning behind a landing rebases and a fresh farm check settles it'

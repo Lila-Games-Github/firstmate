@@ -2,8 +2,8 @@
 name: landing-queue
 description: >-
   Agent-only procedure for firstmate's side of the worker-owned local landing train.
-  Use on any `landing-queue ready-to-land`, `landing-queue needs-baseline`, `landing-queue failed`, `landing-queue testfarm-unreachable`, or `landing-queue sweep` check wake.
-  Owns the status recheck, baseline recording, the landing decision under the existing merge authority, and the no-steering rule.
+  Use on any `landing-queue ready-to-land`, `landing-queue needs-baseline`, `landing-queue failed`, `landing-queue testfarm-unreachable`, or `landing-queue sweep` check wake, and before moving a queued car, stepping the front car back, or briefing a car that other cars are waiting on.
+  Owns the status recheck, baseline recording, the landing decision under the existing merge authority, front step-back, and the no-steering rule.
 user-invocable: false
 metadata:
   internal: true
@@ -21,6 +21,14 @@ Workers also record configured landing-gate passes through the queue tool; a mis
 When the captain requests a queue reorder, use `bin/fm-landing-queue.sh move <id> --project <project> --landing-branch <landing> --place <number>` with this home's `FM_HOME`.
 The script header owns the place numbering and refusal rules.
 Use `status` afterward to report the resulting places; the queue tool handles any due worker steer.
+
+## Step the front car back
+
+Never ask a front car's worker to hold at the front, and never fail a healthy front car to get it out of the way.
+When the front car's check is held up by something that is not its own fault - a failure another car's fix will clear, or a wait the captain has called - and another car is waiting, run `bin/fm-landing-queue.sh step-back <id> --project <project> --landing-branch <landing> --reason <why>` with this home's `FM_HOME`.
+The car moves to second place without a failed mark, keeps its evidence, and redoes its front check when it returns; the tool steers its worker once and the new front car through the usual parked-car steer, and its header owns the exact rules.
+Use it sparingly and only for the car actually blocking the line, because repeated step-backs can starve a car.
+A fix that other cars are waiting on should join with `--priority unblock`, which places it directly behind the front: scaffold its brief with `bin/fm-brief.sh --unblock`, or `move` it to place 2 when it is already queued.
 
 ## Recheck
 
