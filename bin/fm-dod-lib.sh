@@ -5,11 +5,12 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [landing-branch] [test-infra] prints
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [landing-branch] [priority] prints
 # the block on stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract. A truthy
-# [test-infra] (local-only only) tells the worker to join the landing queue with
-# `--priority infra`; omitted or "0" keeps the ordinary join command unchanged.
+# mode is refused rather than silently rendered as the pipeline contract. A
+# [priority] of "infra" (or the legacy "1") or "unblock" (local-only only) tells
+# the worker to join the landing queue with that `--priority`; omitted or "0"
+# keeps the ordinary join command unchanged.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -351,15 +352,20 @@ fm_dod_quote() {
 
 # Shared worker handoff, also rendered on scout promotion. The queue executable
 # owns mechanics; this block supplies the task-bound invocation and next steps.
-fm_landing_queue_block() { # <task-id> [landing-branch] [test-infra]
-  local id=$1 landing=${2:-} test_infra=${3:-0} root home state data queue_command queue_target='' priority_arg=''
+fm_landing_queue_block() { # <task-id> [landing-branch] [priority]
+  local id=$1 landing=${2:-} priority=${3:-0} root home state data queue_command queue_target='' priority_arg=''
   root=${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
   home=${FM_HOME:-$root}
   state=${STATE:-${FM_STATE_OVERRIDE:-$home/state}}
   data=${DATA:-${FM_DATA_OVERRIDE:-$home/data}}
   queue_command="FM_HOME=$(fm_dod_quote "$home") FM_STATE_OVERRIDE=$(fm_dod_quote "$state") FM_DATA_OVERRIDE=$(fm_dod_quote "$data") $(fm_dod_quote "$root/bin/fm-landing-queue.sh")"
   [ -z "$landing" ] || queue_target=" --landing-branch $(fm_dod_quote "$landing")"
-  [ "$test_infra" = 0 ] || priority_arg=' --priority infra'
+  case "$priority" in
+    ''|0) ;;
+    1|infra) priority_arg=' --priority infra' ;;
+    unblock) priority_arg=' --priority unblock' ;;
+    *) echo "error: fm_landing_queue_block: unknown landing priority '$priority'" >&2; return 1 ;;
+  esac
   cat <<EOF
 
 ## Self-service landing train
@@ -402,8 +408,8 @@ landing_queue() {
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [landing-branch] [test-infra]
-  local mode=$1 id=$2 landing_branch=${3:-} test_infra=${4:-0} meta_file
+fm_dod_block() {  # <mode> <task-id> [landing-branch] [priority]
+  local mode=$1 id=$2 landing_branch=${3:-} priority=${4:-0} meta_file
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -431,7 +437,7 @@ Use the queue's current assigned target below when rebasing.
 When it is implemented and committed, follow the self-service landing train below through landing.
 The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path.
 EOF
-      fm_landing_queue_block "$id" "$landing_branch" "$test_infra"
+      fm_landing_queue_block "$id" "$landing_branch" "$priority"
       ;;
     no-mistakes)
       cat <<EOF

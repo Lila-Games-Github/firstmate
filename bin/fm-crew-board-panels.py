@@ -1591,7 +1591,7 @@ def landing_queue_rows(fields_by_task, deadline):
                              f"Out of time; {len(unread)} active car(s) not checked: "
                              + ", ".join(unread[:5]), "unreadable"))
         for place, task_id, fields in sorted(cars):
-            priority = " · infra" if fields.get("priority") == "infra" else ""
+            priority = f" · {fields['priority']}" if fields.get("priority") in ("infra", "unblock") else ""
             detail = ""
             if place == 1:
                 request = fields.get("front_request", "-")

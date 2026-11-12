@@ -401,6 +401,7 @@ mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode 
 test-infra on a no-mistakes ship brief|brief-refused-b5 some-proj --mode no-mistakes --test-infra|--test-infra applies only to local-only ship briefs
 test-infra on a direct-PR ship brief|brief-refused-b6 some-proj --mode direct-PR --test-infra|--test-infra applies only to local-only ship briefs
 test-infra on a scout brief|brief-refused-b7 some-proj --scout --test-infra|--test-infra applies only to local-only ship briefs
+unblock on a direct-PR ship brief|brief-refused-b8 some-proj --mode direct-PR --unblock|--unblock applies only to local-only ship briefs
 ROWS
   pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
 }
@@ -633,6 +634,23 @@ test_test_infra_flag_sets_queue_priority() {
   plain="$home/data/ordinary-join/brief.md"
   assert_no_grep "--priority infra" "$plain" "ordinary brief gained the test-infra join priority"
   pass "fm-brief.sh: --test-infra tells the worker to join the landing queue with --priority infra"
+}
+
+test_unblock_flag_sets_queue_priority() {
+  local home brief out
+  home="$TMP_ROOT/unblock-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" unblock-receipt some-proj --mode local-only --unblock >/dev/null \
+    || fail "unblock brief did not scaffold"
+  brief="$home/data/unblock-receipt/brief.md"
+  assert_grep "--receipt <full-suite-receipt> --priority unblock" "$brief" \
+    "unblock brief did not tell the worker to join with --priority unblock"
+  assert_no_grep "--priority infra" "$brief" "unblock brief gained the test-infra join priority"
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" unblock-both some-proj --mode local-only --unblock --test-infra 2>&1); then
+    fail "a brief with both landing priorities scaffolded"
+  fi
+  assert_contains "$out" "choose one" "combined priority refusal did not explain why"
+  pass "fm-brief.sh: --unblock tells the worker to join directly behind the front with --priority unblock"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -1953,6 +1971,7 @@ test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_green_final_head_names_service_receipt
 test_test_infra_flag_sets_queue_priority
+test_unblock_flag_sets_queue_priority
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--green-final-head] [--test-infra] [--open-questions <register>] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--green-final-head] [--test-infra|--unblock] [--open-questions <register>] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --green-final-head marks a ship task whose definition of done requires a
@@ -76,6 +76,9 @@
 #   captain's standing rule that test-infrastructure work is proven in isolation
 #   and never waits behind product work. The queue tool's header owns ordering
 #   and durability; this flag only changes the worker's join command.
+#   --unblock is the same for a local-only car other cars are waiting on: the
+#   worker joins with `--priority unblock`, directly behind the front car. It
+#   cannot be combined with --test-infra.
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
@@ -251,6 +254,7 @@ MODE=
 MODE_SET=0
 GREEN_FINAL_HEAD=0
 TEST_INFRA=0
+UNBLOCK=0
 OPEN_QUESTIONS=
 OPEN_QUESTIONS_SET=0
 LANE=0
@@ -284,6 +288,7 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --green-final-head) GREEN_FINAL_HEAD=1 ;;
     --test-infra) TEST_INFRA=1 ;;
+    --unblock) UNBLOCK=1 ;;
     --open-questions) want_value='open-questions' ;;
     --open-questions=*) OPEN_QUESTIONS=${a#--open-questions=}; OPEN_QUESTIONS_SET=1 ;;
     --lane) LANE=1 ;;
@@ -330,6 +335,17 @@ fi
   echo "error: --test-infra applies only to local-only ship briefs; it is the mode that uses the self-service landing queue" >&2
   exit 1
 }
+[ "$UNBLOCK" -eq 0 ] || [ "$MODE" = local-only ] || {
+  echo "error: --unblock applies only to local-only ship briefs; it is the mode that uses the self-service landing queue" >&2
+  exit 1
+}
+[ "$TEST_INFRA" -eq 0 ] || [ "$UNBLOCK" -eq 0 ] || {
+  echo "error: --test-infra and --unblock are separate landing priorities; choose one" >&2
+  exit 1
+}
+QUEUE_PRIORITY=0
+[ "$TEST_INFRA" -eq 0 ] || QUEUE_PRIORITY=infra
+[ "$UNBLOCK" -eq 0 ] || QUEUE_PRIORITY=unblock
 if [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
   [ "$KIND" = ship ] || { echo "error: --open-questions applies only to ship briefs" >&2; exit 1; }
   case "/$OPEN_QUESTIONS/" in
@@ -806,7 +822,7 @@ RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
 if [ "$LANE" -eq 0 ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; }; then
   LANDING_BRANCH=$(fm_meta_get "$STATE/$ID.meta" landing_branch)
 fi
-DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH" "$TEST_INFRA") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH" "$QUEUE_PRIORITY") || exit 1
 
 # Lane substitutions preserve the shared owner while naming the workspace branch.
 dod_replace() {  # <old> <new>
