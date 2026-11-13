@@ -1954,6 +1954,77 @@ test_direct_pr_ci_and_data_tooling_contract() {
   assert_grep 'Refuse a completion report' "$brief" 'brief does not refuse count-less completion'
   pass 'direct PR and data/tooling completion contracts are generated'
 }
+test_private_brief_templates() {
+  local home="$TMP_ROOT/template-home" dir="$TMP_ROOT/template-home/data/brief-templates/some-proj" out brief
+  mkdir -p "$dir"
+  cat > "$dir/feature.md" <<'EOF'
+---
+name: feature
+project: some-proj
+when: Use for feature work on the API.
+placeholders: ASK, DETAIL
+---
+## Captain's intent
+{{ASK}}
+
+## Firstmate spec
+Apply {{DETAIL}}.
+EOF
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" template-missing some-proj --mode direct-PR 2>&1); then
+    fail 'project template inventory allowed silent skip'
+  fi
+  assert_contains "$out" 'feature: Use for feature work on the API.' 'template criteria were not listed'
+  assert_contains "$out" 'choose --template' 'selection requirement was not explained'
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" template-unfilled some-proj --mode direct-PR --template feature --set ASK=Hello 2>&1); then
+    fail 'unfilled template placeholder was accepted'
+  fi
+  assert_contains "$out" 'DETAIL' 'unfilled placeholder was not named'
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" template-unknown some-proj --mode direct-PR --template feature --set ASK=Hello --set DETAIL=now --set EXTRA=bad 2>&1); then
+    fail 'unknown template value was accepted'
+  fi
+  assert_contains "$out" 'EXTRA' 'unknown value was not named'
+  printf 'from file' > "$home/detail.txt"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" template-filled some-proj --mode direct-PR --template feature --set ASK=Hello --set-file "DETAIL=$home/detail.txt" >/dev/null || fail 'filled template refused'
+  brief="$home/data/template-filled/brief.md"
+  assert_grep 'Hello' "$brief" 'Captain intent was not rendered'
+  assert_grep 'Apply from file.' "$brief" 'Firstmate spec was not rendered'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" template-bypass some-proj --mode direct-PR --no-template 'scope does not match feature criteria' >/dev/null || fail 'bypass with reason refused'
+  assert_grep 'Template decision: no template - scope does not match feature criteria' "$home/data/template-bypass/brief.md" 'bypass reason missing'
+  cat > "$dir/broken.md" <<'EOF'
+---
+name: broken
+project: some-proj
+when: Broken fixture.
+placeholders: ASK
+---
+## Captain's intent
+{{ASK}}
+EOF
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" template-broken some-proj --mode direct-PR --template feature --set ASK=Hello --set DETAIL=now 2>&1); then
+    fail 'known-bad template missing a section was accepted'
+  fi
+  assert_contains "$out" 'Firstmate spec' 'known-bad rejection did not name the missing section'
+  cat > "$dir/broken.md" <<'EOF'
+---
+name: broken
+project: other-proj
+when: Broken fixture.
+placeholders: ASK
+---
+## Captain's intent
+{{ASK}}
+
+## Firstmate spec
+Valid body.
+EOF
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" template-bad-front-matter some-proj --mode direct-PR --template feature --set ASK=Hello --set DETAIL=now 2>&1); then
+    fail 'known-bad front matter project was accepted'
+  fi
+  assert_contains "$out" 'project must match some-proj' 'known-bad front matter rejection was unclear'
+  pass 'private brief templates: selection, values, rendering, bypass, and known-bad front matter'
+}
+
+test_private_brief_templates
 test_direct_pr_ci_and_data_tooling_contract
 test_recorded_direct_pr_base
 test_recorded_no_mistakes_target
