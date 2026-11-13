@@ -1942,7 +1942,25 @@ test_worker_owned_finalization() {
   fi
 }
 
+test_remote_local_lane_publishes_workspace_branch() {
+  local home brief
+  home="$TMP_ROOT/remote-lane-home"
+  mkdir -p "$home/data"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' > "$home/.fm-secondmate-parent"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" remote-lane some-proj --mode local-only --lane \
+    --landing-branch main --lane-branch frogpile-pond-geometry-landing >/dev/null 2>&1 \
+    || fail 'remote local-only lane brief failed'
+  brief="$home/data/remote-lane/brief.md"
+  assert_grep 'Push only your verified workspace branch to origin for main-home import' "$brief" 'remote lane delivery block forbids publication'
+  # shellcheck disable=SC2016 # The generated brief contains literal backticks.
+  assert_grep 'Push only your workspace branch `frogpile-pond-geometry-landing` to origin' "$brief" 'remote lane rule synthesized an fm task branch'
+  assert_grep 'remote branch=<workspace-branch>' "$brief" 'remote lane report omits its workspace branch'
+  assert_no_grep 'Do NOT push' "$brief" 'remote lane retained a no-push instruction'
+  pass 'fm-brief.sh: remote local-only lane publishes only its registered workspace branch'
+}
+
 test_worker_owned_finalization
+test_remote_local_lane_publishes_workspace_branch
 test_direct_pr_ci_and_data_tooling_contract() {
   local home brief
   home="$TMP_ROOT/direct-pr-ci"
