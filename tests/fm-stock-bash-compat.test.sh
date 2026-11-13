@@ -48,7 +48,7 @@ case "${0##*/}" in
   fm-worker-doorbell.test.sh) key=doorbell; count=5 ;;
   fm-lane-send.test.sh) key=lane-send; count=6 ;;
   fm-farm-results.test.sh) key=farm-results; count=7 ;;
-  fm-remote-landing.test.sh) key=remote-landing; count=8 ;;
+  fm-remote-landing.test.sh) key=remote-landing; count=13 ;;
   fm-task-delivery.test.sh) key=remote-export; count=1 ;;
   *) exit 2 ;;
 esac
