@@ -57,6 +57,6 @@ printf 'user work\n' > "$repo/unrelated.txt"
 if (cd "$repo" && "$ROOT/bin/fm-playbot-uid-collisions.py" preserve "$bad_target") > "$TMP_ROOT/bad.out" 2> "$TMP_ROOT/bad.err"; then
   fail 'non-UID collision was accepted'
 fi
-rg -q 'non-UID untracked work' "$TMP_ROOT/bad.err" || fail 'non-UID rejection did not name its cause'
+grep -q 'non-UID untracked work' "$TMP_ROOT/bad.err" || fail 'non-UID rejection did not name its cause'
 [ "$(cat "$repo/unrelated.txt")" = 'user work' ] || fail 'non-UID collision was damaged'
 pass 'fm-playbot-uid-collisions: real inventories and backups match source counts; non-UID fixture is rejected'
