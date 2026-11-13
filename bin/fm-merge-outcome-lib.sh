@@ -42,10 +42,10 @@ fm_merge_outcome_check_branches() { # <home> <state> <task-id>
   project=$(sed -n 's/^project=//p' "$meta" | tail -1)
   landing=$(sed -n 's/^landing_branch=//p' "$meta" | tail -1)
   if [ -z "$project" ] || [ ! -d "$project" ]; then
-    echo "warning: merged $id but project checkout is unavailable for trial merge checks" >&2
-    fm_wake_append check "landing-conflict-$id-unknown-project" \
-      "check: landing trial merge unknown: merged $id has no readable project checkout"
-    return 1
+    # A poll may confirm a merge after this home's project clone was retired.
+    # It has no project branch inventory to check and must not add a second
+    # wake that delays canonical poll retirement.
+    return 0
   fi
   if [ -z "$landing" ]; then
     landing=$(git -C "$project" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -58,8 +58,6 @@ fm_merge_outcome_check_branches() { # <home> <state> <task-id>
   fi
   if [ -z "$landing" ]; then
     echo "warning: merged $id but landing branch is unknown for trial merge checks" >&2
-    fm_wake_append check "landing-conflict-$id-unknown-landing" \
-      "check: landing trial merge unknown: merged $id has no resolved landing branch"
     return 1
   fi
   FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
