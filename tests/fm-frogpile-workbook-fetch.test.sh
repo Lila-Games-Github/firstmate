@@ -28,6 +28,7 @@ key = Path(key_option[4:]).read_bytes().decode('utf-8')
 assert key == os.environ['TEST_SECRET']
 assert quote(key, safe='') in 'key=' + quote(key, safe='')
 assert all(key not in arg for arg in args)
+assert '--get' in args or '-G' in args
 assert args[args.index('--proto-redir') + 1] == '=https'
 assert args[args.index('--proto') + 1] == '=https'
 assert parse_qs('key=' + quote(key, safe=''))['key'] == [key]
