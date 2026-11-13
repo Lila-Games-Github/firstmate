@@ -869,6 +869,11 @@ if [ "$LANE" -eq 1 ]; then
 This task runs in a Playbot lane workspace: your branch already exists and is $LANE_BRANCH_DESC, so every delivery instruction above applies to that branch and to no other.
 For engine readiness and bounded engine-call handling, follow \`docs/playbot-lanes.md\`'s Engine readiness contract in the Firstmate code root.
 Use its Addon preservation contract before any reset, stash, engine validation, or product commit; never use a raw reset or stash that bypasses that guard.
+Keep front-of-queue integration in this registered Playbot workspace so the engine's project path and the submitted Git head stay together.
+Before the front rebase, run \`$FM_ROOT/bin/fm-playbot-uid-collisions.py check <target_sha>\` in this workspace; if it reports generated UID collisions, run its \`preserve <target_sha>\` action and keep the printed ignored backup and manifest until every preserved UID is accounted for.
+The helper refuses other untracked collisions; never overwrite a newly tracked UID or move the branch to another worktree.
+After a rebase removes or renames scripts, call \`reset_engine_workspace_cache\` with this workspace and the full committed HEAD, then confirm \`get_engine_readiness\` and run the affected tests through that engine.
+Before farm certification, run the affected tests locally on the exact head you will submit; if the engine remains unavailable, submit the affected tests as a focused farm request first, record the engine blocker and selected tests, and require that request to pass on the same head.
 $LANE_DOD_OVERRIDE"
 fi
 
