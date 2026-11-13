@@ -258,6 +258,10 @@ if [ "$PROVISION_RC" -ne 0 ]; then
   if [ "$PROVISION_RC" -eq 255 ]; then
     die "remote provisioning completion is unknown; route preserved for same-host reconciliation"
   fi
+  if [ "$PROVISION_RC" -eq 124 ]; then
+    die "remote provisioning job timed out (exit 124); registry restored; inspect the remote project clone before retrying"
+  fi
+  [ -n "$PROVISION_OUT" ] || die "remote provisioning exited $PROVISION_RC without diagnostic output; registry restored"
   die "remote provisioning failed; registry restored"
 fi
 printf '%s\n' "$PROVISION_OUT"

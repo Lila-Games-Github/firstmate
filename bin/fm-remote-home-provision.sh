@@ -17,6 +17,8 @@
 # .fm-secondmate-home marker commits the complete seed last.
 # A newly created home is removed on failure. An existing matching seeded home
 # is converged only through guarded ordinary-file updates and new project clones.
+# An interrupted git clone with Git's .invalid HEAD sentinel, no refs, and no
+# worktree is preserved in a .fm-incomplete-* sibling before a fresh clone.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +55,8 @@ PROVISION_LOCK=
 PROVISION_LOCK_HELD=0
 CREATED_PROJECTS="$TMP/created-projects"
 : > "$CREATED_PROJECTS"
+QUARANTINED_PROJECTS="$TMP/quarantined-projects"
+: > "$QUARANTINED_PROJECTS"
 release_provision_lock() {
   if [ "$PROVISION_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$PROVISION_LOCK"
@@ -70,7 +74,7 @@ restore_owned_file() { # <relative-path>
   fi
 }
 rollback() {
-  local status=$? project
+  local status=$? project quarantine
   if [ "$status" -ne 0 ] && [ "$PUBLISHED" -eq 0 ]; then
     if [ "$CREATED_HOME" -eq 1 ]; then
       rm -rf -- "$FM_HOME"
@@ -78,6 +82,13 @@ rollback() {
       while IFS= read -r project; do
         [ -n "$project" ] && rm -rf -- "$FM_HOME/projects/$project"
       done < "$CREATED_PROJECTS"
+      while IFS='|' read -r project quarantine; do
+        [ -n "$project" ] || continue
+        if [ ! -e "$FM_HOME/projects/$project" ] && [ -d "$quarantine/clone" ]; then
+          mv -- "$quarantine/clone" "$FM_HOME/projects/$project" || true
+          rmdir -- "$quarantine" || true
+        fi
+      done < "$QUARANTINED_PROJECTS"
       restore_owned_file data/charter.md || true
       restore_owned_file data/projects.md || true
       restore_owned_file .fm-secondmate-home || true
@@ -222,19 +233,40 @@ EOF
   case "$MODE" in no-mistakes|direct-PR|local-only) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
   case "$REGISTRY_LINE" in "- $NAME "*) ;; *) die "project $NAME registry line is malformed" ;; esac
   DEST="$FM_HOME/projects/$NAME"
+  NEEDS_INIT=0
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
-    [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] \
+    [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] && [ ! -L "$DEST/.git" ] \
       || die "project destination exists but is not a safe clone: $DEST"
     EXISTING_ORIGIN=$(git -C "$DEST" remote get-url origin 2>/dev/null || true)
     [ "$EXISTING_ORIGIN" = "$ORIGIN" ] || die "project $NAME origin differs from the requested route"
+    if [ -f "$DEST/.git/HEAD" ] && [ ! -L "$DEST/.git/HEAD" ] \
+      && [ "$(cat "$DEST/.git/HEAD")" = 'ref: refs/heads/.invalid' ]; then
+      # An interrupted git clone leaves this exact unborn sentinel and no
+      # worktree or refs. Preserve it for inspection before retrying the clone.
+      [ ! -e "$DEST/.git/index" ] \
+        && [ -z "$(find "$DEST" -mindepth 1 -maxdepth 1 ! -name .git -print -quit)" ] \
+        && [ -z "$(git -C "$DEST" show-ref 2>/dev/null || true)" ] \
+        || die "project $NAME has an incomplete clone with local data; inspect it before retrying"
+      QUARANTINE=$(mktemp -d "$FM_HOME/projects/.fm-incomplete-$NAME.XXXXXX") \
+        || die "cannot quarantine incomplete clone for project $NAME"
+      mv -- "$DEST" "$QUARANTINE/clone" || die "cannot quarantine incomplete clone for project $NAME"
+      printf '%s|%s\n' "$NAME" "$QUARANTINE" >> "$QUARANTINED_PROJECTS"
+      printf 'quarantined incomplete clone for %s at %s\n' "$NAME" "$QUARANTINE" >&2
+      printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
+      git clone --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
+      git -C "$DEST" rev-parse --verify HEAD >/dev/null 2>&1 \
+        || die "replacement clone for project $NAME has no checked-out HEAD"
+      NEEDS_INIT=1
+    fi
   else
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
     git clone --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
-    if [ "$MODE" = no-mistakes ]; then
-      command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
-      (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \
-        || die "no-mistakes initialization failed for project $NAME"
-    fi
+    NEEDS_INIT=1
+  fi
+  if [ "$NEEDS_INIT" -eq 1 ] && [ "$MODE" = no-mistakes ]; then
+    command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
+    (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \
+      || die "no-mistakes initialization failed for project $NAME"
   fi
   printf '%s\n' "$REGISTRY_LINE" >> "$PROJECT_REG"
 done < <(grep '^project=' "$TMP/manifest")

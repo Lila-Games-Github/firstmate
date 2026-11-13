@@ -110,15 +110,20 @@ DEFAULT_BOUNDS=$(
   # shellcheck source=bin/fm-remote-job-lib.sh
   . "$ROOT/bin/fm-remote-job-lib.sh"
   fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh </dev/null >/dev/null
-  printf '%s %s\n' \
+  printf '%s %s ' \
     "$(cat "$DEFAULT_STATE/jobs/$FM_REMOTE_JOB_ID/queue_deadline")" \
     "$(cat "$DEFAULT_STATE/jobs/$FM_REMOTE_JOB_ID/timeout")"
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+    fm-remote-home-provision.sh </dev/null >/dev/null
+  cat "$DEFAULT_STATE/jobs/$FM_REMOTE_JOB_ID/timeout"
 )
-read -r DEFAULT_QUEUE_DEADLINE DEFAULT_EXECUTION_TIMEOUT <<< "$DEFAULT_BOUNDS"
+read -r DEFAULT_QUEUE_DEADLINE DEFAULT_EXECUTION_TIMEOUT PROVISION_EXECUTION_TIMEOUT <<< "$DEFAULT_BOUNDS"
 DEFAULT_QUEUE_REMAINING=$((DEFAULT_QUEUE_DEADLINE - $(date +%s)))
 [ "$DEFAULT_QUEUE_REMAINING" -ge 350 ] || fail "the default queue bound is too short"
 [ "$DEFAULT_EXECUTION_TIMEOUT" -ge 350 ] || fail "the default execution bound cannot contain a 300-second long poll"
-pass "default queue and execution bounds independently cover long polls"
+[ "$PROVISION_EXECUTION_TIMEOUT" -eq 3600 ] \
+  || fail "large-project provisioning did not receive its own execution bound"
+pass "default queue and execution bounds cover long polls and large-project provisioning"
 
 # shellcheck disable=SC2031 # The earlier assignment was confined to DEFAULT_BOUNDS.
 export FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT"

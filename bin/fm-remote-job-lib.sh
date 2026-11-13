@@ -13,6 +13,8 @@
 # optional caller-cancellation marker, and .claim may hold owner, owner_start,
 # supervisor, supervisor_start, group, group_start, and armed records while
 # work executes.
+# Provisioning has a separate 3600-second execution bound for large project
+# clones; other jobs retain the 360-second default bound.
 # Stage writes state=queued last. seq is a queue-wide monotonic staging
 # sequence reserved atomically by its persistent .seq-claims directory; the
 # counter is only a forward-moving allocation hint. If the bounded hint walk
@@ -87,6 +89,7 @@ FM_REMOTE_JOB_LABEL=dev.firstmate.remote-job
 FM_REMOTE_JOB_MAX_BYTES=${FM_REMOTE_JOB_MAX_BYTES:-1048576}
 FM_REMOTE_JOB_QUEUE_TIMEOUT=${FM_REMOTE_JOB_QUEUE_TIMEOUT:-360}
 FM_REMOTE_JOB_TIMEOUT=${FM_REMOTE_JOB_TIMEOUT:-360}
+FM_REMOTE_JOB_PROVISION_TIMEOUT=${FM_REMOTE_JOB_PROVISION_TIMEOUT:-3600}
 FM_REMOTE_JOB_WAIT_GRACE=${FM_REMOTE_JOB_WAIT_GRACE:-30}
 FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
@@ -127,6 +130,8 @@ fm_remote_job_validate_settings() {
   [ "$FM_REMOTE_JOB_QUEUE_TIMEOUT" -le 3600 ] || return 1
   case "$FM_REMOTE_JOB_TIMEOUT" in ''|*[!0-9]*|0) return 1 ;; esac
   [ "$FM_REMOTE_JOB_TIMEOUT" -le 3600 ] || return 1
+  case "$FM_REMOTE_JOB_PROVISION_TIMEOUT" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$FM_REMOTE_JOB_PROVISION_TIMEOUT" -le 3600 ] || return 1
   case "$FM_REMOTE_JOB_WAIT_GRACE" in ''|*[!0-9]*) return 1 ;; esac
   [ "$FM_REMOTE_JOB_WAIT_GRACE" -le 300 ] || return 1
   case "$FM_REMOTE_JOB_REAP_SECONDS" in ''|*[!0-9]*|0) return 1 ;; esac
@@ -617,7 +622,7 @@ fm_remote_job_cancel() { # <account-home> <id>
 }
 
 fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdin is captured
-  local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes queue_deadline owner_start
+  local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes queue_deadline owner_start job_timeout
   shift 4
   fm_remote_job_prepare_state "$account_home" || return 1
   root=$(fm_remote_job_canonical_existing_dir "$root") || {
@@ -640,13 +645,15 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   }
   chmod 700 "$stage" || { rm -rf -- "$stage"; return 1; }
   queue_deadline=$(( $(date +%s) + FM_REMOTE_JOB_QUEUE_TIMEOUT ))
+  job_timeout=$FM_REMOTE_JOB_TIMEOUT
+  [ "$command" != fm-remote-home-provision.sh ] || job_timeout=$FM_REMOTE_JOB_PROVISION_TIMEOUT
   if ! printf '%s\n' "$$" > "$stage/.owner-pid" ||
     ! printf '%s\n' "$owner_start" > "$stage/.owner-start" ||
     ! chmod 600 "$stage/.owner-pid" "$stage/.owner-start" ||
     ! printf '%s\n' "$root" > "$stage/root" ||
     ! printf '%s\n' "$home" > "$stage/home" ||
     ! printf '%s\n' "$queue_deadline" > "$stage/queue_deadline" ||
-    ! printf '%s\n' "$FM_REMOTE_JOB_TIMEOUT" > "$stage/timeout" ||
+    ! printf '%s\n' "$job_timeout" > "$stage/timeout" ||
     ! printf '%s\0' "$command" "$@" > "$stage/argv" ||
     ! head -c "$((FM_REMOTE_JOB_MAX_BYTES + 1))" > "$stage/stdin"; then
     rm -rf -- "$stage"
