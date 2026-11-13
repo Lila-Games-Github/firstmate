@@ -34,12 +34,25 @@ function verifiedAddons(root, report) {
   if (!report.projects.length) return [];
   if (!report.bundle?.confirmed || report.errors.length) throw new Error(`Addon bundle identity is unconfirmed; start Playbot so its app bundle can be read before preservation. ${JSON.stringify({ bundle: report.bundle, errors: report.errors })}`);
   return report.projects.map((project) => {
-    if (fs.lstatSync(project.addon.path).isSymbolicLink()) throw new Error("Addon preservation refuses a symlinked addon directory.");
-    const directory = fs.realpathSync.native(project.addon.path);
-    const relative = path.relative(root, directory);
-    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Addon lies outside this Git worktree.");
     if (!project.addon.byteIdentical || project.addon.version !== report.bundle.version) throw new Error(`Addon is incomplete or differs from the current app bundle: ${project.addon.path}; obtain a supported Playbot update before reset/stash/validation.`);
-    return { directory, relative: relative.split(path.sep).join("/") };
+    return addonTree(root, project.addon.path);
+  });
+}
+
+function addonTree(root, directory) {
+  if (fs.lstatSync(directory).isSymbolicLink()) throw new Error("Addon preservation refuses a symlinked addon directory.");
+  const canonical = fs.realpathSync.native(directory);
+  const relative = path.relative(root, canonical);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("Addon lies outside this Git worktree.");
+  return { directory: canonical, relative: relative.split(path.sep).join("/") };
+}
+
+// The recovery-mode importer never loads addons and can preserve drifted bytes
+// without a working app/engine bridge. Reset/stash still require bundle proof.
+export function snapshotAddonTrees(root, directories) {
+  return directories.map((directory) => {
+    const addon = addonTree(root, directory);
+    return { ...addon, files: files(addon.directory) };
   });
 }
 
@@ -102,7 +115,7 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
     }
     command = ["stash", "push", ...args, "--", ".", ...addons.map((addon) => `:(exclude,literal)${addon.relative}`)];
   }
-  const snapshots = addons.map((addon, index) => ({ ...addon, index, files: files(addon.directory) }));
+  const snapshots = snapshotAddonTrees(root, addons.map((addon) => addon.directory)).map((addon, index) => ({ ...addon, index }));
   const backup = fs.mkdtempSync(path.join(os.tmpdir(), "fm-playbot-addon-"));
   fs.chmodSync(backup, 0o700);
   for (const addon of snapshots) for (const file of addon.files) restoreFile(path.join(backup, String(addon.index)), file, backup);
