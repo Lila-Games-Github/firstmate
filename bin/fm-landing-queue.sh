@@ -86,8 +86,9 @@
 # train from the watcher poll.
 # receipt requires --head, --target and --receipt. At needs-quick it accepts
 # exactly schema=fm-quick-check.v1, sha=<full head SHA>, target=<full target SHA>.
-# The service produces that receipt only after its configured touched-file suite
-# and short phone check pass. At needs-full it accepts fm-full-suite.v1 instead.
+# The service produces that receipt after its configured touched-file suite and,
+# unless gate_exemption names a real-phone exemption, short phone check pass.
+# At needs-full it accepts fm-full-suite.v1 instead.
 # A quick failure is reported with --reason, requiring a later full rerun.
 # A tip change touching any of this car's files also requires the full rerun.
 # Only the bottom car can submit its last-check receipt.

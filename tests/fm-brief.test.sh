@@ -235,8 +235,8 @@ test_ship_modes_generate_clean_briefs() {
       "$id: long-suite contract omitted the background-job completion observer"
     assert_grep "full suite, phone play-through, applicable benchmark" "$brief" \
       "$id: long-suite contract lost pre-queue validation"
-    assert_grep "quick test and short phone check" "$brief" \
-      "$id: long-suite contract lost the front check"
+    assert_grep "quick test and, when the queue does not exempt its real-phone gate, the short phone check" "$brief" \
+      "$id: long-suite contract lost the conditional front phone check"
     assert_grep 'paused: test-service request=<request-id>' "$brief" \
       "$id: ship brief omitted the service pause identifier"
     assert_grep 'without polling status or holding a waiter session' "$brief" \
@@ -1859,6 +1859,9 @@ assert "--task 'somegame-receipt'" in brief
 assert f"automatically writes `{receipt}`" in brief
 assert "schema=fm-full-suite.v1\nsha=<full tested SHA>\nfailures=0\n" in brief
 assert "--device-gate any" in brief
+assert "When `gate_exemption=-`, use `--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>`" in brief
+assert "When `gate_exemption` names a real-phone exemption, use `--suite --check quick --target <front-target-sha> --receipt <quick-receipt-path>`" in brief
+assert "read `gate_exemption` from the current `landing_queue status` after acknowledging any rebase" in brief
 assert "full-suite.receipt" not in brief
 PY
   id=frogpile-still-unconfigured
@@ -1902,6 +1905,8 @@ test_worker_owned_finalization() {
     assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
     assert_grep 'git rebase --onto <target_sha> <rebase_from>' "$brief" 'brief cannot remove a failed lower car'
     assert_grep 'Before any farm certification, run the affected tests locally on this exact head' "$brief" 'queue omitted the local affected-test gate'
+    # shellcheck disable=SC2016 # The generated brief contains literal backticks.
+    assert_grep 'run the short phone check only when `gate_exemption=-`' "$brief" 'queue omitted the non-exempt quick phone gate'
     if [ "$lane" = lane ]; then
       assert_grep 'Keep front-of-queue integration in this registered Playbot workspace' "$brief" 'lane moved integration away from its engine'
       assert_grep 'fm-playbot-uid-collisions.py check <target_sha>' "$brief" 'lane omitted UID collision preflight'
