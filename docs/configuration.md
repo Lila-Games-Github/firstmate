@@ -860,6 +860,17 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## FrogPile workbook export
+
+Place the non-secret HTTPS Apps Script endpoint without its `key` parameter in the private `config/frogpile-workbook.url` file under the intended `FM_HOME`.
+Place the secret in that home's private `config/frogpile-workbook.key` file as one nonempty line without a newline, then set its mode to `0600`.
+Keep the key out of chat, shell arguments, tracked files, and task reports.
+Run `FM_HOME=/path/to/home bin/fm-frogpile-workbook-fetch.py --check` to check local readiness without fetching.
+Run `FM_HOME=/path/to/home bin/fm-frogpile-workbook-fetch.py` whenever a fresh export is needed.
+The command stores raw bytes and metadata under private `data/frogpile-workbook/` and prints a path, byte count, and checksum receipt.
+The response format is still unvalidated, so inspect its structure and compare its source counts and records with the pinned export before letting a new snapshot supersede that export.
+The command header and `--help` own the exact validation and fetch mechanics.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
