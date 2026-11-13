@@ -367,7 +367,7 @@ A required suite that is still running, or queued behind a shared suite lock, is
 For a test-service request, append `paused: test-service request=<request-id>` and end your turn after submission; resume on its durable completion message, without polling status or holding a waiter session.
 Evidence must describe one snapshot: every capture and artifact you cite and the final suite receipt must all name the same commit.
 In a landing train, finish the exact-head full suite, phone play-through, applicable benchmark, and captures on your branch rebased onto the current tip before joining.
-Only the front car rebases again; it runs the quick test and short phone check, or a full rerun if the new tip changed files this task touches or the quick check fails.
+Only the front car rebases again; it runs the quick test and, when the queue does not exempt its real-phone gate, the short phone check, or a full rerun if the new tip changed files this task touches or the quick check fails.
 An upper car waits without rebasing or rerunning tests as the tip moves.
 EOF
 }
@@ -420,7 +420,8 @@ landing_queue() {
    The queue sends your steering inbox one message when your car reaches bottom; resume then with \`landing_queue status\`.
    At bottom (\`place=1\`), when the base changes, rebase your own commits in this branch's existing worktree with \`git rebase --onto <target_sha> <rebase_from>\`, then acknowledge the prepared head with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <target_sha>\`.
    Resolve rebase conflicts yourself; do not merge or keep commits from a failed lower car.
-3. At \`needs-quick\`, run the configured quick suite mapped to this task's touched files and the short phone check on exactly the rebased head.
+3. At \`needs-quick\`, read the current \`gate_exemption\` from \`landing_queue status\` after acknowledging any rebase.
+   Run the configured quick suite mapped to this task's touched files on exactly the rebased head; run the short phone check only when \`gate_exemption=-\`.
    Submit its \`fm-quick-check.v1\` receipt with \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
    If the quick check fails, submit \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --reason <failure>\`; this requires a full rerun and moves the car to the back when another waits.
    The queue also settles a front quick check from the test farm on its own within about a minute of its result; your report then changes nothing, so run \`landing_queue status\` and continue from what it prints.

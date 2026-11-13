@@ -996,7 +996,9 @@ When this ship's test step calls for the full suite and device play-through, com
 In a landing train, submit the full suite and device play-through before joining on your branch rebased onto the current tip.
 At the front, submit a quick check on the rebased head unless queue status requires a full rerun.
 Use \`FM_HOME=$(shell_quote "$FM_HOME") $FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`.
-For the front quick check, use \`--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>\` instead of the full check options; the configured quick suite receives the touched file paths and its phone command is short.
+For the front quick check, read \`gate_exemption\` from the current \`landing_queue status\` after acknowledging any rebase.
+When \`gate_exemption=-\`, use \`--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>\` instead of the full check options; the configured quick suite receives the touched file paths and its phone command is short.
+When \`gate_exemption\` names a real-phone exemption, use \`--suite --check quick --target <front-target-sha> --receipt <quick-receipt-path>\` so the quick check runs the suite without a device gate.
 Follow the Long-suite and evidence snapshot contract below to pause and end your turn; the service sends your steering inbox the request id, final state, SHA, receipt path, and first failure.
 On success, the service automatically writes \`$TEST_SERVICE_RECEIPT\` in exactly this three-line form for the tested full SHA:
 \`\`\`text

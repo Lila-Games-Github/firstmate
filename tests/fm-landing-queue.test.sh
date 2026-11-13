@@ -94,9 +94,12 @@ grep -q 'requires pre-queue landing gate: real-phone' "$CASE/refusal" || fail 'm
 for gate in real-phone m31; do
   printf 'schema=fm-landing-gate.v1\ngate=%s\nsha=%s\ntarget=%s\n' "$gate" "$(head_of a)" "$BASE" > "$CASE/$gate.gate"
 done
-expect_field "$(join a --gate-receipt real-phone="$CASE/real-phone.gate" --gate-receipt m31="$CASE/m31.gate")" status needs-quick
+out=$(join a --gate-receipt real-phone="$CASE/real-phone.gate" --gate-receipt m31="$CASE/m31.gate")
+expect_field "$out" status needs-quick
+expect_field "$out" gate_exemption -
+expect_field "$(queue status a)" gate_exemption -
 expect_field "$(quick_receipt a)" status ready-to-land
-pass 'configured phone and benchmark gates are required before joining'
+pass 'non-exempt front quick check retains the phone gate after admission'
 
 make_case docs-only-phone-exemption
 mkdir -p "$CASE/home/config/test-service"
@@ -112,6 +115,7 @@ full_receipt docs
 out=$(queue ready docs --branch fm/docs --head "$(head_of docs)" --target "$BASE" --receipt "$CASE/docs.full")
 expect_field "$out" status needs-quick
 expect_field "$out" gate_exemption 'real-phone: all changed paths match documentation_path_globs'
+expect_field "$(queue status docs)" gate_exemption 'real-phone: all changed paths match documentation_path_globs'
 queue_file=$(find "$CASE/home/data/landing-queue" -name queue -type f -print -quit)
 [ "$(tail -1 "$queue_file" | cut -f 12)" = 'real-phone: all changed paths match documentation_path_globs' ] \
   || fail 'docs exemption was not persisted on the queue row'
