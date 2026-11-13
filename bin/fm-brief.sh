@@ -14,9 +14,19 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--green-final-head] [--test-infra|--unblock] [--open-questions <register>] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--green-final-head] [--test-infra|--unblock] [--open-questions <register>] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab] [--template <file-or-name> [--set NAME=value|--set-file NAME=path]...] [--no-template <reason>]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   Private project templates live at data/brief-templates/<registry-project-name>/<name>.md.
+#   Each declares name, project, when, and comma-separated placeholders in a
+#   --- front matter block; its body has the Captain's intent and Firstmate spec
+#   subsections. --template accepts a project template name or an explicit file.
+#   For a project with templates, the available names and plain-language when
+#   criteria are printed and selection is mandatory: use --template or
+#   --no-template <reason>. The latter records the reason in the brief. Matching
+#   the when criteria is firstmate's judgment, not a shell keyword heuristic.
+#   Template validation refuses missing sections, unknown or unfilled values,
+#   malformed front matter, and project mismatch before writing a brief.
 #   --green-final-head marks a ship task whose definition of done requires a
 #   green full-suite receipt on its final head. The marker is consumed by
 #   fm-spawn.sh, which requires a zero-failure receipt on the selected landing
@@ -258,6 +268,12 @@ UNBLOCK=0
 OPEN_QUESTIONS=
 OPEN_QUESTIONS_SET=0
 LANE=0
+TEMPLATE=
+TEMPLATE_SET=0
+NO_TEMPLATE=
+NO_TEMPLATE_SET=0
+TEMPLATE_VALUES=()
+TEMPLATE_FILES=()
 LANE_BRANCH=
 LANE_BRANCH_SET=0
 LANDING_BRANCH=
@@ -274,6 +290,10 @@ for a in "$@"; do
       open-questions) OPEN_QUESTIONS=$a; OPEN_QUESTIONS_SET=1 ;;
       lane-branch) LANE_BRANCH=$a; LANE_BRANCH_SET=1 ;;
       landing-branch) LANDING_BRANCH=$a; LANDING_BRANCH_SET=1 ;;
+      template) TEMPLATE=$a; TEMPLATE_SET=1 ;;
+      no-template) NO_TEMPLATE=$a; NO_TEMPLATE_SET=1 ;;
+      set) TEMPLATE_VALUES+=("$a") ;;
+      set-file) TEMPLATE_FILES+=("$a") ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -296,6 +316,14 @@ for a in "$@"; do
     --lane-branch=*) LANE_BRANCH=${a#--lane-branch=}; LANE_BRANCH_SET=1 ;;
     --landing-branch) want_value='landing-branch' ;;
     --landing-branch=*) LANDING_BRANCH=${a#--landing-branch=}; LANDING_BRANCH_SET=1 ;;
+    --template) want_value=template ;;
+    --template=*) TEMPLATE=${a#--template=}; TEMPLATE_SET=1 ;;
+    --no-template) want_value=no-template ;;
+    --no-template=*) NO_TEMPLATE=${a#--no-template=}; NO_TEMPLATE_SET=1 ;;
+    --set) want_value='set' ;;
+    --set=*) TEMPLATE_VALUES+=("${a#--set=}") ;;
+    --set-file) want_value='set-file' ;;
+    --set-file=*) TEMPLATE_FILES+=("${a#--set-file=}") ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -383,6 +411,47 @@ if [ "$KIND" = ship ] && [ -n "${POS[1]:-}" ]; then
   fi
 fi
 ID=${POS[0]}
+
+if [ "$KIND" = secondmate ] && { [ "$TEMPLATE_SET" -eq 1 ] || [ "$NO_TEMPLATE_SET" -eq 1 ] || [ "${#TEMPLATE_VALUES[@]}" -gt 0 ] || [ "${#TEMPLATE_FILES[@]}" -gt 0 ]; }; then
+  echo "error: template flags apply only to ship and scout briefs" >&2
+  exit 1
+fi
+[ "$TEMPLATE_SET" -eq 0 ] || [ "$NO_TEMPLATE_SET" -eq 0 ] || { echo "error: --template and --no-template are mutually exclusive" >&2; exit 1; }
+if [ "$TEMPLATE_SET" -eq 0 ] && { [ "${#TEMPLATE_VALUES[@]}" -gt 0 ] || [ "${#TEMPLATE_FILES[@]}" -gt 0 ]; }; then
+  echo "error: --set and --set-file require --template" >&2
+  exit 1
+fi
+[ "$NO_TEMPLATE_SET" -eq 0 ] || [ -n "$NO_TEMPLATE" ] || { echo "error: --no-template requires a reason" >&2; exit 1; }
+case "$NO_TEMPLATE" in *$'\n'*|*$'\r'*) echo "error: --no-template reason must be one line" >&2; exit 1 ;; esac
+
+if [ "$KIND" != secondmate ]; then
+  REPO=${POS[1]}
+  TEMPLATE_DIR="$DATA/brief-templates/$REPO"
+  if [ -e "$TEMPLATE_DIR" ] || [ "$TEMPLATE_SET" -eq 1 ]; then
+    case "$REPO" in ''|.|..|*/*) echo "error: project name cannot be a path for template lookup: $REPO" >&2; exit 1 ;; esac
+    TEMPLATE_CHOICES=$(python3 "$SCRIPT_DIR/fm-brief-template.py" list "$TEMPLATE_DIR" "$REPO") || exit 1
+  else
+    TEMPLATE_CHOICES=
+  fi
+  if [ -n "$TEMPLATE_CHOICES" ]; then
+    printf 'Available brief templates for %s:\n%s\n' "$REPO" "$TEMPLATE_CHOICES" >&2
+    if [ "$TEMPLATE_SET" -eq 0 ] && [ "$NO_TEMPLATE_SET" -eq 0 ]; then
+      echo "error: choose --template <name> or --no-template <reason>" >&2
+      exit 1
+    fi
+  fi
+  if [ "$TEMPLATE_SET" -eq 1 ]; then
+    [ -n "$TEMPLATE" ] || { echo "error: --template requires a name or file" >&2; exit 1; }
+    case "$TEMPLATE" in
+      */*|*.md) TEMPLATE_PATH=$TEMPLATE ;;
+      *) TEMPLATE_PATH="$TEMPLATE_DIR/$TEMPLATE.md" ;;
+    esac
+    TEMPLATE_ARGS=()
+    for value in "${TEMPLATE_VALUES[@]}"; do TEMPLATE_ARGS+=(--set "$value"); done
+    for value in "${TEMPLATE_FILES[@]}"; do TEMPLATE_ARGS+=(--set-file "$value"); done
+    RENDERED_TASK=$(python3 "$SCRIPT_DIR/fm-brief-template.py" render "$TEMPLATE_PATH" "$REPO" "${TEMPLATE_ARGS[@]}") || exit 1
+  fi
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -648,6 +717,13 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 {FIRSTMATE_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
+if [ "$TEMPLATE_SET" -eq 1 ]; then
+  TASK_SECTION=$RENDERED_TASK
+elif [ "$NO_TEMPLATE_SET" -eq 1 ]; then
+  TASK_SECTION="$TASK_SECTION
+
+Template decision: no template - $NO_TEMPLATE"
+fi
 
 IFS= read -r -d '' RUNBOOK_SECTION <<'EOF' || true
 # Worktree runbook
@@ -734,7 +810,11 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-li
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
+if [ "$TEMPLATE_SET" -eq 1 ]; then
+  echo "scaffolded: $BRIEF (scout; template $TEMPLATE_PATH)"
+else
+  echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
+fi
 exit 0
 fi
 
@@ -1033,7 +1113,9 @@ FrogPile's \`tests/task_evidence/*.log\` files are gitignored; when this task re
 
 $DOD
 EOF
-if [ "$LANE" -eq 1 ] && [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
+if [ "$TEMPLATE_SET" -eq 1 ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; template $TEMPLATE_PATH)"
+elif [ "$LANE" -eq 1 ] && [ "$OPEN_QUESTIONS_SET" -eq 1 ]; then
   echo "scaffolded: $BRIEF (ship lane, mode=$MODE; replace {TASK}, {FIRSTMATE_SPEC}, and {OPEN_QUESTION_DEPENDENCIES})"
 elif [ "$LANE" -eq 1 ]; then
   echo "scaffolded: $BRIEF (ship lane, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"

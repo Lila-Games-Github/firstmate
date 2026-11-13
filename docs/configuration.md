@@ -317,6 +317,7 @@ A local standalone-clone home cannot receive a primary-local commit through that
 ## FM_HOME
 
 `FM_HOME` selects the operational home for one firstmate instance.
+Private brief templates live under `data/brief-templates/<project>/`; `bin/fm-brief.sh --help` owns their format, selection, and validation flags.
 When it is unset, most scripts use the repo root as the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
