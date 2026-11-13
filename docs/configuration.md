@@ -867,8 +867,8 @@ Place the secret in that home's private `config/frogpile-workbook.key` file as o
 Keep the key out of chat, shell arguments, tracked files, and task reports.
 Run `FM_HOME=/path/to/home bin/fm-frogpile-workbook-fetch.py --check` to check local readiness without fetching.
 Run `FM_HOME=/path/to/home bin/fm-frogpile-workbook-fetch.py` whenever a fresh export is needed.
-The command stores raw bytes and metadata under private `data/frogpile-workbook/` and prints a bounded path, byte count, and checksum receipt.
-The response format is still unvalidated, so inspect its structure and compare its source counts and records with the 13 November pinned export before letting a new snapshot supersede that export.
+The command stores raw bytes and metadata under private `data/frogpile-workbook/` and prints a path, byte count, and checksum receipt.
+The response format is still unvalidated, so inspect its structure and compare its source counts and records with the pinned export before letting a new snapshot supersede that export.
 The command header and `--help` own the exact validation and fetch mechanics.
 
 ## Mail plane (.env)

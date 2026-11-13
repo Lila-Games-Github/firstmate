@@ -5,7 +5,8 @@ Usage: FM_HOME=/path/to/home bin/fm-frogpile-workbook-fetch.py [--check]
 
 The private inputs are config/frogpile-workbook.url (HTTPS endpoint, without a
 key query parameter) and config/frogpile-workbook.key (one nonempty line with
-no newline, owned by this user, regular, non-symlink, mode 0600 or 0400).
+no newline, owned by this user, readable, regular, non-symlink, with no
+group or other permissions).
 curl receives --get --data-urlencode key@FILE, so the key never enters argv.
 Only HTTPS redirects are allowed. Connect and total timeouts are 10 and 60
 seconds. A successful nonempty response is stored as raw bytes under
