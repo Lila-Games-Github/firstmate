@@ -134,8 +134,22 @@ fm_remote_local_landing() {
 
 # Also appended at launch so old/custom briefs and relaunches cannot retain the
 # workstation-only no-push/queue contract in a remote provisioned home.
-fm_remote_local_dod() { # <task-id>
-  local id=$1
+fm_remote_local_dod() { # <task-id> [lane]
+  local id=$1 kind=${2:-ship}
+  if [ "$kind" = lane ]; then
+    cat <<'EOF'
+# Current remote local-only delivery contract
+Delivery contract: mode=local-only
+This section supersedes earlier local-only delivery, no-push and landing-queue instructions in this brief.
+Commit on the branch your registered Playbot workspace owns, and verify `git branch --show-current` still names that branch before publication.
+Push only that exact workspace branch to origin with `git push origin HEAD:refs/heads/<workspace-branch>` and verify `git ls-remote origin refs/heads/<workspace-branch>` equals your full HEAD SHA, replacing the placeholder with the verified branch name.
+Never push a landing branch or the default branch, open a PR, merge, run the workstation farm, or join a landing queue from this remote home.
+Report `done: remote branch=<workspace-branch> head=<full HEAD SHA>` to your secondmate and stop.
+The main home imports that report into its workstation landing worker, which owns farm submission, receipts, front-of-line rebases and landing under the existing merge authority.
+On a conflict steer, fetch the supplied target branch, verify its full target SHA, resolve the same workspace branch against that target, then push and report the new head; a rewritten task branch may use `--force-with-lease` only for its previously reported remote head.
+EOF
+    return
+  fi
   cat <<EOF
 # Current remote local-only delivery contract
 Delivery contract: mode=local-only

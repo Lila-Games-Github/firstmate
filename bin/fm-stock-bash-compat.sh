@@ -167,8 +167,8 @@ run_consumer lane-send "lane test-service completion delivery" "$LANE_SEND_TIMEO
 # The watcher poll calls fm-farm-results.py, which delivers through fm-send.sh.
 run_consumer farm-results "watcher farm-result delivery and submit label" "$FARM_RESULTS_TIMEOUT" 7 \
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-farm-results.test.sh"
-remote_landing_assertions=8
-[ "${FM_SKIP_TESTFARM:-}" != 1 ] || remote_landing_assertions=5
+remote_landing_assertions=13
+[ "${FM_SKIP_TESTFARM:-}" != 1 ] || remote_landing_assertions=10
 run_consumer remote-landing "remote branch import and workstation landing" "$MERGE_TIMEOUT" "$remote_landing_assertions" \
   "$STOCK_BASH" "$ROOT/tests/fm-remote-landing.test.sh"
 run_consumer remote-export "remote local-only brief launch and promotion" "$MERGE_TIMEOUT" 1 \

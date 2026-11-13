@@ -163,12 +163,15 @@ Seed that project with `--main-landing`; the [seed header](../bin/fm-remote-home
 Local secondmate seeding still refuses `local-only` projects.
 The remote project's registry keeps its `local-only` posture.
 The remote-parent binding selects the branch-publication contract owned by [fm-dod-lib.sh](../bin/fm-dod-lib.sh), including generated briefs, promoted scouts and launch overlays for old briefs or relaunches.
-The remote worker commits and pushes its `fm/<remote-task>` branch and reports that branch with its full head SHA to its secondmate, which relays the report to the main home.
+An ordinary remote worker commits and pushes its `fm/<remote-task>` branch; a Playbot lane publishes the branch recorded for its workspace.
+Both report the exact branch and full head SHA to the secondmate, which relays the report to the main home.
 
 Keep the landing backlog item and worker in the main home, and route the implementation request separately to the remote secondmate.
-The workstation worker must have ordinary `local-only` metadata naming its project, disposable worktree and landing branch; it remains the owner of farm delivery and queue wakes.
+The workstation worker must have `local-only` metadata naming its project, worktree and landing branch; a Playbot lane additionally binds its recorded project, workspace and branch identity.
+It remains the owner of farm delivery and queue wakes.
 In that worker, import the reported branch using [fm-remote-landing.sh](../bin/fm-remote-landing.sh); its header owns arguments, refusal rules, retained import heads and conflict handoff mechanics.
-The import fetches only the task branch and checks the reported head before updating the workstation worker's branch.
+The import fetches only the reported branch and checks its exact head before updating the workstation worker's branch.
+For a lane, the Playbot addon guard preserves and verifies complete injected addon bytes across import and rebase while refusing unrelated dirty product work.
 Submit the existing farm from that copy, collect exact-head suite and configured gate receipts, and join the existing [landing queue](../bin/fm-landing-queue.sh) as that workstation task.
 The main home lands through [fm-merge-local.sh](../bin/fm-merge-local.sh) under its existing merge authority.
 Phones, farm execution, gates, receipts and landing rules retain their existing owners.

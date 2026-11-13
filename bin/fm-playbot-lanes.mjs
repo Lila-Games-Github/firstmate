@@ -27,8 +27,9 @@
 //                     Print the tracked-churn allowlist this file owns, one
 //                     path per line, so other tools read it here instead of
 //                     keeping a copy. Starts no server and touches no state.
-//   addon-guard       Preserve injected addons around a local reset/stash, or
+//   addon-guard       Preserve injected addons around local Git mutations, or
 //                     verify complete bytes and product-commit exclusion.
+//   lane-task-branch  Resolve the exact recorded branch of one lane workspace.
 //
 // The server talks to Playbot through its local Electron DevTools socket and
 // invokes Playbot's own IPC handlers: threads:launch for chat and workspace
@@ -5575,6 +5576,19 @@ function laneMeta(file) {
   return meta;
 }
 
+function laneTaskBranch(file) {
+  const meta = laneMeta(file);
+  if (meta.kind !== "lane" || !meta.playbot_project || !meta.playbot_workspace || !meta.project || !meta.worktree) throw new Error("lane task identity is incomplete");
+  if (meta.playbot_desktop) process.env.PLAYBOT_DESKTOP_DIR = supervisionPath(meta.playbot_desktop, "lane desktop directory");
+  const project = topology().find((candidate) => candidate.id === meta.playbot_project);
+  if (!project?.roots.some((candidate) => canonicalPath(candidate.path) === canonicalPath(meta.project))) throw new Error("lane project root differs from recorded Playbot project");
+  const workspace = project?.workspaces.find((candidate) => candidate.id === meta.playbot_workspace && candidate.archiveState === "active");
+  const root = workspace?.roots.filter((candidate) => canonicalPath(candidate.path) === canonicalPath(meta.worktree));
+  if (!root || root.length !== 1 || !root[0].branch) throw new Error("lane workspace has no exact recorded worktree branch");
+  if (meta.playbot_branch && meta.playbot_branch !== root[0].branch) throw new Error("lane metadata branch differs from recorded Playbot workspace branch");
+  return root[0].branch;
+}
+
 function laneIdentityHelper(helper, state, taskId, phase = "capture") {
   const data = path.join(controllerRoot(), "data");
   const result = spawnSync("bash", [
@@ -5717,6 +5731,7 @@ async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, mode, c
       spawn_gen: `s${Date.now()}.${process.pid}.${crypto.randomBytes(16).toString("hex")}`,
       playbot_project: worker.project_id,
       playbot_workspace: worker.workspace_id,
+      playbot_branch: root.branch,
       playbot_thread: worker.thread_id,
       playbot_desktop: desktopDir(),
       playbot_harness_home: harnessDir(),
@@ -7402,8 +7417,9 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs serve",
     "  fm-playbot-lanes.mjs setup|doctor|install",
     "  fm-playbot-lanes.mjs tracked-churn-allowlist",
-    "  fm-playbot-lanes.mjs addon-guard verify|check-index|reset <ref>|stash [--all|--include-untracked] [--message text]",
+    "  fm-playbot-lanes.mjs addon-guard verify|check-index|reset <ref>|remote-checkout <branch> <head>|remote-rebase <target> <from>|stash [--all|--include-untracked] [--message text]",
     "  fm-playbot-lanes.mjs lane-task-state <task.meta> [state-dir]",
+    "  fm-playbot-lanes.mjs lane-task-branch <task.meta>",
     "  fm-playbot-lanes.mjs lane-task-retirable <task.meta> [state-dir]",
     "  fm-playbot-lanes.mjs board-lanes <state-dir>",
     "",
@@ -7553,16 +7569,23 @@ async function main() {
   if (command === "tracked-churn-allowlist") return console.log(PLAYBOT_TRACKED_CHURN_PATHS.join("\n"));
   if (command === "addon-guard") {
     const root = canonicalPath(git(process.cwd(), ["rev-parse", "--show-toplevel"]).trim());
+    const expectedWorkspace = process.env.FM_PLAYBOT_EXPECTED_WORKSPACE;
+    const expectedBranch = process.env.FM_PLAYBOT_EXPECTED_BRANCH;
     const matches = topology().flatMap((project) => project.workspaces
-      .filter((workspace) => workspace.archiveState === "active" && workspace.roots.some((entry) => {
-        const relative = path.relative(root, canonicalPath(entry.path));
-        return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-      })));
+      .filter((workspace) => workspace.archiveState === "active"
+        && (!expectedWorkspace || workspace.id === expectedWorkspace)
+        && workspace.roots.some((entry) => canonicalPath(entry.path) === root
+          && (!expectedBranch || entry.branch === expectedBranch))));
     if (matches.length !== 1) throw new Error("addon-guard requires one exact registered Playbot workspace in the current Git worktree");
     const verify = () => addonReadiness(root);
     const report = await verify();
     const result = await guardAddon({ root, report, operation: process.argv[3], args: process.argv.slice(4), git, indexFlags: gitIndexFlags(root), operations: gitOperationState(root), trackedChurn: isTrackedPlaybotChurn, verify });
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (command === "lane-task-branch") {
+    if (process.argv.length !== 4) throw new Error("lane-task-branch requires one lane metadata path");
+    console.log(laneTaskBranch(process.argv[3]));
     return;
   }
   if (command === "supervision-poll") return await supervisionPoll(process.argv.slice(3));

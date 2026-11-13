@@ -903,6 +903,9 @@ if [ "$LANE" -eq 0 ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; 
   LANDING_BRANCH=$(fm_meta_get "$STATE/$ID.meta" landing_branch)
 fi
 DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH" "$QUEUE_PRIORITY") || exit 1
+if [ "$LANE" -eq 1 ] && [ "$MODE" = local-only ] && fm_remote_local_landing; then
+  DOD=$(fm_remote_local_dod "$ID" lane) || exit 1
+fi
 
 # Lane substitutions preserve the shared owner while naming the workspace branch.
 dod_replace() {  # <old> <new>
@@ -929,14 +932,19 @@ if [ "$LANE" -eq 1 ]; then
       LANE_DOD_OVERRIDE="Follow the current direct-PR base contract above (owner: bin/fm-dod-lib.sh)."
       ;;
     local-only)
-      RULE1="1. Never push to any remote and never open a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches. Firstmate handles the merge into $LANE_LANDING_TARGET."
-      LANE_DOD_OVERRIDE="Never create or switch branches: a branch of your own steps off the one your workspace owns."
-      dod_replace "The task is complete only when committed on your branch \`fm/$ID\`." \
-        "The task is complete only when committed on $LANE_BRANCH_DESC."
-      dod_replace "$DOD_DEFAULT_KEEP" \
-        "Keep that branch a clean fast-forward onto $LANE_LANDING_TARGET."
-      dod_replace "$DOD_DEFAULT_MERGE" \
-        "The configured merge authority approves the ready branch, then firstmate merges it into $LANE_LANDING_TARGET through the guarded fast-forward path."
+      if fm_remote_local_landing; then
+        RULE1="1. Push only $LANE_BRANCH_DESC to origin; never push a landing branch, open a PR, or switch branches."
+        LANE_DOD_OVERRIDE="Publish only the verified workspace branch under the current remote local-only delivery contract above."
+      else
+        RULE1="1. Never push to any remote and never open a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches. Firstmate handles the merge into $LANE_LANDING_TARGET."
+        LANE_DOD_OVERRIDE="Never create or switch branches: a branch of your own steps off the one your workspace owns."
+        dod_replace "The task is complete only when committed on your branch \`fm/$ID\`." \
+          "The task is complete only when committed on $LANE_BRANCH_DESC."
+        dod_replace "$DOD_DEFAULT_KEEP" \
+          "Keep that branch a clean fast-forward onto $LANE_LANDING_TARGET."
+        dod_replace "$DOD_DEFAULT_MERGE" \
+          "The configured merge authority approves the ready branch, then firstmate merges it into $LANE_LANDING_TARGET through the guarded fast-forward path."
+      fi
       ;;
     *)
       RULE1="1. Never push to the default branch. Never merge a PR. Work only on $LANE_BRANCH_DESC; never create or switch branches."
@@ -971,7 +979,11 @@ if [ "$LANE" -eq 1 ]; then
     direct-PR)
       LANE_CONTRACT_RULE="You push your branch and open the PR yourself with \`gh-axi\`. Never run /no-mistakes on this task." ;;
     local-only)
-      LANE_CONTRACT_RULE="No remote, no PR, no pipeline: never push, never open a PR, never run /no-mistakes. Firstmate lands your branch." ;;
+      if fm_remote_local_landing; then
+        LANE_CONTRACT_RULE="Push only your verified workspace branch to origin for main-home import; never open a PR or run /no-mistakes."
+      else
+        LANE_CONTRACT_RULE="No remote, no PR, no pipeline: never push, never open a PR, never run /no-mistakes. Firstmate lands your branch."
+      fi ;;
     *)
       LANE_CONTRACT_RULE="Implement and commit, then start /no-mistakes yourself and continue through the PR and green checks; follow the Definition of done below." ;;
   esac
