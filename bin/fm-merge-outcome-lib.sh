@@ -35,6 +35,35 @@ _FM_MERGE_OUTCOME_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
 FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 
+fm_merge_outcome_check_branches() { # <home> <state> <task-id>
+  local home=$1 state=$2 id=$3 meta project landing candidate
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  project=$(sed -n 's/^project=//p' "$meta" | tail -1)
+  landing=$(sed -n 's/^landing_branch=//p' "$meta" | tail -1)
+  if [ -z "$project" ] || [ ! -d "$project" ]; then
+    # A poll may confirm a merge after this home's project clone was retired.
+    # It has no project branch inventory to check and must not add a second
+    # wake that delays canonical poll retirement.
+    return 0
+  fi
+  if [ -z "$landing" ]; then
+    landing=$(git -C "$project" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    landing=${landing#origin/}
+    if [ -z "$landing" ]; then
+      for candidate in main master; do
+        if git -C "$project" show-ref --verify --quiet "refs/heads/$candidate"; then landing=$candidate; break; fi
+      done
+    fi
+  fi
+  if [ -z "$landing" ]; then
+    echo "warning: merged $id but landing branch is unknown for trial merge checks" >&2
+    return 1
+  fi
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$_FM_MERGE_OUTCOME_LIB_DIR/fm-landing-conflicts.sh" "$project" "$landing" --remote
+}
+
 # fm_merge_outcome_report <home> <state> <task-id> <pr-url> <origin> [authority]
 #
 # <origin> says who observed the merge, because that decides whether the
@@ -93,6 +122,8 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
     # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
     FM_MERGE_OUTCOME_ALREADY_RECORDED=true
     fm_lock_release "$lock"
+    fm_merge_outcome_check_branches "$home" "$state" "$id" \
+      || echo "warning: merged $id but unlanded branch conflict checks were incomplete" >&2
     return 0
   fi
 
@@ -108,5 +139,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
       "$provider" "$host" "$path" "$number" || status=1
   fi
   fm_lock_release "$lock"
+  fm_merge_outcome_check_branches "$home" "$state" "$id" \
+    || echo "warning: merged $id but unlanded branch conflict checks were incomplete" >&2
   return "$status"
 }

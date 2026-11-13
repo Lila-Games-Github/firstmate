@@ -45,6 +45,7 @@ case "${0##*/}" in
   fm-worker-timing.test.sh) key=worker-timing; count=6 ;;
   fm-teardown.test.sh) key=teardown-farm; count=5 ;;
   fm-merge-local.test.sh) key=merge; count=18 ;;
+  fm-landing-conflicts.test.sh) key=landing-conflicts; count=4 ;;
   fm-worker-doorbell.test.sh) key=doorbell; count=5 ;;
   fm-lane-send.test.sh) key=lane-send; count=6 ;;
   fm-farm-results.test.sh) key=farm-results; count=7 ;;
@@ -81,6 +82,7 @@ SH
     fm-worker-timing.test.sh \
     fm-teardown.test.sh \
     fm-merge-local.test.sh \
+    fm-landing-conflicts.test.sh \
     fm-worker-doorbell.test.sh \
     fm-lane-send.test.sh \
     fm-farm-results.test.sh \
@@ -142,8 +144,8 @@ SH
     FM_TEST_TIMEOUT_RECORD="$record" \
     /bin/bash bin/fm-stock-bash-compat.sh 2>&1) || rc=$?
   expect_code 0 "$rc" "default stock Bash compatibility fixture completes"
-  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 16 ] \
-    || fail "each of the fourteen stock Bash consumers needs one passing verdict"
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 17 ] \
+    || fail "each stock Bash consumer needs one passing verdict"
   assert_contains "$out" "ok - fixture assertion 1" \
     "default oversized route completes through the public compatibility wrapper"
   assert_present "$record" "default oversized route did not receive a timeout bound"
@@ -171,7 +173,7 @@ test_every_hung_consumer_is_named_and_streamed() {
       || fail "$key must emit exactly one explicit verdict"
     assert_contains "$out" "one or more stock macOS Bash consumers failed" \
       "$key timeout produces the final compatibility verdict"
-    if [ "$key" != merge ] && [ "$key" != doorbell ] && [ "$key" != lane-send ] && [ "$key" != farm-results ]; then
+    if [ "$key" != merge ] && [ "$key" != landing-conflicts ] && [ "$key" != doorbell ] && [ "$key" != lane-send ] && [ "$key" != farm-results ]; then
       assert_contains "$out" "later consumer completed" \
         "$key timeout does not suppress the later PR 19 consumer"
     fi
@@ -187,6 +189,7 @@ landing|landing-queue test farm resolve, watcher sweep, and front step-back
 worker-timing|worker timing status and teardown record
 teardown-farm|teardown testfarm request ownership
 merge|PR 19 local-merge branch resolution
+landing-conflicts|post-landing trial merge notification
 doorbell|worker gate and job doorbells
 lane-send|lane test-service completion delivery
 farm-results|watcher farm-result delivery and submit label

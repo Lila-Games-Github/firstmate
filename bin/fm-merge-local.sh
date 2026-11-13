@@ -296,12 +296,19 @@ reconcile_landing_queue() {
     "$SCRIPT_DIR/fm-landing-queue.sh" reconcile "$ID" --project "$PROJ" --landing-branch "$TARGET" \
     || echo "warning: landing SUCCEEDED but the $TARGET landing queue was not reconciled; run bin/fm-landing-queue.sh status for its next car" >&2
 }
+check_landing_conflicts() {
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-landing-conflicts.sh" "$PROJ" "$TARGET" \
+    || echo "warning: landing SUCCEEDED but unlanded branch conflict checks were incomplete" >&2
+}
 if [ "$health_status" -ne 0 ]; then
   echo "error: landing SUCCEEDED ($TARGET now at $INCOMING_SHA) but its full-suite receipt could not be recorded; supply --base-receipt for the next landing or re-record the receipt for this tip" >&2
   reconcile_landing_queue
+  check_landing_conflicts
   exit 3
 fi
 after=$(git -C "$PROJ" rev-parse --short "$TARGET")
 echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"
 [ "$INCOMING_COUNT" -eq 0 ] || echo "landing tip remains red; make-it-green task $GREEN_TASK is open; baseline receipt $RECORDED_RECEIPT"
 reconcile_landing_queue
+check_landing_conflicts

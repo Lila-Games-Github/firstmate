@@ -28,7 +28,7 @@ FARM_RESULTS_TIMEOUT=${FM_STOCK_BASH_FARM_RESULTS_TIMEOUT:-90}
 selected=all
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != --consumer ]; then
-    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|worker-timing|teardown-farm|doorbell|lane-send|farm-results|remote-landing|remote-export]" >&2
+    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|landing-conflicts|worker-timing|teardown-farm|doorbell|lane-send|farm-results|remote-landing|remote-export]" >&2
     exit 2
   fi
   selected=$2
@@ -158,6 +158,8 @@ run_consumer teardown-farm "teardown testfarm request ownership" "$TEARDOWN_FARM
   "$STOCK_BASH" "$ROOT/tests/fm-teardown.test.sh"
 run_consumer merge "PR 19 local-merge branch resolution" "$MERGE_TIMEOUT" "$merge_assertions" \
   "$STOCK_BASH" "$ROOT/tests/fm-merge-local.test.sh"
+run_consumer landing-conflicts "post-landing trial merge notification" "$MERGE_TIMEOUT" 4 \
+  "$STOCK_BASH" "$ROOT/tests/fm-landing-conflicts.test.sh"
 run_consumer doorbell "worker gate and job doorbells" "$DOORBELL_TIMEOUT" 5 \
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-worker-doorbell.test.sh"
 run_consumer lane-send "lane test-service completion delivery" "$LANE_SEND_TIMEOUT" 6 \
