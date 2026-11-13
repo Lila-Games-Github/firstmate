@@ -1101,17 +1101,17 @@ test_remote_local_only_contract_consumers() {
 $rec
 EOF
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' > "$home/.fm-secondmate-parent"
-  id=remote-generated
+  id='remote-generated'
   FM_HOME="$home" "$BASH" "$BRIEF" "$id" proj --mode local-only --no-template 'Remote export contract' >/dev/null \
     || fail 'remote local-only brief generation failed'
   assert_grep 'HEAD:refs/heads/fm/remote-generated' "$home/data/$id/brief.md" 'generated remote brief still uses local completion'
-  id=remote-old
+  id='remote-old'
   write_brief "$home" "$id" local-only
   printf 'Do NOT push; join the workstation queue.\n' >> "$home/data/$id/brief.md"
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode local-only --yolo off)
   assert_grep '# Current remote local-only delivery contract' "$home/data/$id/launch-brief.md" "old remote brief lacks current export overlay: $out"
   assert_grep 'supersedes earlier local-only delivery, no-push' "$home/data/$id/launch-brief.md" 'launch overlay did not supersede stale rules'
-  id=remote-promoted
+  id='remote-promoted'
   write_brief "$home" "$id"
   printf 'kind=scout\nwindow=fm-%s\nworktree=/tmp/remote-scout\n' "$id" > "$home/state/$id.meta"
   out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$BASH" "$PROMOTE" "$id" --mode local-only --yolo off 2>&1) \
