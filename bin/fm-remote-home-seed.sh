@@ -2,7 +2,7 @@
 # Register and provision a whole secondmate home on an SSH-reachable host.
 #
 # Usage:
-#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
+#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> [--main-landing] {<project>[=<origin-url>]...|--no-projects}
 #
 # The SSH alias must already reach a host whose non-interactive PATH exposes the
 # fixed fm-remote-entrypoint.sh from <remote-root>. The command records the
@@ -17,7 +17,9 @@
 # this home already has projects/<project>, whose origin is then read instead.
 # bin/fm-project-origin-lib.sh owns which URLs are accepted, and this home's
 # data/projects.md still owns the project's registered delivery mode, so an
-# unregistered or local-only project is refused rather than provisioned.
+# unregistered project is refused. --main-landing explicitly permits local-only
+# projects whose landing remains in the main home; remote workers only push
+# their task branches (contract: bin/fm-dod-lib.sh).
 # Seeding writes nothing under projects/ and needs no fleet sync first.
 #
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
@@ -80,10 +82,13 @@ case "$REMOTE_HOME/" in "$REMOTE_ROOT/"*) die "remote home must not be inside th
 case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be inside the remote home" ;; esac
 
 NO_PROJECTS=0
+MAIN_LANDING=0
 PROJECT_NAMES=()
 PROJECT_ORIGINS=()
 for arg in "$@"; do
-  if [ "$arg" = --no-projects ]; then
+  if [ "$arg" = --main-landing ]; then
+    MAIN_LANDING=1
+  elif [ "$arg" = --no-projects ]; then
     NO_PROJECTS=1
   else
     name=${arg%%=*}
@@ -166,7 +171,7 @@ $MODE_LINE
 EOF
   case "$MODE" in
     no-mistakes|direct-PR) ;;
-    local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
+    local-only) [ "$MAIN_LANDING" -eq 1 ] || die "project $project is local-only; pass --main-landing to keep its landing in the main home" ;;
     *) die "project $project has unsupported delivery mode: $MODE" ;;
   esac
   # An origin named on the command line is authoritative. Reading one from a

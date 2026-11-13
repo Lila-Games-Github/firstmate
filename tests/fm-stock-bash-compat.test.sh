@@ -48,6 +48,8 @@ case "${0##*/}" in
   fm-worker-doorbell.test.sh) key=doorbell; count=5 ;;
   fm-lane-send.test.sh) key=lane-send; count=6 ;;
   fm-farm-results.test.sh) key=farm-results; count=7 ;;
+  fm-remote-landing.test.sh) key=remote-landing; count=8 ;;
+  fm-task-delivery.test.sh) key=remote-export; count=1 ;;
   *) exit 2 ;;
 esac
 if [ "${FM_TEST_HANG_CONSUMER:-}" = "$key" ]; then
@@ -81,7 +83,9 @@ SH
     fm-merge-local.test.sh \
     fm-worker-doorbell.test.sh \
     fm-lane-send.test.sh \
-    fm-farm-results.test.sh
+    fm-farm-results.test.sh \
+    fm-remote-landing.test.sh \
+    fm-task-delivery.test.sh
   do
     cp "$tmp/tests/consumer.sh" "$tmp/tests/$file"
   done
@@ -138,7 +142,7 @@ SH
     FM_TEST_TIMEOUT_RECORD="$record" \
     /bin/bash bin/fm-stock-bash-compat.sh 2>&1) || rc=$?
   expect_code 0 "$rc" "default stock Bash compatibility fixture completes"
-  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 14 ] \
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 16 ] \
     || fail "each of the fourteen stock Bash consumers needs one passing verdict"
   assert_contains "$out" "ok - fixture assertion 1" \
     "default oversized route completes through the public compatibility wrapper"

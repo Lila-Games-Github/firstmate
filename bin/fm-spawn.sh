@@ -2924,6 +2924,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
           fm_brief_intent_overlay "$CAPTAIN_INTENT"
       elif [ "$KIND" = ship ] && [ "$MODE" = direct-PR ]; then
         fm_direct_pr_target_block "$LANDING_BRANCH"
+      elif [ "$KIND" = ship ] && [ "$MODE" = local-only ] && fm_remote_local_landing; then
+        fm_remote_local_dod "$ID"
       fi &&
       # A relaunch keeps the fresh spawn's preflight outcome in front of the
       # replacement worker; a fresh spawn writes its own after the probes.
