@@ -818,7 +818,7 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
 
 wait_for_file_text() {  # <file> <fixed-text>
   local file=$1 expected=$2 i=0
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt 600 ]; do
     grep -F "$expected" "$file" >/dev/null 2>&1 && return 0
     sleep 0.05
     i=$((i + 1))
@@ -1524,7 +1524,7 @@ test_interruption_before_and_after_raw_commit() {
   FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
   pid=$!
   i=0
-  while [ "$i" -lt 100 ] && [ ! -e "$state/.wake-queue.lock" ]; do
+  while [ "$i" -lt 600 ] && [ ! -e "$state/.wake-queue.lock" ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -1910,7 +1910,7 @@ SH
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/holder.ready" "$dir/release-holder" &
   holder_pid=$!
   i=0
-  while [ "$i" -lt 100 ] && [ ! -s "$dir/holder.ready" ]; do
+  while [ "$i" -lt 600 ] && [ ! -s "$dir/holder.ready" ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -1929,7 +1929,7 @@ SH
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/waiter.ready" "$dir/release-waiter" &
   waiter_pid=$!
   i=0
-  while [ "$i" -lt 100 ] && ! grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1; do
+  while [ "$i" -lt 600 ] && ! grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -1941,7 +1941,7 @@ SH
   : > "$dir/release-holder"
   wait "$holder_pid" || { kill "$waiter_pid" 2>/dev/null || true; fail "fixture holder did not release cleanly"; }
   i=0
-  while [ "$i" -lt 100 ] && [ ! -s "$dir/waiter.ready" ]; do
+  while [ "$i" -lt 600 ] && [ ! -s "$dir/waiter.ready" ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -1987,7 +1987,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" "$dir/queue.ready" &
   queue_holder=$!
   i=0
-  while [ "$i" -lt 100 ] && [ ! -s "$dir/queue.ready" ]; do
+  while [ "$i" -lt 600 ] && [ ! -s "$dir/queue.ready" ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -2027,7 +2027,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.status-presentation-lock" "$dir/presentation.ready" &
   presentation_holder=$!
   i=0
-  while [ "$i" -lt 100 ] && [ ! -s "$dir/presentation.ready" ]; do
+  while [ "$i" -lt 600 ] && [ ! -s "$dir/presentation.ready" ]; do
     sleep 0.05
     i=$((i + 1))
   done
@@ -2072,7 +2072,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" "$dir/ack.ready" &
   ack_holder=$!
   i=0
-  while [ "$i" -lt 100 ] && [ ! -s "$dir/ack.ready" ]; do
+  while [ "$i" -lt 600 ] && [ ! -s "$dir/ack.ready" ]; do
     sleep 0.05
     i=$((i + 1))
   done

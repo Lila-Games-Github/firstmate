@@ -3966,7 +3966,7 @@ if (!promptBodies.some((body) => body.includes("TURN WOULD END BLIND"))) {
   console.error(`missing blind-turn prompt: ${promptBodies.join("\n")}`);
   process.exit(1);
 }
-// The external arm's 250ms retry may deliver another prompt after the guard.
+// The external arm 250ms retry may deliver another prompt after the guard.
 // Observe that later delivery so a last-prompt-only assertion cannot pass by timing.
 for (let i = 0; i < 250 && !promptBodies.some((body) => body.includes("continuity retry")); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
