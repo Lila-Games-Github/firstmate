@@ -230,6 +230,7 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     while [ ! -f "$FM_FAKE_SEED_RELEASE" ]; do sleep 0.02; done
     exit 1
     ;;
+  provision-timeout:fm-remote-home-provision.sh:*) exit 124 ;;
   launch-block:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
     touch "$FM_FAKE_LAUNCH_ENTERED"
@@ -406,6 +407,18 @@ assert_grep '- seed-keep ' "$TMP_ROOT/seed-parent/data/secondmates.md" "failed s
 assert_present "$TMP_ROOT/seed-keep-home/.fm-secondmate-home" "serialized seed lost its published remote home"
 pass "remote seed rollback preserves serialized competing routes"
 
+if FM_SECONDMATE_CHARTER='Timed out seed charter.' FM_SECONDMATE_SCOPE='timed out seed' \
+  FM_FAKE_SSH_MODE=provision-timeout seed_env "$ROOT/bin/fm-remote-home-seed.sh" \
+  seed-timeout remote-mac "$REMOTE_ROOT" "$TMP_ROOT/seed-timeout-home" --no-projects \
+  > "$TMP_ROOT/seed-timeout.out" 2>&1; then
+  fail "a remote job timeout claimed provisioning success"
+fi
+assert_grep 'remote provisioning job timed out (exit 124)' "$TMP_ROOT/seed-timeout.out" \
+  "the parent hid the remote timeout behind a generic failure"
+assert_no_grep '- seed-timeout ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "a timed out seed retained a registered route"
+pass "remote provisioning reports its timeout and restores the registry"
+
 : > "$DOCTOR_LOG"
 if FM_SECONDMATE_CHARTER='Unknown readiness charter.' FM_SECONDMATE_SCOPE='unknown readiness' \
   FM_FAKE_SSH_MODE=doctor-fix-unknown seed_env "$ROOT/bin/fm-remote-home-seed.sh" \
@@ -535,6 +548,55 @@ assert_present "$TMP_ROOT/seed-localonly-home/projects/delta/README.md" "local-o
 assert_grep '- delta [local-only]' "$TMP_ROOT/seed-localonly-home/data/projects.md" "remote seed changed local-only posture"
 assert_grep 'route=remote' "$TMP_ROOT/seed-localonly-home/.fm-secondmate-parent" "remote binding absent"
 pass "remote local-only seeding requires main-owned landing and preserves project posture"
+
+# A populated home must accept another project without rewriting its backlog
+# or endpoint. Model the observed aborted clone with Git's .invalid sentinel.
+printf '%s\n' 'live endpoint' > "$TMP_ROOT/seed-localonly-home/state/live.meta"
+printf '%s\n' '## In flight' '' '## Queued' > "$TMP_ROOT/seed-localonly-home/data/backlog.md"
+for item in 1 2 3 4 5 6 7; do
+  printf '%s\n' "- [ ] queued-$item" >> "$TMP_ROOT/seed-localonly-home/data/backlog.md"
+done
+printf '%s\n' '' '## Done' >> "$TMP_ROOT/seed-localonly-home/data/backlog.md"
+BACKLOG_BEFORE=$(sha256_file "$TMP_ROOT/seed-localonly-home/data/backlog.md")
+DELTA_HEAD=$(git -C "$TMP_ROOT/seed-localonly-home/projects/delta" rev-parse HEAD)
+git init -q "$TMP_ROOT/seed-localonly-home/projects/beta"
+git -C "$TMP_ROOT/seed-localonly-home/projects/beta" remote add origin "$BETA_ORIGIN"
+printf 'ref: refs/heads/.invalid\n' > "$TMP_ROOT/seed-localonly-home/projects/beta/.git/HEAD"
+printf 'unfinished pack\n' > "$TMP_ROOT/seed-localonly-home/projects/beta/.git/objects/pack/tmp_pack_fixture"
+out=$(seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-localonly remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-localonly-home" --main-landing "delta=$BETA_ORIGIN" "beta=$BETA_ORIGIN" 2>&1) \
+  || fail "adding to a populated remote home failed: $out"
+assert_contains "$out" 'quarantined incomplete clone for beta' \
+  "the aborted clone was not preserved and replaced"
+assert_grep '- beta [direct-PR]' "$TMP_ROOT/seed-localonly-home/data/projects.md" \
+  "the added project was not registered in the remote home"
+assert_grep 'projects: delta, beta' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "the parent did not register the expanded project list"
+[ "$(git -C "$TMP_ROOT/seed-localonly-home/projects/beta" rev-parse HEAD)" = \
+  "$(git --git-dir="$TMP_ROOT/beta.git" rev-parse HEAD)" ] \
+  || fail "the new project did not finish cloning"
+[ "$(git -C "$TMP_ROOT/seed-localonly-home/projects/delta" rev-parse HEAD)" = "$DELTA_HEAD" ] \
+  || fail "the existing project clone moved"
+[ "$(sha256_file "$TMP_ROOT/seed-localonly-home/data/backlog.md")" = "$BACKLOG_BEFORE" ] \
+  || fail "adding a project rewrote the seven-item backlog"
+[ "$(cat "$TMP_ROOT/seed-localonly-home/state/live.meta")" = 'live endpoint' ] \
+  || fail "adding a project changed the live endpoint"
+assert_present "$TMP_ROOT/seed-localonly-home/projects/beta/README.md" \
+  "the new project has no checked-out worktree"
+quarantine_count=$(find "$TMP_ROOT/seed-localonly-home/projects" -maxdepth 1 -name '.fm-incomplete-beta.*' | wc -l | tr -d ' ')
+[ "$quarantine_count" -eq 1 ] || fail "the incomplete clone was not quarantined exactly once"
+pass "populated remote home adds a project and preserves seven backlog items, live endpoint, and old clone"
+
+if seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-localonly remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-localonly-home" --main-landing "delta=$BETA_ORIGIN" \
+  "beta=file://$TMP_ROOT/alpha.git" > "$TMP_ROOT/seed-wrong-origin.out" 2>&1; then
+  fail "a wrong-origin reseed claimed success"
+fi
+assert_grep 'origin differs from the requested route' "$TMP_ROOT/seed-wrong-origin.out" \
+  "a wrong-origin clone did not explain its refusal"
+assert_grep 'projects: delta, beta' "$TMP_ROOT/seed-parent/data/secondmates.md" \
+  "a refused add changed the parent's project registry"
+pass "known-bad wrong-origin add is rejected without changing the registered route"
 
 if FM_SECONDMATE_CHARTER='Unregistered charter.' FM_SECONDMATE_SCOPE='unregistered' \
   seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-unregistered remote-mac "$REMOTE_ROOT" \

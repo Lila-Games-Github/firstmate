@@ -123,8 +123,13 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 Create and fill the normal secondmate charter first, then run:
 
 ```sh
-bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
+bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> [--main-landing] {<project>[=<origin-url>]...|--no-projects}
 ```
+
+To add a project to an existing route, rerun the seed with the same id, host, root, and home and the complete intended project list.
+The remote home preserves its existing backlog and endpoint, reuses matching project clones, and clones only additions.
+If an earlier clone was interrupted before checkout, the seed preserves that incomplete directory beside the projects and retries the clone; its output names the preserved path.
+Large project clones have a one-hour remote job limit, and a timeout is reported explicitly.
 
 `<remote-root>` is the remote Firstmate code clone that supplies tracked scripts.
 `<remote-home>` is a separate absolute path for the persistent secondmate home and must not overlap the code root.
