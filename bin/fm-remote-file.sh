@@ -10,14 +10,13 @@
 # Put is deliberately narrower: it atomically replaces only a backlog handoff
 # scratch file under state/handoff. There is no delete operation and no generic
 # write path; the receiving command owns scratch cleanup after committed ingest.
+# Get does not initialize the home: a fleet snapshot may query a registered
+# route before that route has been seeded.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
 MAX_DEFAULT=262144
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -216,6 +215,10 @@ case "$COMMAND" in
     case "/$REL/" in */../*|*/./*) die "put path contains traversal" ;; esac
     case "$REL" in *'//'*) die "put path is malformed" ;; esac
     HOME_REAL=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || die "FM_HOME is unavailable"
+    # Only put needs the wake library's lock helpers. Sourcing it for get
+    # would create FM_HOME/state even when this remote home is still absent.
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$SCRIPT_DIR/fm-wake-lib.sh"
     if put_handoff_file "$HOME_REAL" "$(basename "$REL")" "$MAX" "$REL" \
       "$EXPECTED_BYTES" "$EXPECTED_HASH" "$GENERATION"; then
       :
