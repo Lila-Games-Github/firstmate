@@ -8,7 +8,8 @@ The testfarm contract owns project declarations, submission commands, request st
 
 `bin/fm-brief.sh` selects a registered project with `project-for-repo` and tells the worker where to write its full-suite receipt.
 `bin/fm-landing-queue.sh` reads `landing-gates-for-repo` and submits its required checks through the same entry point.
-Its `documentation_path_globs` project setting lets the queue exempt `real-phone` for a car whose changed paths all match; the queue script's header owns the admission details.
+The optional `real_phone_path_globs` project setting limits the `real-phone` landing gate to cars with at least one matching changed path; without that setting, `documentation_path_globs` exempts cars whose changed paths all match.
+Both settings use safe relative globs, and the queue script's header owns the admission details.
 `bin/fm-landing-health-lib.sh` validates the three-line `fm-full-suite.v1` receipt for the exact tested SHA.
 The crew board reads testfarm's `status.json` through the existing `~/.local/state/firstmate-test-service` link; the `fm-test-service.v1` status schema remains supported.
 

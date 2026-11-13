@@ -118,6 +118,60 @@ queue_file=$(find "$CASE/home/data/landing-queue" -name queue -type f -print -qu
 expect_field "$(quick_receipt docs)" status ready-to-land
 pass 'a docs-only car admits on its suite receipt and records the phone exemption'
 
+make_case phone-path-required
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"documentation_path_globs":["**/*.md"],"real_phone_path_globs":["**/*.tscn","**/input/*.gd"]}
+EOF
+git -C "$CASE/project" worktree add -qb fm/ui "$CASE/ui" main
+mkdir -p "$CASE/ui/scenes"
+printf 'scene\n' > "$CASE/ui/scenes/main.tscn"
+git -C "$CASE/ui" add .
+git -C "$CASE/ui" commit -qm ui
+if join ui > "$CASE/refusal" 2>&1; then fail 'phone-relevant scene skipped real-phone'; fi
+grep -q 'requires pre-queue landing gate: real-phone' "$CASE/refusal" || fail 'phone path gate refusal was unclear'
+printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$(head_of ui)" "$BASE" > "$CASE/real-phone.gate"
+expect_field "$(join ui --gate-receipt real-phone="$CASE/real-phone.gate")" gate_exemption -
+pass 'a phone-relevant scene requires the real-phone gate'
+
+make_case phone-path-exempt
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"documentation_path_globs":["**/*.md"],"real_phone_path_globs":["**/*.tscn","**/input/*.gd"]}
+EOF
+git -C "$CASE/project" worktree add -qb fm/rules "$CASE/rules" main
+mkdir -p "$CASE/rules/src"
+printf 'rules\n' > "$CASE/rules/src/rules.gd"
+git -C "$CASE/rules" add .
+git -C "$CASE/rules" commit -qm rules
+out=$(join rules)
+expect_field "$out" status needs-quick
+expect_field "$out" gate_exemption 'real-phone: no changed paths match real_phone_path_globs'
+queue_file=$(find "$CASE/home/data/landing-queue" -name queue -type f -print -quit)
+[ "$(tail -1 "$queue_file" | cut -f 12)" = 'real-phone: no changed paths match real_phone_path_globs' ] \
+  || fail 'phone path exemption was not persisted on the queue row'
+pass 'a nonmatching rules change is exempt even when it is not documentation'
+
+make_case phone-path-invalid
+mkdir -p "$CASE/home/config/test-service"
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"real_phone_path_globs":["../unsafe/*.tscn"]}
+EOF
+car a
+if join a > "$CASE/refusal" 2>&1; then fail 'unsafe phone path glob admitted a car'; fi
+grep -q 'real_phone_path_globs must list safe relative globs' "$CASE/refusal" || fail 'unsafe phone path glob rejection was unclear'
+if python3 "$ROOT/bin/fm-docs-gate.py" "$CASE/home/config/test-service" project "$CASE/project" deadbeef "$(head_of a)" > "$CASE/bad-diff" 2>&1; then
+  fail 'unsafe phone path glob allowed an invalid Git diff'
+fi
+cat > "$CASE/home/config/test-service/project.json" <<'EOF'
+{"suite":["suite.sh"],"landing_branch":"main","landing_gates":["real-phone"],"real_phone_path_globs":["**/*.tscn"]}
+EOF
+if python3 "$ROOT/bin/fm-docs-gate.py" "$CASE/home/config/test-service" project "$CASE/project" deadbeef "$(head_of a)" > "$CASE/bad-diff" 2>&1; then
+  fail 'invalid Git diff qualified for phone path exemption'
+fi
+grep -q 'cannot read changed paths from Git diff' "$CASE/bad-diff" || fail 'invalid Git diff rejection was unclear'
+pass 'invalid phone path glob and Git diff fail closed'
+
 make_case docs-other-gate-required
 mkdir -p "$CASE/home/config/test-service"
 cat > "$CASE/home/config/test-service/project.json" <<'EOF'

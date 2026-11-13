@@ -14,7 +14,8 @@
 # ready joins at the back, or behind the front with --priority infra or unblock,
 # only with --branch, --head, --target, a green exact-head full-suite --receipt,
 # and one --gate-receipt for each configured landing gate, except real-phone
-# when every changed path matches documentation_path_globs in project config.
+# when every changed path matches documentation_path_globs in project config,
+# or, when real_phone_path_globs is present, no changed path matches that list.
 # The tested target must be an ancestor of the current landing tip and head.
 # Each gate receipt is four lines: schema=fm-landing-gate.v1, gate=<name>,
 # sha=<full head SHA>, target=<full target SHA>. A failed car must pass these
@@ -132,7 +133,7 @@
 # identified by the canonical common Git directory and landing branch. Rows in
 # append order hold id, branch, head, state, acknowledged base, receipt file,
 # receipt target, last notified event hash, failure reason (failed rows only),
-# owner task id, admission priority ('-', infra, or unblock), and docs-only
+# owner task id, admission priority ('-', infra, or unblock), and the
 # phone-gate exemption reason. Nine-field legacy rows resolve their owner on
 # refresh; ten-field legacy rows default priority to '-'.
 # '-' means absent. Row order is queue order: assignment walks rows top to
@@ -216,19 +217,24 @@ phone_gate_configured=0
 for gate_name in ${GATES[@]+"${GATES[@]}"}; do
   [ "$gate_name" != real-phone ] || phone_gate_configured=1
 done
-docs_only_exempt() { # <head> <target>; fail closed on invalid configuration
+phone_gate_exemption() { # <head> <target>; print reason, fail closed on invalid configuration
   local outcome=0
   [ "$phone_gate_configured" -eq 1 ] || return 1
   python3 "$SCRIPT_DIR/fm-docs-gate.py" "$DOCS_CONFIG_ROOT" "$REPO_NAME" "$PROJECT" "$2" "$1" || outcome=$?
-  [ "$outcome" -ne 2 ] || die 'invalid documentation path glob configuration or Git diff'
+  return "$outcome"
+}
+phone_gate_exempt() { # <head> <target>; fail closed in the calling shell
+  local outcome=0
+  phone_gate_exemption "$1" "$2" >/dev/null || outcome=$?
+  [ "$outcome" -ne 2 ] || die 'invalid phone gate path glob configuration or Git diff'
   [ "$outcome" -eq 0 ]
 }
 exemption_reason() { # <head> <target>
-  if docs_only_exempt "$1" "$2"; then
-    printf '%s' 'real-phone: all changed paths match documentation_path_globs'
-  else
-    printf '%s' -
-  fi
+  local reason outcome=0
+  reason=$(phone_gate_exemption "$1" "$2") || outcome=$?
+  [ "$outcome" -ne 2 ] || die 'invalid phone gate path glob configuration or Git diff'
+  if [ "$outcome" -eq 0 ]; then printf '%s' "$reason"; return; fi
+  printf '%s' -
 }
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
@@ -466,7 +472,7 @@ if [ -e "$FILE" ]; then
       [[ "$row_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue task id'
       valid_branch "$row_branch" || die 'invalid queue branch'
       [ -n "$row_notified" ] && [ -n "$row_reason" ] && [ -z "$extra" ] || die 'incomplete queue row'
-      case "${row_exemption:--}" in -|'real-phone: all changed paths match documentation_path_globs') ;; *) die 'invalid gate exemption' ;; esac
+      case "${row_exemption:--}" in -|'real-phone: all changed paths match documentation_path_globs'|'real-phone: no changed paths match real_phone_path_globs') ;; *) die 'invalid gate exemption' ;; esac
       row_owner=${row_owner:--}
       [ "$row_owner" = - ] || [[ "$row_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue owner task id'
       row_priority=${row_priority:--}
@@ -581,7 +587,7 @@ if [ "$ACTION" = ready ]; then
     fm_health_receipt_read "$RECEIPT" "$HEAD" || die 'ready requires a valid exact-head full-suite receipt'
     [ "$FM_HEALTH_COUNT" -eq 0 ] || die 'ready requires a green full-suite receipt'
     for gate_name in ${GATES[@]+"${GATES[@]}"}; do
-      if [ "$gate_name" = real-phone ] && docs_only_exempt "$HEAD" "$TARGET"; then continue; fi
+      if [ "$gate_name" = real-phone ] && phone_gate_exempt "$HEAD" "$TARGET"; then continue; fi
       gate_pass=0
       for entry in ${GATE_RECEIPTS[@]+"${GATE_RECEIPTS[@]}"}; do
         [ "${entry%%=*}" = "$gate_name" ] || continue
@@ -925,7 +931,7 @@ for ((i=0; i<count; i++)); do
   [ "${statuses[i]}" = ready-to-land ] || continue
   overlap_requires_full "${ids[i]}" "${heads[i]}" "${target_shas[i]}" || continue
   for gate_name in ${GATES[@]+"${GATES[@]}"}; do
-    if [ "$gate_name" = real-phone ] && docs_only_exempt "${heads[i]}" "${target_shas[i]}"; then continue; fi
+    if [ "$gate_name" = real-phone ] && phone_gate_exempt "${heads[i]}" "${target_shas[i]}"; then continue; fi
     if ! gate_receipt_read "$(gate_receipt_path "${ids[i]}" "$gate_name" "${heads[i]}" "${target_shas[i]}")" \
       "$gate_name" "${heads[i]}" "${target_shas[i]}"; then
       statuses[i]=needs-gate
@@ -1133,7 +1139,8 @@ if [ "${states[found]}" = active ] && [ "${places[found]}" -eq 1 ] \
   tested_target=${target_shas[found]}
 fi
 if [ -n "$tested_target" ]; then
-  printf 'gate_exemption=%s\n' "$(exemption_reason "${heads[found]}" "$tested_target")"
+  exemption=$(exemption_reason "${heads[found]}" "$tested_target")
+  printf 'gate_exemption=%s\n' "$exemption"
 else
   printf 'gate_exemption=-\n'
 fi
