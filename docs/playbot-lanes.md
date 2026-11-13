@@ -368,6 +368,7 @@ The behavioral regression is [`fm-playbot-engine-readiness.test.sh`](../tests/fm
 ### Addon preservation
 
 Lane workers run `node --no-warnings <Firstmate-code-root>/bin/fm-playbot-lanes.mjs addon-guard reset <ref>` for a base-check-authorized reset and `addon-guard stash` for stashing, rather than raw Git reset/stash commands.
+`fm-remote-landing.sh` uses the same guard's `remote-checkout` and `remote-rebase` operations when importing or rebasing a `kind=lane` workstation task, after resolving its branch from Playbot's recorded workspace identity.
 The command binds the current Git worktree to one registered Playbot workspace, discovers every Git-visible Godot project with an `addons/playbot` tree, and requires each such addon to be complete and match the observed app bundle before mutation.
 It reads only `app:metadata` and the packaged bundle, so it does not depend on the version-pinned engine snapshot IPC; a worktree with no addon tree preserves nothing and still applies every other check.
 Reset preserves every tracked, untracked, and ignored addon file, including native files, restores their exact bytes and modes after Git, and verifies them against a fresh app-bundle read.

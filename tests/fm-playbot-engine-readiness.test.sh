@@ -387,6 +387,10 @@ expect('ready');
 assert.equal(fs.readFileSync(path.join(proj,'addons/playbot/untracked-helper.gd'),'utf8'),'injected helper');
 assert(fs.readFileSync(path.join(proj,'addons/playbot/native/library.so')).equals(Buffer.from([1,2,3])));
 assert.equal(fs.statSync(path.join(proj,'addons/playbot/native/library.so')).mode&0o777,0o755);
+guard('remote-checkout','main',oldhead); assert.equal(git('rev-parse','HEAD'),oldhead);
+assert.equal(fs.readFileSync(path.join(proj,'addons/playbot/plugin.gd'),'utf8'),'bundled code\n');
+guard('remote-checkout','main',base); assert.equal(git('rev-parse','HEAD'),base);
+assert.equal(fs.readFileSync(path.join(proj,'addons/playbot/untracked-helper.gd'),'utf8'),'injected helper');
 fs.writeFileSync(path.join(game,'product.txt'),'unstaged product work');
 guard('stash','--all'); expect('ready');
 assert.equal(fs.readFileSync(path.join(game,'product.txt'),'utf8'),'new');
@@ -446,6 +450,8 @@ fs.writeFileSync(path.join(game,'product.txt'),'later'); git('commit','-q','-am'
 git('reset','--hard',dropped);
 const noBundle={PLAYBOT_LANES_APP_RESOURCES:path.join(root,'missing-resources')};
 assert.deepEqual(guardRun(noBundle,'verify').addons,[]);
+const unverifiedTarget=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','remote-checkout','main',oldhead],{cwd:game,encoding:'utf8',env:{...process.env,...noBundle}});
+assert.notEqual(unverifiedTarget.status,0); assert.match(unverifiedTarget.stderr,/no verified addon/); assert.equal(git('rev-parse','HEAD'),dropped);
 const bare=guardRun(noBundle,'reset',later); assert.deepEqual(bare.addons,[]); assert.equal(git('rev-parse','HEAD'),later);
 console.log('verified engine readiness fixture verdicts and dispatch refuses unconfirmed readiness');
 NODE
