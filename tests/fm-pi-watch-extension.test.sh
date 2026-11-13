@@ -3921,17 +3921,17 @@ printf 'guard ran after external healthy watcher\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" FM_WATCH_REARM_RETRY_BASE_MS=250 FM_WATCH_REARM_RETRY_LIMIT=1 node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
 const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
-let promptBody = "";
+const promptBodies = [];
 const client = {
   session: {
     promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
+      promptBodies.push(request.body.parts[0].text);
     },
   },
 };
@@ -3962,8 +3962,21 @@ if (!existsSync(process.env.FM_GUARD_LOG)) {
   console.error("turn-end guard was suppressed by an external healthy watcher");
   process.exit(1);
 }
-if (!promptBody.includes("TURN WOULD END BLIND")) {
-  console.error(`missing blind-turn prompt: ${promptBody}`);
+if (!promptBodies.some((body) => body.includes("TURN WOULD END BLIND"))) {
+  console.error(`missing blind-turn prompt: ${promptBodies.join("\n")}`);
+  process.exit(1);
+}
+// The external arm 250ms retry may deliver another prompt after the guard.
+// Observe that later delivery so a last-prompt-only assertion cannot pass by timing.
+for (let i = 0; i < 250 && !promptBodies.some((body) => body.includes("continuity retry")); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!promptBodies.some((body) => body.includes("continuity retry"))) {
+  console.error(`missing later retry prompt: ${promptBodies.join("\n")}`);
+  process.exit(1);
+}
+if (promptBodies.at(-1).includes("TURN WOULD END BLIND")) {
+  console.error("retry prompt did not arrive after the blind-turn prompt");
   process.exit(1);
 }
 EOF
