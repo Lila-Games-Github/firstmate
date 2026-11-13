@@ -135,7 +135,7 @@ Seeding a project this machine has never cloned needs no clone under `projects/`
 A bare `<project>` is still accepted when this machine happens to have `projects/<project>`, whose configured origin is then read instead of being retyped.
 [`bin/fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) owns which URLs are accepted; it decides on structure and safety alone, so no forge, domain, or host is privileged and a self-hosted server works exactly as a hosted one does.
 The primary validates every resolved origin before transport, and the receiving host validates it again before cloning.
-The project's registered delivery mode still comes from this machine's `data/projects.md`, so an unregistered or `local-only` project is refused rather than provisioned.
+The project's registered delivery mode still comes from this machine's `data/projects.md`; an unregistered project is refused, and `local-only` requires the explicit main-owned landing opt-in below.
 
 The seed records `host:`, `root:`, and `home:` in `data/secondmates.md`, gates the host on readiness, sends a bounded manifest, and lets the remote host clone its own Firstmate home and project origins.
 In the primary home, its durable registration effects are limited to that route and the charter brief under `data/<id>`; launch records are created only when the secondmate is launched.
@@ -150,6 +150,29 @@ The promised-public-reply subsystem is same-filesystem by construction, so a rem
 Local secondmates keep the existing route form and need no migration.
 A fleet may contain local and remote routes together.
 Use `bin/fm-home-seed.sh validate` to validate either form.
+
+## Local-only implementation with workstation landing
+
+A remote secondmate can implement a `local-only` project when the main home retains a workstation landing worker for that work.
+Seed that project with `--main-landing`; the [seed header](../bin/fm-remote-home-seed.sh) owns the opt-in mechanics.
+Local secondmate seeding still refuses `local-only` projects.
+The remote project's registry keeps its `local-only` posture.
+The remote-parent binding selects the branch-publication contract owned by [fm-dod-lib.sh](../bin/fm-dod-lib.sh), including generated briefs, promoted scouts and launch overlays for old briefs or relaunches.
+The remote worker commits and pushes its `fm/<remote-task>` branch and reports that branch with its full head SHA to its secondmate, which relays the report to the main home.
+
+Keep the landing backlog item and worker in the main home, and route the implementation request separately to the remote secondmate.
+The workstation worker must have ordinary `local-only` metadata naming its project, disposable worktree and landing branch; it remains the owner of farm delivery and queue wakes.
+In that worker, import the reported branch using [fm-remote-landing.sh](../bin/fm-remote-landing.sh); its header owns arguments, refusal rules, retained import heads and conflict handoff mechanics.
+The import fetches only the task branch and checks the reported head before updating the workstation worker's branch.
+Submit the existing farm from that copy, collect exact-head suite and configured gate receipts, and join the existing [landing queue](../bin/fm-landing-queue.sh) as that workstation task.
+The main home lands through [fm-merge-local.sh](../bin/fm-merge-local.sh) under its existing merge authority.
+Phones, farm execution, gates, receipts and landing rules retain their existing owners.
+
+Only the front car rebases, using the helper's `rebase` action and the queue's assigned target and rebase base.
+A conflict aborts the workstation rebase, publishes the target under a task-scoped transport branch, and sends the remote secondmate a durable steer naming its worker and the exact fetch ref and target SHA.
+The remote worker resolves its task branch and reports a new head for import; the helper retains the replaced imported head and refuses to replace additional workstation work.
+After a successful workstation rebase, use the queue's reported state to obtain the required new evidence from the farm.
+No landing branch is pushed by this path.
 
 ## Normal operation
 
@@ -280,6 +303,7 @@ bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+bin/fm-test-run.sh tests/fm-remote-landing.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
 

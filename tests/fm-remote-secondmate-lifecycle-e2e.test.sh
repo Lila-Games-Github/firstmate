@@ -523,8 +523,18 @@ if FM_SECONDMATE_CHARTER='Local-only charter.' FM_SECONDMATE_SCOPE='local only' 
   > "$TMP_ROOT/seed-localonly.out" 2>&1; then
   fail "a supplied origin bypassed the local-only delivery-mode refusal"
 fi
-assert_grep 'is local-only and cannot be provisioned remotely' "$TMP_ROOT/seed-localonly.out" \
+assert_grep 'pass --main-landing' "$TMP_ROOT/seed-localonly.out" \
   "the local-only refusal did not name the registered mode"
+
+out=$(FM_SECONDMATE_CHARTER='Remote local-only implementation; main owns landing.' \
+  FM_SECONDMATE_SCOPE='delta implementation' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-localonly remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-localonly-home" --main-landing "delta=$BETA_ORIGIN" 2>&1) \
+  || fail "explicit main-owned landing seed failed: $out"
+assert_present "$TMP_ROOT/seed-localonly-home/projects/delta/README.md" "local-only origin was not cloned"
+assert_grep '- delta [local-only]' "$TMP_ROOT/seed-localonly-home/data/projects.md" "remote seed changed local-only posture"
+assert_grep 'route=remote' "$TMP_ROOT/seed-localonly-home/.fm-secondmate-parent" "remote binding absent"
+pass "remote local-only seeding requires main-owned landing and preserves project posture"
 
 if FM_SECONDMATE_CHARTER='Unregistered charter.' FM_SECONDMATE_SCOPE='unregistered' \
   seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-unregistered remote-mac "$REMOTE_ROOT" \

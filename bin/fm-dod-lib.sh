@@ -123,6 +123,31 @@ For a trivial one-line or low-risk fix, briefly record and report why you judge 
 EOF
 }
 
+# A remote provisioned home's existing parent binding selects branch export for
+# local-only tasks. The main home still owns all tests, gates and landing.
+fm_remote_local_landing() {
+  local parent="${FM_HOME:-${FM_ROOT_OVERRIDE:-.}}/.fm-secondmate-parent"
+  # shellcheck source=bin/fm-secondmate-parent-lib.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/fm-secondmate-parent-lib.sh"
+  fm_secondmate_parent_record_parse "$parent" && [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ]
+}
+
+# Also appended at launch so old/custom briefs and relaunches cannot retain the
+# workstation-only no-push/queue contract in a remote provisioned home.
+fm_remote_local_dod() { # <task-id>
+  local id=$1
+  cat <<EOF
+# Current remote local-only delivery contract
+Delivery contract: mode=local-only
+This section supersedes earlier local-only delivery, no-push and landing-queue instructions in this brief.
+Commit your work on \`fm/$id\`, push only that task branch to origin with \`git push origin HEAD:refs/heads/fm/$id\`, and verify \`git ls-remote origin refs/heads/fm/$id\` equals your full HEAD SHA.
+Never push a landing branch or the default branch, open a PR, merge, run the workstation farm, or join a landing queue from this remote home.
+Report \`done: remote branch=fm/$id head=<full HEAD SHA>\` to your secondmate and stop.
+The main home imports that report into its workstation landing worker, which owns farm submission, receipts, front-of-line rebases and landing under the existing merge authority.
+On a conflict steer, fetch the supplied target branch, verify its full target SHA, resolve your task branch against that target, then push and report the new head; a rewritten task branch may use \`--force-with-lease\` only for its previously reported remote head.
+EOF
+}
+
 fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
   local mode=$1 id=$2
   case "$mode" in
@@ -130,6 +155,10 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
       printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR."
       ;;
     local-only)
+      if fm_remote_local_landing; then
+        printf '%s\n' "1. Push only your task branch \`fm/$id\` to origin; never push a landing branch or open or merge a PR."
+        return 0
+      fi
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
       ;;
     no-mistakes)
@@ -427,6 +456,11 @@ EOF
       fm_direct_pr_target_block "$landing_branch" || return 1
       ;;
     local-only)
+      if fm_remote_local_landing; then
+        printf '%s\n' '# Definition of done'
+        fm_remote_local_dod "$id"
+        return
+      fi
       meta_file=$(fm_dod_quote "${STATE:-${FM_STATE_OVERRIDE:-${FM_HOME:-.}/state}}/$id.meta")
       cat <<EOF
 # Definition of done

@@ -28,7 +28,7 @@ FARM_RESULTS_TIMEOUT=${FM_STOCK_BASH_FARM_RESULTS_TIMEOUT:-90}
 selected=all
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != --consumer ]; then
-    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|worker-timing|teardown-farm|doorbell|lane-send|farm-results]" >&2
+    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|worker-timing|teardown-farm|doorbell|lane-send|farm-results|remote-landing|remote-export]" >&2
     exit 2
   fi
   selected=$2
@@ -165,6 +165,12 @@ run_consumer lane-send "lane test-service completion delivery" "$LANE_SEND_TIMEO
 # The watcher poll calls fm-farm-results.py, which delivers through fm-send.sh.
 run_consumer farm-results "watcher farm-result delivery and submit label" "$FARM_RESULTS_TIMEOUT" 7 \
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-farm-results.test.sh"
+remote_landing_assertions=8
+[ "${FM_SKIP_TESTFARM:-}" != 1 ] || remote_landing_assertions=5
+run_consumer remote-landing "remote branch import and workstation landing" "$MERGE_TIMEOUT" "$remote_landing_assertions" \
+  "$STOCK_BASH" "$ROOT/tests/fm-remote-landing.test.sh"
+run_consumer remote-export "remote local-only brief launch and promotion" "$MERGE_TIMEOUT" 1 \
+  env FM_TASK_DELIVERY_TEST_ONLY=remote-local "$STOCK_BASH" "$ROOT/tests/fm-task-delivery.test.sh"
 [ "$ran_consumer" -eq 1 ] || {
   echo "::error::unknown stock Bash consumer: $selected" >&2
   exit 2

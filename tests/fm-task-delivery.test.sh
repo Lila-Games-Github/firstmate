@@ -66,7 +66,7 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" 2>&1
+    "$BASH" "$SPAWN" "$@" 2>&1
 }
 
 # A ship spawn must stop when its delivery contract was never decided or cannot be
@@ -1094,6 +1094,36 @@ test_direct_pr_promotion_target_contract() {
   pass "promotion records and delivers a direct-PR landing base"
 }
 
+test_remote_local_only_contract_consumers() {
+  local rec home proj fakebin id out
+  rec=$(make_home remote-local '- proj [local-only] - fixture')
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' > "$home/.fm-secondmate-parent"
+  id=remote-generated
+  FM_HOME="$home" "$BASH" "$BRIEF" "$id" proj --mode local-only --no-template 'Remote export contract' >/dev/null \
+    || fail 'remote local-only brief generation failed'
+  assert_grep 'HEAD:refs/heads/fm/remote-generated' "$home/data/$id/brief.md" 'generated remote brief still uses local completion'
+  id=remote-old
+  write_brief "$home" "$id" local-only
+  printf 'Do NOT push; join the workstation queue.\n' >> "$home/data/$id/brief.md"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode local-only --yolo off)
+  assert_grep '# Current remote local-only delivery contract' "$home/data/$id/launch-brief.md" "old remote brief lacks current export overlay: $out"
+  assert_grep 'supersedes earlier local-only delivery, no-push' "$home/data/$id/launch-brief.md" 'launch overlay did not supersede stale rules'
+  id=remote-promoted
+  write_brief "$home" "$id"
+  printf 'kind=scout\nwindow=fm-%s\nworktree=/tmp/remote-scout\n' "$id" > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$BASH" "$PROMOTE" "$id" --mode local-only --yolo off 2>&1) \
+    || fail "remote promotion failed: $out"
+  assert_grep 'HEAD:refs/heads/fm/remote-promoted' "$home/data/$id/ship-instructions.md" 'promoted remote scout missed export DOD'
+  pass 'remote local-only generated, old launch and promoted contracts all export task branches'
+}
+if [ "${FM_TASK_DELIVERY_TEST_ONLY:-}" = remote-local ]; then
+  test_remote_local_only_contract_consumers
+  exit 0
+fi
+
 test_direct_pr_promotion_target_contract
 test_green_final_head_brief_marker() {
   local rec home proj fakebin out
@@ -1127,6 +1157,7 @@ test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
+test_remote_local_only_contract_consumers
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
