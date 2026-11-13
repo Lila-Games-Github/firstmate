@@ -93,6 +93,10 @@ server.on('upgrade',(req,socket) => {
             fs.cpSync(bundle,path.join(payload.workspacePath,'addons/playbot'),{recursive:true});
             return {success:true};
           }
+          if(channel==='engine:controlInstance') {
+            if(payload.action!=='reset'||payload.instanceType!=='headless'||payload.workspacePath!==path.join(root,'game/prototype-game')) throw new Error('Unexpected engine cache reset target');
+            return {success:true};
+          }
           if(channel==='engine:listWorkspaceProjects') {
             if(fs.existsSync(path.join(root,'engine-no-handler')))throw new Error("No handler registered for 'engine:listWorkspaceProjects'");
             if(fs.existsSync(path.join(root,'engine-shape')))return [{engineKind:'godot'}];
@@ -183,6 +187,14 @@ const current=call('get_engine_readiness');
 assert.equal(current.verdict,'ready'); assert.equal(current.app.version,'0.129.0');
 assert.equal(current.app.verifiedVersions,'0.117.0, 0.124.0, and 0.129.0');
 assert.equal(current.projects[0].addon.byteIdentical,true);
+fs.writeFileSync(path.join(root,'version'),'0.145.0'); fs.writeFileSync(path.join(root,'resources/app/package.json'),JSON.stringify({version:'0.145.0'}));
+fs.rmSync(path.join(game,'addons/playbot/native/library.so'));
+const currentPrepared=call('prepare_engine_workspace',{confirm:true});
+const sourceProjectCount=JSON.parse(fs.readFileSync(path.join(root,'engine.json'),'utf8')).length;
+assert.equal(sourceProjectCount,1);
+assert.equal(currentPrepared.before.projects.length,1); assert.equal(currentPrepared.after.projects.length,1);
+assert.equal(currentPrepared.after.projects[0].addon.byteIdentical,true);
+console.log(`prepare_engine_workspace: source Godot projects=${sourceProjectCount}, observed projects before=${currentPrepared.before.projects.length} after=${currentPrepared.after.projects.length}, missing native files installed=${currentPrepared.before.projects[0].addon.missingFiles.length}`);
 fs.rmSync(path.join(root,'version')); fs.writeFileSync(path.join(root,'resources/app/package.json'),JSON.stringify({version:'0.117.0'}));
 fs.writeFileSync(path.join(game,'addons/playbot/extra.gd'),'extra'); expect('ready');
 assert.equal(d.projects[0].selectedExecutable.path,path.join(root,'godot'));
@@ -325,6 +337,32 @@ function git(...args) {
 }
 git('init','--initial-branch=main'); git('config','user.name','Fixture'); git('config','user.email','fixture@example.invalid');
 fs.writeFileSync(path.join(game,'.gitignore'),'prototype-game/addons/playbot/native/\nprotected.private\n');
+git('add','.'); git('commit','-m','complete engine project');
+const engineHead=git('rev-parse','HEAD');
+assert.equal(JSON.parse(fs.readFileSync(path.join(root,'engine.json'),'utf8')).length,sourceProjectCount);
+fs.writeFileSync(path.join(root,'calls'),'');
+const reset=call('reset_engine_workspace_cache',{expectedHead:engineHead,confirm:true});
+assert.equal(reset.head,engineHead); assert.equal(reset.workspaceId,'ws');
+assert.equal(reset.before.projects.length,1); assert.equal(reset.after.projects.length,1);
+assert.equal(reset.ready,true);
+const resetCalls=fs.readFileSync(path.join(root,'calls'),'utf8').trim().split('\n').map(JSON.parse);
+assert.equal(resetCalls.filter(row=>row.channel==='engine:controlInstance').length,1);
+assert.deepEqual(resetCalls.find(row=>row.channel==='engine:controlInstance').payload,{action:'reset',instanceType:'headless',workspacePath:proj});
+fs.writeFileSync(path.join(root,'calls'),'');
+let refusedCache=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'call','reset_engine_workspace_cache',JSON.stringify({project:'p',workspace:'ws',expectedHead:'0'.repeat(40),confirm:true})],{encoding:'utf8'});
+assert.notEqual(refusedCache.status,0); assert.match(refusedCache.stderr,/differs from expectedHead/);
+assert(!fs.readFileSync(path.join(root,'calls'),'utf8').includes('engine:controlInstance'));
+fs.writeFileSync(path.join(proj,'project.godot'),'dirty\n');
+refusedCache=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'call','reset_engine_workspace_cache',JSON.stringify({project:'p',workspace:'ws',expectedHead:engineHead,confirm:true})],{encoding:'utf8'});
+assert.notEqual(refusedCache.status,0); assert.match(refusedCache.stderr,/uncommitted tracked changes/);
+assert(!fs.readFileSync(path.join(root,'calls'),'utf8').includes('engine:controlInstance'));
+git('checkout','--','prototype-game/project.godot');
+instance.type='interactive'; stage();
+refusedCache=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'call','reset_engine_workspace_cache',JSON.stringify({project:'p',workspace:'ws',expectedHead:engineHead,confirm:true})],{encoding:'utf8'});
+assert.notEqual(refusedCache.status,0); assert.match(refusedCache.stderr,/only supports a headless session/);
+assert(!fs.readFileSync(path.join(root,'calls'),'utf8').includes('engine:controlInstance'));
+instance.type='headless'; stage();
+console.log(`reset_engine_workspace_cache: registered roots=1, source Godot projects=${sourceProjectCount}, observed projects before=${reset.before.projects.length} after=${reset.after.projects.length}, reset IPC calls=${resetCalls.filter(row=>row.channel==='engine:controlInstance').length}; bad SHA, dirty tree, and interactive session rejected`);
 fs.writeFileSync(path.join(game,'product.txt'),'old');
 fs.writeFileSync(path.join(proj,'addons/playbot/plugin.cfg'),'[plugin]\nversion="0.7.14"\n');
 fs.writeFileSync(path.join(proj,'addons/playbot/plugin.gd'),'old');

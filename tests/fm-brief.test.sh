@@ -1901,6 +1901,13 @@ test_worker_owned_finalization() {
     assert_no_grep "At \`waiting-for-front\`, \`ready-to-land\`" "$brief" 'upper worker still told to poll'
     assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
     assert_grep 'git rebase --onto <target_sha> <rebase_from>' "$brief" 'brief cannot remove a failed lower car'
+    assert_grep 'Before any farm certification, run the affected tests locally on this exact head' "$brief" 'queue omitted the local affected-test gate'
+    if [ "$lane" = lane ]; then
+      assert_grep 'Keep front-of-queue integration in this registered Playbot workspace' "$brief" 'lane moved integration away from its engine'
+      assert_grep 'fm-playbot-uid-collisions.py check <target_sha>' "$brief" 'lane omitted UID collision preflight'
+      assert_grep 'preserve <target_sha>' "$brief" 'lane omitted safe UID preservation'
+      assert_grep 'reset_engine_workspace_cache' "$brief" 'lane omitted supported engine cache refresh'
+    fi
     if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
       printf '%s\n' 'note: skipped generated landing queue helper execution because the private testfarm checkout is unavailable'
     else

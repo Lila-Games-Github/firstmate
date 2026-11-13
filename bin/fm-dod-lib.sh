@@ -380,7 +380,8 @@ landing_queue() {
   $queue_command "\$action" $(fm_dod_quote "$id") --project .$queue_target "\$@"
 }
 \`\`\`
-1. Once implementation is committed, rebase your branch onto the current landing tip and run the project's configured full suite, phone play-through, and every applicable landing gate on that exact head.
+1. Once implementation is committed, rebase your branch onto the current landing tip in the same worktree that owns your branch and run the project's configured full suite, phone play-through, and every applicable landing gate on that exact head.
+   Before any farm certification, run the affected tests locally on this exact head through the available engine; when the engine is unavailable, submit those affected tests as a focused farm request first, record which tests and engine blocker caused that fallback, and proceed only after that focused request passes on the same head.
    Join only when those checks pass: \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <tested-tip-sha> --receipt <full-suite-receipt>$priority_arg\`.
    Add \`--gate-receipt <name>=<path>\` once for each configured gate; each gate receipt uses the four-line format in the queue tool's \`--help\` and names the same head and tip.
    A changed tip refuses admission; rebase and finish pre-queue checks on the new tip before retrying.
@@ -388,7 +389,7 @@ landing_queue() {
    Read its \`place\`, \`target_ref\`, \`target_sha\`, and \`rebase_from\`; these replace any earlier target, even if another car failed or landed.
    At \`waiting-for-front\`, do not rebase or rerun checks even when the target changes: append \`paused: landing-queue waiting-for-front\` and end your turn without polling.
    The queue sends your steering inbox one message when your car reaches bottom; resume then with \`landing_queue status\`.
-   At bottom (\`place=1\`), when the base changes, rebase your own commits with \`git rebase --onto <target_sha> <rebase_from>\`, then acknowledge the prepared head with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <target_sha>\`.
+   At bottom (\`place=1\`), when the base changes, rebase your own commits in this branch's existing worktree with \`git rebase --onto <target_sha> <rebase_from>\`, then acknowledge the prepared head with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <target_sha>\`.
    Resolve rebase conflicts yourself; do not merge or keep commits from a failed lower car.
 3. At \`needs-quick\`, run the configured quick suite mapped to this task's touched files and the short phone check on exactly the rebased head.
    Submit its \`fm-quick-check.v1\` receipt with \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.

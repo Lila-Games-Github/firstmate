@@ -6644,6 +6644,11 @@ function toolDefinitions() {
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Exact workspace id, path, or name"), confirm: { type: "boolean", const: true } }, ["project", "workspace", "confirm"]),
     },
     {
+      name: "reset_engine_workspace_cache",
+      description: "Reset the headless Godot instance and its import cache through Playbot's own engine control, for one registered workspace and an exact committed Git head. Use after a rebase removes or renames scripts; then run affected tests through the refreshed engine before farm certification. Refuses a noncanonical project path, incomplete addon, dirty tracked tree, branch mismatch, or changed head.",
+      inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Exact workspace id, path, or name"), expectedHead: string("Full Git SHA of the committed head to refresh"), confirm: { type: "boolean", const: true } }, ["project", "workspace", "expectedHead", "confirm"]),
+    },
+    {
       name: "get_workspace_freshness",
       description: "Read one workspace's exact Git heads against a caller-named landing branch using current remote evidence. Reports ahead and behind counts, whether each head is a clean fast-forward of the landing tip, and every unlanded commit subject. Missing or unreadable worktrees, repositories, or branches fail closed.",
       inputSchema: object({
@@ -6871,7 +6876,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const workspace = resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace));
     if (threadsForProject(project.id, workspace.id).some((row) => row.agent_status !== "ready" || queuedMessageCount(row.pending_queue_json) !== 0)) throw new Error("Cannot prepare the addon while a chat in this workspace is active or queued");
     const before = await engineReadiness(project, workspace);
-    if (before.app.version !== "0.124.0" || !before.bundle.confirmed || before.errors.length || before.projects.length !== 1) throw new Error("Playbot 0.124.0, one detected Godot project, and a confirmed bundled addon are required");
+    if (!["version-verified", "capability-verified"].includes(before.ipc.contract.status) || !before.bundle.confirmed || before.errors.length || before.projects.length !== 1) throw new Error("A compatible engine snapshot, one detected Godot project, and a confirmed bundled addon are required");
     const detected = before.projects[0];
     if (detected.engineKind !== "godot" || detected.storedPath !== detected.canonicalPath) throw new Error("The detected Godot project must have one canonical stored path");
     if (detected.addon.byteIdentical === true) return { before, after: before, changed: false };
@@ -6881,6 +6886,35 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const after = await engineReadiness(resolveProject(project.id), resolveWorkspace(resolveProject(project.id), workspace.id));
     if (installed?.success !== true || after.errors.length || after.projects.length !== 1 || after.projects[0].addon.byteIdentical !== true) throw new Error("Playbot did not install and verify the complete bundled addon");
     return { before, installed, after, changed: true };
+  }
+  if (name === "reset_engine_workspace_cache") {
+    if (args.confirm !== true) throw new Error("reset_engine_workspace_cache requires confirm=true");
+    if (typeof args.expectedHead !== "string" || !/^[0-9a-f]{40}$/.test(args.expectedHead)) throw new Error("expectedHead must be a full Git SHA");
+    const workspace = resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace));
+    if (workspace.roots.length !== 1 || project.roots.length !== 1) throw new Error("Cache reset requires one complete registered workspace root");
+    const root = workspace.roots[0];
+    const actualRoot = canonicalPath(root.path);
+    if (actualRoot !== root.path || git(actualRoot, ["rev-parse", "--show-toplevel"]).trim() !== actualRoot) throw new Error("Workspace root must be the canonical Git worktree top level");
+    if (!root.branch || git(actualRoot, ["branch", "--show-current"]).trim() !== root.branch) throw new Error("Workspace branch differs from Playbot's registered branch");
+    if (gitOperationState(actualRoot).length || gitIndexFlags(actualRoot).length) throw new Error("Workspace has an in-progress Git operation or hidden index flags");
+    const head = git(actualRoot, ["rev-parse", "HEAD"]).trim();
+    if (head !== args.expectedHead) throw new Error(`Workspace head ${head} differs from expectedHead ${args.expectedHead}`);
+    if (git(actualRoot, ["diff", "HEAD", "--name-only", "-z", "--"]).length) throw new Error("Workspace has uncommitted tracked changes; commit the exact head before resetting its engine cache");
+    const before = await engineReadiness(project, workspace);
+    if (before.ipc.bridge.status !== "reachable" || !["version-verified", "capability-verified"].includes(before.ipc.contract.status) || before.errors.length || before.projects.length !== 1) throw new Error("Playbot did not confirm one Godot project in this workspace");
+    const detected = before.projects[0];
+    if (detected.engineKind !== "godot" || detected.storedPath !== detected.canonicalPath || !detected.addon.byteIdentical || detected.addon.version !== before.bundle.version) throw new Error("Godot project path or bundled addon is not ready for cache reset");
+    if (!detected.session) throw new Error("No existing headless session to reset; start one through Playbot's engine controls");
+    if (detected.session.type !== "headless") throw new Error("Cache reset only supports a headless session; use Playbot's editor controls for an interactive session");
+    const currentWorkspace = resolveWorkspace(resolveProject(project.id), workspace.id);
+    if (currentWorkspace.roots.length !== 1 || currentWorkspace.roots[0].path !== root.path || currentWorkspace.roots[0].branch !== root.branch) throw new Error("Playbot workspace registration changed before cache reset");
+    if (head !== git(actualRoot, ["rev-parse", "HEAD"]).trim()) throw new Error("Workspace head changed before cache reset");
+    const reset = await playbotInvoke("engine:controlInstance", { action: "reset", instanceType: "headless", workspacePath: detected.storedPath });
+    if (reset?.success === false || reset?.failure) throw new Error(`Playbot reported engine cache reset failure: ${JSON.stringify(reset)}`);
+    const after = await engineReadiness(project, workspace);
+    const headAfter = git(actualRoot, ["rev-parse", "HEAD"]).trim();
+    if (headAfter !== head) throw new Error(`Engine cache reset completed but workspace head changed from ${head} to ${headAfter}`);
+    return { head, workspaceId: workspace.id, projectPath: detected.storedPath, before, reset, after, ready: after.ready === true };
   }
   if (name === "get_workspace_freshness") {
     const landingBranch = explicitLandingBranch(name, args.landingBranch);
