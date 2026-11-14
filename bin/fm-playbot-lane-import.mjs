@@ -157,8 +157,8 @@ export async function laneImport(args, { root, git, gitEnvironment, identity, gu
   // Compare actual project bytes to HEAD without stat-cache shortcuts or filters.
   for (const entry of tree.filter((entry) => within(entry.file) && !addonPath(entry.file))) {
     const bytes = regular(root, entry.file);
-    const blob = git(root, ["cat-file", "blob", entry.object], { encoding: "buffer" });
-    if (!bytes.equals(blob) || Boolean(fs.statSync(path.join(root, entry.file)).mode & 0o111) !== (entry.mode === "100755")) throw new Error(`Project differs from committed head (including filters/mode): ${entry.file}`);
+    const object = git(root, ["hash-object", "--no-filters", "--stdin"], { input: bytes }).trim();
+    if (object !== entry.object || Boolean(fs.statSync(path.join(root, entry.file)).mode & 0o111) !== (entry.mode === "100755")) throw new Error(`Project differs from committed head (including filters/mode): ${entry.file}`);
   }
   // Ignored evidence and credentials are preserved by the complete snapshot.
   // Existing authorized sidecars are ambiguous even when Git ignores them.
