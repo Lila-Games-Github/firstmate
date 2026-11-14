@@ -43,7 +43,7 @@ case "${0##*/}" in
   fm-learning-candidate.test.sh) key=learning; count=1 ;;
   fm-landing-queue.test.sh)
     if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" = spec ]; then
-      key=landing-spec; count=9
+      key=landing-spec; count=17
     else
       key=landing; count=12
     fi
@@ -198,7 +198,7 @@ public-followup|public-followup empty-lock register
 watch-churn|watcher churn deferral
 learning|PR 18 learning-candidate NUL enumeration
 landing|landing-queue test farm resolve, watcher sweep, and front step-back
-landing-spec|landing queue speculative candidate and local merge
+landing-spec|landing queue speculative candidate and watcher auto-land
 worker-timing|worker timing status and teardown record
 teardown-farm|teardown testfarm request ownership
 merge|PR 19 local-merge branch resolution
