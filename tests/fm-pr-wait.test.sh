@@ -59,6 +59,14 @@ grep -q 'merge-conflict' "$case_dir/out" || fail 'conflicted PR missed the deadl
 make_view MERGED MERGEABLE "$green"
 "$ROOT/bin/fm-pr-wait.sh" "$state_dir" task-c "$url" > "$case_dir/out"
 [ ! -s "$case_dir/out" ] && [ ! -e "$state_dir/task-c.pr-wait" ] || fail 'merged PR woke or retained wait state'
+# A newer green run supersedes an older failure of the same check name.
+old_failed='{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-13T19:52:00Z"}'
+new_green='{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-13T19:53:00Z"}'
+make_view OPEN MERGEABLE "$old_failed,$new_green"
+reruns_before=$(wc -l < "$FM_TEST_RERUN")
+"$ROOT/bin/fm-pr-wait.sh" "$state_dir" task-f "$url" > "$case_dir/out"
+[ ! -s "$case_dir/out" ] && [ "$(wc -l < "$FM_TEST_RERUN")" -eq "$reruns_before" ] \
+  || fail 'superseded failure was treated as red'
 # A secondmate's deadline reaches the existing parent reply channel.
 printf 'mate-a\n' > "$case_dir/home/.fm-secondmate-home"
 printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' > "$case_dir/home/.fm-secondmate-parent"

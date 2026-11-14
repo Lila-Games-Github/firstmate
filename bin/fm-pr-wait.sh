@@ -34,7 +34,18 @@ if [ "$pr_state" != OPEN ]; then
 fi
 # CheckRun and StatusContext have different verdict fields. Pending checks do
 # not count as red; they also prevent the clean, green-unmerged condition.
-red=$(printf '%s' "$json" | jq -r '[.statusCheckRollup[]? | if .__typename=="CheckRun" then select(.status=="COMPLETED" and (.conclusion|IN("FAILURE","TIMED_OUT","ACTION_REQUIRED","CANCELLED"))) | .name else select(.state|IN("FAILURE","ERROR")) | .context end] | map(select(.!=null and .!="")) | unique | join(", ")' 2>/dev/null) || exit 0
+non_green=$(github_checks_not_green "$json") || exit 0
+# Retain only failed names that the shared merge classifier still considers
+# current. An older failed run superseded by a newer green run is not red.
+failed_names=$(printf '%s' "$json" | jq -r '.statusCheckRollup[]? | if .__typename=="CheckRun" then select(.status=="COMPLETED" and (.conclusion|IN("FAILURE","TIMED_OUT","ACTION_REQUIRED","CANCELLED"))) | .name else select(.state|IN("FAILURE","ERROR")) | .context end' 2>/dev/null) || exit 0
+red=
+while IFS= read -r check_name; do
+  [ -n "$check_name" ] || continue
+  if printf '%s\n' "$non_green" | grep -Fqx -- "$check_name"; then
+    [ -z "$red" ] || red="$red, "
+    red="$red$check_name"
+  fi
+done <<< "$failed_names"
 red=$(printf '%s' "$red" | tr '\r\n\t' '   ')
 red=${red:0:300}
 pending=$(printf '%s' "$json" | jq -r '[.statusCheckRollup[]? | if .__typename=="CheckRun" then select(.status!="COMPLETED") else select(.state=="PENDING") end] | length' 2>/dev/null) || exit 0
