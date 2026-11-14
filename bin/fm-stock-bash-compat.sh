@@ -155,7 +155,7 @@ else
     env FM_LANDING_QUEUE_TEST_ONLY=farm \
     "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
 fi
-run_consumer landing-spec "landing queue speculative candidate and watcher auto-land" "$LANDING_SPEC_TIMEOUT" 15 \
+run_consumer landing-spec "landing queue speculative candidate and watcher auto-land" "$LANDING_SPEC_TIMEOUT" 17 \
   env FM_LANDING_QUEUE_TEST_ONLY=spec \
   "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
 run_consumer worker-timing "worker timing status and teardown record" "$WORKER_TIMING_TIMEOUT" 6 \
