@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# The crew board's worker tag must read a local-only car's live landing-queue
-# place and front-check state through fm-landing-queue.sh status, never a
-# worker's stale self-reported phase text.
+# The crew board projects a local-only car's place and last reconciled status
+# from the queue snapshot without waiting for per-car status subprocesses.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -28,6 +27,32 @@ run_panels() {
     FROGPILE_SUITE_LOCK_HOLDER="$home/empty-locks/suite.holder" PATH="$home/stub-bin:$PATH" \
     TESTFARM_CHECKOUT="$TESTFARM_CHECKOUT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     python3 "$PANELS" "$snapshot"
+}
+
+run_panels_with_slow_queue_status() {
+  local home=$1 snapshot=$2
+  FM_CREW_BOARD_PROC_ROOT="$home/empty-proc" FM_TEST_SERVICE_STATE="$home/empty-service" \
+    FM_CREW_BOARD_PHONE_QUEUE_ROOT="$home/empty-locks" FROGPILE_SUITE_LOCK="$home/empty-locks/suite.lock" \
+    FROGPILE_SUITE_LOCK_HOLDER="$home/empty-locks/suite.holder" PATH="$home/stub-bin:$PATH" \
+    TESTFARM_CHECKOUT="$TESTFARM_CHECKOUT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    python3 - "$PANELS" "$snapshot" <<'PY'
+import runpy
+import subprocess
+import sys
+import time
+
+original = subprocess.run
+def slow_queue_status(args, *other, **kwargs):
+    if isinstance(args, (list, tuple)) and args and str(args[0]).endswith("fm-landing-queue.sh"):
+        time.sleep(4.5)
+    return original(args, *other, **kwargs)
+subprocess.run = slow_queue_status
+start = time.monotonic()
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+if time.monotonic() - start > 3.0:
+    raise SystemExit("board projection waited on slow queue status")
+PY
 }
 
 field() { sed -n "s/^$1=//p"; }
@@ -111,6 +136,11 @@ EOF
     'queue status comes from the live status helper'
   assert_equals 'Front check: none · none' "$(jq -r '.landing_queue[] | select(.id == "a") | .detail' "$home/panels.json")" \
     'the front car exposes its check state'
+  run_panels_with_slow_queue_status "$home" "$snapshot" > "$home/slow-panels.json" \
+    || fail 'slow queue status delayed board projection'
+  assert_equals '#1 a|#2 c · infra|#3 b' \
+    "$(jq -r '[.landing_queue[] | select(.status != "section") | .title] | join("|")' "$home/slow-panels.json")" \
+    'all active cars remain visible when queue status would take 4.5 seconds'
   queue=$(find "$home/data/landing-queue" -name queue -type f -print -quit)
   assert_equals '3' "$(tail -n +4 "$queue" | wc -l | tr -d ' ')" \
     'fixture source has three cars, matching the observed three panel cars'
