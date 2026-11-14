@@ -49,6 +49,7 @@ case "${0##*/}" in
   fm-worker-doorbell.test.sh) key=doorbell; count=5 ;;
   fm-lane-send.test.sh) key=lane-send; count=6 ;;
   fm-farm-results.test.sh) key=farm-results; count=7 ;;
+  fm-pr-wait.test.sh) key=pr-wait; count=1 ;;
   fm-remote-landing.test.sh) key=remote-landing; count=13 ;;
   fm-task-delivery.test.sh) key=remote-export; count=1 ;;
   *) exit 2 ;;
@@ -86,6 +87,7 @@ SH
     fm-worker-doorbell.test.sh \
     fm-lane-send.test.sh \
     fm-farm-results.test.sh \
+    fm-pr-wait.test.sh \
     fm-remote-landing.test.sh \
     fm-task-delivery.test.sh
   do
@@ -112,6 +114,7 @@ run_fixture() {
     FM_STOCK_BASH_DOORBELL_TIMEOUT=1 \
     FM_STOCK_BASH_LANE_SEND_TIMEOUT=1 \
     FM_STOCK_BASH_FARM_RESULTS_TIMEOUT=1 \
+    FM_STOCK_BASH_PR_WAIT_TIMEOUT=1 \
     "$@" /bin/bash bin/fm-stock-bash-compat.sh 2>&1)
 }
 
@@ -144,7 +147,7 @@ SH
     FM_TEST_TIMEOUT_RECORD="$record" \
     /bin/bash bin/fm-stock-bash-compat.sh 2>&1) || rc=$?
   expect_code 0 "$rc" "default stock Bash compatibility fixture completes"
-  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 17 ] \
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 18 ] \
     || fail "each stock Bash consumer needs one passing verdict"
   assert_contains "$out" "ok - fixture assertion 1" \
     "default oversized route completes through the public compatibility wrapper"
@@ -193,6 +196,7 @@ landing-conflicts|post-landing trial merge notification
 doorbell|worker gate and job doorbells
 lane-send|lane test-service completion delivery
 farm-results|watcher farm-result delivery and submit label
+pr-wait|PR wait deadline and one-rerun observer
 EOF
   pass "stock Bash compatibility: every hung consumer is named, streamed, and independently bounded"
 }
