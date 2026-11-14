@@ -525,6 +525,8 @@ function fixture(){
   fs.mkdirSync(main+'/prototype-game',{recursive:true});
   fs.writeFileSync(main+'/.gitignore','prototype-game/.godot/\nprototype-game/addons/playbot/native/\nprototype-game/tests/task_evidence/\nprototype-game/private.env\n');
   fs.writeFileSync(main+'/prototype-game/project.godot','config_version=5\n');
+  fs.mkdirSync(main+'/prototype-game/android/build',{recursive:true});
+  fs.writeFileSync(main+'/prototype-game/android/build/gradlew','#!/bin/sh\nexit 0\n',{mode:0o755});
   fs.mkdirSync(main+'/scripts');
   fs.writeFileSync(main+'/scripts/check_guide_compliance.py','# fixture dependency\n');
   fs.writeFileSync(main+'/scripts/guide_submission_checks.py','# fixture dependency\n');
@@ -577,6 +579,17 @@ fs.writeFileSync(f.repo+'/prototype-game/untracked.gd','preserve\n');reject(f,{}
 git(f.repo,'update-index','--assume-unchanged','prototype-game/new.gd');f.indexBefore=fs.readFileSync(f.index);reject(f,{},/hidden index flags/);git(f.repo,'update-index','--no-assume-unchanged','prototype-game/new.gd');
 console.log('identity: wrong head/branch/workspace/root, invalid base/companions, dirty inputs and hidden index flags rejected before import');
 let r;
+f=fixture();
+const gradlew=f.repo+'/prototype-game/android/build/gradlew';
+fs.chmodSync(gradlew,0o700);
+assert.equal(fs.statSync(gradlew).mode & 0o777,0o700);
+assert.equal(git(f.repo,'diff','--name-only','--','prototype-game/android/build/gradlew'),'');
+r=run(f);assert.equal(r.status,0,r.stderr);
+assert.equal(fs.statSync(gradlew).mode & 0o777,0o700);
+f=fixture();fs.chmodSync(f.repo+'/prototype-game/android/build/gradlew',0o600);
+reject(f,{},/Project differs from committed head.*gradlew/);
+assert.equal(fs.readFileSync(root+'/imports','utf8'),'');
+console.log('Git file mode: 0700 remains executable and imports without chmod; 0600 loses executability and refuses before Godot');
 f=fixture();
 const originalBranch=f.branch, renamedBranch='fm/'+originalBranch;
 git(f.repo,'branch','-m',renamedBranch);
