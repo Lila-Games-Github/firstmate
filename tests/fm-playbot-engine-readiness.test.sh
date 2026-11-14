@@ -519,12 +519,16 @@ fs.mkdirSync(bundle+'/native',{recursive:true});
 fs.writeFileSync(bundle+'/plugin.cfg','[plugin]\nversion="0.9"\n');fs.writeFileSync(bundle+'/plugin.gd','bundled addon\n');fs.writeFileSync(bundle+'/native/helper.so','native bytes');
 let serial=0;
 function git(repo,...args){const r=cp.spawnSync('git',['-C',repo,...args],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
-function fixture(){
+function fixture(large=false){
   serial++;const main=root+'/main'+serial,repo=root+'/lane'+serial,branch='playbot/wave-three-'+serial;
   fs.mkdirSync(main);git(main,'init','-q','-b','main');git(main,'config','user.name','Fixture');git(main,'config','user.email','fixture@example.invalid');
   fs.mkdirSync(main+'/prototype-game',{recursive:true});
   fs.writeFileSync(main+'/.gitignore','prototype-game/.godot/\nprototype-game/addons/playbot/native/\nprototype-game/tests/task_evidence/\nprototype-game/private.env\n');
   fs.writeFileSync(main+'/prototype-game/project.godot','config_version=5\n');
+  if(large){
+    fs.mkdirSync(main+'/prototype-game/docs',{recursive:true});
+    fs.writeFileSync(main+'/prototype-game/docs/large.bin',Buffer.alloc(17*1024*1024,0x61));
+  }
   fs.mkdirSync(main+'/prototype-game/android/build',{recursive:true});
   fs.writeFileSync(main+'/prototype-game/android/build/gradlew','#!/bin/sh\nexit 0\n',{mode:0o755});
   fs.mkdirSync(main+'/scripts');
@@ -590,6 +594,15 @@ f=fixture();fs.chmodSync(f.repo+'/prototype-game/android/build/gradlew',0o600);
 reject(f,{},/Project differs from committed head.*gradlew/);
 assert.equal(fs.readFileSync(root+'/imports','utf8'),'');
 console.log('Git file mode: 0700 remains executable and imports without chmod; 0600 loses executability and refuses before Godot');
+f=fixture(true);
+r=run(f);assert.equal(r.status,0,r.stderr);
+assert.equal(JSON.parse(r.stdout).sourceCounts.headTracked,13);
+f=fixture(true);
+const largeFile=f.repo+'/prototype-game/docs/large.bin';
+const fd=fs.openSync(largeFile,'r+');fs.writeSync(fd,Buffer.from([0x62]),0,1,0);fs.closeSync(fd);
+reject(f,{},/Project differs from committed head.*large.bin/);
+assert.equal(fs.readFileSync(root+'/imports','utf8'),'');
+console.log('large tracked blob: 17 MiB raw committed file imports without Git stdout overflow; one-byte drift refuses before Godot');
 f=fixture();
 const originalBranch=f.branch, renamedBranch='fm/'+originalBranch;
 git(f.repo,'branch','-m',renamedBranch);
