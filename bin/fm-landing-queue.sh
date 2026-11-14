@@ -553,7 +553,7 @@ if [ -e "$FILE" ]; then
         *) [[ "$row_receipt" =~ ^[0-9a-f]{40}([0-9a-f]{24})?\.receipt$ ]] || die 'invalid queue receipt name' ;;
       esac
       case "$row_state" in active|landed|failed) ;; *) die 'invalid queue state' ;; esac
-      case "${row_display:--}" in -|waiting-for-front|needs-rebase|needs-full|needs-quick|needs-gate|ready-to-land|red-receipt|needs-baseline|landed|failed) ;; *) die 'invalid queue display status' ;; esac
+      case "${row_display:--}" in -|waiting-for-front|needs-rebase|needs-full|needs-quick|needs-gate|checking-candidate|ready-to-land|red-receipt|needs-baseline|landed|failed) ;; *) die 'invalid queue display status' ;; esac
       if [ "$row_state" = failed ]; then
         valid_reason "$row_reason" || die 'invalid queue failure reason'
       else
