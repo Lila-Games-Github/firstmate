@@ -10,7 +10,7 @@
 # not a watcher, daemon, PR poll, or forge client of its own.
 # In a secondmate home every `scan` invocation, which is every watcher poll,
 # first runs the LEDGER-FIRST parent delivery: a direct child whose status
-# ledger ends in a whole `done:` or `failed:` line has stated its own outcome,
+# ledger ends in a whole `blocked:`, `done:`, or `failed:` line has stated its own outcome,
 # so that line is published on the parent channel at once through
 # bin/fm-parent-channel-lib.sh as
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
@@ -370,6 +370,19 @@ child_terminal_ledger_line() { # <status>
   printf '%s\n' "$last"
 }
 
+# Blocked is a captain-facing child event even though it is not terminal.
+# It shares the same complete-line and per-fingerprint retry path; the inactive
+# terminal fallback continues to consider only done and failed.
+child_reportable_ledger_line() { # <status>
+  local status=$1 line snapshot marker='__FM_LEDGER_SNAPSHOT_END__'
+  [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
+  line=$(last_status_line "$status")
+  case "$(status_line_verb "$line")" in blocked) ;; *) child_terminal_ledger_line "$status"; return $? ;; esac
+  snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
+  case "$snapshot" in *$'\n'"$marker") ;; "$line$marker"|*$'\n'"$line$marker") return 2 ;; esac
+  printf '%s\n' "$line"
+}
+
 # Claim one already-delivered inactive fallback as the delivery of this ledger
 # event. Both reconciliation paths hold the child's meta lock, so this receipt
 # update serializes their decision even though the child appends its ledger
@@ -403,7 +416,7 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 report_child_ledger_locked() { # <id> <meta>
   local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
-  last=$(child_terminal_ledger_line "$status") || return 0
+  last=$(child_reportable_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
   pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
@@ -413,7 +426,7 @@ report_child_ledger_locked() { # <id> <meta>
   [ -n "$RECORD_PENDING" ] || return 0
   last_status_line "$status" previous >/dev/null
   predecessor_head=$(sha256_text "$previous")
-  if claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
+  if [ "$state" != blocked ] && claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
     # The fallback line is already on the parent channel. This reported ledger
     # receipt records that its richer rendering owes no second publication.
     mark_reported "$RECORD_PENDING" || return 1

@@ -790,6 +790,7 @@ tests/fm-quota-array-dispatch-live-e2e.test.sh 71
 tests/fm-quota-choose.test.sh 1484
 tests/fm-routing-ledger.test.sh 700
 tests/fm-remote-backlog-handoff.test.sh 73123
+tests/fm-remote-child-check.test.sh 1000
 tests/fm-remote-doctor.test.sh 13889
 tests/fm-remote-entrypoint.test.sh 108
 tests/fm-remote-herdr-guard.test.sh 3044
