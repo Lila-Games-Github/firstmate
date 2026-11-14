@@ -1488,52 +1488,73 @@ LANDING_QUEUE_FRONT_WORDS = {
     "needs-gate": "NEEDS GATE", "ready-to-land": "READY TO LAND",
     "red-receipt": "RED RECEIPT", "needs-baseline": "NEEDS BASELINE",
 }
-LANDING_QUEUE_INACTIVE_STATUSES = frozenset({"landed", "failed"})
+def landing_queue_snapshot():
+    """Read each atomic queue snapshot once, without running queue reconciliation.
+
+    The display status is published by the queue writer after reconciliation.
+    Older snapshots still show every car, with the front's recorded active
+    state and waiting status for the other cars.
+    """
+    trains = []
+    fields_by_task = {}
+    for queue in sorted((DATA / "landing-queue").glob("*/queue")):
+        try:
+            with queue.open(encoding="utf-8") as source:
+                schema, common, branch = (source.readline().rstrip("\n") for _ in range(3))
+                if schema != "fm-landing-queue.v1" or not common or not branch:
+                    continue
+                cars = []
+                for line in source:
+                    cols = line.rstrip("\n").split("\t")
+                    if len(cols) < 9 or cols[3] != "active":
+                        continue
+                    task_id = cols[0]
+                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", task_id):
+                        continue
+                    place = len(cars) + 1
+                    status = cols[12] if len(cols) > 12 else ""
+                    if status not in LANDING_QUEUE_FRONT_WORDS and status != "waiting-for-front":
+                        status = "waiting-for-front" if place > 1 else "active"
+                    priority = cols[10] if len(cols) > 10 and cols[10] in ("infra", "unblock") else "-"
+                    request = "-"
+                    ledger = queue.parent / f"farm-{task_id}"
+                    if place == 1 and ledger.is_file() and not ledger.is_symlink():
+                        try:
+                            for record in ledger.read_text(encoding="utf-8").splitlines():
+                                parts = record.split("\t")
+                                if len(parts) >= 4:
+                                    request = f"{parts[0]}:{parts[3]}"
+                        except (OSError, UnicodeError):
+                            pass
+                    fields = {"queue": queue.parent.name, "place": str(place),
+                              "status": status, "priority": priority, "front_request": request}
+                    cars.append((place, task_id, fields))
+                    fields_by_task[task_id] = fields
+        except (OSError, UnicodeError):
+            continue
+        if cars:
+            project = str(Path(common).parent) if Path(common).name == ".git" else common
+            trains.append((project, branch, cars))
+    return trains, fields_by_task
 
 
-def landing_queue_fields(task_id, worktree, deadline):
-    """This local-only car's live landing-queue row as key=value fields, read
-    through fm-landing-queue.sh status, or {} when it is not an active car."""
-    budget = deadline - time.monotonic()
-    if budget <= 0.05 or not worktree or not Path(worktree).is_dir():
-        return {}
-    try:
-        run = subprocess.run([str(SCRIPT_DIR / "fm-landing-queue.sh"), "status", task_id,
-                             "--project", worktree], capture_output=True, text=True,
-                             timeout=min(2.0, budget), check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return {}
-    if run.returncode:
-        return {}
-    fields = {}
-    for line in run.stdout.splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            fields[key] = value
-    return fields
-
-
-def landing_queue_resource_tags(snapshot, tags, fields_by_task=None, deadline=None):
-    """Record each local-only car's live landing-queue place and whether it is
+def landing_queue_resource_tags(snapshot, tags, fields_by_task):
+    """Record each local-only car's queue place and whether it is
     truly the front, so a stale self-reported "front" phase never outlives the
     live queue position."""
-    deadline = deadline or time.monotonic() + 2.0
     for task in snapshot.get("tasks", []):
         if not isinstance(task, dict) or task.get("mode") != "local-only":
             continue
         task_id = str(task.get("id") or "")
-        worktree = ((task.get("paths") or {}).get("worktree") or {}).get("path")
-        if not task_id or not isinstance(worktree, str) or not worktree:
+        if not task_id:
             continue
-        fields = landing_queue_fields(task_id, worktree, deadline)
-        if fields_by_task is not None:
-            fields_by_task[task_id] = fields
+        fields = fields_by_task.get(task_id, {})
         status = fields.get("status", "")
         try:
             place = int(fields.get("place", "0"))
         except ValueError:
             place = 0
-        if not status or place <= 0 or status in LANDING_QUEUE_INACTIVE_STATUSES:
+        if not status or place <= 0:
             continue
         if status == "waiting-for-front":
             resource_tag(tags, task_id, 1, f"LANDING QUEUE #{place}")
@@ -1542,55 +1563,12 @@ def landing_queue_resource_tags(snapshot, tags, fields_by_task=None, deadline=No
             resource_tag(tags, task_id, 0, f"LANDING QUEUE FRONT \u00b7 {word}")
 
 
-def landing_queue_rows(fields_by_task, deadline):
-    """Enumerate queue identities locally, then get each car's live fields from status.
-    Reuse worker-tag reads so this adds no status call for a snapshot car."""
+def landing_queue_rows(trains):
+    """Render every active car from the queue's last reconciled snapshot."""
     rows = []
-    for queue in sorted((DATA / "landing-queue").glob("*/queue")):
-        unread = []
-        try:
-            with queue.open(encoding="utf-8") as source:
-                schema, common, branch = (source.readline().rstrip("\n") for _ in range(3))
-                # Column four is the recorded state; landed and failed rows are
-                # terminal, so they never cost a status call.
-                ids = []
-                for line in source:
-                    cols = line.rstrip("\n").split("\t")
-                    if len(cols) > 3 and cols[3] in LANDING_QUEUE_INACTIVE_STATUSES:
-                        continue
-                    ids.append(cols[0])
-        except (OSError, UnicodeError):
-            continue
-        if schema != "fm-landing-queue.v1" or not ids:
-            continue
-        project = str(Path(common).parent) if Path(common).name == ".git" else common
-        cars = []
-        for task_id in ids:
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", task_id):
-                continue
-            fields = fields_by_task.get(task_id)
-            if not fields or fields.get("queue") != queue.parent.name:
-                fields = landing_queue_fields(task_id, project, deadline)
-                if not fields and deadline - time.monotonic() <= 0.05:
-                    unread.append(task_id)
-                    continue
-            if fields.get("status") in LANDING_QUEUE_INACTIVE_STATUSES:
-                continue
-            try:
-                place = int(fields.get("place", "0"))
-            except ValueError:
-                continue
-            if place < 1 or not fields.get("status"):
-                continue
-            cars.append((place, task_id, fields))
-        if not cars and not unread:
-            continue
+    for project, branch, cars in trains:
         rows.append(item(f"{Path(project).name} / {branch}", status="section"))
-        if unread:
-            rows.append(item("Landing queue could not be fully read",
-                             f"Out of time; {len(unread)} active car(s) not checked: "
-                             + ", ".join(unread[:5]), "unreadable"))
-        for place, task_id, fields in sorted(cars):
+        for place, task_id, fields in cars:
             priority = f" · {fields['priority']}" if fields.get("priority") in ("infra", "unblock") else ""
             detail = ""
             if place == 1:
@@ -2228,10 +2206,9 @@ def project(snapshot):
     allowance = allowance_entries(cache)
     resources = {}
     tests = test_queue(snapshot, phones, now, resources)
-    landing_deadline = time.monotonic() + 2.0
-    landing_fields = {}
-    landing_queue_resource_tags(snapshot, resources, landing_fields, landing_deadline)
-    landing_queue = landing_queue_rows(landing_fields, landing_deadline)
+    landing_trains, landing_fields = landing_queue_snapshot()
+    landing_queue_resource_tags(snapshot, resources, landing_fields)
+    landing_queue = landing_queue_rows(landing_trains)
     queued = tasks_axi_list("queued")
     in_flight = tasks_axi_list("in_flight")
     backlog = {
