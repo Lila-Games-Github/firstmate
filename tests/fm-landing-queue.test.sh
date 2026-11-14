@@ -879,6 +879,8 @@ if cmd == 'project-for-repo':
     print('project')
     sys.exit(0)
 if cmd == 'status':
+    calls = path.with_suffix('.calls')
+    calls.write_text(str(int(calls.read_text()) + 1 if calls.exists() else 1))
     if path.with_suffix('.down').exists():
         sys.exit(3)
     print(json.dumps(state))
@@ -1074,7 +1076,9 @@ spec_queue resolve sweep >/dev/null
 [ "$(wake_count)" -eq "$((before + 1))" ] || fail 'speculative farm outage did not wake firstmate'
 spec_queue resolve sweep >/dev/null
 [ "$(wake_count)" -eq "$((before + 1))" ] || fail 'repeat speculative farm outage woke firstmate again'
+status_calls=$(cat "$CASE/farm.calls")
 expect_field "$(spec_queue status a)" status checking-candidate
+[ "$(cat "$CASE/farm.calls")" -eq "$status_calls" ] || fail 'status observation polled the test service'
 spec_queue resolve sweep >/dev/null
 [ "$(wake_count)" -eq "$((before + 1))" ] || fail 'status recheck reset the farm outage dedupe marker'
 rm "$CASE/farm.down"
