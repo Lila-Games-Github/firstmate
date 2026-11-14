@@ -461,7 +461,9 @@ for row in requests:
     if basis != "-":
         # The exempt quick request establishes farm evidence. Only the later
         # admitted phone request completes the front check.
-        if options.get("rebase_basis") != basis or not options.get("device_gate"):
+        if (options.get("rebase_basis") != basis or options.get("check") != "quick"
+                or not options.get("suite") or options.get("target") != target
+                or not options.get("device_gate")):
             continue
         if options.get("phone_admission") != {"kind": "rebased-quick", "basis": basis, "target": target}:
             continue

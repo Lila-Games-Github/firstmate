@@ -619,7 +619,7 @@ farm_rebase_request() {
 import json, sys, time
 rid, sha, target, state, basis = sys.argv[1:6]
 print(json.dumps({"id": rid, "seq": 2, "sha": sha, "original_sha": sha, "state": state,
-  "submitted": time.time() + 5, "options": {"suite": False, "check": "full",
+  "submitted": time.time() + 5, "options": {"suite": True, "check": "quick", "target": target,
   "device_gate": "any", "rebase_basis": basis,
   "phone_admission": {"kind": "rebased-quick", "basis": basis, "target": target}}}))
 ' "$id" "$(head_of "$car")" "$target" "$state" "$basis"
@@ -663,6 +663,9 @@ worker_meta a
 farm_json "$(farm_request r-exempt-quick a passed)"
 [ -z "$(queue resolve sweep)" ] || fail 'exempt quick request completed the queue before rebase phone admission'
 expect_field "$(queue status a)" status needs-quick
+farm_json "$(farm_request r-exempt-quick a passed)" "$(farm_rebase_request r-full-phone a passed "$admitted" | python3 -c 'import json,sys; row=json.load(sys.stdin); row["options"].update({"suite":False,"check":"full"}); print(json.dumps(row))')"
+[ -z "$(queue resolve sweep)" ] || fail 'full phone request completed the rebase front check'
+expect_field "$(queue status a)" status needs-quick
 farm_json "$(farm_request r-exempt-quick a passed)" "$(farm_rebase_request r-rebased-phone a passed "$admitted")"
 case "$(queue resolve sweep)" in "front-check passed task=a request=r-rebased-phone "*) ;; *) fail 'accepted rebase phone result did not settle the front car' ;; esac
 expect_field "$(queue status a)" status ready-to-land
@@ -691,6 +694,8 @@ if args[0] != 'submit':
     raise SystemExit('unexpected stub farm command')
 sha = args[3]
 if '--rebase-basis' in args:
+    if '--check' not in args or args[args.index('--check') + 1] != 'quick':
+        raise SystemExit('error: full phone route is not permitted for landing')
     basis = args[args.index('--rebase-basis') + 1]
     repo = args[2]
     if os.environ.get('STUB_FARM_MISSING') == '1':
@@ -699,27 +704,40 @@ if '--rebase-basis' in args:
     new = subprocess.check_output(['git', '-C', repo, 'show', sha + ':a.txt'])
     if old != new:
         raise SystemExit('error: phone gate requires a passed full suite for this project and exact commit; rebase changed the patch')
-    print('admitted-phone')
+    print('admitted-short-phone')
 elif '--suite' in args:
     path = pathlib.Path(args[args.index('--receipt') + 1])
-    path.write_text('schema=fm-full-suite.v1\nsha=' + sha + '\nfailures=0\n')
-    print('fallback-full')
+    if '--device-gate' in args:
+        if '--check' not in args or args[args.index('--check') + 1] != 'quick':
+            raise SystemExit('error: full phone route is not permitted for landing')
+        target = args[args.index('--target') + 1]
+        path.write_text('schema=fm-quick-check.v1\nsha=' + sha + '\ntarget=' + target + '\n')
+        print('short-phone')
+    else:
+        path.write_text('schema=fm-full-suite.v1\nsha=' + sha + '\nfailures=0\n')
+        print('editor-suite')
 else:
     raise SystemExit('unexpected stub farm request')
 FARM_STUB
 export STUB_FARM_LOG="$CASE/farm-submits.log"
 if TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
-  --task a --device-gate any --rebase-basis "$admitted" > "$CASE/refusal" 2>&1; then
+  --task a --suite --check quick --target "$(tip)" --device-gate any --rebase-basis "$admitted" > "$CASE/refusal" 2>&1; then
   fail 'stub farm accepted a changed rebased patch'
 fi
 grep -q 'rebase changed the patch' "$CASE/refusal" || fail 'farm refusal reason was hidden by the shim'
 TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
-  --task a --suite --device-gate any --receipt "$CASE/fallback.full" > "$CASE/fallback.request"
-[ "$(cat "$CASE/fallback.request")" = fallback-full ] || fail 'exact-head fallback did not submit'
-out=$(queue receipt a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/fallback.full")
+  --task a --suite --receipt "$CASE/fallback.full" > "$CASE/fallback.request"
+[ "$(cat "$CASE/fallback.request")" = editor-suite ] || fail 'exact-head editor suite did not submit'
+TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+  --task a --suite --check quick --target "$(tip)" --device-gate any --receipt "$CASE/fallback.quick" > "$CASE/fallback.request"
+[ "$(cat "$CASE/fallback.request")" = short-phone ] || fail 'exact-head short phone did not submit'
+out=$(queue receipt a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/fallback.quick")
 expect_field "$out" status ready-to-land
 grep -q -- "--rebase-basis $admitted" "$STUB_FARM_LOG" || fail 'shim did not pass the basis SHA through'
-pass 'stub farm rejects a changed patch with its reason, and an exact-head full suite settles the front car'
+if grep -E -- '--device-gate any( --receipt| --rebase-basis)' "$STUB_FARM_LOG" | grep -v -- '--check quick' >/dev/null; then
+  fail 'front fallback requested the full phone route'
+fi
+pass 'stub farm rejects a changed patch and the fallback uses editor suite then short phone'
 
 stub_checkout="$CASE/farm-checkout"
 farm_case farm-missing-basis
@@ -733,14 +751,16 @@ prepare a
 cp -a "$stub_checkout" "$CASE/farm-checkout"
 export STUB_FARM_LOG="$CASE/farm-submits.log"
 accepted=$(TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
-  --task a --device-gate any --rebase-basis "$admitted")
-[ "$accepted" = admitted-phone ] || fail 'stub farm did not accept a clean rebased patch'
+  --task a --suite --check quick --target "$(tip)" --device-gate any --rebase-basis "$admitted")
+[ "$accepted" = admitted-short-phone ] || fail 'stub farm did not accept a clean rebased patch on the short route'
+grep -q -- "--suite --check quick --target $(tip) --device-gate any --rebase-basis $admitted" "$STUB_FARM_LOG" \
+  || fail 'clean code rebase without a save cache did not request the short phone route'
 if STUB_FARM_MISSING=1 TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
-  --task a --device-gate any --rebase-basis "$admitted" > "$CASE/refusal" 2>&1; then
+  --task a --suite --check quick --target "$(tip)" --device-gate any --rebase-basis "$admitted" > "$CASE/refusal" 2>&1; then
   fail 'stub farm accepted a basis without its green full-suite result'
 fi
 grep -q 'rebase basis has no green farm full suite' "$CASE/refusal" || fail 'missing basis refusal reason was hidden by the shim'
-pass 'stub farm accepts a clean rebase and refuses a basis missing its farm full-suite result'
+pass 'stub farm uses the short phone route for a clean code rebase without a save cache and refuses a missing basis'
 
 farm_case farm-fail-waiting
 car a; join a >/dev/null
