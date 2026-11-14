@@ -113,6 +113,9 @@
 #   check: landing-queue sweep failed: <first output line>
 #                          the landing sweep itself could not run; surfaced once
 #                          per distinct error until a successful sweep clears it
+#   check: landing-queue auto-land failed: <error>
+#                          the guarded speculative merge or authorized branch
+#                          publication failed; surfaced once per distinct error
 #   check: farm-results: farm-result undelivered task=<id> request=<id>: <why>
 #                          a finished test-farm result could not be sent to its
 #                          task (bin/fm-farm-results.py owns what it prints)
@@ -2246,6 +2249,23 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+landing_auto_land_tick() {
+  local landing_auto_rc=0 landing_auto_out landing_auto_err
+  landing_auto_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-landing-auto-land.sh" 2>&1) || landing_auto_rc=$?
+  if [ "$landing_auto_rc" -ne 0 ]; then
+    landing_auto_err=$(printf '%s\n' "$landing_auto_out" | tail -n 1)
+    [ -n "$landing_auto_err" ] || landing_auto_err="exit $landing_auto_rc"
+    triage_log "landing-queue auto-land failed: $landing_auto_err"
+    if [ "$(cat "$STATE/.last-landing-auto-error" 2>/dev/null || true)" != "$landing_auto_err" ]; then
+      printf '%s\n' "$landing_auto_err" > "$STATE/.last-landing-auto-error" 2>/dev/null || true
+      wake "check: landing-queue auto-land failed: $landing_auto_err"
+    fi
+  else
+    rm -f "$STATE/.last-landing-auto-error"
+  fi
+}
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -2260,6 +2280,10 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Settle any candidate made ready by a worker or a previous watcher cycle
+  # before an unrelated wake can end this cycle.
+  landing_auto_land_tick
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
@@ -2347,6 +2371,11 @@ while :; do
       wake "check: landing-queue sweep: $landing_out"
     fi
   fi
+
+  # A verified speculative front car in a registered local-only +yolo project
+  # lands through the guarded candidate path here, without waiting for a
+  # conversational wake turn. The helper rechecks current queue state itself.
+  landing_auto_land_tick
 
   # Finished test-farm results reach their tasks whatever hook the request had,
   # and open requests are listed for the stale triage (bin/fm-farm-results.py).

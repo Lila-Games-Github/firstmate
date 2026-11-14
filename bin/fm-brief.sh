@@ -1003,12 +1003,25 @@ TEST_SERVICE_PROJECT=$(FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-test-service.
 if [ -n "$TEST_SERVICE_PROJECT" ]; then
   TEST_SERVICE_RECEIPT="$DATA/$ID/suite.receipt"
   TEST_SERVICE_RECEIPT_ARG=$(shell_quote "$TEST_SERVICE_RECEIPT")
+  TEST_SERVICE_OPENING="When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit through the Firstmate test service with explicit FM_HOME."
+  TEST_SERVICE_PREJOIN='In a landing train, submit the full suite and device play-through before joining on your branch rebased onto the current tip.'
+  TEST_SERVICE_FULL_OPTIONS='--suite --device-gate any'
+  TEST_SERVICE_PHONE_GUIDANCE=
+  if [ "$MODE" = local-only ]; then
+    TEST_SERVICE_OPENING='Commit the exact version first, then submit the editor suite and short phone check separately through the Firstmate test service with explicit FM_HOME.'
+    TEST_SERVICE_PREJOIN='Run the editor suite and short phone check on your own rebased branch before joining the landing line; workers prepare those checks independently, without waiting for other cars.
+The line then runs the editor suite followed by its short phone check on the exact replayed candidate SHA before landing.'
+    TEST_SERVICE_FULL_OPTIONS='--suite'
+    # shellcheck disable=SC2016 # The backticks are literal generated brief text.
+    TEST_SERVICE_PHONE_GUIDANCE='After the editor suite passes, submit `--suite --check quick --target <pre-queue-tip-sha> --device-gate any --receipt <quick-receipt-path>` on the same head; its passed result supplies the phone evidence for the configured landing gate.'
+  fi
   TEST_SERVICE_GUIDANCE="# Test service gate
-When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit through the Firstmate test service with explicit FM_HOME.
-In a landing train, submit the full suite and device play-through before joining on your branch rebased onto the current tip.
+$TEST_SERVICE_OPENING
+$TEST_SERVICE_PREJOIN
 When \`landing_queue status\` reports \`candidate_sha\`, the queue builds and tests the candidate itself; after joining, wait for its status and do not rebase or submit the front check.
 When status has no \`candidate_sha\`, submit a quick check on the rebased front head unless queue status requires a full rerun.
-Use \`FM_HOME=$(shell_quote "$FM_HOME") $FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`.
+Use \`FM_HOME=$(shell_quote "$FM_HOME") $FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' $TEST_SERVICE_FULL_OPTIONS --receipt $TEST_SERVICE_RECEIPT_ARG\`.
+$TEST_SERVICE_PHONE_GUIDANCE
 For the front quick check, read \`gate_exemption\` and \`rebase_basis\` from the current \`landing_queue status\` after acknowledging any rebase.
 When \`rebase_basis\` is a SHA and \`gate_exemption=-\`, submit \`--suite --check quick --target <front-target-sha> --device-gate any --suite-exemption exempt --receipt <quick-receipt-path>\` and wait for its green result; the farm runs the touched editor tests and short phone command.
 Then submit \`--device-gate any --rebase-basis <rebase_basis>\` on that exact rebased head and wait for its result; the queue settles this final phone request, not the exempt quick request.

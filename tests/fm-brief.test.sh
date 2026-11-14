@@ -234,7 +234,7 @@ test_ship_modes_generate_clean_briefs() {
       "$id: long-suite contract lost the durable reattachable job shape"
     assert_grep 'fm-procevent-worker-job.sh arm' "$brief" \
       "$id: long-suite contract omitted the background-job completion observer"
-    assert_grep "full suite, phone play-through, applicable benchmark" "$brief" \
+    assert_grep "editor suite and short phone check on your own exact committed head" "$brief" \
       "$id: long-suite contract lost pre-queue validation"
     assert_grep "quick test and, when the queue does not exempt its real-phone gate, the short phone check" "$brief" \
       "$id: long-suite contract lost the conditional front phone check"
@@ -593,7 +593,9 @@ test_green_final_head_names_service_receipt() {
   assert_grep "Final-head health: green" "$brief" "green brief lost its health marker"
   assert_grep "$home/data/green-receipt/suite.receipt" "$brief" "green brief omitted its task receipt path"
   assert_grep "fm-test-service.py submit some-proj" "$brief" "green brief omitted the configured pass-record producer"
-  assert_grep "--task 'green-receipt' --suite --device-gate any --receipt" "$brief" "green brief omitted service receipt arguments"
+  assert_grep "--task 'green-receipt' --suite --receipt" "$brief" "green brief omitted service receipt arguments"
+  assert_grep 'After the editor suite passes, submit' "$brief" 'green brief omitted the post-suite phone check'
+  assert_no_grep "--task 'green-receipt' --suite --device-gate any" "$brief" 'green brief still requests the full phone play-through'
   assert_grep "FM_HOME='$home'" "$brief" "green brief omitted the explicit service home"
   assert_grep "the service sends your steering inbox" "$brief" "green brief omitted the completion delivery"
   assert_no_grep 'fm-test-service.py wait <request-id>' "$brief" "green brief still holds a service waiter"
@@ -1907,7 +1909,8 @@ test_worker_owned_finalization() {
     assert_no_grep "At \`waiting-for-front\`, \`ready-to-land\`" "$brief" 'upper worker still told to poll'
     assert_no_grep 'append `done: ready in branch' "$brief" 'brief still stops before queue finalization'
     assert_grep 'git rebase --onto <target_sha> <rebase_from>' "$brief" 'brief cannot remove a failed lower car'
-    assert_grep 'Before any farm certification, run the affected tests locally on this exact head' "$brief" 'queue omitted the local affected-test gate'
+    assert_grep 'run the affected internal and focused tests locally on this exact head' "$brief" 'queue omitted the local affected-test gate'
+    assert_grep 'phone request follows the green editor result and runs independently of other workers' "$brief" 'queue omitted independent pre-join checks'
     # shellcheck disable=SC2016 # The generated brief contains literal backticks.
     assert_grep 'run the short phone check only when `gate_exemption=-`' "$brief" 'queue omitted the non-exempt quick phone gate'
     if [ "$lane" = lane ]; then

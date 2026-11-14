@@ -1002,6 +1002,7 @@ path = pathlib.Path(os.environ['STUB_FARM_STATE'])
 state = json.loads(path.read_text()) if path.exists() else {'next': 1, 'requests': []}
 cmd = sys.argv[1]
 if cmd == 'landing-gates-for-repo':
+    print(os.environ.get('STUB_GATES', ''), end='')
     sys.exit(0)
 if cmd == 'project-for-repo':
     print('project')
@@ -1037,13 +1038,28 @@ PY
   chmod +x "$CASE/bin/test-service"
 }
 spec_queue() {
-  PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" FM_LANDING_TRAIN="${SPEC_TEST_SETTING-3}" FM_TEST_SERVICE_BIN="$CASE/bin/test-service" STUB_FARM_STATE="$CASE/farm.json" \
+  PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" FM_LANDING_TRAIN="${SPEC_TEST_SETTING-3}" FM_TEST_SERVICE_BIN="$CASE/bin/test-service" STUB_FARM_STATE="$CASE/farm.json" STUB_GATES="${SPEC_TEST_GATES:-}" \
     "$QUEUE" "$@" --project "$CASE/project" --landing-branch main
 }
 spec_join() {
   local id=$1
   full_receipt "$id"
   spec_queue ready "$id" --branch "fm/$id" --head "$(head_of "$id")" --target "$(tip)" --receipt "$CASE/$id.full"
+}
+spec_auto_land() {
+  PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" \
+    FM_LANDING_TRAIN="${SPEC_TEST_SETTING-3}" FM_TEST_SERVICE_BIN="$CASE/bin/test-service" \
+    STUB_FARM_STATE="$CASE/farm.json" "$ROOT/bin/fm-landing-auto-land.sh"
+}
+spec_register() { # on|off
+  mkdir -p "$CASE/home/data" "$CASE/home/state"
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$CASE/home/data/backlog.md"
+  printf '%s\n' "- project [local-only +yolo] - test at $CASE/project (added 2026-11-14)" > "$CASE/home/data/projects.md"
+  if [ "$1" = off ]; then
+    printf '%s\n' "- project [local-only] - test at $CASE/project (added 2026-11-14)" > "$CASE/home/data/projects.md"
+  fi
+  fm_write_meta "$CASE/home/state/a.meta" "project=$CASE/project" 'mode=local-only' 'landing_branch=main' \
+    'kind=ship' 'harness=claude' 'window=sess:fm-notify'
 }
 spec_mark() { # task, full|quick, passed|failed
   python3 - "$CASE/farm.json" "$1" "$2" "$3" <<'PY'
@@ -1105,7 +1121,7 @@ for id in a b c; do
       || fail 'local merge did not explain its candidate requirement'
     quick=$(printf '%s\n' "$out" | field candidate_phone_receipt)
     cp "$quick" "$CASE/valid-quick.receipt"
-    printf 'schema=fm-quick-check.v1\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$quick"
+    printf 'schema=fm-quick-check.v1\nsha=%s\ntarget=%s\n' "$BASE" "$BASE" > "$quick"
     if PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" FM_LANDING_TRAIN=3 \
       FM_TEST_SERVICE_BIN="$CASE/bin/test-service" STUB_FARM_STATE="$CASE/farm.json" \
       "$ROOT/bin/fm-merge-local.sh" "$id" --receipt "$receipt" --candidate "$candidate" > "$CASE/bad-merge" 2>&1; then
@@ -1124,6 +1140,21 @@ for id in a b c; do
 done
 expect_field "$(spec_queue status d)" status checking-candidate
 pass 'three candidates start together, pass editor then short phone checks, and land in tested order at exact SHAs'
+
+spec_case pre-join-phone-gate
+SPEC_TEST_GATES=real-phone
+car a
+full_receipt a
+if spec_queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/a.full" \
+  > "$CASE/missing-phone" 2>&1; then
+  fail 'speculative ready admitted a car without its worker phone gate'
+fi
+printf 'schema=fm-landing-gate.v1\ngate=real-phone\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$CASE/a.phone-gate"
+spec_queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/a.full" \
+  --gate-receipt real-phone="$CASE/a.phone-gate" >/dev/null
+expect_field "$(spec_queue status a)" status checking-candidate
+SPEC_TEST_GATES=
+pass 'speculative admission retains worker editor and phone-gate receipts'
 
 spec_case front-failure
 mkdir -p "$CASE/home/state"
@@ -1150,6 +1181,145 @@ for id in b c; do
   spec_queue reconcile sweep >/dev/null
 done
 pass 'front failure removes only the failed car and rebuilds the suffix from the live tip'
+
+spec_case auto-yolo
+spec_register on
+ln -s project "$CASE/registered-project"
+printf '%s\n' "- project [local-only +yolo] - test at $CASE/registered-project (added 2026-11-14)" > "$CASE/home/data/projects.md"
+car a
+if spec_queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" > "$CASE/no-suite" 2>&1; then
+  fail 'speculative ready admitted without a worker full editor receipt'
+fi
+spec_join a >/dev/null
+candidate=$(spec_queue status a | field candidate_sha)
+spec_mark a full passed
+spec_queue resolve sweep >/dev/null
+spec_mark a quick passed
+spec_queue resolve sweep >/dev/null
+spec_auto_land > "$CASE/auto-land.log" 2>&1 || { cat "$CASE/auto-land.log" >&2; fail 'yolo candidate did not auto-land'; }
+if [ "$(tip)" != "$candidate" ]; then
+  cat "$CASE/auto-land.log" >&2
+  FM_HOME="$CASE/home" "$ROOT/bin/fm-project-mode.sh" project >&2
+  FM_HOME="$CASE/home" "$ROOT/bin/fm-project-mode.sh" --path project >&2
+  git -C "$CASE/project" worktree list --porcelain >&2
+  find "$CASE/home/data/landing-queue" -name queue -exec sed -n '1,5p' {} \; >&2
+  fail 'auto-land moved tip to a SHA other than the tested candidate'
+fi
+expect_field "$(spec_queue status a)" status landed
+pass 'speculative ready needs a worker editor receipt and +yolo auto-lands the tested candidate'
+
+spec_case auto-publish
+mv "$CASE/project" "$CASE/ProjectWhite"
+ln -s ProjectWhite "$CASE/project"
+spec_register on
+printf '%s\n' "- ProjectWhite [local-only +yolo] - test at $CASE/ProjectWhite (added 2026-11-14)" > "$CASE/home/data/projects.md"
+fm_write_meta "$CASE/home/state/a.meta" "project=$CASE/ProjectWhite" 'mode=local-only' 'landing_branch=main' \
+  'kind=ship' 'harness=claude' 'window=sess:fm-notify'
+git init -q --bare "$CASE/origin.git"
+git -C "$CASE/ProjectWhite" remote add origin "$CASE/origin.git"
+git -C "$CASE/ProjectWhite" push -q origin main
+car a; spec_join a >/dev/null
+candidate=$(spec_queue status a | field candidate_sha)
+spec_mark a full passed
+spec_queue resolve sweep >/dev/null
+spec_mark a quick passed
+spec_queue resolve sweep >/dev/null
+spec_auto_land > "$CASE/auto-land.log" 2>&1 || { cat "$CASE/auto-land.log" >&2; fail 'published yolo candidate did not auto-land'; }
+[ "$(tip)" = "$candidate" ] || fail 'published local tip differs from tested candidate'
+[ "$(git -C "$CASE/origin.git" rev-parse refs/heads/main)" = "$candidate" ] \
+  || fail 'published landing branch differs from tested candidate'
+pass 'authorized published landing branch fast-forward pushes the tested candidate'
+
+spec_case auto-push-retry
+mv "$CASE/project" "$CASE/ProjectWhite"
+ln -s ProjectWhite "$CASE/project"
+spec_register on
+printf '%s\n' "- ProjectWhite [local-only +yolo] - test at $CASE/ProjectWhite (added 2026-11-14)" > "$CASE/home/data/projects.md"
+fm_write_meta "$CASE/home/state/a.meta" "project=$CASE/ProjectWhite" 'mode=local-only' 'landing_branch=main' \
+  'kind=ship' 'harness=claude' 'window=sess:fm-notify'
+git -C "$CASE/ProjectWhite" remote add origin "$CASE/recovered-origin.git"
+car a; spec_join a >/dev/null
+candidate=$(spec_queue status a | field candidate_sha)
+spec_mark a full passed
+spec_queue resolve sweep >/dev/null
+spec_mark a quick passed
+spec_queue resolve sweep >/dev/null
+if spec_auto_land > "$CASE/first-auto-land.log" 2>&1; then fail 'missing remote did not defer publication'; fi
+[ "$(tip)" = "$candidate" ] || fail 'failed push lost the local tested landing'
+[ -f "$(find "$CASE/home/data/landing-queue" -name pending-push-a -print -quit)" ] \
+  || fail 'failed publication left no durable retry record'
+git init -q --bare "$CASE/recovered-origin.git"
+spec_auto_land > "$CASE/retry-auto-land.log" 2>&1 || { cat "$CASE/retry-auto-land.log" >&2; fail 'pending publication did not retry'; }
+[ "$(git -C "$CASE/recovered-origin.git" rev-parse refs/heads/main)" = "$candidate" ] \
+  || fail 'retried publication pushed a SHA other than the tested candidate'
+pass 'a failed authorized push retries the tested landing without repeating the merge'
+
+spec_case auto-failed
+spec_register on
+car a; spec_join a >/dev/null
+spec_mark a full failed
+spec_queue resolve sweep >/dev/null
+spec_auto_land > "$CASE/auto-land.log" 2>&1 || fail 'failed candidate caused an auto-land error'
+[ "$(tip)" = "$BASE" ] || fail 'failed candidate auto-landed'
+expect_field "$(spec_queue status a)" status failed
+pass 'failed candidate does not auto-land'
+
+spec_case auto-no-yolo
+spec_register off
+car a; spec_join a >/dev/null
+spec_mark a full passed
+spec_queue resolve sweep >/dev/null
+spec_mark a quick passed
+spec_queue resolve sweep >/dev/null
+before=$(wake_count)
+spec_auto_land > "$CASE/auto-land.log" 2>&1 || fail 'no-yolo scan failed'
+[ "$(tip)" = "$BASE" ] || fail 'no-yolo candidate auto-landed'
+[ "$(wake_count)" -eq "$before" ] || fail 'no-yolo scan emitted an extra wake'
+expect_field "$(spec_queue status a)" status ready-to-land
+pass 'project without +yolo retains the ordinary ready wake without auto-land'
+
+spec_case merge-commit
+car a; spec_join a >/dev/null
+git -C "$CASE/project" worktree add -qb fm/b "$CASE/b" main
+printf 'batch core\n' > "$CASE/b/b.txt"
+git -C "$CASE/b" add b.txt
+git -C "$CASE/b" commit -qm 'batch core'
+git -C "$CASE/project" worktree add -qb fm/b-side "$CASE/b-side" main
+printf 'batch side\n' > "$CASE/b-side/b-side.txt"
+git -C "$CASE/b-side" add b-side.txt
+git -C "$CASE/b-side" commit -qm 'batch side'
+git -C "$CASE/b" merge -q --no-ff -m 'combine batch' fm/b-side
+spec_join b >/dev/null
+[ "$(git -C "$CASE/b" rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] || fail 'merge-commit fixture has no merge commit'
+expect_field "$(spec_queue status b)" status waiting-for-front
+b_candidate=$(spec_queue status b | field candidate_sha)
+[ "$b_candidate" != - ] || fail 'merge-commit candidate was not built'
+[ "$(git -C "$CASE/project" rev-list --parents -n 1 "$b_candidate" | wc -w)" -eq 3 ] \
+  || fail 'candidate replay flattened the batch merge commit'
+spec_mark a full passed
+spec_queue resolve sweep >/dev/null
+spec_mark a quick passed
+spec_queue resolve sweep >/dev/null
+out=$(spec_queue status a)
+git -C "$CASE/project" merge -q --ff-only "$(printf '%s\n' "$out" | field candidate_sha)"
+spec_queue reconcile sweep >/dev/null
+expect_field "$(spec_queue status b)" status checking-candidate
+pass 'a no-ff merge-commit batch replays after the previous car lands'
+
+spec_case already-based-merge
+git -C "$CASE/project" worktree add -qb fm/a "$CASE/a" main
+printf 'merged core\n' > "$CASE/a/a.txt"
+git -C "$CASE/a" add a.txt
+git -C "$CASE/a" commit -qm core
+git -C "$CASE/project" worktree add -qb fm/a-side "$CASE/a-side" main
+printf 'merged side\n' > "$CASE/a-side/a-side.txt"
+git -C "$CASE/a-side" add a-side.txt
+git -C "$CASE/a-side" commit -qm side
+git -C "$CASE/a" merge -q --no-ff -m 'combine' fm/a-side
+spec_join a >/dev/null
+[ "$(spec_queue status a | field candidate_sha)" = "$(head_of a)" ] \
+  || fail 'already-based merge-commit head was not used directly as candidate'
+pass 'an already-based merge-commit branch is its own candidate'
 
 spec_case middle-failure
 for id in a b c; do car "$id"; spec_join "$id" >/dev/null; done
@@ -1220,6 +1390,9 @@ SPEC_TEST_SETTING=
 mkdir -p "$CASE/home/config/landing-train"
 printf 'off\n' > "$CASE/home/config/landing-train/default"
 car a
+if spec_queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" > "$CASE/no-receipt" 2>&1; then
+  fail 'off switch admitted a car without its worker full-suite receipt'
+fi
 full_receipt a
 out=$(spec_queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/a.full")
 expect_field "$out" status needs-quick

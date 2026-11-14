@@ -380,8 +380,9 @@ For your own background job outside the test service, register a completion obse
 A required suite that is still running, or queued behind a shared suite lock, is work under way rather than a stalled task: report it as the declared external wait rule 4 defines, naming its identifier and what it is waiting on, and never abandon, duplicate, or restart it because one command call was killed, timed out, or hit an execution-session limit.
 For a test-service request, append `paused: test-service request=<request-id>` and end your turn after submission; resume on its durable completion message, without polling status or holding a waiter session.
 Evidence must describe one snapshot: every capture and artifact you cite and the final suite receipt must all name the same commit.
-In a landing train, finish the exact-head full suite, phone play-through, applicable benchmark, and captures on your branch rebased onto the current tip before joining.
-Only the front car rebases again; it runs the quick test and, when the queue does not exempt its real-phone gate, the short phone check, or a full rerun if the new tip changed files this task touches or the quick check fails.
+Before joining a landing train, run the editor suite and short phone check on your own exact committed head, plus applicable benchmark and captures; workers prepare these independently before waiting in line.
+In a speculative train, the line then runs the editor suite and short phone check on its candidate SHA.
+Only the sequential/off front car rebases again; it runs the quick test and, when the queue does not exempt its real-phone gate, the short phone check, or a full rerun if the new tip changed files this task touches or the quick check fails.
 An upper car waits without rebasing or rerunning tests as the tip moves.
 EOF
 }
@@ -423,23 +424,25 @@ landing_queue() {
   $queue_command "\$action" $(fm_dod_quote "$id") --project .$queue_target "\$@"
 }
 \`\`\`
-1. Once implementation is committed, rebase your branch onto the current landing tip in the same worktree that owns your branch and run the project's configured full suite, phone play-through, and every applicable landing gate on that exact head.
-   Before any farm certification, run the affected tests locally on this exact head through the available engine; when the engine is unavailable, submit those affected tests as a focused farm request first, record which tests and engine blocker caused that fallback, and proceed only after that focused request passes on the same head.
-   Join only when those checks pass: \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <tested-tip-sha> --receipt <full-suite-receipt>$priority_arg\`.
-   Add \`--gate-receipt <name>=<path>\` once for each configured gate; each gate receipt uses the four-line format in the queue tool's \`--help\` and names the same head and tip.
+1. Rebase your branch onto the current landing tip in the same worktree that owns your branch, commit, and run the affected internal and focused tests locally on this exact head through the available engine.
+   When the engine is unavailable, submit those affected tests as a focused farm request first, record which tests and engine blocker caused that fallback, and proceed only after that focused request passes on the same head.
+   Submit the full editor suite and then the short phone check through the test service on this head before joining; the phone request follows the green editor result and runs independently of other workers' requests.
+   Join only after both pass: \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <tested-tip-sha> --receipt <full-suite-receipt>$priority_arg\`.
+   Add \`--gate-receipt <name>=<path>\` once for each configured gate; the short phone check's passed result is the evidence for its four-line landing-gate receipt, which names the same head and tip.
    A changed tip refuses admission; rebase and finish pre-queue checks on the new tip before retrying.
-2. Run \`landing_queue status\` before rebasing at the front and whenever you resume waiting.
+2. Run \`landing_queue status\` before rebasing at the sequential/off front and whenever you resume waiting.
    Read its \`place\`, \`target_ref\`, \`target_sha\`, and \`rebase_from\`; these replace any earlier target, even if another car failed or landed.
    At \`waiting-for-front\`, do not rebase or rerun checks even when the target changes: append \`paused: landing-queue waiting-for-front\` and end your turn without polling.
    The queue sends your steering inbox one message when your car reaches bottom; resume then with \`landing_queue status\`.
-   At bottom (\`place=1\`), when the base changes, rebase your own commits in this branch's existing worktree with \`git rebase --onto <target_sha> <rebase_from>\`, then acknowledge the prepared head with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <target_sha>\`.
+   At the sequential/off bottom (\`place=1\`), when the base changes, rebase your own commits in this branch's existing worktree with \`git rebase --onto <target_sha> <rebase_from>\`, then acknowledge the prepared head with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <target_sha>\`.
+   In speculative mode, the line builds and checks the candidate; do not rebase or acknowledge a new front head after joining.
    Resolve rebase conflicts yourself; do not merge or keep commits from a failed lower car.
-3. At \`needs-quick\`, read the current \`gate_exemption\` from \`landing_queue status\` after acknowledging any rebase.
+3. In sequential/off mode, at \`needs-quick\`, read the current \`gate_exemption\` from \`landing_queue status\` after acknowledging any rebase.
    Run the configured quick suite mapped to this task's touched files on exactly the rebased head; run the short phone check only when \`gate_exemption=-\`.
    Submit its \`fm-quick-check.v1\` receipt with \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
    If the quick check fails, submit \`landing_queue receipt --head <tested-full-sha> --target <tested-target-sha> --reason <failure>\`; this requires a full rerun and moves the car to the back when another waits.
    The queue also settles a front quick check from the test farm on its own within about a minute of its result; your report then changes nothing, so run \`landing_queue status\` and continue from what it prints.
-   At \`needs-full\`, rerun the configured full suite, phone play-through, and applicable benchmark on the rebased head, then submit the \`fm-full-suite.v1\` receipt with the same command.
+   At \`needs-full\`, rerun the editor suite, short phone check, and applicable benchmark on the rebased head, then submit the \`fm-full-suite.v1\` receipt with the same command.
    At \`needs-gate\`, read the missing gate in \`reason\` and submit its passing \`fm-landing-gate.v1\` receipt with \`landing_queue gate --gate <name> --head <tested-full-sha> --target <tested-target-sha> --receipt <file>\`.
    A changed head or target refuses either receipt; read status and check the new head at the front.
    A failing full receipt moves your car to the back when another car waits; fix failures before rejoining.

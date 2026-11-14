@@ -77,13 +77,18 @@ def retire(repo, service, state_path, state, ref):
 def build(repo, scratch_root, source, base, parent, ref):
     if git(repo, "merge-base", "--is-ancestor", base, source, check=False).returncode:
         raise RuntimeError("replay base is not an ancestor of the source head")
+    if not git(repo, "merge-base", "--is-ancestor", parent, source, check=False).returncode:
+        if source == parent:
+            raise RuntimeError("candidate replay produced no new commit")
+        git(repo, "update-ref", ref, source)
+        return source
     with tempfile.TemporaryDirectory(prefix=".build-", dir=scratch_root) as tmp:
         scratch = Path(tmp) / "worktree"
         git(repo, "worktree", "add", "--detach", "--quiet", str(scratch), source)
         try:
             result = git(scratch, "-c", "user.name=Landing Train", "-c",
                          "user.email=landing-train@localhost", "rebase", "--force-rebase",
-                         "--keep-empty", "--empty=keep",
+                         "--keep-empty", "--empty=keep", "--rebase-merges",
                          "--onto", parent, base, source, check=False)
             if result.returncode:
                 conflict = bool(git(scratch, "ls-files", "-u").stdout.strip())

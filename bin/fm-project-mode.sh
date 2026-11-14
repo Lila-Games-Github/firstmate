@@ -148,7 +148,8 @@ if [ "$PATH_ONLY" -eq 1 ]; then
     }
     END {
       if (count!=1 || found>1 || invalid) exit 1;
-      print found==1 ? result : fallback;
+      if (found==1) { print result; }
+      else { print fallback; }
     }
   ' "$REG" || {
     echo "error: registered clone path for $NAME is missing or ambiguous in $REG" >&2

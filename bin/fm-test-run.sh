@@ -1654,6 +1654,9 @@ families_for_changed_path() {
       printf '%s\n' '__script__:fm-merge-local.test.sh'
       printf '%s\n' '__script__:fm-spawn-pool-base-freshen.test.sh'
       ;;
+    bin/fm-landing-auto-land.sh|bin/fm-landing-train.py)
+      printf '%s\n' '__script__:fm-landing-queue.test.sh'
+      ;;
     bin/fm-pr-*|bin/fm-landing-queue.sh|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge

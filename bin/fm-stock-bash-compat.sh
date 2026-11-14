@@ -142,7 +142,7 @@ run_consumer watch-churn "watcher churn deferral" "$WATCH_CHURN_TIMEOUT" 1 \
 run_consumer learning "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIMEOUT" 1 \
   env FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
-# The watcher poll calls fm-landing-queue-sweep.sh, which runs the queue's resolve.
+# The watcher poll calls fm-landing-queue-sweep.sh and fm-landing-auto-land.sh.
 merge_assertions=18
 if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
   if [ "$selected" = all ] || [ "$selected" = landing ]; then
@@ -155,7 +155,7 @@ else
     env FM_LANDING_QUEUE_TEST_ONLY=farm \
     "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
 fi
-run_consumer landing-spec "landing queue speculative candidate and local merge" "$LANDING_SPEC_TIMEOUT" 9 \
+run_consumer landing-spec "landing queue speculative candidate and watcher auto-land" "$LANDING_SPEC_TIMEOUT" 17 \
   env FM_LANDING_QUEUE_TEST_ONLY=spec \
   "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
 run_consumer worker-timing "worker timing status and teardown record" "$WORKER_TIMING_TIMEOUT" 6 \
