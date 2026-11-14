@@ -67,6 +67,8 @@ out=$(check)
 assert_contains "$out" 'child=stuck' 'stuck child did not reach parent'
 assert_contains "$out" 'reason=stalled' 'stuck child was not classified by status age'
 assert_contains "$out" 'pr=https://example.test/owner/repo/pull/7' 'recorded PR was omitted'
+assert_grep 'remote secondmate ios: child=stuck' "$PARENT/state/.wake-queue" \
+  'stalled child did not create a durable parent check wake'
 out=$(check)
 [ -z "$out" ] || fail "unchanged stalled child repeated its notice: $out"
 
@@ -80,6 +82,8 @@ rm -f "$REMOTE/state/stuck.meta" "$REMOTE/state/stuck.status"
 printf 'failed [key=child-outcome]: child build failed\n' > "$REMOTE/state/parent-replies.status"
 out=$(check)
 assert_contains "$out" 'awaiting acknowledgement' 'dropped parent-channel delivery was invisible'
+assert_grep 'parent channel awaiting acknowledgement' "$PARENT/state/.wake-queue" \
+  'unacknowledged parent-channel bytes did not create a durable parent check wake'
 bytes=$(wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 if command -v shasum >/dev/null 2>&1; then
   hash=$(shasum -a 256 "$REMOTE/state/parent-replies.status" | awk '{print $1}')

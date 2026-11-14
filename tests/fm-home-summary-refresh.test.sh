@@ -66,6 +66,12 @@ mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config" \
 HOME_DIR=$(cd "$HOME_DIR" && pwd -P)
 printf '# Seeded Firstmate home\n' > "$HOME_DIR/AGENTS.md"
 printf 'mate\n' > "$HOME_DIR/.fm-secondmate-home"
+mkdir -p "$TMP_ROOT/upstream/state"
+cat > "$HOME_DIR/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$TMP_ROOT/upstream
+EOF
 fm_git_init_commit "$HOME_DIR/projects/task"
 git -C "$HOME_DIR/projects/task" checkout -q -b fm/ledger-task
 cat > "$HOME_DIR/data/backlog.md" <<'EOF'

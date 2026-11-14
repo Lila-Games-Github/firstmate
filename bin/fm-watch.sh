@@ -1638,7 +1638,8 @@ scan_signals() {
   return 0
 }
 
-# Deliver a durably queued process-event result or worker delivery failure.
+# Deliver a durably queued process-event result, worker delivery failure, or
+# remote child inventory notice.
 # Failure publication belongs to fm-worker-doorbell-lib.sh; result publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -1670,12 +1671,12 @@ procevent_surface_after_output() {
 }
 
 procevent_surface_queued() {
-  local key reason captured="" stranded="" unstarted="" delivery=""
+  local key reason captured="" stranded="" unstarted="" delivery="" remote_children=""
   PROCEVENT_SURFACED=
   [ -s "$FM_WAKE_QUEUE" ] || return 0
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   while IFS= read -r key; do
-    case "$key" in procevent:*|worker-doorbell:*) ;; *) continue ;; esac
+    case "$key" in procevent:*|worker-doorbell:*|remote-child:*) ;; *) continue ;; esac
     [ -e "$(procevent_surfaced_marker "$key")" ] && continue
     PROCEVENT_SURFACED="$PROCEVENT_SURFACED $key"
     # A stranded source or one whose launch never proved itself is the opposite
@@ -1684,6 +1685,7 @@ procevent_surface_queued() {
     # these wakes exist to surface.
     case "$key" in
       worker-doorbell:*) delivery="$delivery $key" ;;
+      remote-child:*) remote_children="$remote_children $key" ;;
       procevent:*:stranded:*) stranded="$stranded $key" ;;
       procevent:*:launch-failed:*) unstarted="$unstarted $key" ;;
       *) captured="$captured $key" ;;
@@ -1706,6 +1708,10 @@ procevent_surface_queued() {
   if [ -n "$delivery" ]; then
     [ "$reason" = "check:" ] || reason="$reason;"
     reason="$reason worker doorbell delivery failed:$delivery"
+  fi
+  if [ -n "$remote_children" ]; then
+    [ "$reason" = "check:" ] || reason="$reason;"
+    reason="$reason remote child inventory:$remote_children"
   fi
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
@@ -2113,6 +2119,20 @@ reconcile_requests_detached() {
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
   RECONCILE_REQUEST_PID=$!
+}
+
+REMOTE_CHILD_CHECK_PID=
+remote_child_check_detached() {
+  if [ -n "$REMOTE_CHILD_CHECK_PID" ]; then
+    if kill -0 "$REMOTE_CHILD_CHECK_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$REMOTE_CHILD_CHECK_PID" 2>/dev/null || triage_log "remote child inventory scan deferred"
+    REMOTE_CHILD_CHECK_PID=
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-remote-child-check.sh" scan </dev/null >/dev/null 2>&1 &
+  REMOTE_CHILD_CHECK_PID=$!
 }
 
 PR_POLL_CONTROL_LOCK=
@@ -2847,16 +2867,11 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
-  # Remote child progress has its own fixed heartbeat cadence, since an idle
-  # local fleet must not back off beyond the remote stall bound.
+  # Remote child progress has its own fixed heartbeat cadence. The remote read
+  # runs off this watcher's beacon path and queues its own durable check rows.
   if [ "$(age_of "$STATE/.last-remote-child-check")" -ge 600 ]; then
-    remote_child_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-remote-child-check.sh" scan 2>/dev/null) || remote_child_out='remote child inventory check failed'
+    remote_child_check_detached
     touch "$STATE/.last-remote-child-check"
-    if [ -n "$remote_child_out" ]; then
-      remote_child_out=$(printf '%s' "$remote_child_out" | tr '\n' ';' | cut -c1-1800)
-      wake "check: $remote_child_out"
-    fi
   fi
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12

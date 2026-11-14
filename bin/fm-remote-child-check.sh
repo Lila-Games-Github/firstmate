@@ -21,6 +21,9 @@ case "$BOUND" in ''|*[!0-9]*|0) echo 'remote-child-check: invalid stall bound' >
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 mkdir -p "$STATE/remote-child-check" || exit 1
 [ ! -L "$STATE/remote-child-check" ] || exit 1
+scan_lock="$STATE/.remote-child-check.lock"
+fm_lock_try_acquire "$scan_lock" || exit 0
+trap 'fm_lock_release "$scan_lock"' EXIT
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in '- '*) ;; *) continue ;; esac
   secondmate_registry_parse_line "$line" || continue
@@ -116,7 +119,12 @@ while IFS= read -r line || [ -n "$line" ]; do
   while IFS= read -r notice || [ -n "$notice" ]; do
     [ -n "$notice" ] || continue
     notice="remote secondmate $id: $notice"
-    fm_wake_append check "remote-child:$id" "$notice" || exit 1
+    if command -v shasum >/dev/null 2>&1; then
+      notice_hash=$(printf '%s' "$notice" | shasum -a 256 | awk '{print substr($1, 1, 16)}')
+    else
+      notice_hash=$(printf '%s' "$notice" | sha256sum | awk '{print substr($1, 1, 16)}')
+    fi
+    fm_wake_append check "remote-child:$id:$notice_hash" "$notice" || exit 1
     [ -n "$first_notice" ] || first_notice=$notice
   done <<EOF
 $verdict
