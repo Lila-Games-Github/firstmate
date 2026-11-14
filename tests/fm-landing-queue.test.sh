@@ -1069,7 +1069,14 @@ spec_queue resolve sweep >/dev/null
 spec_mark a quick passed
 spec_queue resolve sweep >/dev/null
 spec_auto_land > "$CASE/auto-land.log" 2>&1 || { cat "$CASE/auto-land.log" >&2; fail 'yolo candidate did not auto-land'; }
-[ "$(tip)" = "$candidate" ] || fail 'auto-land moved tip to a SHA other than the tested candidate'
+if [ "$(tip)" != "$candidate" ]; then
+  cat "$CASE/auto-land.log" >&2
+  FM_HOME="$CASE/home" "$ROOT/bin/fm-project-mode.sh" project >&2
+  FM_HOME="$CASE/home" "$ROOT/bin/fm-project-mode.sh" --path project >&2
+  git -C "$CASE/project" worktree list --porcelain >&2
+  find "$CASE/home/data/landing-queue" -name queue -exec sed -n '1,5p' {} \; >&2
+  fail 'auto-land moved tip to a SHA other than the tested candidate'
+fi
 expect_field "$(spec_queue status a)" status landed
 pass 'speculative ready needs a worker editor receipt and +yolo auto-lands the tested candidate'
 
