@@ -1046,11 +1046,13 @@ pass 'middle failure preserves the tested prefix and rebuilds only its surviving
 
 spec_case replay-conflict
 git -C "$CASE/project" worktree add -qb fm/a "$CASE/a" main
-sed -i 's/^first$/changed-by-a/' "$CASE/a/shared.txt"
+sed 's/^first$/changed-by-a/' "$CASE/a/shared.txt" > "$CASE/a/shared.new"
+mv "$CASE/a/shared.new" "$CASE/a/shared.txt"
 git -C "$CASE/a" commit -qam a
 spec_join a >/dev/null
 git -C "$CASE/project" worktree add -qb fm/b "$CASE/b" main
-sed -i 's/^first$/changed-by-b/' "$CASE/b/shared.txt"
+sed 's/^first$/changed-by-b/' "$CASE/b/shared.txt" > "$CASE/b/shared.new"
+mv "$CASE/b/shared.new" "$CASE/b/shared.txt"
 git -C "$CASE/b" commit -qam b
 spec_join b >/dev/null
 expect_field "$(spec_queue status b)" status failed
