@@ -28,6 +28,8 @@ for queue in "$DATA"/landing-queue/*/queue; do
   primary=$(git -C "$common" worktree list --porcelain | sed -n '1s/^worktree //p') || continue
   [ -n "$primary" ] && [ -d "$primary" ] || continue
   primary=$(cd "$primary" && pwd -P) || continue
+  git -C "$primary" check-ref-format "refs/heads/$landing" >/dev/null 2>&1 \
+    || fail "invalid landing branch in $queue"
   name=${primary##*/}
   registered=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$name" 2>/dev/null) || continue
   [ "$registered" = 'local-only on' ] || continue
