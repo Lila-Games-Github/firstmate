@@ -41,7 +41,13 @@ case "${0##*/}" in
   fm-public-followup.test.sh) key=public-followup; count=1 ;;
   fm-watch-triage.test.sh) key=watch-churn; count=1 ;;
   fm-learning-candidate.test.sh) key=learning; count=1 ;;
-  fm-landing-queue.test.sh) key=landing; count=12 ;;
+  fm-landing-queue.test.sh)
+    if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" = spec ]; then
+      key=landing-spec; count=9
+    else
+      key=landing; count=12
+    fi
+    ;;
   fm-worker-timing.test.sh) key=worker-timing; count=6 ;;
   fm-teardown.test.sh) key=teardown-farm; count=5 ;;
   fm-merge-local.test.sh) key=merge; count=18 ;;
@@ -110,6 +116,7 @@ run_fixture() {
     FM_STOCK_BASH_WATCH_CHURN_TIMEOUT=1 \
     FM_STOCK_BASH_LEARNING_TIMEOUT=1 \
     FM_STOCK_BASH_LANDING_TIMEOUT=1 \
+    FM_STOCK_BASH_LANDING_SPEC_TIMEOUT=1 \
     FM_STOCK_BASH_WORKER_TIMING_TIMEOUT=1 \
     FM_STOCK_BASH_TEARDOWN_FARM_TIMEOUT=1 \
     FM_STOCK_BASH_MERGE_TIMEOUT=1 \
@@ -149,7 +156,7 @@ SH
     FM_TEST_TIMEOUT_RECORD="$record" \
     /bin/bash bin/fm-stock-bash-compat.sh 2>&1) || rc=$?
   expect_code 0 "$rc" "default stock Bash compatibility fixture completes"
-  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 19 ] \
+  [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 20 ] \
     || fail "each stock Bash consumer needs one passing verdict"
   assert_contains "$out" "ok - fixture assertion 1" \
     "default oversized route completes through the public compatibility wrapper"
@@ -191,6 +198,7 @@ public-followup|public-followup empty-lock register
 watch-churn|watcher churn deferral
 learning|PR 18 learning-candidate NUL enumeration
 landing|landing-queue test farm resolve, watcher sweep, and front step-back
+landing-spec|landing queue speculative candidate and local merge
 worker-timing|worker timing status and teardown record
 teardown-farm|teardown testfarm request ownership
 merge|PR 19 local-merge branch resolution
