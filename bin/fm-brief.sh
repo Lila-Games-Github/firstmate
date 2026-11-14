@@ -1009,8 +1009,12 @@ In a landing train, submit the full suite and device play-through before joining
 When \`landing_queue status\` reports \`candidate_sha\`, the queue builds and tests the candidate itself; after joining, wait for its status and do not rebase or submit the front check.
 When status has no \`candidate_sha\`, submit a quick check on the rebased front head unless queue status requires a full rerun.
 Use \`FM_HOME=$(shell_quote "$FM_HOME") $FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`.
-For the front quick check, read \`gate_exemption\` from the current \`landing_queue status\` after acknowledging any rebase.
-When \`gate_exemption=-\`, use \`--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>\` instead of the full check options; the configured quick suite receives the touched file paths and its phone command is short.
+For the front quick check, read \`gate_exemption\` and \`rebase_basis\` from the current \`landing_queue status\` after acknowledging any rebase.
+When \`rebase_basis\` is a SHA and \`gate_exemption=-\`, submit \`--suite --check quick --target <front-target-sha> --device-gate any --suite-exemption exempt --receipt <quick-receipt-path>\` and wait for its green result; the farm runs the touched editor tests and short phone command.
+Then submit \`--device-gate any --rebase-basis <rebase_basis>\` on that exact rebased head and wait for its result; the queue settles this final phone request, not the exempt quick request.
+If the farm refuses the basis at submit, show its exact error, then submit the existing exact-head \`--suite --device-gate any --receipt <full-receipt-path>\` request and give its green receipt to \`landing_queue receipt\` with the current head and target.
+The farm alone verifies that its full-suite result for the basis and exact-head quick result are green and that the rebased patch is unchanged; the queue's \`rebase_basis\` is only a candidate from its retained admission receipt.
+When \`rebase_basis=-\` and \`gate_exemption=-\`, use \`--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>\` instead of the full check options.
 When \`gate_exemption\` names a real-phone exemption, use \`--suite --check quick --target <front-target-sha> --receipt <quick-receipt-path>\` so the quick check runs the suite without a device gate.
 Follow the Long-suite and evidence snapshot contract below to pause and end your turn; the service sends your steering inbox the request id, final state, SHA, receipt path, and first failure.
 On success, the service automatically writes \`$TEST_SERVICE_RECEIPT\` in exactly this three-line form for the tested full SHA:

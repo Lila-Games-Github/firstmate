@@ -68,7 +68,8 @@
 # reason (a failed car's recorded reason or this invocation's red-receipt
 # reason, else '-'), priority ('-', infra, or unblock), and front_request (the last test
 # farm request resolve applied to this car, as <request>:<passed|failed>, else
-# '-').
+# '-'). A front needs-quick car also reports rebase_basis when its admitted
+# pre-rebase head has a retained green full-suite receipt.
 # In sequential/off mode, use git rebase --onto <target_sha> <rebase_from> when
 # the front base changes, retaining only this car's commits, then ready --target
 # before the last check. In speculative mode, neither the front nor upper
@@ -364,6 +365,13 @@ admitted_head() {
   [[ "$value" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
   printf '%s' "$value"
 }
+admitted_basis() { # <id>; print only a basis backed by the admission receipt
+  local basis
+  basis=$(admitted_head "$1") || return 1
+  fm_health_receipt_read "$DIR/pre-receipt-$1" "$basis" >/dev/null 2>&1 || return 1
+  [ "$FM_HEALTH_COUNT" -eq 0 ] || return 1
+  printf '%s' "$basis"
+}
 overlap_requires_full() { # <id> <head> <target>
   local prior changed touched
   [ ! -L "$DIR/full-$1" ] || die "full-rerun marker is a symlink: $DIR/full-$1"
@@ -424,7 +432,7 @@ farm_record() { # <id> <request> <head> <target> <outcome>
 # shellcheck disable=SC2016 # Python source, not shell expansions.
 FARM_SELECT='
 import json, os, re, sys
-path, head, target, admission, ledger, stepped = sys.argv[1:7]
+path, head, target, admission, ledger, stepped, basis = sys.argv[1:8]
 with open(path) as handle:
     data = json.load(handle)
 requests = data.get("requests") if isinstance(data, dict) else None
@@ -448,9 +456,18 @@ for row in requests:
     if not isinstance(row, dict):
         continue
     options = row.get("options")
-    if not isinstance(options, dict) or options.get("check") != "quick" or not options.get("suite"):
+    if not isinstance(options, dict):
         continue
-    if row.get("sha") != head or options.get("target") != target or row.get("state") == "cancelled":
+    if basis != "-":
+        # The exempt quick request establishes farm evidence. Only the later
+        # admitted phone request completes the front check.
+        if options.get("rebase_basis") != basis or not options.get("device_gate"):
+            continue
+        if options.get("phone_admission") != {"kind": "rebased-quick", "basis": basis, "target": target}:
+            continue
+    elif options.get("check") != "quick" or not options.get("suite"):
+        continue
+    if row.get("sha") != head or (basis == "-" and options.get("target") != target) or row.get("state") == "cancelled":
         continue
     rid = row.get("id")
     if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", rid) or rid in consumed:
@@ -478,7 +495,7 @@ else:
 '
 FARM_RESULT='' FARM_REQUEST='' FARM_DETAIL='' FARM_ERROR=''
 farm_query() { # <id> <head> <target>; returns 1 when the farm cannot be read
-  local rc=0 line stepped_at
+  local rc=0 line stepped_at basis=- admitted
   FARM_RESULT='' FARM_REQUEST='' FARM_DETAIL='' FARM_ERROR=''
   # Only this read uses the bound, so a bad value never blocks other actions.
   case "$FARM_TIMEOUT" in ''|*[!0-9]*) FARM_TIMEOUT=0 ;; esac
@@ -491,13 +508,15 @@ farm_query() { # <id> <head> <target>; returns 1 when the farm cannot be read
     return 1
   fi
   stepped_at=$(stepback_field "$1" 2)
+  admitted=$(admitted_head "$1" || true)
+  if [ "$admitted" != "$2" ]; then basis=$(admitted_basis "$1" || printf '%s' -); fi
   FARM_TMP=$(mktemp "$DIR/.farm-status.XXXXXX")
   fm_run_timed "$FARM_TIMEOUT" "$FARM_BIN" status --json --no-probe > "$FARM_TMP" 2>/dev/null </dev/null || rc=$?
   if [ "$rc" -eq 124 ]; then
     FARM_ERROR="testfarm status timed out after ${FARM_TIMEOUT}s"
   elif [ "$rc" -ne 0 ]; then
     FARM_ERROR="testfarm status exited $rc"
-  elif ! line=$(python3 -I -c "$FARM_SELECT" "$FARM_TMP" "$2" "$3" "$DIR/pre-head-$1" "$(farm_ledger "$1")" "$stepped_at" 2>/dev/null); then
+  elif ! line=$(python3 -I -c "$FARM_SELECT" "$FARM_TMP" "$2" "$3" "$DIR/pre-head-$1" "$(farm_ledger "$1")" "$stepped_at" "$basis" 2>/dev/null); then
     FARM_ERROR='testfarm status did not return a request list'
   fi
   rm -f -- "$FARM_TMP"
@@ -695,6 +714,10 @@ if [ "$ACTION" = ready ]; then
     printf '%s\n' "$HEAD" > "$TMP"
     mv -f -- "$TMP" "$DIR/pre-head-$ID"
     TMP=
+    TMP=$(mktemp "$DIR/.pre-receipt.XXXXXX")
+    cp -- "$RECEIPT" "$TMP" || die 'cannot stage admission receipt'
+    mv -f -- "$TMP" "$DIR/pre-receipt-$ID"
+    TMP=
     rm -f -- "$DIR/full-$ID" "$(farm_ledger "$ID")" "$DIR/stepback-$ID"
   fi
   if [ "$found" -lt 0 ]; then
@@ -764,7 +787,9 @@ assign() {
     if [ "${targets[i]}" != "$sha" ]; then receipts[i]=-; targets[i]=-; fi
     statuses[i]=needs-rebase
     if [ "${bases[i]}" = "$sha" ] && git -C "$PROJECT" merge-base --is-ancestor "$sha" "${heads[i]}"; then
-      if overlap_requires_full "${ids[i]}" "${heads[i]}" "$sha"; then
+      if overlap_requires_full "${ids[i]}" "${heads[i]}" "$sha" \
+        || { [ "${heads[i]}" != "$(admitted_head "${ids[i]}" || true)" ] \
+          && ! admitted_basis "${ids[i]}" >/dev/null; }; then
         statuses[i]=needs-full
         if [ "${receipts[i]}" != - ] && fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}" >/dev/null 2>&1; then
           statuses[i]=ready-to-land
@@ -840,7 +865,7 @@ fi
 # Settle the front car's last check from HEAD, TARGET, and RECEIPT or REASON.
 # A worker's receipt command and resolve's test farm verdict share this path.
 submit_front_result() {
-  local digest
+  local digest full_fallback=0
   [ "${states[found]}" = active ] || die 'only active cars can submit receipts'
   [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
   [ "$HEAD" = "${heads[found]}" ] && [ "$TARGET" = "${target_shas[found]}" ] \
@@ -858,8 +883,14 @@ submit_front_result() {
     cp -- "$RECEIPT" "$TMP" || die 'cannot stage receipt'
     if [ "${statuses[found]}" = needs-full ]; then
       fm_health_receipt_read "$TMP" "$HEAD" || die 'invalid exact-head full receipt'
+    elif fm_health_receipt_read "$TMP" "$HEAD" >/dev/null 2>&1; then
+      # A rejected rebase admission may be replaced by an exact-head full run.
+      full_fallback=1
     else
       fm_quick_receipt_read "$TMP" "$HEAD" "$TARGET" || die 'invalid exact-head quick receipt'
+    fi
+    if [ "$full_fallback" -eq 1 ]; then
+      printf 'exact-head full suite after rebase admission refusal\n' > "$DIR/full-${ids[found]}"
     fi
     digest=$(git hash-object -- "$TMP")
     mv -f -- "$TMP" "$DIR/$digest.receipt"
@@ -1319,3 +1350,9 @@ else
   printf 'gate_exemption=-\n'
 fi
 printf 'front_request=%s\n' "$(farm_last "${ids[found]}")"
+rebase_basis=-
+if [ "$SPEC_DEPTH" -eq 0 ] && [ "${places[found]}" -eq 1 ] \
+  && [ "${statuses[found]}" = needs-quick ] && [ "${heads[found]}" != "$(admitted_head "$ID" || true)" ]; then
+  rebase_basis=$(admitted_basis "$ID" || printf '%s' -)
+fi
+printf 'rebase_basis=%s\n' "$rebase_basis"

@@ -1860,9 +1860,11 @@ assert "--task 'somegame-receipt'" in brief
 assert f"automatically writes `{receipt}`" in brief
 assert "schema=fm-full-suite.v1\nsha=<full tested SHA>\nfailures=0\n" in brief
 assert "--device-gate any" in brief
-assert "When `gate_exemption=-`, use `--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>`" in brief
-assert "When `gate_exemption` names a real-phone exemption, use `--suite --check quick --target <front-target-sha> --receipt <quick-receipt-path>`" in brief
-assert "read `gate_exemption` from the current `landing_queue status` after acknowledging any rebase" in brief
+assert "read `gate_exemption` and `rebase_basis` from the current `landing_queue status`" in brief
+assert "--suite --check quick --target <front-target-sha> --device-gate any --suite-exemption exempt" in brief
+assert "--device-gate any --rebase-basis <rebase_basis>" in brief
+assert "If the farm refuses the basis at submit, show its exact error" in brief
+assert "--suite --device-gate any --receipt <full-receipt-path>" in brief
 assert "full-suite.receipt" not in brief
 PY
   id=frogpile-still-unconfigured
