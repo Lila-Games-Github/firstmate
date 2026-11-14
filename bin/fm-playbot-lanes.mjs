@@ -6,7 +6,7 @@
 // caller without one is an external terminal that dispatches without a lane
 // and supervises by polling.
 //
-// This executable has thirteen entry points:
+// This executable has fifteen entry points:
 //   serve             Run the stdio MCP server.
 //   call              Invoke one MCP tool from a terminal and print the same
 //                     result object the stdio transport returns.
@@ -27,6 +27,8 @@
 //                     Print the tracked-churn allowlist this file owns, one
 //                     path per line, so other tools read it here instead of
 //                     keeping a copy. Starts no server and touches no state.
+//   lane-import       Operator-owned Godot companion import; JSON contract in
+//                     fm-playbot-lane-import.mjs. Never an LLM/MCP engine tool.
 //   addon-guard       Preserve injected addons around local Git mutations, or
 //                     verify complete bytes and product-commit exclusion.
 //   lane-task-branch  Resolve the exact recorded branch of one lane workspace.
@@ -7418,6 +7420,7 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs setup|doctor|install",
     "  fm-playbot-lanes.mjs tracked-churn-allowlist",
     "  fm-playbot-lanes.mjs addon-guard verify|check-index|reset <ref>|remote-checkout <branch> <head>|remote-rebase <target> <from>|stash [--all|--include-untracked] [--message text]",
+    "  fm-playbot-lanes.mjs lane-import <arguments-json|->  # operator only; see fm-playbot-lane-import.mjs",
     "  fm-playbot-lanes.mjs lane-task-state <task.meta> [state-dir]",
     "  fm-playbot-lanes.mjs lane-task-branch <task.meta>",
     "  fm-playbot-lanes.mjs lane-task-retirable <task.meta> [state-dir]",
@@ -7567,6 +7570,39 @@ async function main() {
   }
   if (command === "doctor") return console.log(JSON.stringify(await doctor(), null, 2));
   if (command === "tracked-churn-allowlist") return console.log(PLAYBOT_TRACKED_CHURN_PATHS.join("\n"));
+  if (command === "lane-import") {
+    if (process.argv.length !== 4) throw new Error("lane-import requires one arguments JSON object or - for stdin");
+    const args = process.argv[3] === "-" ? await readStdinJson() : JSON.parse(process.argv[3]);
+    const root = fs.realpathSync.native(process.cwd());
+    const environment = () => ({ ...freshnessGitEnvironment(), GIT_OPTIONAL_LOCKS: "0" });
+    const runGit = (directory, argv, options = {}) => git(directory, argv, { env: environment(), ...options });
+    const identity = (request) => {
+      const projects = topology().filter((project) => project.id === request.project);
+      if (projects.length !== 1) throw new Error("lane-import requires one exact registered project id");
+      const project = projects[0];
+      const workspaces = project.workspaces.filter((workspace) => workspace.id === request.workspace && workspace.archiveState === "active");
+      if (workspaces.length !== 1 || workspaces[0].kind !== "worktree") throw new Error("lane-import requires one exact active lane workspace id, not the main workspace");
+      const workspace = workspaces[0];
+      const coverage = workspaceRootCoverage(project, workspace);
+      if (!coverage.complete) throw new Error(coverage.message);
+      const roots = workspace.roots.filter((entry) => canonicalPath(entry.path) === root);
+      if (roots.length !== 1) throw new Error("Run lane-import from the exact canonical registered lane root");
+      const selected = roots[0];
+      projectAwareWorkspaceRoot(project, selected, runGit);
+      const matches = topology().flatMap((candidate) => candidate.workspaces.filter((item) => item.archiveState === "active").flatMap((item) => item.roots.filter((entry) => canonicalPath(entry.path) === root)));
+      if (matches.length !== 1) throw new Error("Lane root has ambiguous Playbot ownership");
+      return { project: project.id, workspace: workspace.id, root, registeredRoot: selected.path, registeredBranch: selected.branch };
+    };
+    const guards = () => {
+      assertNoGitAncestryOverrides(root, runGit);
+      if (runGit(root, ["rev-parse", "--is-shallow-repository"]).trim() !== "false") throw new Error("lane-import refuses shallow ancestry");
+      if (gitIndexFlags(root).length) throw new Error("lane-import refuses hidden index flags");
+      if (gitOperationState(root).length) throw new Error("lane-import refuses an in-progress Git operation");
+    };
+    const { laneImport } = await import("./fm-playbot-lane-import.mjs");
+    console.log(JSON.stringify(await laneImport(args, { root, git: runGit, gitEnvironment: environment, identity, guards, addonProjects: () => playbotAddonProjects(root) }), null, 2));
+    return;
+  }
   if (command === "addon-guard") {
     const root = canonicalPath(git(process.cwd(), ["rev-parse", "--show-toplevel"]).trim());
     const expectedWorkspace = process.env.FM_PLAYBOT_EXPECTED_WORKSPACE;

@@ -25,10 +25,11 @@ TEARDOWN_FARM_TIMEOUT=${FM_STOCK_BASH_TEARDOWN_FARM_TIMEOUT:-90}
 DOORBELL_TIMEOUT=${FM_STOCK_BASH_DOORBELL_TIMEOUT:-90}
 LANE_SEND_TIMEOUT=${FM_STOCK_BASH_LANE_SEND_TIMEOUT:-90}
 FARM_RESULTS_TIMEOUT=${FM_STOCK_BASH_FARM_RESULTS_TIMEOUT:-90}
+PR_WAIT_TIMEOUT=${FM_STOCK_BASH_PR_WAIT_TIMEOUT:-30}
 selected=all
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != --consumer ]; then
-    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|landing-conflicts|worker-timing|teardown-farm|doorbell|lane-send|farm-results|remote-landing|remote-export|remote-child]" >&2
+    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|landing-conflicts|worker-timing|teardown-farm|doorbell|lane-send|farm-results|pr-wait|remote-landing|remote-export|remote-child]" >&2
     exit 2
   fi
   selected=$2
@@ -56,6 +57,7 @@ validate_timeout FM_STOCK_BASH_TEARDOWN_FARM_TIMEOUT "$TEARDOWN_FARM_TIMEOUT"
 validate_timeout FM_STOCK_BASH_DOORBELL_TIMEOUT "$DOORBELL_TIMEOUT"
 validate_timeout FM_STOCK_BASH_LANE_SEND_TIMEOUT "$LANE_SEND_TIMEOUT"
 validate_timeout FM_STOCK_BASH_FARM_RESULTS_TIMEOUT "$FARM_RESULTS_TIMEOUT"
+validate_timeout FM_STOCK_BASH_PR_WAIT_TIMEOUT "$PR_WAIT_TIMEOUT"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
@@ -169,6 +171,8 @@ run_consumer farm-results "watcher farm-result delivery and submit label" "$FARM
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-farm-results.test.sh"
 remote_landing_assertions=13
 [ "${FM_SKIP_TESTFARM:-}" != 1 ] || remote_landing_assertions=10
+run_consumer pr-wait "PR wait deadline and one-rerun observer" "$PR_WAIT_TIMEOUT" 1 \
+  "$STOCK_BASH" "$ROOT/tests/fm-pr-wait.test.sh"
 run_consumer remote-landing "remote branch import and workstation landing" "$MERGE_TIMEOUT" "$remote_landing_assertions" \
   "$STOCK_BASH" "$ROOT/tests/fm-remote-landing.test.sh"
 run_consumer remote-export "remote local-only brief launch and promotion" "$MERGE_TIMEOUT" 1 \

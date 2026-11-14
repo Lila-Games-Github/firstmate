@@ -456,3 +456,187 @@ const bare=guardRun(noBundle,'reset',later); assert.deepEqual(bare.addons,[]); a
 console.log('verified engine readiness fixture verdicts and dispatch refuses unconfirmed readiness');
 NODE
 pass "fm-playbot-engine-readiness: fixture verdicts and dispatch execute through public tools"
+
+# Keep the companion-import regression with its existing engine/addon owner.
+# The child has an independent fixture/cleanup scope and no DevTools endpoint.
+bash -s -- "$ROOT" <<'LANE_IMPORT_TEST'
+#!/usr/bin/env bash
+# Owned lane-import CLI with real Git worktrees and a fake Godot only.
+set -eu
+# shellcheck source=tests/lib.sh
+. "$1/tests/lib.sh"
+fm_test_require_node "fm-playbot-lane-import"
+case "$(uname -s)" in Linux) ;; *) echo "skip: Linux lane-import runtime required"; exit 0 ;; esac
+TMP_ROOT=$(fm_test_tmproot fm-playbot-lane-import)
+export FIXTURE_ROOT="$TMP_ROOT"
+export PLAYBOT_DESKTOP_DIR="$TMP_ROOT/desktop"
+export IMPORT_SCRIPT="$ROOT/bin/fm-playbot-lanes.mjs"
+trap 'fm_test_cleanup' EXIT
+mkdir -p "$PLAYBOT_DESKTOP_DIR"
+# No DevTools endpoint exists: successful imports prove the command never
+# requires app/engine IPC, a connected engine session, or Playbot lifecycle.
+# argv/environment-driven fake editor models imports, not engine readiness.
+cat > "$TMP_ROOT/godot" <<'NODE'
+#!/usr/bin/env node
+const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');
+const root=process.env.FIXTURE_ROOT,mode=fs.existsSync(root+'/mode')?fs.readFileSync(root+'/mode','utf8'):'success';
+const args=process.argv.slice(2);
+fs.appendFileSync(root+'/engine-calls',JSON.stringify(args)+'\n');
+if(args[0]==='--version'){console.log(mode==='version'?'4.6.1.stable.official.abc123':'4.7.1.stable.official.abc123');process.exit(0);}
+if(args[0]==='--help'){console.log('--headless --recovery-mode --import --path');process.exit(0);}
+const expected=['--headless','--recovery-mode','--import','--path'];
+if(args.length!==5||!expected.every((x,i)=>args[i]===x))throw Error('unsafe import arguments');
+if(!process.env.XDG_CONFIG_HOME.includes('fm-lane-import-')||fs.readdirSync(process.env.ANDROID_HOME).length||process.env.ANDROID_HOME===process.env.HOSTILE_SDK)throw Error('host SDK/settings leaked');
+if(process.env.ADB_SERVER_SOCKET||process.env.GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD)throw Error('host ADB/credential environment leaked');
+fs.appendFileSync(root+'/imports',args[4]+'\n');
+const project=args[4],repo=path.dirname(project);
+fs.mkdirSync(project+'/.godot/imported',{recursive:true});
+fs.writeFileSync(project+'/.godot/imported/cache','ignored cache');
+const uid=mode==='malformed'?'handcrafted garbage\n':'uid://abc123\n';
+fs.writeFileSync(project+'/new.gd.uid',uid);
+fs.writeFileSync(project+'/art.png.import','[remap]\nimporter="texture"\nuid="uid://asset123"\n\n[deps]\nsource_file="res://art.png"\n\n[params]\n');
+if(mode==='source')fs.writeFileSync(project+'/new.gd','unexpected source mutation\n');
+if(mode==='unrelated')fs.writeFileSync(repo+'/unexpected.txt','unexpected product output\n');
+if(mode==='addon')fs.writeFileSync(project+'/addons/playbot/plugin.gd','unexpected addon mutation\n');
+if(mode==='second-pass'&&fs.readFileSync(root+'/imports','utf8').trim().split('\n').length>1)fs.writeFileSync(project+'/new.gd.uid','uid://changed456\n');
+if(mode==='lock-drift'){const lock=cp.execFileSync('git',['-C',repo,'rev-parse','--path-format=absolute','--git-path','index.lock'],{encoding:'utf8'}).trim();fs.renameSync(lock,lock+'.displaced');fs.writeFileSync(lock,'foreign lock owner');}
+if(mode==='head-drift')cp.execFileSync('git',['-C',repo,'update-ref','HEAD',fs.readFileSync(root+'/base','utf8').trim()]);
+if(mode==='failed')process.exit(7);
+NODE
+chmod +x "$TMP_ROOT/godot"
+node --no-warnings <<'NODE'
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');
+const {DatabaseSync}=require('node:sqlite');
+const root=process.env.FIXTURE_ROOT,script=process.env.IMPORT_SCRIPT;
+const db=new DatabaseSync(path.join(root,'desktop/playbot.db'));
+db.exec(`CREATE TABLE projects(id TEXT,name TEXT,default_working_root_id TEXT,deletion_state TEXT,created_at TEXT,updated_at TEXT);
+CREATE TABLE repositories(id TEXT,name TEXT,path TEXT,default_branch TEXT);
+CREATE TABLE project_roots(id TEXT,project_id TEXT,repository_id TEXT,position INTEGER);
+CREATE TABLE workspaces(id TEXT,project_id TEXT,name TEXT,kind TEXT,is_selected INTEGER,archive_state TEXT,created_at TEXT,updated_at TEXT);
+CREATE TABLE workspace_roots(workspace_id TEXT,project_root_id TEXT,path TEXT,branch TEXT);`);
+const bundle=path.join(root,'bundle');
+fs.mkdirSync(bundle+'/native',{recursive:true});
+fs.writeFileSync(bundle+'/plugin.cfg','[plugin]\nversion="0.9"\n');fs.writeFileSync(bundle+'/plugin.gd','bundled addon\n');fs.writeFileSync(bundle+'/native/helper.so','native bytes');
+let serial=0;
+function git(repo,...args){const r=cp.spawnSync('git',['-C',repo,...args],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);return r.stdout.trim();}
+function fixture(){
+  serial++;const main=root+'/main'+serial,repo=root+'/lane'+serial,branch='playbot/wave-three-'+serial;
+  fs.mkdirSync(main);git(main,'init','-q','-b','main');git(main,'config','user.name','Fixture');git(main,'config','user.email','fixture@example.invalid');
+  fs.mkdirSync(main+'/prototype-game',{recursive:true});
+  fs.writeFileSync(main+'/.gitignore','prototype-game/.godot/\nprototype-game/addons/playbot/native/\nprototype-game/tests/task_evidence/\nprototype-game/private.env\n');
+  fs.writeFileSync(main+'/prototype-game/project.godot','config_version=5\n');
+  fs.mkdirSync(main+'/scripts');
+  fs.writeFileSync(main+'/scripts/check_guide_compliance.py','# fixture dependency\n');
+  fs.writeFileSync(main+'/scripts/guide_submission_checks.py','# fixture dependency\n');
+  fs.writeFileSync(main+'/scripts/check_import_clean.py',`import json, pathlib, subprocess, sys
+root=pathlib.Path(__file__).resolve().parents[1]
+head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
+if (root.parent/'mode').read_text()=='gate-no-receipt': sys.exit(0)
+subprocess.run(sys.argv[2:],cwd=root,check=True)
+receipt=root/'prototype-game/.godot/automation-data/guide-checks/import.json'
+receipt.parent.mkdir(parents=True,exist_ok=True)
+receipt.write_text(json.dumps(dict(schema='frogpile.import-clean.v1',sha=head,exit_code=0,unchanged=True)))
+`);
+  fs.writeFileSync(main+'/outside.txt','committed\n');fs.writeFileSync(main+'/unstaged.txt','committed\n');
+  fs.cpSync(bundle,main+'/prototype-game/addons/playbot',{recursive:true});
+  git(main,'add','.');git(main,'commit','-qm','base');const base=git(main,'rev-parse','HEAD');git(main,'branch','proto/godot/frog-pile',base);
+  git(main,'worktree','add','-q','-b',branch,repo,'HEAD');
+  fs.writeFileSync(repo+'/prototype-game/new.gd','extends RefCounted\n');fs.writeFileSync(repo+'/prototype-game/art.png','fixture asset bytes\n');
+  git(repo,'add','prototype-game/new.gd','prototype-game/art.png');git(repo,'commit','-qm','task sources\n\nGuide-check-base: '+base);
+  const head=git(repo,'rev-parse','HEAD');fs.cpSync(bundle,repo+'/prototype-game/addons/playbot',{recursive:true});
+  fs.writeFileSync(repo+'/prototype-game/addons/playbot/untracked.gd','injected helper\n');
+  fs.mkdirSync(repo+'/prototype-game/tests/task_evidence',{recursive:true});fs.writeFileSync(repo+'/prototype-game/tests/task_evidence/inventory.txt','ignored evidence\n');fs.writeFileSync(repo+'/prototype-game/private.env','private fixture credentials\n');
+  fs.writeFileSync(repo+'/outside.txt','staged work\n');git(repo,'add','outside.txt');fs.writeFileSync(repo+'/outside.txt','staged plus unstaged work\n');fs.writeFileSync(repo+'/unstaged.txt','unstaged work\n');
+  const project='p'+serial,workspace='ws'+serial;
+  db.prepare('INSERT INTO projects VALUES(?,?,?,?,?,?)').run(project,project,'r'+serial,'active','','');
+  db.prepare('INSERT INTO repositories VALUES(?,?,?,?)').run('repo'+serial,project,main,'main');
+  db.prepare('INSERT INTO project_roots VALUES(?,?,?,?)').run('r'+serial,project,'repo'+serial,0);
+  db.prepare('INSERT INTO workspaces VALUES(?,?,?,?,?,?,?,?)').run(workspace,project,workspace,'worktree',0,'active','','');
+  db.prepare('INSERT INTO workspace_roots VALUES(?,?,?,?)').run(workspace,'r'+serial,repo,branch);
+  const args={project,workspace,expectedBranch:branch,expectedHead:head,base,landingBranch:'proto/godot/frog-pile',godotProject:'prototype-game',godot:root+'/godot',companions:['prototype-game/new.gd.uid','prototype-game/art.png.import']};
+  const index=git(repo,'rev-parse','--path-format=absolute','--git-path','index');
+  fs.writeFileSync(root+'/mode','success');fs.writeFileSync(root+'/base',base);fs.writeFileSync(root+'/imports','');fs.writeFileSync(root+'/engine-calls','');
+  return {repo,main,branch,head,base,index,args,indexBefore:fs.readFileSync(index),staged:git(repo,'diff','--cached','--','outside.txt')};
+}
+function run(f,extra={},mode='success',cwd=f.repo){
+  fs.writeFileSync(root+'/mode',mode);
+  return cp.spawnSync(process.execPath,['--no-warnings',script,'lane-import',JSON.stringify({...f.args,...extra})],{cwd,encoding:'utf8',env:{...process.env,ANDROID_HOME:'/unusable-host-sdk',ANDROID_SDK_ROOT:'/unusable-host-sdk',ADB_SERVER_SOCKET:'tcp:host:5037',GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD:'never-in-child'}});
+}
+function reject(f,extra,pattern,mode='success',cwd=f.repo){const r=run(f,extra,mode,cwd);assert.notEqual(r.status,0,r.stdout);assert.match(r.stderr,pattern);assert.equal(git(f.repo,'rev-parse','HEAD'),f.head);assert(fs.readFileSync(f.index).equals(f.indexBefore));return r;}
+let f=fixture();
+reject(f,{expectedHead:'0'.repeat(40)},/branch\/head differs/);
+reject(f,{expectedBranch:'fm/wrong'},/branch\/head differs/);
+reject(f,{workspace:'absent'},/active lane workspace/);
+reject(f,{},/canonical registered lane root/,'success',f.repo+'/prototype-game');
+reject(f,{},/version mismatch/,'version');assert.equal(fs.readFileSync(root+'/imports','utf8'),'');
+reject(f,{companions:['outside.txt']},/not authorized/);
+reject(f,{companions:['prototype-game/addons/playbot/plugin.gd.uid']},/not authorized/);
+reject(f,{base:'0'.repeat(40)},/base differs from merge-base/);
+fs.writeFileSync(f.repo+'/prototype-game/new.gd','uncommitted work\n');reject(f,{},/differs from committed head/);fs.writeFileSync(f.repo+'/prototype-game/new.gd','extends RefCounted\n');
+fs.writeFileSync(f.repo+'/prototype-game/untracked.gd','preserve\n');reject(f,{},/untracked product work/);assert.equal(fs.readFileSync(f.repo+'/prototype-game/untracked.gd','utf8'),'preserve\n');fs.unlinkSync(f.repo+'/prototype-game/untracked.gd');
+git(f.repo,'update-index','--assume-unchanged','prototype-game/new.gd');f.indexBefore=fs.readFileSync(f.index);reject(f,{},/hidden index flags/);git(f.repo,'update-index','--no-assume-unchanged','prototype-game/new.gd');
+console.log('identity: wrong head/branch/workspace/root, invalid base/companions, dirty inputs and hidden index flags rejected before import');
+let r;
+f=fixture();
+const originalBranch=f.branch, renamedBranch='fm/'+originalBranch;
+git(f.repo,'branch','-m',renamedBranch);
+f.args.expectedBranch=renamedBranch;
+r=run(f);assert.equal(r.status,0,r.stderr);
+const renamed=JSON.parse(r.stdout);
+assert.equal(renamed.branch,renamedBranch);
+assert.equal(renamed.registeredBranch,originalBranch);
+assert.equal(git(f.repo,'symbolic-ref','HEAD'),'refs/heads/'+renamedBranch);
+assert.equal(git(f.repo,'rev-parse','HEAD'),renamed.head);
+assert.equal(fs.readFileSync(root+'/imports','utf8').trim().split('\n').length,2);
+f=fixture();git(f.repo,'branch','-m','fm/'+f.branch);
+reject(f,{},/branch\/head differs/);
+f.args.expectedBranch='fm/'+f.branch;
+reject(f,{expectedHead:'0'.repeat(40)},/branch\/head differs/);
+f=fixture();
+db.prepare('INSERT INTO workspaces VALUES(?,?,?,?,?,?,?,?)').run('duplicate-'+f.args.workspace,f.args.project,'duplicate','worktree',0,'active','','');
+db.prepare('INSERT INTO workspace_roots VALUES(?,?,?,?)').run('duplicate-'+f.args.workspace,'r'+serial,f.repo,'duplicate');
+reject(f,{},/ambiguous Playbot ownership/);
+console.log('renamed lane: actual symbolic branch and full head authorize import while stale registration is reported; wrong actual branch/head and duplicate ownership refuse');
+f=fixture();
+const sourceTracked=git(f.repo,'ls-tree','-r','--name-only',f.head).split('\n').length;
+const sourceChanged=git(f.repo,'diff','--name-only',f.base,f.head).split('\n').length;
+r=run(f);assert.equal(r.status,0,r.stderr);const result=JSON.parse(r.stdout);
+assert.notEqual(result.head,f.head);assert.equal(git(f.repo,'rev-parse','HEAD'),result.head);
+assert.deepEqual(git(f.repo,'diff-tree','--no-commit-id','--name-only','-r',f.head,result.head).split('\n').sort(),f.args.companions.slice().sort());
+assert.equal(git(f.repo,'show','-s','--format=%(trailers:key=Guide-check-base,valueonly)','HEAD'),f.base);
+assert.equal(result.sourceCounts.headTracked,sourceTracked);assert.equal(result.sourceCounts.changed,sourceChanged);assert.equal(result.sourceCounts.authorizedCompanions,2);assert.equal(result.committedCompanions,2);
+assert.equal(result.importClean,true);assert.equal(fs.readFileSync(root+'/imports','utf8').trim().split('\n').length,2);
+assert.equal(git(f.repo,'diff','--cached','--','outside.txt'),f.staged);
+assert.equal(git(f.repo,'diff','--cached','--name-only'),'outside.txt');
+assert.equal(fs.readFileSync(f.repo+'/outside.txt','utf8'),'staged plus unstaged work\n');assert.equal(fs.readFileSync(f.repo+'/unstaged.txt','utf8'),'unstaged work\n');
+assert.equal(fs.readFileSync(f.repo+'/prototype-game/addons/playbot/plugin.gd','utf8'),'bundled addon\n');assert.equal(fs.readFileSync(f.repo+'/prototype-game/addons/playbot/native/helper.so','utf8'),'native bytes');assert.equal(fs.readFileSync(f.repo+'/prototype-game/addons/playbot/untracked.gd','utf8'),'injected helper\n');
+assert(!fs.existsSync(f.index+'.lock'));
+assert.equal(fs.readFileSync(f.repo+'/prototype-game/private.env','utf8'),'private fixture credentials\n');
+assert.equal(fs.readFileSync(f.repo+'/prototype-game/tests/task_evidence/inventory.txt','utf8'),'ignored evidence\n');
+console.log(`success: source tracked=${sourceTracked}, observed=${result.sourceCounts.headTracked}; source changed=${sourceChanged}, observed=${result.sourceCounts.changed}; authorized=2 committed=${result.committedCompanions}; import passes=2; original staged/unstaged/addon bytes preserved`);
+f.args.expectedHead=result.head;f.head=result.head;f.indexBefore=fs.readFileSync(f.index);r=run(f,{mode:'check'});assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).head,result.head);assert(fs.readFileSync(f.index).equals(f.indexBefore));
+f=fixture();r=run(f,{importCleanGuard:'scripts/check_import_clean.py'});assert.equal(r.status,0,r.stderr);const gated=JSON.parse(r.stdout);assert.equal(JSON.parse(fs.readFileSync(f.repo+'/'+gated.importCleanReceipt,'utf8')).sha,gated.head);assert.equal(gated.importCleanGuard,'scripts/check_import_clean.py');
+console.log('native gate routing: guard subprocess received pinned import with isolated environment and certified resulting committed head');
+f=fixture();r=run(f,{importCleanGuard:'scripts/check_import_clean.py'},'gate-no-receipt');assert.notEqual(r.status,0);assert.notEqual(git(f.repo,'rev-parse','HEAD'),f.head);assert.match(r.stderr,/no such file|did not certify/);assert(!fs.existsSync(f.index+'.lock'));
+console.log('native gate refusal: a zero exit without a resulting-head receipt cannot certify import-clean');
+console.log('import-clean: exact generated head passed a separate check with no commit or index change');
+for(const [mode,pattern,mutated] of [['source',/Unexpected import mutations preserved/,'prototype-game/new.gd'],['unrelated',/Unexpected import mutations preserved/,'unexpected.txt'],['addon',/Unexpected import mutations preserved/,'prototype-game/addons/playbot/plugin.gd'],['failed',/Godot import failed/,'prototype-game/new.gd.uid'],['malformed',/Malformed generated UID/,'prototype-game/new.gd.uid']]){
+  f=fixture();r=reject(f,{},pattern,mode);assert(fs.existsSync(f.repo+'/'+mutated));assert.match(r.stderr,/evidence\/backups:/);const scratch=r.stderr.trim().split('evidence/backups: ').at(-1);assert(fs.existsSync(scratch+'/index.before'));assert(fs.existsSync(scratch+'/addons/prototype-game/addons/playbot/plugin.gd'));
+}
+console.log('refusals: source/addon/unrelated mutations, failed import, malformed UID preserved outputs, index, head and private backups');
+f=fixture();fs.writeFileSync(f.repo+'/prototype-game/addons/playbot/plugin.gd','drift\n');r=run(f);assert.equal(r.status,0,r.stderr);assert.equal(fs.readFileSync(f.repo+'/prototype-game/addons/playbot/plugin.gd','utf8'),'drift\n');
+f=fixture();fs.writeFileSync(f.repo+'/prototype-game/addons/playbot/plugin.gd','staged addon\n');git(f.repo,'add','prototype-game/addons/playbot/plugin.gd');f.indexBefore=fs.readFileSync(f.index);reject(f,{},/Injected addon changes are staged/);
+f=fixture();fs.writeFileSync(f.index+'.lock','another owner');reject(f,{},/EEXIST/);assert.equal(fs.readFileSync(f.index+'.lock','utf8'),'another owner');
+f=fixture();reject(f,{},/Index lock ownership changed/,'lock-drift');assert.equal(fs.readFileSync(f.index+'.lock','utf8'),'foreign lock owner');
+f=fixture();r=run(f,{},'head-drift');assert.notEqual(r.status,0);assert.match(r.stderr,/branch\/head differs/);assert.equal(git(f.repo,'rev-parse','HEAD'),f.base);assert(fs.readFileSync(f.index).equals(f.indexBefore));
+assert(!fs.existsSync(root+'/ipc'));
+f=fixture();r=run(f,{},'second-pass');assert.notEqual(r.status,0);assert.match(r.stderr,/Import-clean failed on committed head/);assert.notEqual(git(f.repo,'rev-parse','HEAD'),f.head);assert.equal(fs.readFileSync(f.repo+'/prototype-game/new.gd.uid','utf8'),'uid://changed456\n');assert(!fs.existsSync(f.index+'.lock'));
+f=fixture();git(f.repo,'update-ref','refs/heads/proto/godot/frog-pile',f.head);reject(f,{},/base differs from merge-base/);
+f=fixture();const alias=f.repo+'-alias';fs.symlinkSync(f.repo,alias);db.prepare('UPDATE workspace_roots SET path=? WHERE workspace_id=?').run(alias,f.args.workspace);r=run(f);assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).root,f.repo);assert.equal(JSON.parse(r.stdout).registeredRoot,alias);
+console.log('path aliases: registered alias resolves to one exact physical lane checkout without changing Playbot registration');
+console.log('committed-head refusal: unstable second import retained generated head and changed bytes; stale guide base refused');
+console.log('guards: existing index lock/concurrent head drift refused; addon drift preserved; no Playbot IPC or ADB invoked');
+db.close();
+NODE
+pass 'fm-playbot-lane-import: public CLI identity, exact companions, import-clean and preservation (fake Godot only)'
+LANE_IMPORT_TEST

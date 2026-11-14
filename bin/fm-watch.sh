@@ -2416,6 +2416,10 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          if [ "$provider" = github ] && [ "$out" != merged ]; then
+            FM_HOME="$FM_HOME" run_check_capture "$SCRIPT_DIR/fm-pr-wait.sh" "$STATE" "$id" "$url" || exit 1
+            out=$FM_CHECK_RESULT
+          fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
