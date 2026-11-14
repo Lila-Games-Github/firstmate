@@ -7591,7 +7591,7 @@ async function main() {
       projectAwareWorkspaceRoot(project, selected, runGit);
       const matches = topology().flatMap((candidate) => candidate.workspaces.filter((item) => item.archiveState === "active").flatMap((item) => item.roots.filter((entry) => canonicalPath(entry.path) === root)));
       if (matches.length !== 1) throw new Error("Lane root has ambiguous Playbot ownership");
-      return { project: project.id, workspace: workspace.id, root, registeredRoot: selected.path, branch: selected.branch };
+      return { project: project.id, workspace: workspace.id, root, registeredRoot: selected.path, registeredBranch: selected.branch };
     };
     const guards = () => {
       assertNoGitAncestryOverrides(root, runGit);
