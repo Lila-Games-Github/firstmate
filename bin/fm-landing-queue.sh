@@ -135,8 +135,9 @@
 # append order hold id, branch, head, state, acknowledged base, receipt file,
 # receipt target, last notified event hash, failure reason (failed rows only),
 # owner task id, admission priority ('-', infra, or unblock), and the
-# phone-gate exemption reason. Nine-field legacy rows resolve their owner on
-# refresh; ten-field legacy rows default priority to '-'.
+# phone-gate exemption reason, and the last reconciled display status. Nine-field
+# legacy rows resolve their owner on refresh; ten-field legacy rows default
+# priority to '-'. Older rows without display status are refreshed on next use.
 # '-' means absent. Row order is queue order: assignment walks rows top to
 # bottom and gives each active row the next place, so an admitted infra car's
 # row sits after the front row and its contiguous infra run. Immutable
@@ -469,7 +470,7 @@ if [ -e "$FILE" ]; then
     IFS= read -r schema && [ "$schema" = fm-landing-queue.v1 ] || die 'invalid queue schema'
     IFS= read -r repository && [ "$repository" = "$COMMON" ] || die 'queue repository mismatch'
     IFS= read -r landing && [ "$landing" = "$LANDING" ] || die 'queue landing branch mismatch'
-    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason row_owner row_priority row_exemption extra; do
+    while IFS=$'\t' read -r row_id row_branch row_head row_state row_base row_receipt row_target row_notified row_reason row_owner row_priority row_exemption row_display extra; do
       [[ "$row_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'invalid queue task id'
       valid_branch "$row_branch" || die 'invalid queue branch'
       [ -n "$row_notified" ] && [ -n "$row_reason" ] && [ -z "$extra" ] || die 'incomplete queue row'
@@ -485,6 +486,7 @@ if [ -e "$FILE" ]; then
         *) [[ "$row_receipt" =~ ^[0-9a-f]{40}([0-9a-f]{24})?\.receipt$ ]] || die 'invalid queue receipt name' ;;
       esac
       case "$row_state" in active|landed|failed) ;; *) die 'invalid queue state' ;; esac
+      case "${row_display:--}" in -|waiting-for-front|needs-rebase|needs-full|needs-quick|needs-gate|ready-to-land|red-receipt|needs-baseline|landed|failed) ;; *) die 'invalid queue display status' ;; esac
       if [ "$row_state" = failed ]; then
         valid_reason "$row_reason" || die 'invalid queue failure reason'
       else
@@ -543,8 +545,8 @@ save() {
         fi
         [ -z "$tested_target" ] || exemption=$(exemption_reason "${heads[i]}" "$tested_target")
       fi
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
-        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason" "${owners[i]}" "${priorities[i]}" "$exemption"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${states[i]}" \
+        "${bases[i]}" "${receipts[i]}" "${targets[i]}" "${notified[i]}" "$reason" "${owners[i]}" "${priorities[i]}" "$exemption" "${statuses[i]}"
     done
   } > "$TMP"
   mv -f -- "$TMP" "$FILE"
