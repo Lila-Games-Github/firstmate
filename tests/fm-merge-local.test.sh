@@ -17,6 +17,7 @@
 #       and a landing without a train creates no queue state
 #   (l) a landing whose receipt cannot be recorded still exits 3 and steers
 set -u
+export FM_LANDING_TRAIN=off
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -443,6 +444,8 @@ test_landing_steers_next_queue_car() {
   git -C "$case_dir/next-wt" commit -q --allow-empty -m 'next change'
   git -C "$case_dir/project" worktree add -qb fm/alias-z3 "$case_dir/alias-wt" fm/task-y2
   git -C "$case_dir/alias-wt" commit -q --allow-empty -m 'alias change'
+  # The separate landing-conflicts scan expects a ship's conventional branch.
+  git -C "$case_dir/project" branch fm/task-z3 fm/alias-z3
   fm_write_meta "$case_dir/state/task-y2.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
   fm_write_meta "$case_dir/state/task-z3.meta" "project=$case_dir/project" 'lane_branch=fm/alias-z3' \
     'window=sess:fm-notify' 'kind=ship' 'harness=claude'

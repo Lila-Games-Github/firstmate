@@ -1,11 +1,36 @@
 #!/usr/bin/env bash
-# Worker-owned local landing train. Never merges, rebases, pushes, or runs tests.
+# Worker-owned local landing train. Never merges or pushes the landing branch.
 # Usage: fm-landing-queue.sh <ready|status|receipt|gate|fail|baseline|move|step-back|reconcile|resolve> <task-id>
 #          --project <checkout> [--landing-branch <branch>]
 #          [--branch <branch> --head <full-sha>] [--target <full-sha>]
 #          [--receipt <file>] [--gate-receipt <name>=<file>]...
 #          [--gate <name>] [--reason <text>] [--owner-task <task-id>]
 #          [--place <number>] [--priority infra|unblock]
+# A speculative train uses config/landing-train/<repository-name>, then
+# config/landing-train/default, then the built-in depth 3 for a registered test
+# service project. An unregistered project keeps the sequential path. Each file contains
+# `off` or a whole depth 1..6; FM_LANDING_TRAIN overrides both for tests and
+# one-shot operation. Off cancels outstanding speculative requests, retires
+# their refs, and preserves the sequential worker-owned front check.
+# At a positive depth, this tool replays each active car's admitted commits in
+# queue order into a disposable worktree, records the resulting real commit in
+# refs/landing-candidates/<queue-key>/<id>, and submits the editor suite for
+# every candidate in the window at once. Once a candidate's full suite passes,
+# it submits a quick check on that same SHA, which runs the touched editor tests
+# and only the short phone check. The candidate's full and quick receipts must
+# both name the exact SHA; a ready wake names the full receipt and candidate SHA.
+# Candidate state is held in candidate-<id>.json beside the queue snapshot with
+# schema=fm-landing-candidate.v1, branch, source, base, parent, sha,
+# suite_request, quick_request, and verified fields. verified becomes true only
+# after both exact-SHA receipts and passed service rows agree. The suite and
+# phone receipts are candidate-<id>-<sha>.full.receipt and .quick.receipt.
+# Source head, replay base, candidate parent, and ref must still match on every
+# reconcile. A changed tip, row order, or head cancels the affected requests and
+# rebuilds the suffix. A failed suite or short phone check fails only its car,
+# while a replay conflict fails only the car that introduced it. Later cars are
+# rebuilt without that car. Extra cars beyond the depth remain parked. Only
+# fm-merge-local.sh --candidate may land the tested candidate, under the same
+# local merge authority and with an exact parent fast-forward.
 # FM_HOME must explicitly select the owning home; FM_STATE_OVERRIDE and
 # FM_DATA_OVERRIDE optionally select its state and data directories.
 # Without --landing-branch, use this task's recorded landing_branch, else the
@@ -35,20 +60,22 @@
 # priority=infra, or priority=unblock, and kept across a fail/ready re-enrollment unless that
 # later ready repeats --priority with a different value.
 # A head already contained in the landing tip has nothing to land and is refused.
-# After rebasing, repeat ready with --target from status to acknowledge the new
-# base. The target must still be current and an ancestor of the submitted head.
+# In sequential/off mode, after rebasing, repeat ready with --target from status
+# to acknowledge the new base. The target must still be current and an ancestor
+# of the submitted head.
 # status reconciles the whole queue and prints this car as key=value lines:
 # place (bottom=1), target_ref, target_sha, rebase_from, head, status, receipt,
 # reason (a failed car's recorded reason or this invocation's red-receipt
 # reason, else '-'), priority ('-', infra, or unblock), and front_request (the last test
 # farm request resolve applied to this car, as <request>:<passed|failed>, else
 # '-').
-# Use git rebase --onto <target_sha> <rebase_from> when the front base changes,
-# retaining only this car's commits, then ready --target before the last check.
-# Only the bottom car prepares final evidence on the live landing tip. Upper
-# cars return waiting-for-front, regardless of receipts or target movement, and
-# their workers pause instead of polling, as do workers at ready-to-land and
-# needs-baseline. A per-car park-<id> marker beside the queue snapshot records
+# In sequential/off mode, use git rebase --onto <target_sha> <rebase_from> when
+# the front base changes, retaining only this car's commits, then ready --target
+# before the last check. In speculative mode, neither the front nor upper
+# workers rebase or submit final checks; candidate_sha appears in status and the
+# queue owns those checks. Upper cars still report waiting-for-front, and all
+# workers pause instead of polling, as do workers at checking-candidate,
+# ready-to-land, and needs-baseline. A per-car park-<id> marker beside the queue snapshot records
 # the parked status. When a parked car leaves parking - it reaches bottom, lands,
 # fails, or its head, target, gates, or receipt return work - and when a
 # needs-baseline car becomes ready-to-land, any invocation that observes it,
@@ -62,7 +89,7 @@
 # steers, without requiring <task-id> to be a car; it prints nothing and is a
 # no-op when the landing branch has no queue. fm-merge-local.sh runs it after
 # every landing, so a landing steers its own car and advances sleeping cars.
-# resolve does everything reconcile does, then settles a front car at
+# In sequential/off mode, resolve does everything reconcile does, then settles a front car at
 # needs-quick from the test farm itself, so the line never waits on a worker to
 # report its result. It reads `testfarm status --json --no-probe`
 # (FM_TESTFARM_BIN, default testfarm; bounded by FM_TESTFARM_TIMEOUT, default
@@ -84,21 +111,22 @@
 # outcome: `front-check passed|failed|unreachable task=<id> ...`, with
 # `wake=new|repeat` on unreachable. fm-landing-queue-sweep.sh runs it for every
 # train from the watcher poll.
-# receipt requires --head, --target and --receipt. At needs-quick it accepts
+# In sequential/off mode, receipt requires --head, --target and --receipt. At needs-quick it accepts
 # exactly schema=fm-quick-check.v1, sha=<full head SHA>, target=<full target SHA>.
 # The service produces that receipt after its configured touched-file suite and,
 # unless gate_exemption names a real-phone exemption, short phone check pass.
 # At needs-full it accepts fm-full-suite.v1 instead.
 # A quick failure is reported with --reason, requiring a later full rerun.
 # A tip change touching any of this car's files also requires the full rerun.
-# Only the bottom car can submit its last-check receipt.
+# Only the bottom car can submit its last-check receipt in sequential/off mode.
 # A target/head race refuses the submission; status then supplies the new work.
 # The legacy gate command can still record a configured gate at the front;
 # admission requires all configured gate receipts on the tested pre-queue head.
 # A failing front check moves its car to the back when another car waits and
 # sends it one durable reason message.
 # Its old final evidence is cleared; it fixes its branch while waiting and
-# rebases and tests again only on reaching the front. The queue accepts it
+# rebases and tests again only on reaching the front in sequential/off mode.
+# The queue accepts it
 # only for the current head and target.
 # fail removes a car from the active train with --reason, a single line without
 # control characters other than '-', recorded for later status calls. A later
@@ -154,6 +182,8 @@
 # records the baseline, the car becomes ready-to-land, needs-gate, or red-receipt.
 # red-receipt is the worker's to fix on a new head when no other car waits.
 # Existing v1 rows and still-matching receipts remain readable without migration.
+# In speculative mode, a front ready-to-land status prints candidate_sha and
+# candidate_phone_receipt; receipt is the candidate's full editor-suite receipt.
 # Only ready-to-land (bottom, acceptable receipt, every configured gate passed,
 # fast-forward of the live tip),
 # needs-baseline, and failed transitions append durable `check: landing-queue`
@@ -208,11 +238,46 @@ PRIMARY=$(git -C "$PROJECT" worktree list --porcelain | sed -n '1s/^worktree //p
 [ -n "$PRIMARY" ] || die 'cannot identify the primary checkout'
 PRIMARY=$(cd "$PRIMARY" && pwd -P)
 REPO_NAME=${PRIMARY##*/}
-GATES_OUTPUT=$(FM_HOME="$FM_HOME" python3 "$SCRIPT_DIR/fm-test-service.py" landing-gates-for-repo "$REPO_NAME") \
+SERVICE_BIN=${FM_TEST_SERVICE_BIN:-$SCRIPT_DIR/fm-test-service.py}
+GATES_OUTPUT=$(FM_HOME="$FM_HOME" "$SERVICE_BIN" landing-gates-for-repo "$REPO_NAME") \
   || die "cannot read landing gates for $REPO_NAME"
 GATES=()
 if [ -n "$GATES_OUTPUT" ]; then
   while IFS= read -r gate_name; do GATES[${#GATES[@]}]=$gate_name; done <<< "$GATES_OUTPUT"
+fi
+SPEC_SETTING=${FM_LANDING_TRAIN:-}
+SPEC_EXPLICIT=0
+[ -z "$SPEC_SETTING" ] || SPEC_EXPLICIT=1
+if [ -z "$SPEC_SETTING" ]; then
+  for setting_path in "$FM_HOME/config/landing-train/$REPO_NAME" "$FM_HOME/config/landing-train/default"; do
+    [ -e "$setting_path" ] || continue
+    [ -f "$setting_path" ] && [ ! -L "$setting_path" ] || die "invalid landing train setting: $setting_path"
+    SPEC_SETTING=$(cat -- "$setting_path")
+    SPEC_EXPLICIT=1
+    break
+  done
+fi
+SPEC_SETTING=${SPEC_SETTING:-3}
+case "$SPEC_SETTING" in
+  off) SPEC_DEPTH=0 ;;
+  [1-6]) SPEC_DEPTH=$SPEC_SETTING ;;
+  *) die 'landing train setting must be off or a depth from 1 to 6' ;;
+esac
+if [ "$SPEC_DEPTH" -gt 0 ]; then
+  SERVICE_PROJECT=$(FM_HOME="$FM_HOME" "$SERVICE_BIN" project-for-repo "$REPO_NAME" 2>/dev/null) || SERVICE_PROJECT=
+  if [ -z "$SERVICE_PROJECT" ]; then
+    [ "$SPEC_EXPLICIT" -eq 0 ] || die "no test service project for $REPO_NAME"
+    SPEC_DEPTH=0
+  fi
+fi
+if [ "$SPEC_DEPTH" -gt 0 ]; then
+  for gate_name in ${GATES[@]+"${GATES[@]}"}; do
+    if [ "$gate_name" != real-phone ]; then
+      [ "$SPEC_EXPLICIT" -eq 0 ] || die "speculation cannot run unautomated landing gate: $gate_name; set landing-train to off"
+      SPEC_DEPTH=0
+      break
+    fi
+  done
 fi
 DOCS_CONFIG_ROOT=${FM_TEST_SERVICE_CONFIG_ROOT:-$FM_HOME/config/test-service}
 phone_gate_configured=0
@@ -275,7 +340,7 @@ done
 mkdir -p "$DIR"
 LOCK="$STATE/.landing-queue-$KEY.lock"
 HEALTH_LOCK="$STATE/.landing-health-$HEALTH_KEY.lock"
-TMP='' FARM_TMP='' WAKE_HELD=0 HEALTH_HELD=0
+TMP='' FARM_TMP='' SPEC_ROWS='' SPEC_RESULT='' WAKE_HELD=0 HEALTH_HELD=0
 gate_receipt_read() { # <path> <gate> <head> <target>
   local path=$1 gate=$2 head=$3 target=$4 line lines=()
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -454,6 +519,8 @@ cleanup() {
   trap '' TERM INT HUP
   [ -z "$TMP" ] || rm -f -- "$TMP"
   [ -z "$FARM_TMP" ] || rm -f -- "$FARM_TMP"
+  [ -z "$SPEC_ROWS" ] || rm -f -- "$SPEC_ROWS"
+  [ -z "$SPEC_RESULT" ] || rm -f -- "$SPEC_RESULT"
   [ "$HEALTH_HELD" -eq 0 ] || fm_lock_release "$HEALTH_LOCK" || true
   [ "$WAKE_HELD" -eq 0 ] || fm_lock_release "$FM_WAKE_QUEUE_LOCK" || true
   fm_lock_release "$LOCK" || true
@@ -486,7 +553,7 @@ if [ -e "$FILE" ]; then
         *) [[ "$row_receipt" =~ ^[0-9a-f]{40}([0-9a-f]{24})?\.receipt$ ]] || die 'invalid queue receipt name' ;;
       esac
       case "$row_state" in active|landed|failed) ;; *) die 'invalid queue state' ;; esac
-      case "${row_display:--}" in -|waiting-for-front|needs-rebase|needs-full|needs-quick|needs-gate|ready-to-land|red-receipt|needs-baseline|landed|failed) ;; *) die 'invalid queue display status' ;; esac
+      case "${row_display:--}" in -|waiting-for-front|needs-rebase|needs-full|needs-quick|needs-gate|checking-candidate|ready-to-land|red-receipt|needs-baseline|landed|failed) ;; *) die 'invalid queue display status' ;; esac
       if [ "$row_state" = failed ]; then
         valid_reason "$row_reason" || die 'invalid queue failure reason'
       else
@@ -556,10 +623,16 @@ save() {
 # Re-read actual refs even on status: workers publish heads without a supervisor
 # steer. A receipt remains usable only if its claimed head still resolves.
 refresh() {
-  local i live
+  local i live candidate_ref
   TIP=$(resolve "$LANDING") || die "landing branch disappeared: $LANDING"
   for ((i=0; i<count; i++)); do
     [ "${states[i]}" = active ] || continue
+    candidate_ref="refs/landing-candidates/$KEY/${ids[i]}"
+    if git -C "$PROJECT" show-ref --verify --quiet "$candidate_ref" \
+      && git -C "$PROJECT" merge-base --is-ancestor "$candidate_ref" "$TIP"; then
+      states[i]=landed
+      continue
+    fi
     if ! live=$(resolve "${branches[i]}"); then
       if git -C "$PROJECT" merge-base --is-ancestor "${heads[i]}" "$TIP"; then
         states[i]=landed
@@ -577,6 +650,14 @@ refresh() {
 recorded_head=-
 [ "$found" -lt 0 ] || recorded_head=${heads[found]}
 refresh
+if [ "$SPEC_DEPTH" -eq 0 ]; then
+  for candidate_state in "$DIR"/candidate-*.json; do
+    [ -e "$candidate_state" ] || continue
+    python3 "$SCRIPT_DIR/fm-landing-train.py" retire "$PRIMARY" "$DIR" "$KEY" "$SERVICE_BIN" \
+      || die 'cannot retire speculative requests after landing train was turned off'
+    break
+  done
+fi
 if [ "$ACTION" = ready ]; then
   valid_branch "$BRANCH" && [ "$BRANCH" != "$LANDING" ] || die 'ready requires a task branch distinct from the landing branch'
   [ -n "$HEAD" ] && [ "$(resolve "$BRANCH")" = "$HEAD" ] || die '--head must equal the full current branch SHA'
@@ -796,6 +877,7 @@ case "$ACTION" in
     fi
     ;;
   receipt)
+    [ "$SPEC_DEPTH" -eq 0 ] || die 'the speculative train owns candidate receipts; wait for its status'
     [ -n "$REASON" ] || [ -n "$RECEIPT" ] || die 'receipt requires --receipt or --reason'
     [ -z "$REASON" ] || [ -z "$RECEIPT" ] || die 'failed quick check cannot also submit a receipt'
     if farm_outcome=$(farm_recorded "${ids[found]}" "$HEAD" "$TARGET"); then
@@ -808,6 +890,8 @@ case "$ACTION" in
     fi
     ;;
   resolve)
+    if [ "$SPEC_DEPTH" -gt 0 ]; then :
+    else
     front=-1
     for ((i=0; i<count; i++)); do
       [ "${states[i]}" != active ] || [ "${places[i]}" -ne 1 ] || { front=$i; break; }
@@ -835,8 +919,10 @@ case "$ACTION" in
         [ "$FARM_RESULT" = passed ] || farm_line="$farm_line reason=$REASON"
       fi
     fi
+    fi
     ;;
   gate)
+    [ "$SPEC_DEPTH" -eq 0 ] || die 'the speculative train owns final gates; wait for its status'
     [ "${states[found]}" = active ] || die 'only active cars can submit gate receipts'
     [ "${places[found]}" -eq 1 ] || die 'only the bottom car can submit final evidence; wait for the front'
     [[ "$GATE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'gate requires a safe --gate name'
@@ -914,7 +1000,56 @@ case "$ACTION" in
 esac
 assign
 
+candidate_shas=() candidate_fulls=() candidate_quicks=() candidate_phases=()
+spec_unreachable=0
+if [ "$SPEC_DEPTH" -gt 0 ]; then
+  SPEC_ROWS=$(mktemp "$DIR/.spec-rows.XXXXXX")
+  SPEC_RESULT=$(mktemp "$DIR/.spec-result.XXXXXX")
+  for ((i=0; i<count; i++)); do
+    [ "${states[i]}" = active ] || continue
+    printf '%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${bases[i]}" >> "$SPEC_ROWS"
+  done
+  if [ -s "$SPEC_ROWS" ]; then
+    spec_mode=''
+    [ "$ACTION" != status ] || spec_mode=observe
+    FM_HOME="$FM_HOME" python3 "$SCRIPT_DIR/fm-landing-train.py" ${spec_mode:+$spec_mode} "$PRIMARY" "$DIR" "$KEY" "$TIP" \
+      "$SPEC_DEPTH" "$SERVICE_BIN" "$SERVICE_PROJECT" "$SPEC_ROWS" > "$SPEC_RESULT" \
+      || die 'cannot drive speculative candidates'
+  fi
+  while IFS=$'\t' read -r spec_id spec_phase spec_sha spec_full spec_quick spec_reason; do
+    [ -n "$spec_id" ] || continue
+    if [ "$spec_id" = '!farm' ]; then spec_unreachable=1; continue; fi
+    for ((i=0; i<count; i++)); do [ "${ids[i]}" != "$spec_id" ] || break; done
+    [ "$i" -lt "$count" ] || die 'unknown speculative candidate'
+    case "$spec_phase" in
+      failed)
+        states[i]=failed reasons[i]=$spec_reason receipts[i]=- targets[i]=- ;;
+      ready|checking)
+        candidate_shas[i]=$spec_sha candidate_fulls[i]=$spec_full candidate_quicks[i]=$spec_quick candidate_phases[i]=$spec_phase ;;
+      waiting) ;;
+      *) die 'invalid speculative candidate phase' ;;
+    esac
+  done < "$SPEC_RESULT"
+  rm -f -- "$SPEC_ROWS" "$SPEC_RESULT"
+  SPEC_ROWS='' SPEC_RESULT=''
+  assign
+  spec_parent=$TIP spec_ref="refs/heads/$LANDING"
+  for ((i=0; i<count; i++)); do
+    [ "${states[i]}" = active ] || continue
+    if [ -n "${candidate_phases[i]:-}" ]; then
+      statuses[i]=checking-candidate
+      [ "${candidate_phases[i]}" != ready ] || statuses[i]=ready-to-land
+      if [ "${candidate_shas[i]:-}" != - ]; then
+        target_shas[i]=$spec_parent target_refs[i]=$spec_ref
+        spec_parent=${candidate_shas[i]} spec_ref="refs/landing-candidates/$KEY/${ids[i]}"
+      fi
+    fi
+    if [ "${places[i]}" -ne 1 ]; then statuses[i]='waiting-for-front'; fi
+  done
+fi
+
 # Full fallback receipts use the current-tip failure-set policy as fm-merge-local.
+if [ "$SPEC_DEPTH" -eq 0 ]; then
 for ((i=0; i<count; i++)); do
   if [ "${statuses[i]}" = ready-to-land ] && overlap_requires_full "${ids[i]}" "${heads[i]}" "${target_shas[i]}"; then
     fm_health_receipt_read "$DIR/${receipts[i]}" "${heads[i]}"
@@ -970,11 +1105,32 @@ if [ -n "$requeue_reason" ] && [ "$found" -ge 0 ] && [ "${places[found]}" -eq 1 
     die "$requeue_reason; no other car is waiting, so fix the branch, rebase and retest on a new head"
   fi
 fi
+fi
 
 # Persist queue and wake publication under the wake lock. Repeated status calls
 # do not ring again for an unchanged readiness/failure event.
 fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 WAKE_HELD=1
+if [ "$SPEC_DEPTH" -gt 0 ] && [ "$ACTION" != status ]; then
+  marker="$DIR/testfarm-unreachable"
+  [ ! -L "$marker" ] || die "test farm marker is a symlink: $marker"
+  if [ "$spec_unreachable" -eq 1 ]; then
+    if [ ! -f "$marker" ] || [ "$(cat -- "$marker")" != "$TIP" ]; then
+      spec_front_id=$ID
+      for ((i=0; i<count; i++)); do
+        [ "${states[i]}" != active ] || { spec_front_id=${ids[i]}; break; }
+      done
+      fm_wake_append_locked check "landing-queue-$KEY" \
+        "check: landing-queue testfarm-unreachable task=$spec_front_id project=$PRIMARY landing=$LANDING tip=$TIP head=- receipt=- reason=testfarm status unavailable"
+      TMP=$(mktemp "$DIR/.farm-unreachable.XXXXXX")
+      printf '%s\n' "$TIP" > "$TMP"
+      mv -f -- "$TMP" "$marker"
+      TMP=
+    fi
+  else
+    rm -f -- "$marker"
+  fi
+fi
 if [ "$stepped_back" -eq 1 ]; then
   for marker in "$DIR/stepback-$ID" "$DIR/stepped-$ID"; do
     [ ! -L "$marker" ] || die "step-back marker is a symlink: $marker"
@@ -1005,7 +1161,7 @@ elif [ "$farm_failed" -eq 1 ]; then
   mv -f -- "$TMP" "$marker"
   TMP=
 fi
-if [ "$ACTION" = resolve ]; then
+if [ "$ACTION" = resolve ] && [ "$SPEC_DEPTH" -eq 0 ]; then
   marker="$DIR/testfarm-unreachable"
   [ ! -L "$marker" ] || die "test farm marker is a symlink: $marker"
   if [ "$farm_unreachable" -eq 1 ]; then
@@ -1033,10 +1189,15 @@ for ((i=0; i<count; i++)); do
   esac
   event_tip=-
   [ "${statuses[i]}" = failed ] || event_tip=$TIP
-  event=$(printf '%s\n' "${ids[i]}" "${statuses[i]}" "${heads[i]}" "$event_tip" "${receipts[i]}" | git hash-object --stdin)
+  wake_head=${heads[i]} wake_receipt="$DIR/${receipts[i]}"
+  if [ "$SPEC_DEPTH" -gt 0 ] && [ "${statuses[i]}" = ready-to-land ]; then
+    wake_head=${candidate_shas[i]}
+    wake_receipt=${candidate_fulls[i]}
+  fi
+  event=$(printf '%s\n' "${ids[i]}" "${statuses[i]}" "$wake_head" "$event_tip" "$wake_receipt" | git hash-object --stdin)
   if [ "${notified[i]}" != "$event" ]; then
     fm_wake_append_locked check "landing-queue-$KEY" \
-      "check: landing-queue ${statuses[i]} task=${ids[i]} project=$PRIMARY landing=$LANDING tip=$TIP head=${heads[i]} receipt=$DIR/${receipts[i]} reason=${reasons[i]}"
+      "check: landing-queue ${statuses[i]} task=${ids[i]} project=$PRIMARY landing=$LANDING tip=$TIP head=$wake_head receipt=$wake_receipt reason=${reasons[i]}"
     notified[i]=$event
   fi
 done
@@ -1066,8 +1227,12 @@ for ((i=0; i<count; i++)); do
   stepped_reason=$(cat -- "$marker")
   stepped_because=''
   [ "$stepped_reason" = - ] || stepped_because=" because $stepped_reason"
+  stepped_next='It is not failed and keeps its admission evidence; it must redo its front check when it returns to the front.'
+  if [ "$SPEC_DEPTH" -gt 0 ]; then
+    stepped_next='It is not failed and keeps its admission evidence; the queue will rebuild its candidate checks in the new order.'
+  fi
   if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${owners[i]}" \
-    "Landing queue: task=${ids[i]} stepped back from the front to place 2$stepped_because. It is not failed and keeps its admission evidence; it must redo its front check when it returns to the front. Run landing_queue status and continue from that status." 2>&1 >/dev/null); then
+    "Landing queue: task=${ids[i]} stepped back from the front to place 2$stepped_because. $stepped_next Run landing_queue status and continue from that status." 2>&1 >/dev/null); then
     printf 'warning: could not steer %s after its step-back; the next queue invocation retries: %s\n' "${ids[i]}" "$send_error" >&2
     continue
   fi
@@ -1095,7 +1260,7 @@ for ((i=0; i<count; i++)); do
   [ ! -f "$marker" ] || parked=$(cat -- "$marker")
   current=${statuses[i]}
   case "$current" in
-    waiting-for-front|ready-to-land|needs-baseline)
+    waiting-for-front|checking-candidate|ready-to-land|needs-baseline)
       [ "$parked" != "$current" ] || continue
       steer=0
       [ "$parked:$current" != needs-baseline:ready-to-land ] || steer=1
@@ -1108,13 +1273,13 @@ for ((i=0; i<count; i++)); do
   if [ "$steer" -eq 1 ]; then
     [ -f "$STATE/${owners[i]}.meta" ] || continue
     if ! send_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_SEND_IDEMPOTENT=1 "$SCRIPT_DIR/fm-send.sh" "${owners[i]}" \
-      "Landing queue: task=${ids[i]} status=$current (was $parked) place=${places[i]} queue=$KEY landing=$LANDING tip=$TIP head=${heads[i]}. Run landing_queue status and continue from that status." 2>&1 >/dev/null); then
+      "Landing queue: task=${ids[i]} status=$current (was $parked) place=${places[i]} queue=$KEY landing=$LANDING tip=$TIP head=${heads[i]} reason=${reasons[i]}. Run landing_queue status and continue from that status." 2>&1 >/dev/null); then
       printf 'warning: could not steer %s from %s to %s; the next queue invocation retries: %s\n' "${ids[i]}" "$parked" "$current" "$send_error" >&2
       continue
     fi
   fi
   case "$current" in
-    waiting-for-front|ready-to-land|needs-baseline)
+    waiting-for-front|checking-candidate|ready-to-land|needs-baseline)
       TMP=$(mktemp "$DIR/.park.XXXXXX")
       printf '%s\n' "$current" > "$TMP"
       mv -f -- "$TMP" "$marker"
@@ -1133,7 +1298,13 @@ fi
 printf 'queue=%s\ntask=%s\nbranch=%s\nhead=%s\nlanding_branch=%s\ntip=%s\nplace=%s\ntarget_ref=%s\ntarget_sha=%s\nrebase_from=%s\nstatus=%s\n' \
   "$KEY" "$ID" "${branches[found]}" "${heads[found]}" "$LANDING" "$TIP" "${places[found]}" \
   "${target_refs[found]}" "${target_shas[found]}" "${bases[found]}" "${statuses[found]}"
-if [ "${receipts[found]}" = - ]; then printf 'receipt=-\n'; else printf 'receipt=%s/%s\n' "$DIR" "${receipts[found]}"; fi
+if [ "$SPEC_DEPTH" -gt 0 ] && [ "${statuses[found]}" = ready-to-land ]; then
+  printf 'receipt=%s\n' "${candidate_fulls[found]}"
+elif [ "${receipts[found]}" = - ]; then printf 'receipt=-\n'; else printf 'receipt=%s/%s\n' "$DIR" "${receipts[found]}"; fi
+if [ "$SPEC_DEPTH" -gt 0 ]; then
+  printf 'candidate_sha=%s\n' "${candidate_shas[found]:--}"
+  printf 'candidate_phone_receipt=%s\n' "${candidate_quicks[found]:--}"
+fi
 printf 'reason=%s\n' "${reasons[found]}"
 printf 'priority=%s\n' "${priorities[found]}"
 tested_target=$(pre_target "${ids[found]}" || true)

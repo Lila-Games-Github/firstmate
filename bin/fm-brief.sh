@@ -1006,7 +1006,8 @@ if [ -n "$TEST_SERVICE_PROJECT" ]; then
   TEST_SERVICE_GUIDANCE="# Test service gate
 When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit through the Firstmate test service with explicit FM_HOME.
 In a landing train, submit the full suite and device play-through before joining on your branch rebased onto the current tip.
-At the front, submit a quick check on the rebased head unless queue status requires a full rerun.
+When \`landing_queue status\` reports \`candidate_sha\`, the queue builds and tests the candidate itself; after joining, wait for its status and do not rebase or submit the front check.
+When status has no \`candidate_sha\`, submit a quick check on the rebased front head unless queue status requires a full rerun.
 Use \`FM_HOME=$(shell_quote "$FM_HOME") $FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' --suite --device-gate any --receipt $TEST_SERVICE_RECEIPT_ARG\`.
 For the front quick check, read \`gate_exemption\` from the current \`landing_queue status\` after acknowledging any rebase.
 When \`gate_exemption=-\`, use \`--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>\` instead of the full check options; the configured quick suite receives the touched file paths and its phone command is short.

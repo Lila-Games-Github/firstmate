@@ -4,13 +4,14 @@ set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
+if [ "${FM_SKIP_TESTFARM:-}" = 1 ] && [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != spec ]; then
   printf '%s\n' 'skip: landing queue compatibility checks require the private testfarm checkout'
   exit 0
 fi
 
 TMP_ROOT=$(fm_test_tmproot fm-landing-queue)
 QUEUE="$ROOT/bin/fm-landing-queue.sh"
+export FM_LANDING_TRAIN=off
 make_case() {
   CASE="$TMP_ROOT/$1"
   mkdir -p "$CASE/home" "$CASE/project"
@@ -27,7 +28,7 @@ car() {
   git -C "$CASE/$id" add .
   git -C "$CASE/$id" commit -qm "$id"
 }
-queue() { FM_HOME="$CASE/home" "$QUEUE" "$@" --project "$CASE/project" --landing-branch main; }
+queue() { FM_HOME="$CASE/home" FM_LANDING_TRAIN=off "$QUEUE" "$@" --project "$CASE/project" --landing-branch main; }
 field() { sed -n "s/^$1=//p"; }
 head_of() { git -C "$CASE/project" rev-parse "fm/$1"; }
 tip() { git -C "$CASE/project" rev-parse main; }
@@ -71,7 +72,7 @@ wake_count() { if [ -f "$CASE/home/state/.wake-queue" ]; then wc -l < "$CASE/hom
 
 # FM_LANDING_QUEUE_TEST_ONLY=farm runs only the test farm cases below, which the
 # stock macOS Bash consumer in bin/fm-stock-bash-compat.sh selects.
-if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != farm ]; then
+if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != farm ] && [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != spec ]; then
 make_case admission
 car a
 if queue ready a --branch fm/a --head "$(head_of a)" --target "$BASE" > "$CASE/refusal" 2>&1; then
@@ -545,6 +546,7 @@ expect_field "$(queue status a)" status landed
 pass 'a deleted branch whose head landed stays landed'
 fi
 
+if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != spec ]; then
 # --- front check settled from the test farm, with no worker action -----------
 # The fixture farm prints $CASE/farm.json as `testfarm status --json --no-probe`
 # does; FM_TESTFARM_BIN points the queue at it. A worker meta and a fake tmux let
@@ -845,3 +847,282 @@ farm_json "$(farm_request r-new a passed '' "$(( $(date +%s) + 5 ))")"
 case "$(queue resolve sweep)" in "front-check passed task=a request=r-new "*) ;; *) fail 'a fresh farm check did not settle the returning car' ;; esac
 expect_field "$(queue status a)" status ready-to-land
 pass 'a stepped-back car returning behind a landing rebases and a fresh farm check settles it'
+fi
+
+if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != farm ]; then
+# Speculation drives the real queue and real Git object graph. The stub replaces
+# only the external test service and stores every submitted request durably.
+spec_case() {
+  make_case "spec-$1"
+  mkdir -p "$CASE/bin" "$CASE/fm-root/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE/fm-root/bin/fm-guard.sh"
+  chmod +x "$CASE/fm-root/bin/fm-guard.sh"
+  cat > "$CASE/bin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+case "$1" in
+  display-message) echo fakepane ;;
+  list-windows) echo fm-notify ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n' ;;
+  send-keys) exit 1 ;;
+esac
+TMUX
+  chmod +x "$CASE/bin/tmux"
+  cat > "$CASE/bin/test-service" <<'PY'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+path = pathlib.Path(os.environ['STUB_FARM_STATE'])
+state = json.loads(path.read_text()) if path.exists() else {'next': 1, 'requests': []}
+cmd = sys.argv[1]
+if cmd == 'landing-gates-for-repo':
+    sys.exit(0)
+if cmd == 'project-for-repo':
+    print('project')
+    sys.exit(0)
+if cmd == 'status':
+    calls = path.with_suffix('.calls')
+    calls.write_text(str(int(calls.read_text()) + 1 if calls.exists() else 1))
+    if path.with_suffix('.down').exists():
+        sys.exit(3)
+    print(json.dumps(state))
+    sys.exit(0)
+if cmd == 'cancel':
+    for row in state['requests']:
+        if row['id'] == sys.argv[2] and row['state'] not in ('passed', 'failed'):
+            row['state'] = 'cancelled'
+    path.write_text(json.dumps(state))
+    sys.exit(0)
+if cmd != 'submit':
+    sys.exit(2)
+args = sys.argv[5:]
+def option(name):
+    return args[args.index(name) + 1] if name in args else None
+rid = 'r' + str(state['next'])
+state['next'] += 1
+state['requests'].append({'id': rid, 'sha': sys.argv[4], 'state': 'queued',
+    'task': option('--task'), 'check': option('--check') or 'full',
+    'target': option('--target'), 'receipt': option('--receipt'), 'options':
+    {'suite': '--suite' in args, 'check': option('--check') or 'full',
+     'target': option('--target'), 'device_gate': option('--device-gate')}})
+path.write_text(json.dumps(state))
+print(rid)
+PY
+  chmod +x "$CASE/bin/test-service"
+}
+spec_queue() {
+  PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" FM_LANDING_TRAIN="${SPEC_TEST_SETTING-3}" FM_TEST_SERVICE_BIN="$CASE/bin/test-service" STUB_FARM_STATE="$CASE/farm.json" \
+    "$QUEUE" "$@" --project "$CASE/project" --landing-branch main
+}
+spec_join() {
+  local id=$1
+  full_receipt "$id"
+  spec_queue ready "$id" --branch "fm/$id" --head "$(head_of "$id")" --target "$(tip)" --receipt "$CASE/$id.full"
+}
+spec_mark() { # task, full|quick, passed|failed
+  python3 - "$CASE/farm.json" "$1" "$2" "$3" <<'PY'
+import json, pathlib, sys
+path, task, check, verdict = sys.argv[1:]
+path = pathlib.Path(path)
+data = json.loads(path.read_text())
+matches = [row for row in data['requests'] if row['task'] == 'landing_' + task
+           and row['check'] == check and row['state'] != 'cancelled']
+assert matches, (task, check, verdict)
+row = matches[-1]
+row['state'] = verdict
+if verdict == 'passed':
+    receipt = pathlib.Path(row['receipt'])
+    if check == 'full':
+        receipt.write_text(f"schema=fm-full-suite.v1\nsha={row['sha']}\nfailures=0\n")
+    else:
+        receipt.write_text(f"schema=fm-quick-check.v1\nsha={row['sha']}\ntarget={row['target']}\n")
+else:
+    row['error'] = 'intentional test failure'
+path.write_text(json.dumps(data))
+PY
+}
+spec_count() { # check, optional state
+  python3 - "$CASE/farm.json" "$1" "${2:-all}" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+print(sum(row['check'] == sys.argv[2] and (sys.argv[3] == 'all' or row['state'] == sys.argv[3])
+          for row in data['requests']))
+PY
+}
+
+spec_case all-pass
+mkdir -p "$CASE/home/data" "$CASE/home/state"
+printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$CASE/home/data/backlog.md"
+for id in a b c d; do car "$id"; spec_join "$id" >/dev/null; done
+[ "$(spec_count full)" -eq 3 ] || fail 'depth three did not submit exactly three editor suites'
+[ "$(spec_count quick)" -eq 0 ] || fail 'phone checks started before editor suites passed'
+expect_field "$(spec_queue status d)" status waiting-for-front
+for id in a b c; do spec_mark "$id" full passed; done
+spec_queue resolve sweep >/dev/null
+[ "$(spec_count quick)" -eq 3 ] || fail 'editor passes did not launch three short phone checks'
+for id in a b c; do spec_mark "$id" quick passed; done
+spec_queue resolve sweep >/dev/null
+for id in a b c; do
+  out=$(spec_queue status "$id")
+  candidate=$(printf '%s\n' "$out" | field candidate_sha)
+  if [ "$id" = a ]; then expect_field "$out" status ready-to-land; fi
+  fm_write_meta "$CASE/home/state/$id.meta" "project=$CASE/project" 'mode=local-only' 'landing_branch=main' \
+    'kind=ship' 'harness=claude' 'window=sess:fm-notify'
+  receipt=$(printf '%s\n' "$out" | field receipt)
+  if [ "$id" = a ]; then
+    if PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" FM_LANDING_TRAIN=3 \
+      FM_TEST_SERVICE_BIN="$CASE/bin/test-service" STUB_FARM_STATE="$CASE/farm.json" \
+      "$ROOT/bin/fm-merge-local.sh" "$id" --receipt "$CASE/a.full" > "$CASE/omitted-candidate" 2>&1; then
+      fail 'local merge accepted the worker branch while a tested queue candidate existed'
+    fi
+    grep -q 'requires --candidate' "$CASE/omitted-candidate" \
+      || fail 'local merge did not explain its candidate requirement'
+    quick=$(printf '%s\n' "$out" | field candidate_phone_receipt)
+    cp "$quick" "$CASE/valid-quick.receipt"
+    printf 'schema=fm-quick-check.v1\nsha=%s\ntarget=%s\n' "$(head_of a)" "$BASE" > "$quick"
+    if PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" FM_LANDING_TRAIN=3 \
+      FM_TEST_SERVICE_BIN="$CASE/bin/test-service" STUB_FARM_STATE="$CASE/farm.json" \
+      "$ROOT/bin/fm-merge-local.sh" "$id" --receipt "$receipt" --candidate "$candidate" > "$CASE/bad-merge" 2>&1; then
+      fail 'local merge accepted a candidate with a wrong-SHA short-phone receipt'
+    fi
+    [ "$(tip)" = "$BASE" ] || fail 'wrong-SHA phone receipt moved the landing tip'
+    mv "$CASE/valid-quick.receipt" "$quick"
+  fi
+  PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" FM_LANDING_TRAIN=3 \
+    FM_TEST_SERVICE_BIN="$CASE/bin/test-service" STUB_FARM_STATE="$CASE/farm.json" \
+    "$ROOT/bin/fm-merge-local.sh" "$id" --receipt "$receipt" --candidate "$candidate" > "$CASE/$id.merge" \
+    || { cat "$CASE/$id.merge" >&2; fail "local merge did not land tested candidate $id"; }
+  [ "$(tip)" = "$candidate" ] || fail "landed $id at a SHA other than its tested candidate"
+  grep -q 'status=landed' "$CASE/home/state/$id.inbox/"*.msg \
+    || fail "the worker for $id was not told it landed"
+done
+expect_field "$(spec_queue status d)" status checking-candidate
+pass 'three candidates start together, pass editor then short phone checks, and land in tested order at exact SHAs'
+
+spec_case front-failure
+mkdir -p "$CASE/home/state"
+fm_write_meta "$CASE/home/state/a.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'
+for id in a b c; do car "$id"; spec_join "$id" >/dev/null; done
+old_b=$(spec_queue status b | field candidate_sha)
+spec_mark a full failed
+spec_queue resolve sweep >/dev/null
+expect_field "$(spec_queue status a)" status failed
+grep -q 'status=failed.*reason=intentional test failure' "$CASE/home/state/a.inbox/"*.msg \
+  || fail 'front failure did not tell its worker the reason'
+expect_field "$(spec_queue status b)" place 1
+new_b=$(spec_queue status b | field candidate_sha)
+[ "$new_b" != "$old_b" ] || fail 'front failure did not rebuild the surviving suffix'
+[ "$(spec_count full cancelled)" -ge 2 ] || fail 'front failure did not cancel requests that included it'
+for id in b c; do spec_mark "$id" full passed; done
+spec_queue resolve sweep >/dev/null
+for id in b c; do spec_mark "$id" quick passed; done
+spec_queue resolve sweep >/dev/null
+for id in b c; do
+  out=$(spec_queue status "$id")
+  expect_field "$out" status ready-to-land
+  git -C "$CASE/project" merge -q --ff-only "$(printf '%s\n' "$out" | field candidate_sha)"
+  spec_queue reconcile sweep >/dev/null
+done
+pass 'front failure removes only the failed car and rebuilds the suffix from the live tip'
+
+spec_case middle-failure
+for id in a b c; do car "$id"; spec_join "$id" >/dev/null; done
+old_a=$(spec_queue status a | field candidate_sha)
+old_c=$(spec_queue status c | field candidate_sha)
+spec_mark b full failed
+spec_queue resolve sweep >/dev/null
+expect_field "$(spec_queue status b)" status failed
+[ "$(spec_queue status a | field candidate_sha)" = "$old_a" ] || fail 'middle failure rebuilt the unaffected prefix'
+[ "$(spec_queue status c | field candidate_sha)" != "$old_c" ] || fail 'middle failure did not rebuild the suffix'
+for id in a c; do spec_mark "$id" full passed; done
+spec_queue resolve sweep >/dev/null
+for id in a c; do spec_mark "$id" quick passed; done
+spec_queue resolve sweep >/dev/null
+for id in a c; do
+  out=$(spec_queue status "$id")
+  expect_field "$out" status ready-to-land
+  git -C "$CASE/project" merge -q --ff-only "$(printf '%s\n' "$out" | field candidate_sha)"
+  spec_queue reconcile sweep >/dev/null
+done
+pass 'middle failure preserves the tested prefix and rebuilds only its surviving suffix'
+
+spec_case replay-conflict
+git -C "$CASE/project" worktree add -qb fm/a "$CASE/a" main
+sed 's/^first$/changed-by-a/' "$CASE/a/shared.txt" > "$CASE/a/shared.new"
+mv "$CASE/a/shared.new" "$CASE/a/shared.txt"
+git -C "$CASE/a" commit -qam a
+spec_join a >/dev/null
+git -C "$CASE/project" worktree add -qb fm/b "$CASE/b" main
+sed 's/^first$/changed-by-b/' "$CASE/b/shared.txt" > "$CASE/b/shared.new"
+mv "$CASE/b/shared.new" "$CASE/b/shared.txt"
+git -C "$CASE/b" commit -qam b
+spec_join b >/dev/null
+expect_field "$(spec_queue status b)" status failed
+expect_field "$(spec_queue status a)" status checking-candidate
+pass 'candidate replay conflict fails only the car that introduced it'
+
+spec_case moving-tip
+for id in a b; do car "$id"; spec_join "$id" >/dev/null; done
+old_a=$(spec_queue status a | field candidate_sha)
+printf 'outside\n' > "$CASE/project/outside.txt"
+git -C "$CASE/project" add outside.txt
+git -C "$CASE/project" commit -qm outside
+spec_queue reconcile sweep >/dev/null
+[ "$(spec_queue status a | field candidate_sha)" != "$old_a" ] || fail 'tip move did not rebuild candidates'
+[ "$(spec_count full cancelled)" -ge 2 ] || fail 'tip move did not cancel stale requests'
+pass 'moving landing tip invalidates old results and rebuilds candidates'
+
+spec_case farm-unreachable
+car a; spec_join a >/dev/null
+touch "$CASE/farm.down"
+before=$(wake_count)
+spec_queue resolve sweep >/dev/null
+[ "$(wake_count)" -eq "$((before + 1))" ] || fail 'speculative farm outage did not wake firstmate'
+spec_queue resolve sweep >/dev/null
+[ "$(wake_count)" -eq "$((before + 1))" ] || fail 'repeat speculative farm outage woke firstmate again'
+status_calls=$(cat "$CASE/farm.calls")
+expect_field "$(spec_queue status a)" status checking-candidate
+[ "$(cat "$CASE/farm.calls")" -eq "$status_calls" ] || fail 'status observation polled the test service'
+spec_queue resolve sweep >/dev/null
+[ "$(wake_count)" -eq "$((before + 1))" ] || fail 'status recheck reset the farm outage dedupe marker'
+rm "$CASE/farm.down"
+spec_queue resolve sweep >/dev/null
+pass 'unreachable test service leaves candidates unlandable and wakes firstmate once'
+
+spec_case off-switch
+SPEC_TEST_SETTING=
+mkdir -p "$CASE/home/config/landing-train"
+printf 'off\n' > "$CASE/home/config/landing-train/default"
+car a
+full_receipt a
+out=$(spec_queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/a.full")
+expect_field "$out" status needs-quick
+[ ! -f "$CASE/farm.json" ] || fail 'off switch submitted a speculative request'
+pass 'per-home off switch keeps the sequential front check'
+
+spec_case switch-off-running
+car a; spec_join a >/dev/null
+[ "$(spec_count full)" -eq 1 ] || fail 'running switch case did not submit a candidate'
+mkdir -p "$CASE/home/config/landing-train"
+printf 'off\n' > "$CASE/home/config/landing-train/default"
+SPEC_TEST_SETTING=
+expect_field "$(spec_queue status a)" status needs-quick
+[ "$(spec_count full cancelled)" -eq 1 ] || fail 'switching off did not cancel the in-flight candidate'
+[ -z "$(git -C "$CASE/project" for-each-ref refs/landing-candidates --format='%(refname)')" ] \
+  || fail 'switching off left a candidate ref behind'
+pass 'switching speculation off retires in-flight checks and returns to sequential status'
+
+spec_case project-off
+mkdir -p "$CASE/home/config/landing-train"
+printf '3\n' > "$CASE/home/config/landing-train/default"
+printf 'off\n' > "$CASE/home/config/landing-train/project"
+SPEC_TEST_SETTING=
+car a
+full_receipt a
+out=$(spec_queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/a.full")
+expect_field "$out" status needs-quick
+[ ! -f "$CASE/farm.json" ] || fail 'project off switch submitted a speculative request'
+rm "$CASE/home/config/landing-train/project"
+spec_queue reconcile sweep >/dev/null
+expect_field "$(spec_queue status a)" status checking-candidate
+[ "$(spec_count full)" -eq 1 ] || fail 'lifting the project switch did not submit a candidate'
+pass 'per-project off switch overrides the home depth and can be lifted'
+fi

@@ -13,7 +13,8 @@ metadata:
 
 Load this on any `check: landing-queue <status> task=<id> ...` wake.
 `bin/fm-landing-queue.sh`'s header and `--help` own the queue protocol, statuses, and receipt format; this skill owns only what firstmate does with its wakes.
-Workers own admission, rebasing, suite runs, and receipts, so never message a worker about its place, target, rebase, or suite timing, and never edit queue files by hand; the queue tool alone steers paused workers when their car leaves parking.
+Workers own admission; the queue owns candidate builds and checks when speculation is enabled, while workers own front rebasing and checks when it is off.
+Never message a worker about its place, target, rebase, or suite timing, and never edit queue files by hand; the queue tool alone steers paused workers when their car leaves parking.
 Workers also record configured landing-gate passes through the queue tool; a missing gate remains their work and emits no readiness wake.
 
 ## Move a waiting car
@@ -39,7 +40,7 @@ Act only on the status it prints now; if it changed, take no queue action, becau
 ## ready-to-land
 
 Apply the existing merge authority for a local-only landing, exactly as for any other local-only task.
-With authority, run `bin/fm-merge-local.sh <id> --receipt <receipt>` using the `receipt` path from the recheck, then push only when the project's delivery path authorizes it.
+With authority, run `bin/fm-merge-local.sh <id> --receipt <receipt>` using the `receipt` path from the recheck, adding `--candidate <candidate_sha>` when status reports a speculative candidate, then push only when the project's delivery path authorizes it.
 `fm-merge-local.sh` reconciles the queue after landing, which steers the landed car's worker and a waiting next car once each; they read `landed` and the new target from the queue themselves.
 
 ## needs-baseline
@@ -52,7 +53,7 @@ Reserve `fail` for a car that genuinely cannot continue.
 
 ## sweep and testfarm-unreachable
 
-The watcher's sweep settles each front quick check from the test farm itself, so a car never waits on its worker to report; the queue tool's header owns that `resolve` contract.
+The watcher's sweep settles candidate checks, or the front quick check when speculation is off, from the test farm itself; the queue tool's header owns that `resolve` contract.
 A `landing-queue sweep: front-check` wake only announces the durable row queued beside it: `front-check passed` pairs with a `ready-to-land` row, handled as above, and `front-check unreachable` with a `testfarm-unreachable` row.
 A `landing-queue testfarm-unreachable` wake means the front car is unchanged because the farm's status could not be read, and the sweep retries on its own.
 Check the farm with `testfarm doctor` and restore its runner if it is down; escalate to the captain only when it cannot be restored, and send no queue coordination to the worker.
@@ -60,5 +61,5 @@ A `landing-queue sweep failed:` wake means the sweep itself could not run, so no
 
 ## failed
 
-The tool has already removed the car, and its successors retarget themselves from status.
-Handle the worker's `failed:` status line as an ordinary failed task; send no queue coordination to the remaining cars.
+The tool has already removed the car, told its worker the reason when speculation settled it, and rebuilt the surviving suffix.
+Handle the failed queue wake and any worker `failed:` status as an ordinary failed task; send no queue coordination to the remaining cars.

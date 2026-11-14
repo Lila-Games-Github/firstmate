@@ -1485,7 +1485,8 @@ def worker_tags(snapshot, resources):
 
 LANDING_QUEUE_FRONT_WORDS = {
     "needs-rebase": "REBASING", "needs-full": "NEEDS FULL", "needs-quick": "NEEDS QUICK",
-    "needs-gate": "NEEDS GATE", "ready-to-land": "READY TO LAND",
+    "needs-gate": "NEEDS GATE", "checking-candidate": "CHECKING CANDIDATE",
+    "ready-to-land": "READY TO LAND",
     "red-receipt": "RED RECEIPT", "needs-baseline": "NEEDS BASELINE",
 }
 def landing_queue_snapshot():

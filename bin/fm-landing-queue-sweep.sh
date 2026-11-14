@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-landing-queue-sweep.sh - settle every landing train's front check from the
+# fm-landing-queue-sweep.sh - settle every landing train's candidate checks from the
 # test farm, from the watcher poll, so no train waits on a worker's turn.
 #
 # Usage: fm-landing-queue-sweep.sh [--force]
@@ -9,16 +9,16 @@
 # branch from its snapshot. fm-landing-queue.sh's header owns what resolve does.
 # bin/fm-watch.sh calls this every poll; the sweep runs at most once per
 # FM_LANDING_SWEEP_SECS (default 30, valid 5..600) per home, tracked by the
-# epoch recorded in state/.last-landing-sweep, so a front check settles within about
+# epoch recorded in state/.last-landing-sweep, so a candidate check settles within about
 # 30 seconds plus one poll of its farm result. --force skips that cadence.
-# Each train is bounded by FM_LANDING_SWEEP_BOUND (default 20, valid 1..120)
+# Each train is bounded by FM_LANDING_SWEEP_BOUND (default 60, valid 1..120)
 # seconds; a train that times out or errors is skipped until the next sweep.
 #
-# Prints one line per outcome that needs firstmate: a passed front check, which
-# leaves a ready-to-land car for the merge authority, and the first report of an
-# unreadable test farm for a car. Failed checks already moved their car and
-# messaged its owner, and repeat unreachable reports are already queued, so both
-# stay silent here. Prints nothing otherwise; the watcher turns any output into
+# In sequential mode, prints a passed front check or the first unreadable farm
+# report; in speculative mode, resolve appends its readiness, failure, and farm
+# outage wakes directly and prints nothing. Failed sequential checks already
+# moved their car and messaged its owner, and repeat unreachable reports are
+# already queued, so both stay silent here. The watcher turns any output into
 # one `check: landing-queue` wake. Exits nonzero, with one error line on
 # stderr, only when the sweep itself cannot run (bad usage, or an unwritable
 # cadence stamp); a single train's failure is skipped, never an exit status.
@@ -34,11 +34,11 @@ esac
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 SECS=${FM_LANDING_SWEEP_SECS:-30}
-BOUND=${FM_LANDING_SWEEP_BOUND:-20}
+BOUND=${FM_LANDING_SWEEP_BOUND:-60}
 case "$SECS" in ''|*[!0-9]*) SECS=30 ;; esac
 [ "$SECS" -ge 5 ] && [ "$SECS" -le 600 ] || SECS=30
-case "$BOUND" in ''|*[!0-9]*) BOUND=20 ;; esac
-[ "$BOUND" -ge 1 ] && [ "$BOUND" -le 120 ] || BOUND=20
+case "$BOUND" in ''|*[!0-9]*) BOUND=60 ;; esac
+[ "$BOUND" -ge 1 ] && [ "$BOUND" -le 120 ] || BOUND=60
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"

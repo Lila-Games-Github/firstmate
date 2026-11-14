@@ -309,7 +309,7 @@ For Playbot 0.124.0 on a symlinked home, use `get_worktree_root` to inspect the 
 That setting changes the path Playbot records for future workspaces, while existing workspaces retain their recorded paths.
 After creating a Godot workspace, `prepare_engine_workspace` uses Playbot's engine IPC to install missing bundled native addon files in that exact idle workspace and verifies complete byte identity before engine validation.
 The tool refuses a stored project path alias and addon drift beyond missing native files.
-At the landing queue front, keep the rebased branch in its registered Playbot workspace; Playbot's engine session is tied to that workspace's project path, so a separate Git worktree does not move the session with the branch.
+When landing speculation is off, keep the front car's rebased branch in its registered Playbot workspace; Playbot's engine session is tied to that workspace's project path, so a separate Git worktree does not move the session with the branch.
 Before a front rebase, `bin/fm-playbot-uid-collisions.py check <target-sha>` compares real untracked paths with the target tree and reports both source counts and every collision.
 Its `preserve <target-sha>` action moves only valid colliding `.gd.uid` sidecars into an ignored, byte-verified manifest in the same workspace and refuses other collisions; retain that backup until every preserved UID is accounted for, and never overwrite a UID that the new head tracks.
 After a rebase removes or renames a script, `reset_engine_workspace_cache` uses Playbot's `engine:controlInstance` `reset` action for the exact registered headless project path, then returns a new readiness report.
