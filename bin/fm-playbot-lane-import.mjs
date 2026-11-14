@@ -118,7 +118,7 @@ export async function laneImport(args, { root, git, gitEnvironment, identity, gu
   let requiredHead = expectedHead;
   const checkIdentity = async () => {
     const observed = await identity(args);
-    if (observed.branch !== expectedBranch || git(root, ["symbolic-ref", "HEAD"]).trim() !== expectedRef || git(root, ["rev-parse", "HEAD"]).trim() !== requiredHead) throw new Error("Lane branch/head differs from expectedBranch/expectedHead");
+    if (git(root, ["symbolic-ref", "HEAD"]).trim() !== expectedRef || git(root, ["rev-parse", "HEAD"]).trim() !== requiredHead) throw new Error("Lane branch/head differs from expectedBranch/expectedHead");
     guards();
     if (git(root, ["merge-base", requiredHead, `refs/heads/${landingBranch}`]).trim() !== base) throw new Error("base differs from merge-base HEAD with the explicit landingBranch");
     return observed;

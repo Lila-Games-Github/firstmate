@@ -348,7 +348,8 @@ When a lane's validation is defined by its suite runner's verdict, route that su
 An operator can generate lane `.gd.uid` and asset `.import` companions with `node --no-warnings <Firstmate-code-root>/bin/fm-playbot-lanes.mjs lane-import - < <operator-request.json>` from the exact registered lane Git root.
 This is the supported option B when a lane has no usable engine bridge; LLM implementation workers must never invoke it with real Godot.
 The JSON contract and execution/recovery mechanics belong to [`fm-playbot-lane-import.mjs`](../bin/fm-playbot-lane-import.mjs).
-The command runs locally on Linux workstation and server hosts, reads existing Playbot registration without IPC, resolves stored path aliases to one exact physical checkout, and accepts the registered branch's actual name, including Playbot-generated names.
+The command runs locally on Linux workstation and server hosts, reads existing Playbot registration without IPC, resolves stored path aliases to one exact physical checkout, and requires the current Git branch and full head to match the operator request.
+An in-place branch rename may leave Playbot's stored branch name stale; the result reports that name as `registeredBranch` while `branch` reports the verified Git branch.
 It changes no Playbot session or engine setting and establishes no engine-readiness or suite verdict.
 
 The operator supplies an exact companion inventory for the task; an entire landing-base diff is insufficient task ownership because it can include other lanes' work.
