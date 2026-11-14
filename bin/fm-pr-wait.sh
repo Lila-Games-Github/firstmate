@@ -73,7 +73,9 @@ if [ -f "$record" ]; then
   [ "$(fm_pr_file_link_count "$record")" = 1 ] || exit 1
   IFS=$'\t' read -r old_head old_condition old_first rerun notified < "$record" || true
   if [ "$old_head" = "$head" ]; then
-    if [ "$old_condition" = "$condition" ]; then
+    if [ "$old_condition" = "$condition" ] \
+      || { [ "$old_condition" = red ] && [ "$condition" = conflict ]; } \
+      || { [ "$old_condition" = conflict ] && [ "$condition" = red ]; }; then
       case "$old_first" in ''|*[!0-9]*) exit 1 ;; esac
       first=$old_first
     else

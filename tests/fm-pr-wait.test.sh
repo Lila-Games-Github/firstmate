@@ -59,6 +59,15 @@ grep -q 'merge-conflict' "$case_dir/out" || fail 'conflicted PR missed the deadl
 make_view MERGED MERGEABLE "$green"
 "$ROOT/bin/fm-pr-wait.sh" "$state_dir" task-c "$url" > "$case_dir/out"
 [ ! -s "$case_dir/out" ] && [ ! -e "$state_dir/task-c.pr-wait" ] || fail 'merged PR woke or retained wait state'
+# A conflict becoming red is one continuous blocked wait on the same head.
+make_view OPEN CONFLICTING "$green"
+"$ROOT/bin/fm-pr-wait.sh" "$state_dir" task-g "$url" > "$case_dir/out"
+awk -F '\t' -v OFS='\t' '{$3=1; print}' "$state_dir/task-g.pr-wait" > "$case_dir/old"
+cp "$case_dir/old" "$state_dir/task-g.pr-wait"
+make_view OPEN MERGEABLE "$red"
+"$ROOT/bin/fm-pr-wait.sh" "$state_dir" task-g "$url" > "$case_dir/out"
+grep -q 'failing check: portable serial shard 2' "$case_dir/out" \
+  || fail 'conflict-to-red transition reset the blocked wait clock'
 # A newer green run supersedes an older failure of the same check name.
 old_failed='{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-13T19:52:00Z"}'
 new_green='{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-13T19:53:00Z"}'
