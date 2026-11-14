@@ -1056,6 +1056,8 @@ pass 'front failure removes only the failed car and rebuilds the suffix from the
 
 spec_case auto-yolo
 spec_register on
+ln -s project "$CASE/registered-project"
+printf '%s\n' "- project [local-only +yolo] - test at $CASE/registered-project (added 2026-11-14)" > "$CASE/home/data/projects.md"
 car a
 if spec_queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" > "$CASE/no-suite" 2>&1; then
   fail 'speculative ready admitted without a worker full editor receipt'

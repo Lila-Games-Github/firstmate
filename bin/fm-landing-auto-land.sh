@@ -15,6 +15,7 @@ FM_HOME=${FM_HOME:?select the owning FM_HOME explicitly}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 DATA=${FM_DATA_OVERRIDE:-$FM_HOME/data}
 [ -d "$DATA/landing-queue" ] && [ ! -L "$DATA/landing-queue" ] || exit 0
+TAB=$(printf '\t')
 
 field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1; }
 fail() { echo "error: auto-land: $*" >&2; exit 1; }
@@ -34,6 +35,8 @@ for queue in "$DATA"/landing-queue/*/queue; do
   registered=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$name" 2>/dev/null) || continue
   [ "$registered" = 'local-only on' ] || continue
   registered_path=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --path "$name" 2>/dev/null) || continue
+  [ -d "$registered_path" ] || continue
+  registered_path=$(cd "$registered_path" && pwd -P) || continue
   [ "$registered_path" = "$primary" ] || continue
 
   publish=0
@@ -55,9 +58,9 @@ for queue in "$DATA"/landing-queue/*/queue; do
 
   # A merge reconciles the queue and can expose another already-tested car.
   while :; do
-    front=$(awk -F '\t' 'NR > 3 && $4 == "active" { print $1; exit }' "$queue")
+    front=$(awk -F "$TAB" 'NR > 3 && $4 == "active" { print $1; exit }' "$queue")
     [ -n "$front" ] || break
-    display=$(awk -F '\t' 'NR > 3 && $1 == id { print $13; exit }' id="$front" "$queue")
+    display=$(awk -F "$TAB" 'NR > 3 && $1 == id { print $13; exit }' id="$front" "$queue")
     [ "$display" = ready-to-land ] || break
     status=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-landing-queue.sh" status "$front" --project "$primary" --landing-branch "$landing") \
