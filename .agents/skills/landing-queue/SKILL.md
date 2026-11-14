@@ -39,6 +39,8 @@ Act only on the status it prints now; if it changed, take no queue action, becau
 
 ## ready-to-land
 
+The watcher calls `bin/fm-landing-auto-land.sh` on every poll and after the queue sweep, so a registered local-only `+yolo` project's verified speculative front car lands through `fm-merge-local.sh --candidate` without waiting for this wake to be handled in conversation.
+Recheck a delivered ready wake as usual; it may already be `landed`.
 Apply the existing merge authority for a local-only landing, exactly as for any other local-only task.
 With authority, run `bin/fm-merge-local.sh <id> --receipt <receipt>` using the `receipt` path from the recheck, adding `--candidate <candidate_sha>` when status reports a speculative candidate, then push only when the project's delivery path authorizes it.
 `fm-merge-local.sh` reconciles the queue after landing, which steers the landed car's worker and a waiting next car once each; they read `landed` and the new target from the queue themselves.
