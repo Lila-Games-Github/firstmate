@@ -84,6 +84,25 @@ expect_field "$(quick_receipt a)" status ready-to-land
 [ "$(wake_count)" = 1 ] || fail 'front quick receipt did not wake firstmate once'
 pass 'ready requires a green exact-head full receipt and a quick front check lands'
 
+make_case rebase-basis
+car a
+admitted=$(head_of a)
+join a >/dev/null
+printf 'unrelated landing change\n' > "$CASE/project/landing.txt"
+git -C "$CASE/project" add landing.txt
+git -C "$CASE/project" commit -qm landing
+prepare a
+out=$(queue status a)
+expect_field "$out" status needs-quick
+expect_field "$out" rebase_basis "$admitted"
+pre_receipt=$(find "$CASE/home/data/landing-queue" -name pre-receipt-a -type f -print -quit)
+[ -n "$pre_receipt" ] || fail 'admission receipt was not retained'
+rm "$pre_receipt"
+out=$(queue status a)
+expect_field "$out" status needs-full
+expect_field "$out" rebase_basis -
+pass 'a clean rebased front car exposes its admitted full-suite basis, and missing evidence requires a full rerun'
+
 make_case pre-gates
 mkdir -p "$CASE/home/config/test-service"
 cat > "$CASE/home/config/test-service/project.json" <<'EOF'
@@ -553,7 +572,12 @@ if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != spec ]; then
 # fm-send deliver owner messages into state/<id>.inbox.
 farm_case() {
   make_case "$1"
-  mkdir -p "$CASE/bin" "$CASE/home/state"
+  mkdir -p "$CASE/bin" "$CASE/compat" "$CASE/home/state"
+  cat > "$CASE/compat/fm-test-service.py" <<'SERVICE'
+import sys
+if sys.argv[1] != 'landing-gates-for-repo':
+    raise SystemExit('unexpected compatibility call')
+SERVICE
   cat > "$CASE/bin/testfarm" <<'FARM'
 #!/usr/bin/env bash
 [ "$1 $2 $3" = 'status --json --no-probe' ] || { echo "unexpected testfarm call: $*" >&2; exit 64; }
@@ -588,6 +612,18 @@ print(json.dumps({"id": rid, "seq": 1, "sha": sha, "original_sha": sha, "state":
   "options": {"suite": True, "check": "quick", "target": target, "device_gate": "any"}}))
 ' "$id" "$(head_of "$car")" "$target" "$state" "$error" "$submitted"
 }
+farm_rebase_request() {
+  local id=$1 car=$2 state=$3 basis=$4 target
+  target=$(queue status "$car" | field target_sha)
+  python3 -I -c '
+import json, sys, time
+rid, sha, target, state, basis = sys.argv[1:6]
+print(json.dumps({"id": rid, "seq": 2, "sha": sha, "original_sha": sha, "state": state,
+  "submitted": time.time() + 5, "options": {"suite": False, "check": "full",
+  "device_gate": "any", "rebase_basis": basis,
+  "phone_admission": {"kind": "rebased-quick", "basis": basis, "target": target}}}))
+' "$id" "$(head_of "$car")" "$target" "$state" "$basis"
+}
 farm_json() { { printf '{"schema":"fm-test-service.v1","requests":['; (IFS=,; printf '%s' "$*"); printf ']}\n'; } > "$CASE/farm.json"; }
 inbox_count() { find "$CASE/home/state/$1.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' '; }
 ORIGINAL_PATH=$PATH
@@ -613,6 +649,98 @@ if queue receipt a --head "$(head_of a)" --target "$BASE" --reason 'late failure
 fi
 grep -q 'already settled this front check as passed' "$CASE/refusal" || fail 'contradicting report refusal was unclear'
 pass 'a farm pass settles the front car as ready-to-land with no worker action, and a duplicate worker receipt is a no-op'
+
+farm_case farm-rebase-basis
+car a
+admitted=$(head_of a)
+join a >/dev/null
+printf 'unrelated landing change\n' > "$CASE/project/landing.txt"
+git -C "$CASE/project" add landing.txt
+git -C "$CASE/project" commit -qm landing
+prepare a
+expect_field "$(queue status a)" rebase_basis "$admitted"
+worker_meta a
+farm_json "$(farm_request r-exempt-quick a passed)"
+[ -z "$(queue resolve sweep)" ] || fail 'exempt quick request completed the queue before rebase phone admission'
+expect_field "$(queue status a)" status needs-quick
+farm_json "$(farm_request r-exempt-quick a passed)" "$(farm_rebase_request r-rebased-phone a passed "$admitted")"
+case "$(queue resolve sweep)" in "front-check passed task=a request=r-rebased-phone "*) ;; *) fail 'accepted rebase phone result did not settle the front car' ;; esac
+expect_field "$(queue status a)" status ready-to-land
+pass 'the farm accepted rebase phone request settles only after the earlier quick result'
+
+# Submit through the Firstmate shim into a stub farm. Its refusal preserves the
+# farm's reason, and the worker's exact-head fallback produces queue evidence.
+farm_case farm-refused-patch
+car a
+admitted=$(head_of a)
+join a >/dev/null
+printf 'unrelated landing change\n' > "$CASE/project/landing.txt"
+git -C "$CASE/project" add landing.txt
+git -C "$CASE/project" commit -qm landing
+prepare a
+printf 'changed patch\n' > "$CASE/a/a.txt"
+git -C "$CASE/a" commit -qam changed-patch
+queue ready a --branch fm/a --head "$(head_of a)" --target "$(tip)" >/dev/null
+mkdir -p "$CASE/farm-checkout/compat"
+cat > "$CASE/farm-checkout/compat/fm-test-service.py" <<'FARM_STUB'
+import os, pathlib, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ['STUB_FARM_LOG'], 'a') as log:
+    log.write(' '.join(args) + '\n')
+if args[0] != 'submit':
+    raise SystemExit('unexpected stub farm command')
+sha = args[3]
+if '--rebase-basis' in args:
+    basis = args[args.index('--rebase-basis') + 1]
+    repo = args[2]
+    if os.environ.get('STUB_FARM_MISSING') == '1':
+        raise SystemExit('error: phone gate requires a passed full suite for this project and exact commit; rebase basis has no green farm full suite')
+    old = subprocess.check_output(['git', '-C', repo, 'show', basis + ':a.txt'])
+    new = subprocess.check_output(['git', '-C', repo, 'show', sha + ':a.txt'])
+    if old != new:
+        raise SystemExit('error: phone gate requires a passed full suite for this project and exact commit; rebase changed the patch')
+    print('admitted-phone')
+elif '--suite' in args:
+    path = pathlib.Path(args[args.index('--receipt') + 1])
+    path.write_text('schema=fm-full-suite.v1\nsha=' + sha + '\nfailures=0\n')
+    print('fallback-full')
+else:
+    raise SystemExit('unexpected stub farm request')
+FARM_STUB
+export STUB_FARM_LOG="$CASE/farm-submits.log"
+if TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+  --task a --device-gate any --rebase-basis "$admitted" > "$CASE/refusal" 2>&1; then
+  fail 'stub farm accepted a changed rebased patch'
+fi
+grep -q 'rebase changed the patch' "$CASE/refusal" || fail 'farm refusal reason was hidden by the shim'
+TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+  --task a --suite --device-gate any --receipt "$CASE/fallback.full" > "$CASE/fallback.request"
+[ "$(cat "$CASE/fallback.request")" = fallback-full ] || fail 'exact-head fallback did not submit'
+out=$(queue receipt a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/fallback.full")
+expect_field "$out" status ready-to-land
+grep -q -- "--rebase-basis $admitted" "$STUB_FARM_LOG" || fail 'shim did not pass the basis SHA through'
+pass 'stub farm rejects a changed patch with its reason, and an exact-head full suite settles the front car'
+
+stub_checkout="$CASE/farm-checkout"
+farm_case farm-missing-basis
+car a
+admitted=$(head_of a)
+join a >/dev/null
+printf 'unrelated landing change\n' > "$CASE/project/landing.txt"
+git -C "$CASE/project" add landing.txt
+git -C "$CASE/project" commit -qm landing
+prepare a
+cp -a "$stub_checkout" "$CASE/farm-checkout"
+export STUB_FARM_LOG="$CASE/farm-submits.log"
+accepted=$(TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+  --task a --device-gate any --rebase-basis "$admitted")
+[ "$accepted" = admitted-phone ] || fail 'stub farm did not accept a clean rebased patch'
+if STUB_FARM_MISSING=1 TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+  --task a --device-gate any --rebase-basis "$admitted" > "$CASE/refusal" 2>&1; then
+  fail 'stub farm accepted a basis without its green full-suite result'
+fi
+grep -q 'rebase basis has no green farm full suite' "$CASE/refusal" || fail 'missing basis refusal reason was hidden by the shim'
+pass 'stub farm accepts a clean rebase and refuses a basis missing its farm full-suite result'
 
 farm_case farm-fail-waiting
 car a; join a >/dev/null
@@ -843,7 +971,7 @@ git -C "$CASE/project" merge -q --ff-only fm/b
 expect_field "$(queue status a)" status needs-rebase
 prepare a
 expect_field "$(queue status a)" status needs-quick
-farm_json "$(farm_request r-new a passed '' "$(( $(date +%s) + 5 ))")"
+farm_json "$(farm_rebase_request r-new a passed "$(queue status a | field rebase_basis)")"
 case "$(queue resolve sweep)" in "front-check passed task=a request=r-new "*) ;; *) fail 'a fresh farm check did not settle the returning car' ;; esac
 expect_field "$(queue status a)" status ready-to-land
 pass 'a stepped-back car returning behind a landing rebases and a fresh farm check settles it'
