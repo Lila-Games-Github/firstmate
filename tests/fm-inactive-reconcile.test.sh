@@ -894,7 +894,22 @@ SH
   pass "reconciliation state reads set no-forge mode"
 }
 
+test_secondmate_blocked_ledger_retries() {
+  local key
+  make_world blocked-ledger; bind_secondmate local
+  write_child "$MATE" child 'blocked: CI credential unavailable'
+  FM_FAKE_CREW_STATE='blocked' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" child blocked) || fail 'blocked child did not retain a delivery receipt'
+  grep -Fq "blocked [key=$key]: child child blocked: CI credential unavailable" "$MAIN/state/mate.status" \
+    || fail 'blocked child did not reach the parent channel'
+  FM_FAKE_CREW_STATE='blocked' run_reconcile "$MATE"
+  [ "$(grep -c 'child-outcome-child-blocked' "$MAIN/state/mate.status")" = 1 ] \
+    || fail 'blocked child event repeated after delivery'
+  pass 'blocked child ledger reaches parent once'
+}
+
 test_main_direct_terminal_presentation_receipt
+test_secondmate_blocked_ledger_retries
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome

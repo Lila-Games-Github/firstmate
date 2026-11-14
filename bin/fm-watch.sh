@@ -2847,6 +2847,17 @@ EOF
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
   # surfaced non-heartbeat wake.
+  # Remote child progress has its own fixed heartbeat cadence, since an idle
+  # local fleet must not back off beyond the remote stall bound.
+  if [ "$(age_of "$STATE/.last-remote-child-check")" -ge 600 ]; then
+    remote_child_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-remote-child-check.sh" scan 2>/dev/null) || remote_child_out='remote child inventory check failed'
+    touch "$STATE/.last-remote-child-check"
+    if [ -n "$remote_child_out" ]; then
+      remote_child_out=$(printf '%s' "$remote_child_out" | tr '\n' ';' | cut -c1-1800)
+      wake "check: $remote_child_out"
+    fi
+  fi
   streak=$(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0)
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))

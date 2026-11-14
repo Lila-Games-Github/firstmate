@@ -247,6 +247,8 @@ An SSH exit status of 255 always means transport failure or unknown remote compl
 The underlying `fm-on` transport never retries automatically, but `fm-send` retries its correlation-preserving steering-inbox leg exactly once.
 Semantic callers preserve the route or pending request; an operation that is not idempotent requires same-host reconciliation rather than a blind resend, while an unconfirmed steer may be retried only through the correlation-preserving command described above.
 An unavailable remote home is projected as unknown and is never replaced by a local second mate.
+The parent watcher also reads a bounded live child inventory through `fm-on.sh` on a fixed ten-minute cadence, independent of the remote mate's own relay choices.
+It notices blocked or failed children, red PR checks, and children with no status progress for `FM_REMOTE_CHILD_STALL_SECS` (default 2700 seconds), while an unreachable home remains unknown and never triggers endpoint control.
 
 ## Backlog handoff
 

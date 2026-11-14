@@ -28,7 +28,7 @@ FARM_RESULTS_TIMEOUT=${FM_STOCK_BASH_FARM_RESULTS_TIMEOUT:-90}
 selected=all
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != --consumer ]; then
-    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|landing-conflicts|worker-timing|teardown-farm|doorbell|lane-send|farm-results|remote-landing|remote-export]" >&2
+    echo "usage: $0 [--consumer parse|fleet|bearings|oversized|public-followup|watch-churn|learning|merge|landing|landing-conflicts|worker-timing|teardown-farm|doorbell|lane-send|farm-results|remote-landing|remote-export|remote-child]" >&2
     exit 2
   fi
   selected=$2
@@ -173,6 +173,8 @@ run_consumer remote-landing "remote branch import and workstation landing" "$MER
   "$STOCK_BASH" "$ROOT/tests/fm-remote-landing.test.sh"
 run_consumer remote-export "remote local-only brief launch and promotion" "$MERGE_TIMEOUT" 1 \
   env FM_TASK_DELIVERY_TEST_ONLY=remote-local "$STOCK_BASH" "$ROOT/tests/fm-task-delivery.test.sh"
+run_consumer remote-child "remote secondmate child heartbeat and parent ack" "$MERGE_TIMEOUT" 1 \
+  "$STOCK_BASH" "$ROOT/tests/fm-remote-child-check.test.sh"
 [ "$ran_consumer" -eq 1 ] || {
   echo "::error::unknown stock Bash consumer: $selected" >&2
   exit 2
