@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Parent heartbeat reads a fake remote home's live child records over fm-on.
 set -u
+# shellcheck source=tests/lib.sh
 . "$(dirname "$0")/lib.sh"
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 TMP=$(fm_test_tmproot fm-remote-child-check)
