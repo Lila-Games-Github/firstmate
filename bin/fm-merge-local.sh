@@ -17,7 +17,14 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
-# Usage: fm-merge-local.sh <task-id> --receipt <front-receipt> [--base-receipt <full-suite-receipt>]
+# Usage: fm-merge-local.sh <task-id> --receipt <front-receipt> [--base-receipt <full-suite-receipt>] [--candidate <full-sha>]
+# --candidate is the queue-built speculative commit, never a worker branch
+# mutation. It requires this task to be the active front car, the queue's
+# verified candidate state to name the live branch head and current tip as its
+# parent, and both exact-SHA editor-suite and quick-phone receipts. The queue
+# lock is held through the fast-forward, so a concurrent reconcile cannot
+# replace that candidate. Merge authority and all other checks still apply.
+# A queued candidate state also refuses the ordinary worker-branch path.
 # The project-agnostic receipt has schema=fm-full-suite.v1, sha=<full SHA>,
 # failures=<count>, then one failure=<stable id> line per failure; the complete
 # parser contract is owned by bin/fm-landing-health-lib.sh. --receipt must
@@ -53,11 +60,16 @@ ID=$1
 shift
 RECEIPT=
 BASE_RECEIPT=
+CANDIDATE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --receipt|--base-receipt)
+    --receipt|--base-receipt|--candidate)
       [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: $1 needs a receipt path" >&2; exit 2; }
-      if [ "$1" = --receipt ]; then RECEIPT=$2; else BASE_RECEIPT=$2; fi
+      case "$1" in
+        --receipt) RECEIPT=$2 ;;
+        --base-receipt) BASE_RECEIPT=$2 ;;
+        --candidate) CANDIDATE=$2 ;;
+      esac
       shift 2 ;;
     *) echo "error: unknown local merge option $1" >&2; exit 2 ;;
   esac
@@ -89,11 +101,13 @@ MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 
 MERGE_CONTROL_LOCK=
 MERGE_HEALTH_LOCK=
+MERGE_QUEUE_LOCK=
 MERGE_RECEIPT_STAGE=
 MERGE_BASE_STAGE=
 merge_control_cleanup() {
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
   [ -z "$MERGE_HEALTH_LOCK" ] || fm_lock_release "$MERGE_HEALTH_LOCK" || true
+  [ -z "$MERGE_QUEUE_LOCK" ] || fm_lock_release "$MERGE_QUEUE_LOCK" || true
   [ -z "$MERGE_RECEIPT_STAGE" ] || rm -f -- "$MERGE_RECEIPT_STAGE"
   [ -z "$MERGE_BASE_STAGE" ] || rm -f -- "$MERGE_BASE_STAGE"
 }
@@ -169,7 +183,7 @@ if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
 fi
 
 # Clean fast-forward only: TARGET must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "refs/heads/$BRANCH"; then
+if [ -z "$CANDIDATE" ] && ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "refs/heads/$BRANCH"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
@@ -197,10 +211,66 @@ fm_backlog_directory_present "$DATA" "data directory" || {
 }
 PROJ_REAL=$(cd "$PROJ" && pwd -P)
 HEALTH_KEY=$(fm_health_key "$PROJ_REAL" "$TARGET") || exit 1
+COMMON=$(git -C "$PROJ" rev-parse --git-common-dir) || exit 1
+case "$COMMON" in /*) ;; *) COMMON="$PROJ/$COMMON" ;; esac
+COMMON=$(cd "$COMMON" && pwd -P)
+QUEUE_KEY=$(fm_health_key "$COMMON" "$TARGET") || exit 1
+QUEUE_DIR="$DATA/landing-queue/$QUEUE_KEY"
+QUEUE_FILE="$QUEUE_DIR/queue"
+if [ -n "$CANDIDATE" ] || [ -e "$QUEUE_FILE" ]; then
+  MERGE_QUEUE_LOCK="$STATE/.landing-queue-$QUEUE_KEY.lock"
+  fm_lock_acquire_wait "$MERGE_QUEUE_LOCK"
+fi
+if [ -z "$CANDIDATE" ] && [ -e "$QUEUE_DIR/candidate-$ID.json" ]; then
+  echo 'error: queued speculative car requires --candidate with its tested SHA' >&2
+  exit 1
+fi
+if [ -n "$CANDIDATE" ]; then
+  [[ "$CANDIDATE" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || { echo 'error: invalid candidate SHA' >&2; exit 1; }
+fi
 MERGE_HEALTH_LOCK="$STATE/.landing-health-$HEALTH_KEY.lock"
 fm_lock_acquire_wait "$MERGE_HEALTH_LOCK"
 CURRENT_SHA=$(git -C "$PROJ" rev-parse "$TARGET_REF^{commit}") || exit 1
 INCOMING_SHA=$(git -C "$PROJ" rev-parse "refs/heads/$BRANCH^{commit}") || exit 1
+if [ -n "$CANDIDATE" ]; then
+  [ -f "$QUEUE_FILE" ] && [ ! -L "$QUEUE_FILE" ] || { echo 'error: candidate has no queue snapshot' >&2; exit 1; }
+  queue_header=$(sed -n '1,3p' "$QUEUE_FILE")
+  [ "$queue_header" = "$(printf 'fm-landing-queue.v1\n%s\n%s' "$COMMON" "$TARGET")" ] \
+    || { echo 'error: candidate queue identity changed' >&2; exit 1; }
+  queue_front=$(awk -F '\t' 'NR > 3 && $4 == "active" { print $1 "\t" $2 "\t" $3; exit }' "$QUEUE_FILE")
+  [ "$queue_front" = "$(printf '%s\t%s\t%s' "$ID" "$BRANCH" "$INCOMING_SHA")" ] \
+    || { echo 'error: candidate is not this task at the front of the queue' >&2; exit 1; }
+  CANDIDATE_STATE="$QUEUE_DIR/candidate-$ID.json"
+  [ -f "$CANDIDATE_STATE" ] && [ ! -L "$CANDIDATE_STATE" ] || { echo 'error: candidate state is missing' >&2; exit 1; }
+  python3 -I - "$CANDIDATE_STATE" "$BRANCH" "$INCOMING_SHA" "$CURRENT_SHA" "$CANDIDATE" <<'PY' || {
+import json, sys
+path, branch, source, parent, sha = sys.argv[1:]
+with open(path) as handle:
+    state = json.load(handle)
+if (state.get('schema') != 'fm-landing-candidate.v1'
+        or state.get('branch') != branch or state.get('source') != source
+        or state.get('parent') != parent or state.get('sha') != sha
+        or state.get('verified') is not True):
+    raise SystemExit(1)
+PY
+    echo 'error: candidate was not verified for this exact source and tip' >&2
+    exit 1
+  }
+  [ "$(git -C "$PROJ" rev-parse --verify "refs/landing-candidates/$QUEUE_KEY/$ID^{commit}" 2>/dev/null)" = "$CANDIDATE" ] \
+    || { echo 'error: candidate ref changed' >&2; exit 1; }
+  git -C "$PROJ" merge-base --is-ancestor "$CURRENT_SHA" "$CANDIDATE" \
+    || { echo 'error: candidate is not a fast-forward of the current tip' >&2; exit 1; }
+  CANDIDATE_FULL="$QUEUE_DIR/candidate-$ID-$CANDIDATE.full.receipt"
+  CANDIDATE_QUICK="$QUEUE_DIR/candidate-$ID-$CANDIDATE.quick.receipt"
+  [ "$RECEIPT" = "$CANDIDATE_FULL" ] \
+    || { echo 'error: candidate landing requires its queued full-suite receipt' >&2; exit 1; }
+  fm_health_receipt_read "$CANDIDATE_FULL" "$CANDIDATE" \
+    || { echo 'error: candidate editor-suite receipt is invalid' >&2; exit 1; }
+  [ "$FM_HEALTH_COUNT" -eq 0 ] || { echo 'error: candidate editor suite is red' >&2; exit 1; }
+  fm_quick_receipt_read "$CANDIDATE_QUICK" "$CANDIDATE" "$CURRENT_SHA" \
+    || { echo 'error: candidate short-phone receipt is invalid' >&2; exit 1; }
+  INCOMING_SHA=$CANDIDATE
+fi
 MERGE_RECEIPT_STAGE=$(mktemp "$STATE/.merge-receipt.XXXXXX") || exit 1
 cp -- "$RECEIPT" "$MERGE_RECEIPT_STAGE" || { echo "error: cannot stage receipt $RECEIPT" >&2; exit 1; }
 QUICK_RECEIPT=0
@@ -291,6 +361,8 @@ fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 fm_lock_release "$MERGE_HEALTH_LOCK" || true
 MERGE_HEALTH_LOCK=
+fm_lock_release "$MERGE_QUEUE_LOCK" || true
+MERGE_QUEUE_LOCK=
 reconcile_landing_queue() {
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     "$SCRIPT_DIR/fm-landing-queue.sh" reconcile "$ID" --project "$PROJ" --landing-branch "$TARGET" \

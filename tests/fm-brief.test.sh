@@ -14,6 +14,7 @@
 # Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
 # cross-version enforcement lives in the macos-stock-bash CI job.
 set -u
+export FM_LANDING_TRAIN=off
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

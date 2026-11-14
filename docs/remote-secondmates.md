@@ -168,7 +168,7 @@ Both report the exact branch and full head SHA to the secondmate, which relays t
 
 Keep the landing backlog item and worker in the main home, and route the implementation request separately to the remote secondmate.
 The workstation worker must have `local-only` metadata naming its project, worktree and landing branch; a Playbot lane additionally binds its recorded project, workspace and branch identity.
-It remains the owner of farm delivery and queue wakes.
+It remains the owner of admission and worker-side evidence delivery.
 In that worker, import the reported branch using [fm-remote-landing.sh](../bin/fm-remote-landing.sh); its header owns arguments, refusal rules, retained import heads and conflict handoff mechanics.
 The import fetches only the reported branch and checks its exact head before updating the workstation worker's branch.
 For a lane, the Playbot addon guard preserves and verifies complete injected addon bytes across import and rebase while refusing unrelated dirty product work.
@@ -176,10 +176,10 @@ Submit the existing farm from that copy, collect exact-head suite and configured
 The main home lands through [fm-merge-local.sh](../bin/fm-merge-local.sh) under its existing merge authority.
 Phones, farm execution, gates, receipts and landing rules retain their existing owners.
 
-Only the front car rebases, using the helper's `rebase` action and the queue's assigned target and rebase base.
+When speculation is off, only the front car rebases, using the helper's `rebase` action and the queue's assigned target and rebase base; the queue header owns the enabled candidate path.
 A conflict aborts the workstation rebase, publishes the target under a task-scoped transport branch, and sends the remote secondmate a durable steer naming its worker and the exact fetch ref and target SHA.
 The remote worker resolves its task branch and reports a new head for import; the helper retains the replaced imported head and refuses to replace additional workstation work.
-After a successful workstation rebase, use the queue's reported state to obtain the required new evidence from the farm.
+After a successful workstation rebase in sequential mode, use the queue's reported state to obtain the required new evidence from the farm.
 No landing branch is pushed by this path.
 
 ## Normal operation
