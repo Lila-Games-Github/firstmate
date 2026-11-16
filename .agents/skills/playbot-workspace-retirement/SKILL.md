@@ -19,7 +19,8 @@ Use the `playbot_lanes` MCP for the entire retirement workflow.
    Ignored output beneath `.godot`, `.import`, `__pycache__`, `.task_tmp`, and `Builds` directories, Playbot's `prototype-game/addons/playbot/native/` tree, and addon files at exact known injected paths or byte-identical to the main clone are reported as discardable and never block; every other untracked or ignored path blocks until an explicit `untracked-files` or `ignored-files` authorization covers it; an orphaned root whose directory is gone is registration cleanup and does not block, unless a Git registration still records a HEAD that is not proven landed.
    An `orphaned` verdict includes counts, a bounded sample, and a SHA-256 reference to the complete private file inventory and requires explicit `orphaned-files` discard authorization while files remain, including apparent caches.
    Otherwise stop on any blocker or unreadable evidence and preserve the workspace, including when an unarchived thread state is missing or unrecognized.
-   A `live-task-record` blocker names the firstmate record still pointing at the workspace; resolve that task or poll through its own owner, never by deleting the record.
+   A `live-task-record` blocker names the firstmate record still pointing at the workspace; resolve that task or poll through its own owner.
+   When the captain explicitly authorized discarding an existing lane task and its workspace, use `fm-teardown.sh <id> --force --discard-authorization '<verbatim words>'`; that guarded path retires the workspace while preserving the task record until deletion succeeds.
 3. Select one exact workspace id from that fresh result.
    Retirement is destructive, so set `confirm: true` only when deletion of that specific workspace is already authorized and the immediately preceding evidence still supports it.
 4. Call `retire_workspace` for that one id with the same explicit `landingBranch`, the same `registryProject`, and `confirm: true`.
@@ -31,5 +32,5 @@ Use the `playbot_lanes` MCP for the entire retirement workflow.
    If `deleted: true` arrives with lane cleanup or audit problems, report that deletion was verified but post-action work is incomplete and never retry the destructive call as though nothing happened.
    If Playbot rejects the deletion, read the returned reconciliation and audit evidence for every database row, directory, and Git registration, including exact root-row deltas, report any partial removal exactly, and never retry blindly.
 
-Never replace either tool with raw CDP or IPC code, manual worktree-folder deletion, direct Playbot database edits, or `git worktree remove`; the tool itself removes an inventoried orphaned directory that Playbot cannot.
+Never replace either tool or the guarded lane teardown path with raw CDP or IPC code, manual worktree-folder deletion, direct Playbot database edits, or `git worktree remove`; the tool itself removes an inventoried orphaned directory that Playbot cannot.
 Never add a bulk deletion loop or confirm more than one workspace per call.

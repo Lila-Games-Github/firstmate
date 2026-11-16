@@ -2636,12 +2636,13 @@ function retirementWorkspaceRecord(project, workspace) {
   };
 }
 
-function retirementThreadEvidence(workspace) {
+function retirementThreadEvidence(workspace, discardTaskId = null) {
   const unarchivedThreads = threadRows()
     .filter((row) => row.workspace_id === workspace.id && !row.archived)
     .map((row) => ({ id: row.thread_id, title: row.title, status: row.agent_status, updatedAt: row.updated_at }));
   const blockingThreads = unarchivedThreads.filter((thread) => thread.status === "working" || thread.status === "pending_input");
-  const uncertainThreads = unarchivedThreads.filter((thread) => !RETIRABLE_THREAD_STATES.has(thread.status) && !blockingThreads.includes(thread));
+  const acceptable = discardTaskId ? new Set([...RETIRABLE_THREAD_STATES, "error", "stopped"]) : RETIRABLE_THREAD_STATES;
+  const uncertainThreads = unarchivedThreads.filter((thread) => !acceptable.has(thread.status) && !blockingThreads.includes(thread));
   return { unarchivedThreads, blockingThreads, uncertainThreads };
 }
 
@@ -2794,8 +2795,8 @@ function localWorkspaceRetirementEvidence(project, workspace, landingBranch, lan
   };
 }
 
-function inspectWorkspace(project, workspace, landingBranch, landingOptions = {}) {
-  const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace);
+function inspectWorkspace(project, workspace, landingBranch, landingOptions = {}, discardTaskId = null) {
+  const { unarchivedThreads, blockingThreads, uncertainThreads } = retirementThreadEvidence(workspace, discardTaskId);
   const coverage = workspaceRootCoverage(project, workspace);
   const taskRecords = liveTaskRecordEvidence(workspace);
   const evidence = {
@@ -2804,7 +2805,10 @@ function inspectWorkspace(project, workspace, landingBranch, landingOptions = {}
     threads: { unarchived: unarchivedThreads, blocking: blockingThreads, uncertain: uncertainThreads },
     taskRecords,
     roots: [],
-    blockers: [...retirementThreadBlockers(blockingThreads, uncertainThreads), ...liveTaskRecordBlockers(taskRecords)],
+    blockers: [...retirementThreadBlockers(blockingThreads, uncertainThreads), ...liveTaskRecordBlockers({
+      ...taskRecords,
+      records: discardTaskId ? taskRecords.records.filter((record) => record.taskId !== discardTaskId) : taskRecords.records,
+    })],
   };
   if (!coverage.complete) evidence.blockers.push(workspaceRootCoverageBlocker(coverage));
   if (workspace.roots.length === 0) {
@@ -2824,10 +2828,10 @@ function inspectWorkspace(project, workspace, landingBranch, landingOptions = {}
   return evidence;
 }
 
-function workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions = {}) {
+function workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions = {}, discardTaskId = null) {
   return workspace.kind === "local"
     ? localWorkspaceRetirementEvidence(project, workspace, landingBranch, landingOptions)
-    : inspectWorkspace(project, workspace, landingBranch, landingOptions);
+    : inspectWorkspace(project, workspace, landingBranch, landingOptions, discardTaskId);
 }
 
 // The firstmate registry posture decides which landing evidence retirement
@@ -3447,8 +3451,8 @@ function verifiedLandingRecord(root) {
   };
 }
 
-async function retireWorkspace(project, workspace, landingBranch, landingOptions = {}, authorization = null) {
-  const inspection = workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions);
+async function retireWorkspace(project, workspace, landingBranch, landingOptions = {}, authorization = null, discardTaskId = null) {
+  const inspection = workspaceRetirementEvidence(project, workspace, landingBranch, landingOptions, discardTaskId);
   const plan = authorization ? discardPlan(inspection, authorization) : null;
   if (plan ? !plan.permitted : !inspection.retirable) {
     const refused = plan ? plan.uncovered : inspection.blockers;
@@ -5914,6 +5918,59 @@ function laneTaskState(file, retirable = false, state = path.dirname(file), land
   console.log(`${workerState} ${row.agent_status} queued=${queued ?? "unreadable"}${completion}`);
 }
 
+// Teardown's force path is the sole caller allowed to retire its own live lane
+// record. The record remains in place until Playbot deletion and audit finish.
+async function laneTaskDiscard(file, state, data, authorizationWords, preflight = false) {
+  if (!authorizationWords?.trim()) throw new Error("lane discard requires the captain's verbatim authorization");
+  if (canonicalPath(path.dirname(file)) !== canonicalPath(state)) throw new Error("lane metadata is outside the named state directory");
+  const meta = laneMeta(file);
+  const taskId = path.basename(file, ".meta");
+  if (!supervisionTaskIdValid(taskId) || meta.kind !== "lane" || !meta.spawn_gen || !meta.playbot_project || !meta.playbot_workspace || !meta.playbot_thread || !meta.landing_branch) {
+    throw new Error("lane discard identity is incomplete");
+  }
+  process.env.PLAYBOT_DESKTOP_DIR = supervisionPath(meta.playbot_desktop, "lane desktop directory");
+  process.env.PLAYBOT_HARNESS_HOME = supervisionPath(meta.playbot_harness_home, "lane harness directory");
+  process.env.PLAYBOT_LANES_CONTROLLER_ROOT = path.dirname(canonicalPath(state));
+  const project = resolveProject(meta.playbot_project);
+  const workspace = resolveRetirementWorkspace(project, meta.playbot_workspace);
+  if (!workspace.roots.some((root) => canonicalPath(root.path) === canonicalPath(meta.worktree)) || !project.roots.some((root) => canonicalPath(root.path) === canonicalPath(meta.project))) {
+    throw new Error("lane discard workspace or project differs from recorded identity");
+  }
+  const row = threadRowById(meta.playbot_thread);
+  if (!row || row.workspace_id !== workspace.id || row.project_id !== project.id) throw new Error("lane discard worker identity changed");
+  if (preflight) {
+    const threads = retirementThreadEvidence(workspace, taskId);
+    const blockers = retirementThreadBlockers(threads.blockingThreads, threads.uncertainThreads);
+    if (blockers.length) throw new Error(`lane discard refused: worker is actively working, parked, or unreadable: ${blockers.map((blocker) => blocker.message).join("; ")}`);
+    return;
+  }
+  const evidence = workspaceRetirementEvidence(project, workspace, meta.landing_branch, {}, taskId);
+  const active = evidence.blockers.find((blocker) => blocker.code === "active-threads");
+  if (active) throw new Error(`lane discard refused: worker is actively working or parked: ${active.message}`);
+  const allow = [...new Set(evidence.blockers.filter((blocker) => DISCARDABLE_LOCAL_CHANGE_SET.has(blocker.code)).map((blocker) => blocker.code))];
+  const commits = evidence.discard.unlandedCommits.map((commit) => commit.toLowerCase());
+  const discard = { authorization: authorizationWords, allow, commits };
+  const plan = discardPlan(evidence, discard);
+  if (!plan.permitted) throw new Error(`lane discard refused by workspace safety evidence: ${plan.uncovered.map((blocker) => `${blocker.code}: ${blocker.message}`).join("; ")}`);
+  const auditDir = path.join(data, taskId);
+  if (fs.lstatSync(auditDir, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error("lane audit directory is a symlink");
+  fs.mkdirSync(auditDir, { recursive: true, mode: 0o700 });
+  const auditFile = path.join(auditDir, "discard-retirement.json");
+  if (fs.existsSync(auditFile) || fs.lstatSync(auditFile, { throwIfNoEntry: false })) throw new Error("lane discard audit already exists; inspect the prior attempt before retrying");
+  const audit = {
+    taskId, workspaceId: workspace.id, authorization: authorizationWords,
+    landingBranch: meta.landing_branch,
+    roots: evidence.roots.map((root) => ({ path: root.path, branch: root.branch, head: root.head, unlandedCommits: root.commitsAhead ?? [] })),
+    blockerCodes: evidence.blockers.map((blocker) => blocker.code), discardedCommits: commits,
+    status: "pending", observedAt: nowIso(),
+  };
+  fs.writeFileSync(auditFile, `${JSON.stringify(audit, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  const result = await retireWorkspace(project, workspace, meta.landing_branch, {}, discard, taskId);
+  if (!result.deleted || !result.postActionComplete || !result.audit?.appended) throw new Error(`lane workspace retirement incomplete; inspect ${auditFile} and ${result.audit?.path ?? "Playbot audit"}`);
+  fs.writeFileSync(auditFile, `${JSON.stringify({ ...audit, status: "retired", retiredAt: nowIso(), playbotAudit: result.audit.path }, null, 2)}\n`, { mode: 0o600 });
+  console.log(`workspace ${workspace.id} retired; audit ${auditFile}`);
+}
+
 // Arm one worker's watcher poll and report exactly what happened. Never throws
 // into the caller's dispatch: the send has already reached Playbot by the time
 // this runs, so a failure here is reported loudly in the result rather than
@@ -7424,6 +7481,8 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs lane-task-state <task.meta> [state-dir]",
     "  fm-playbot-lanes.mjs lane-task-branch <task.meta>",
     "  fm-playbot-lanes.mjs lane-task-retirable <task.meta> [state-dir]",
+    "  fm-playbot-lanes.mjs lane-task-discard --force <task.meta> <state-dir> <data-dir> <authorization>",
+    "  fm-playbot-lanes.mjs lane-task-discard-check --force <task.meta> <state-dir> <data-dir> <authorization>",
     "  fm-playbot-lanes.mjs board-lanes <state-dir>",
     "",
     `MCP tools: ${toolDefinitions().map((tool) => tool.name).join(", ")}`,
@@ -7634,6 +7693,10 @@ async function main() {
       ? process.argv[6] : null;
     if (![4, 5].includes(process.argv.length) && landedVia === null) throw new Error(`${command} requires a lane metadata path and optional state directory`);
     return laneTaskState(process.argv[3], command === "lane-task-retirable", process.argv[4], landedVia);
+  }
+  if (command === "lane-task-discard" || command === "lane-task-discard-check") {
+    if (process.argv.length !== 8 || process.argv[3] !== "--force") throw new Error(`${command} requires --force, metadata, state, data, and authorization`);
+    return await laneTaskDiscard(process.argv[4], process.argv[5], process.argv[6], process.argv[7], command === "lane-task-discard-check");
   }
   if (command === "hook-pretool") {
     try {
