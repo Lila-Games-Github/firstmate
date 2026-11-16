@@ -4339,6 +4339,8 @@ mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-discard"
 printf 'Discard lane brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-discard/brief.md"
 tasks-axi add fm-lane-discard "Discard lane regression" --kind ship --queue \
   --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage discard lane backlog"
+printf -- '- worker-game [local-only] - test clone at %s (added 2026-11-16)\n' \
+  "$FIXTURE_ROOT/worker" > "$FM_HOME_FIXTURE/data/projects.md"
 out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-discard\"},\"title\":\"Discard lane\",\"message\":\"Do the discard task\",\"taskId\":\"fm-lane-discard\",\"mode\":\"local-only\"}")
 discard_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
 discard_tree=$(sed -n 's/^worktree=//p' "$FM_HOME_FIXTURE/state/fm-lane-discard.meta")
@@ -4370,7 +4372,9 @@ assert_grep 'Yes discard the old port workers' "$FM_HOME_FIXTURE/data/fm-lane-di
 assert_grep 'ignored-files' "$FM_HOME_FIXTURE/data/fm-lane-discard/discard-retirement.json" "task audit omitted ignored-file blocker"
 assert_grep 'Yes discard the old port workers' "$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" "Playbot audit omitted the same authorization"
 assert_grep "$discard_head" "$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" "Playbot audit omitted discarded commit"
+assert_grep 'local-branch' "$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" "lane discard did not use registered local landing evidence"
 assert_grep '"status": "retired"' "$FM_HOME_FIXTURE/data/fm-lane-discard/discard-retirement.json" "task audit did not record completed retirement"
+rm "$FM_HOME_FIXTURE/data/projects.md"
 pass "fm-playbot-lanes: authorized discard retires untracked files and unlanded commits, while noauth and busy turns refuse"
 
 # A lane's recorded mode decides which landing path owns it (fm-merge-local.sh

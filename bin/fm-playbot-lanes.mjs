@@ -5920,6 +5920,24 @@ function laneTaskState(file, retirable = false, state = path.dirname(file), land
 
 // Teardown's force path is the sole caller allowed to retire its own live lane
 // record. The record remains in place until Playbot deletion and audit finish.
+function laneDiscardLandingOptions(project, clone, data) {
+  const registryFile = path.join(data, "projects.md");
+  if (!fs.existsSync(registryFile)) return {};
+  const cloneTop = canonicalPath(String(freshnessGit(clone, ["rev-parse", "--show-toplevel"])).trim());
+  const names = [...new Set(fs.readFileSync(registryFile, "utf8").split("\n")
+    .map((line) => line.match(/^- ([A-Za-z0-9][A-Za-z0-9._-]*)\s/)?.[1]).filter(Boolean))];
+  const script = path.join(path.dirname(supervisionSelfScript()), "fm-project-mode.sh");
+  const env = { ...process.env, FM_HOME: controllerRoot() };
+  delete env.FM_DATA_OVERRIDE;
+  delete env.FM_ROOT_OVERRIDE;
+  const matching = names.filter((name) => {
+    const result = spawnSync("bash", [script, "--path", name], { env, encoding: "utf8", timeout: 20_000 });
+    return !result.error && result.status === 0 && canonicalPath(String(result.stdout).trim()) === cloneTop;
+  });
+  if (matching.length > 1) throw new Error(`lane discard clone is named by multiple registry projects: ${matching.join(", ")}`);
+  return matching.length === 1 ? registryLandingOptions(project, matching[0]) : {};
+}
+
 async function laneTaskDiscard(file, state, data, authorizationWords, preflight = false) {
   if (!authorizationWords?.trim()) throw new Error("lane discard requires the captain's verbatim authorization");
   if (canonicalPath(path.dirname(file)) !== canonicalPath(state)) throw new Error("lane metadata is outside the named state directory");
@@ -5944,7 +5962,8 @@ async function laneTaskDiscard(file, state, data, authorizationWords, preflight 
     if (blockers.length) throw new Error(`lane discard refused: worker is actively working, parked, or unreadable: ${blockers.map((blocker) => blocker.message).join("; ")}`);
     return;
   }
-  const evidence = workspaceRetirementEvidence(project, workspace, meta.landing_branch, {}, taskId);
+  const landingOptions = laneDiscardLandingOptions(project, meta.project, data);
+  const evidence = workspaceRetirementEvidence(project, workspace, meta.landing_branch, landingOptions, taskId);
   const active = evidence.blockers.find((blocker) => blocker.code === "active-threads");
   if (active) throw new Error(`lane discard refused: worker is actively working or parked: ${active.message}`);
   const laneDiscardCodes = new Set(["untracked-files", "ignored-files", "unlanded-commits"]);
@@ -5966,7 +5985,7 @@ async function laneTaskDiscard(file, state, data, authorizationWords, preflight 
     status: "pending", observedAt: nowIso(),
   };
   fs.writeFileSync(auditFile, `${JSON.stringify(audit, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-  const result = await retireWorkspace(project, workspace, meta.landing_branch, {}, discard, taskId);
+  const result = await retireWorkspace(project, workspace, meta.landing_branch, landingOptions, discard, taskId);
   if (!result.deleted || !result.postActionComplete || !result.audit?.appended) throw new Error(`lane workspace retirement incomplete; inspect ${auditFile} and ${result.audit?.path ?? "Playbot audit"}`);
   fs.writeFileSync(auditFile, `${JSON.stringify({ ...audit, status: "retired", retiredAt: nowIso(), playbotAudit: result.audit.path }, null, 2)}\n`, { mode: 0o600 });
   console.log(`workspace ${workspace.id} retired; audit ${auditFile}`);
