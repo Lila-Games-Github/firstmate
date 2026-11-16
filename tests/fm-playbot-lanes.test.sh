@@ -4333,6 +4333,50 @@ tasks-axi show fm-lane-via --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE
 assert_grep 'state: queued' "$FIXTURE_ROOT/lane-via.out" "commit-proof lane teardown ignored the manual backlog posture"
 pass "fm-playbot-lanes: explicit commit proof retires only a lane and preserves manual backlog ownership"
 
+# Authorized discard keeps the task record until the guarded Playbot delete
+# has captured exact unlanded commits and removed the workspace.
+mkdir -p "$FM_HOME_FIXTURE/data/fm-lane-discard"
+printf 'Discard lane brief\n' > "$FM_HOME_FIXTURE/data/fm-lane-discard/brief.md"
+tasks-axi add fm-lane-discard "Discard lane regression" --kind ship --queue \
+  --file "$FM_HOME_FIXTURE/data/backlog.md" >/dev/null || fail "could not stage discard lane backlog"
+printf -- '- worker-game [local-only] - test clone at %s (added 2026-11-16)\n' \
+  "$FIXTURE_ROOT/worker" > "$FM_HOME_FIXTURE/data/projects.md"
+out=$(FM_TEST_PRESERVE_TASK_IDENTITY=1 home_dispatch "{\"landingBranch\":\"main\",\"project\":$worker_json,\"newWorkspace\":{\"branch\":\"fm-lane-discard\"},\"title\":\"Discard lane\",\"message\":\"Do the discard task\",\"taskId\":\"fm-lane-discard\",\"mode\":\"local-only\"}")
+discard_thread=$(OUT="$out" node --no-warnings -e 'process.stdout.write(JSON.parse(process.env.OUT).result.structuredContent.thread.id)')
+discard_tree=$(sed -n 's/^worktree=//p' "$FM_HOME_FIXTURE/state/fm-lane-discard.meta")
+printf 'untracked\n' > "$discard_tree/discard-me.txt"
+printf 'discard-ignore.txt\n' >> "$(git -C "$discard_tree" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+printf 'ignored\n' > "$discard_tree/discard-ignore.txt"
+git -C "$discard_tree" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit --allow-empty -qm 'Unlanded discard fixture' || fail "could not commit discard fixture"
+discard_head=$(git -C "$discard_tree" rev-parse HEAD)
+set_thread_turn "$discard_thread" ready 2099-08-25T12:07:00.000Z
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-discard --force > "$FIXTURE_ROOT/lane-discard-noauth.out" 2>&1; then
+  fail "forced lane teardown accepted no captain authorization"
+fi
+assert_grep 'requires --discard-authorization' "$FIXTURE_ROOT/lane-discard-noauth.out" "missing authorization refusal was unclear"
+[ -e "$FM_HOME_FIXTURE/state/fm-lane-discard.meta" ] || fail "noauth refusal removed the lane record"
+set_thread_turn "$discard_thread" working 2099-08-25T12:08:00.000Z
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-discard --force --discard-authorization 'Yes discard the old port workers' > "$FIXTURE_ROOT/lane-discard-busy.out" 2>&1; then
+  fail "forced lane teardown accepted a working chat"
+fi
+assert_grep 'actively working' "$FIXTURE_ROOT/lane-discard-busy.out" "busy refusal was unclear"
+[ -d "$discard_tree" ] || fail "busy refusal deleted the workspace"
+set_thread_turn "$discard_thread" error 2099-08-25T12:09:00.000Z
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-discard --force --discard-authorization 'Yes discard the old port workers' > "$FIXTURE_ROOT/lane-discard-success.out" 2>&1 \
+  || fail "authorized lane discard failed: $(cat "$FIXTURE_ROOT/lane-discard-success.out")"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-discard.meta" "authorized discard retained supervision"
+assert_absent "$discard_tree" "authorized discard retained the Playbot worktree"
+assert_grep "$discard_head" "$FM_HOME_FIXTURE/data/fm-lane-discard/discard-retirement.json" "task audit omitted discarded commit"
+assert_grep 'Yes discard the old port workers' "$FM_HOME_FIXTURE/data/fm-lane-discard/discard-retirement.json" "task audit omitted authorization"
+assert_grep 'ignored-files' "$FM_HOME_FIXTURE/data/fm-lane-discard/discard-retirement.json" "task audit omitted ignored-file blocker"
+assert_grep 'Yes discard the old port workers' "$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" "Playbot audit omitted the same authorization"
+assert_grep "$discard_head" "$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" "Playbot audit omitted discarded commit"
+assert_grep 'local-branch' "$PLAYBOT_LANES_STATE_DIR/workspace-retirements.jsonl" "lane discard did not use registered local landing evidence"
+assert_grep '"status": "retired"' "$FM_HOME_FIXTURE/data/fm-lane-discard/discard-retirement.json" "task audit did not record completed retirement"
+rm "$FM_HOME_FIXTURE/data/projects.md"
+pass "fm-playbot-lanes: authorized discard retires untracked files and unlanded commits, while noauth and busy turns refuse"
+
 # A lane's recorded mode decides which landing path owns it (fm-merge-local.sh
 # only ever advances mode=local-only), so a missing or invalid mode refuses to
 # record the identity exactly like any other post-creation identity failure:
@@ -4413,11 +4457,11 @@ set_thread_turn "$lane_identity_thread" working 2099-08-25T12:20:00.000Z || fail
 if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-active --force > "$FIXTURE_ROOT/lane-active-force.out" 2>&1; then
   fail "forced lane teardown retired a working chat"
 fi
-assert_grep 'not idle' "$FIXTURE_ROOT/lane-active-force.out" "forced active-chat refusal did not name the busy worker"
+assert_grep 'requires --discard-authorization' "$FIXTURE_ROOT/lane-active-force.out" "forced active-chat refusal did not require authorization"
 [ -e "$FM_HOME_FIXTURE/state/fm-lane-active.meta" ] || fail "forced active-chat refusal removed the lane record"
 set_thread_turn "$lane_identity_thread" ready 2099-08-25T12:21:00.000Z || fail "could not stop the active-chat lane"
 rm -f "$FM_HOME_FIXTURE/state/fm-lane-active.meta"
-pass "fm-playbot-lanes: an active worker chat still blocks forced lane teardown"
+pass "fm-playbot-lanes: forced lane teardown requires authorization even for an active chat"
 
 lane_orphan_meta fm-lane-absent-unlanded chat-lane-deleted || fail "could not stage unlanded absent-chat lane record"
 lane_identity_head=$(git -C "$lane_identity_worktree" rev-parse HEAD)
@@ -4426,11 +4470,11 @@ git -C "$lane_identity_worktree" -c user.name=fixture -c user.email=fixture@exam
 if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-absent-unlanded --force > "$FIXTURE_ROOT/lane-absent-force.out" 2>&1; then
   fail "forced lane teardown retired an unlanded workspace behind an absent chat"
 fi
-assert_grep 'not safely landed' "$FIXTURE_ROOT/lane-absent-force.out" "forced absent-chat refusal did not name the landed-work gate"
+assert_grep 'requires --discard-authorization' "$FIXTURE_ROOT/lane-absent-force.out" "forced absent-chat refusal did not require authorization"
 [ -e "$FM_HOME_FIXTURE/state/fm-lane-absent-unlanded.meta" ] || fail "forced unlanded refusal removed the lane record"
 git -C "$lane_identity_worktree" reset --hard -q "$lane_identity_head" || fail "could not restore the orphan lane fixture"
 rm -f "$FM_HOME_FIXTURE/state/fm-lane-absent-unlanded.meta"
-pass "fm-playbot-lanes: --force never bypasses the landed check for an absent worker chat"
+pass "fm-playbot-lanes: --force never bypasses authorization for an absent worker chat"
 
 # Archived Playbot workspaces and stale delivery sidecars must use the task's
 # recorded branch in the project clone. Keep both roots separate so an

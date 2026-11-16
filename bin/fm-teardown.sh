@@ -18,6 +18,10 @@
 # recorded landing branch in its recorded project clone. It replaces only the
 # lane declaration and workspace landing proofs, retaining every other guard,
 # and keeps the resolved hashes in data/<id>/retirement.md.
+# For a lane only, --force requires --discard-authorization with the captain's
+# verbatim words. It records the branch heads and exact unlanded commits in
+# data/<id>/discard-retirement.json, retires the workspace through Playbot's
+# guarded delete, then removes task supervision. A working turn refuses.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -190,7 +194,7 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--reconcile-slot] [--landed-via <commit>[,<commit>...]] [--cancel-test-requests]
+# Usage: fm-teardown.sh <task-id> [--force --discard-authorization <words>] [--legacy-record] [--reconcile-slot] [--landed-via <commit>[,<commit>...]] [--cancel-test-requests]
 #   --landed-via is lane-only and requires at least one commit already on the
 #   recorded landing branch in the recorded project clone. It retains Playbot.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
@@ -358,10 +362,11 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 if [ "${1:-}" = --help ]; then
   cat <<'HELP'
-Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--reconcile-slot] [--landed-via <commit>[,<commit>...]] [--cancel-test-requests]
+Usage: fm-teardown.sh <task-id> [--force --discard-authorization <words>] [--legacy-record] [--reconcile-slot] [--landed-via <commit>[,<commit>...]] [--cancel-test-requests]
   --landed-via  Retire a lane record using commits on its recorded local landing branch.
                 Requires at least one commit; applies only to kind=lane.
   --force       Discard this task's unlanded work when explicitly authorized.
+  --discard-authorization  Captain's verbatim authorization; required with --force for lane tasks.
   --cancel-test-requests  Cancel this task's live testfarm requests, then require terminal confirmation.
 HELP
   exit 0
@@ -372,6 +377,7 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=
+DISCARD_AUTHORIZATION=
 LEGACY_RECORD_GIVEN=0
 RECONCILE_SLOT=0
 LANDED_VIA=
@@ -380,6 +386,14 @@ shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
+    --discard-authorization)
+      shift
+      if [ "$#" -eq 0 ] || [ -z "${1//[[:space:]]/}" ]; then
+        echo "error: --discard-authorization requires the captain's verbatim words" >&2
+        exit 2
+      fi
+      DISCARD_AUTHORIZATION=$1
+      ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     --reconcile-slot) RECONCILE_SLOT=1 ;;
     --cancel-test-requests) CANCEL_TEST_REQUESTS=1 ;;
@@ -548,6 +562,10 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 if [ -n "$LANDED_VIA" ] && [ "$TEARDOWN_META_KIND" != lane ]; then
   echo "REFUSED: --landed-via applies only to kind=lane tasks; nothing was changed" >&2
+  exit 1
+fi
+if [ -n "$DISCARD_AUTHORIZATION" ] && { [ "$FORCE" != --force ] || [ "$TEARDOWN_META_KIND" != lane ]; }; then
+  echo "REFUSED: --discard-authorization applies only to forced lane teardown" >&2
   exit 1
 fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
@@ -1244,18 +1262,34 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
     echo "REFUSED: cannot lock lane task $ID publication; preserving supervision." >&2
     exit 1
   }
-  LANE_TERMINAL_LINE=$(status_current_line "$STATE/$ID.status" lane)
-  if [ -z "$LANDED_VIA" ] && [ "$FORCE" != --force ] && [ "$(status_line_verb "$LANE_TERMINAL_LINE")" != "done" ]; then
-    echo "REFUSED: lane task $ID has no resolved done declaration; preserving supervision." >&2
-    exit 1
+  if [ "$FORCE" = --force ]; then
+    if [ -z "$DISCARD_AUTHORIZATION" ] || [ -n "$LANDED_VIA" ]; then
+      echo "REFUSED: forced lane teardown requires --discard-authorization with the captain's words and cannot combine --landed-via" >&2
+      exit 1
+    fi
+    if ! LANE_RETIRE_DETAIL=$(node "$SCRIPT_DIR/fm-playbot-lanes.mjs" lane-task-discard-check --force "$META" "$STATE" "$DATA" "$DISCARD_AUTHORIZATION" 2>&1); then
+      echo "REFUSED: lane task $ID cannot discard its Playbot workspace: $LANE_RETIRE_DETAIL" >&2
+      exit 1
+    fi
+    report_final_task_outcome || exit 1
+    if ! LANE_RETIRE_DETAIL=$(node "$SCRIPT_DIR/fm-playbot-lanes.mjs" lane-task-discard --force "$META" "$STATE" "$DATA" "$DISCARD_AUTHORIZATION" 2>&1); then
+      echo "REFUSED: lane task $ID could not retire its Playbot workspace: $LANE_RETIRE_DETAIL" >&2
+      exit 1
+    fi
+  else
+    LANE_TERMINAL_LINE=$(status_current_line "$STATE/$ID.status" lane)
+    if [ -z "$LANDED_VIA" ] && [ "$(status_line_verb "$LANE_TERMINAL_LINE")" != "done" ]; then
+      echo "REFUSED: lane task $ID has no resolved done declaration; preserving supervision." >&2
+      exit 1
+    fi
+    LANE_RETIRE_ARGS=()
+    [ -z "$LANDED_VIA" ] || LANE_RETIRE_ARGS=(--landed-via "$LANDED_VIA")
+    if ! LANE_RETIRE_DETAIL=$(node "$SCRIPT_DIR/fm-playbot-lanes.mjs" lane-task-retirable "$META" "$STATE" ${LANE_RETIRE_ARGS[@]+"${LANE_RETIRE_ARGS[@]}"} 2>&1); then
+      echo "REFUSED: lane task $ID cannot retire its supervision: $LANE_RETIRE_DETAIL" >&2
+      exit 1
+    fi
+    report_final_task_outcome || exit 1
   fi
-  LANE_RETIRE_ARGS=()
-  [ -z "$LANDED_VIA" ] || LANE_RETIRE_ARGS=(--landed-via "$LANDED_VIA")
-  if ! LANE_RETIRE_DETAIL=$(node "$SCRIPT_DIR/fm-playbot-lanes.mjs" lane-task-retirable "$META" "$STATE" ${LANE_RETIRE_ARGS[@]+"${LANE_RETIRE_ARGS[@]}"} 2>&1); then
-    echo "REFUSED: lane task $ID cannot retire its supervision: $LANE_RETIRE_DETAIL" >&2
-    exit 1
-  fi
-  report_final_task_outcome || exit 1
   if [ -n "$LANDED_VIA" ]; then
     LANE_PROOF_DIR="$DATA/$ID"
     if [ ! -e "$LANE_PROOF_DIR" ] && [ ! -L "$LANE_PROOF_DIR" ]; then
@@ -1290,10 +1324,10 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
   remove_pr_poll_artifacts_locked "$STATE" "$ID" retain || exit 1
   python3 "$SCRIPT_DIR/fm-routing-ledger.py" record --meta "$META" --state "$STATE" --data "$DATA" \
     --id "$ID" --outcome "$([ -n "$LANDED_VIA" ] && echo landed || echo not-landed)" \
-    --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || exit 1
+    --method "$([ "$FORCE" = --force ] && echo discarded || { [ -n "$LANDED_VIA" ] && echo local-landing || echo unknown; })" || exit 1
   python3 "$SCRIPT_DIR/fm-worker-timing.py" record --meta "$META" --state "$STATE" --data "$DATA" \
     --id "$ID" --outcome "$([ -n "$LANDED_VIA" ] && echo landed || echo not-landed)" \
-    --method "$([ -n "$LANDED_VIA" ] && echo local-landing || echo unknown)" || \
+    --method "$([ "$FORCE" = --force ] && echo discarded || { [ -n "$LANDED_VIA" ] && echo local-landing || echo unknown; })" || \
     printf 'warning: worker timing record failed for %s; continuing teardown\n' "$ID" >&2
   status_retire_presentation_task "$STATE" "$ID" || exit 1
   remove_task_runtime_files "$STATE" "$ID" || exit 1
@@ -1309,7 +1343,11 @@ if [ "$TEARDOWN_META_KIND" = lane ]; then
     printf 'Follow-up: update %s backlog manually (%s).\n' "$ID" "$TEARDOWN_BACKLOG_SKIP_REASON"
   fi
   fm_pr_poll_lock_release || exit 1
-  printf 'teardown %s complete (lane supervision retired; Playbot workspace and chat preserved)\n' "$ID"
+  if [ "$FORCE" = --force ]; then
+    printf 'teardown %s complete (lane supervision and Playbot workspace retired; %s)\n' "$ID" "$LANE_RETIRE_DETAIL"
+  else
+    printf 'teardown %s complete (lane supervision retired; Playbot workspace and chat preserved)\n' "$ID"
+  fi
   exit 0
 fi
 
