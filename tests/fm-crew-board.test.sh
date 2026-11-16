@@ -910,13 +910,19 @@ JSON
   cat > "$stub/testfarm" <<EOF
 #!/usr/bin/env bash
 if [ "\$1" = status ]; then
+  printf '%s\n' "\$*" >> "$home/testfarm-calls"
+  if [ "\$3" != --no-probe ] && [ -e "$home/slow-probe" ]; then
+    sleep 2.2
+  fi
   cat "$home/testfarm-status.json"
   exit 0
 fi
 exit 1
 EOF
   chmod +x "$stub/testfarm"
+  touch "$home/slow-probe"
   PATH="$stub:/usr/bin:/bin" run_board "$home" refresh >/dev/null || fail 'testfarm fixture refresh failed'
+  rm "$home/slow-probe"
   assert_equals 'TEST SERVICE: 5 pending · 1 building' \
     "$(jq -r '[.panels.test_queue[] | select(.id == "service-heading")][0].title' "$home/state/crew-board.json")" \
     'a real testfarm status fixture renders its pending requests'
@@ -933,6 +939,9 @@ EOF
     'the authoritative status fixture contains five live requests'
   assert_equals 5 "$(jq '[.panels.test_queue[] | select(.id | startswith("service-")) | select(.status != "section")] | length' "$home/state/crew-board.json")" \
     'the board carries all five source requests'
+  assert_contains "$(cat "$home/testfarm-calls")" 'status --json --no-probe' \
+    'service requests use the fast farm status command'
+  grep -qx 'status --json' "$home/testfarm-calls" || fail 'phone state did not use the probing farm status command'
   assert_equals 0 \
     "$(jq '[.panels.test_queue[] | select(.id == "service-runner-down")] | length' "$home/state/crew-board.json")" \
     'a live runner raises no down notice'

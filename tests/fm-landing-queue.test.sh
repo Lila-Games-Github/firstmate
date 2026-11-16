@@ -12,6 +12,24 @@ fi
 TMP_ROOT=$(fm_test_tmproot fm-landing-queue)
 QUEUE="$ROOT/bin/fm-landing-queue.sh"
 export FM_LANDING_TRAIN=off
+if command -v testfarm >/dev/null 2>&1; then
+  python3 - "$ROOT/bin/fm-landing-train.py" "$ROOT/bin/fm-test-service.py" <<'PY' || fail 'landing train could not read the real test service status command'
+import importlib.util
+import json
+import subprocess
+import sys
+
+spec = importlib.util.spec_from_file_location("landing_train", sys.argv[1])
+train = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(train)
+service = sys.argv[2]
+source = subprocess.run([service, "status", "--json"], check=True, capture_output=True, text=True, timeout=10)
+source_requests = json.loads(source.stdout)["requests"]
+observed = train.request_status(service)
+assert observed is not None
+print(f"ok: landing train reads real service requests (source={len(source_requests)}, observed={len(observed)})")
+PY
+fi
 make_case() {
   CASE="$TMP_ROOT/$1"
   mkdir -p "$CASE/home" "$CASE/project"
@@ -1028,6 +1046,8 @@ if cmd == 'project-for-repo':
     print('project')
     sys.exit(0)
 if cmd == 'status':
+    if sys.argv[2:] != ['--json']:
+        sys.exit(2)
     calls = path.with_suffix('.calls')
     calls.write_text(str(int(calls.read_text()) + 1 if calls.exists() else 1))
     if path.with_suffix('.down').exists():

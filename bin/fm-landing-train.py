@@ -107,7 +107,7 @@ def build(repo, scratch_root, source, base, parent, ref):
 
 def request_status(service):
     try:
-        result = run(service, "status", "--json", "--no-probe", check=False, timeout=10)
+        result = run(service, "status", "--json", check=False, timeout=10)
     except (subprocess.TimeoutExpired, json.JSONDecodeError):
         return None
     if result.returncode:

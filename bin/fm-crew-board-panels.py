@@ -6,8 +6,9 @@ Usage: fm-crew-board-panels.py <fleet-snapshot.json>
 
 Registered phones and their live state come from the test farm's protected adb
 probe. The test queue reads the test farm's registered device list from its
-Python client and one bounded `testfarm status --json` call for
-live phone holders, waiters, and service requests, cached per refresh.
+Python client and bounded `testfarm status --json` calls, cached per refresh.
+Service requests use `--no-probe`; live phone holders and waiters use the
+probing status.
 DEVICES, the phone sections, and TEST SERVICE show unavailable when their farm
 sources cannot be read. FrogPile tickets under FROGPILE_QUEUE_ROOT (default
 ~/.frogpile-queues), the full-suite holder sidecar FROGPILE_SUITE_LOCK_HOLDER,
@@ -889,14 +890,17 @@ def suite_processes(trees, now):
     return sorted(result, key=lambda row: row["pid"])
 
 
-TESTFARM_STATUS_TIMEOUT_S = 2.0
+TESTFARM_STATUS_TIMEOUT_S = 5.0
 
 
 @functools.lru_cache(maxsize=1)
-def testfarm_status():
-    """One bounded `testfarm status --json` probe per refresh, or None when the farm is unreachable."""
+def testfarm_status(probe=False):
+    """Read farm state once per mode and refresh, or None when the farm is unreachable."""
     try:
-        run = subprocess.run(["testfarm", "status", "--json"], capture_output=True,
+        command = ["testfarm", "status", "--json"]
+        if not probe:
+            command.append("--no-probe")
+        run = subprocess.run(command, capture_output=True,
                              text=True, timeout=TESTFARM_STATUS_TIMEOUT_S, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -915,7 +919,7 @@ def testfarm_status():
 def farm_phone_records():
     """Return registered devices and matching live rows, or None on a bad read."""
     devices = registered_phones()
-    farm = testfarm_status()
+    farm = testfarm_status(probe=True)
     farm_rows = farm.get("phones") if farm else None
     if devices is None or not isinstance(farm_rows, list):
         return None
