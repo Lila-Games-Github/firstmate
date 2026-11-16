@@ -5947,7 +5947,8 @@ async function laneTaskDiscard(file, state, data, authorizationWords, preflight 
   const evidence = workspaceRetirementEvidence(project, workspace, meta.landing_branch, {}, taskId);
   const active = evidence.blockers.find((blocker) => blocker.code === "active-threads");
   if (active) throw new Error(`lane discard refused: worker is actively working or parked: ${active.message}`);
-  const allow = [...new Set(evidence.blockers.filter((blocker) => DISCARDABLE_LOCAL_CHANGE_SET.has(blocker.code)).map((blocker) => blocker.code))];
+  const laneDiscardCodes = new Set(["untracked-files", "ignored-files", "unlanded-commits"]);
+  const allow = [...new Set(evidence.blockers.filter((blocker) => laneDiscardCodes.has(blocker.code)).map((blocker) => blocker.code))];
   const commits = evidence.discard.unlandedCommits.map((commit) => commit.toLowerCase());
   const discard = { authorization: authorizationWords, allow, commits };
   const plan = discardPlan(evidence, discard);
