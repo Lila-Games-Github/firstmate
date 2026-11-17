@@ -24,6 +24,11 @@
 # suite_request, quick_request, and verified fields. verified becomes true only
 # after both exact-SHA receipts and passed service rows agree. The suite and
 # phone receipts are candidate-<id>-<sha>.full.receipt and .quick.receipt.
+# When a candidate request passed on the farm but its receipt file is missing, the
+# train fetches it with `testfarm receipt get <request>` (FM_TESTFARM_BIN, bounded
+# by FM_TESTFARM_TIMEOUT), publishes it atomically only if it names the exact
+# candidate SHA (and parent for the quick receipt), and continues in the same sweep;
+# an unreadable farm or a mismatching receipt changes nothing until the next sweep.
 # Source head, replay base, candidate parent, and ref must still match on every
 # reconcile. A changed tip, row order, or head cancels the affected requests and
 # rebuilds the suffix. A failed suite or short phone check fails only its car,

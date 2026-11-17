@@ -43,7 +43,7 @@ case "${0##*/}" in
   fm-learning-candidate.test.sh) key=learning; count=1 ;;
   fm-landing-queue.test.sh)
     if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" = spec ]; then
-      key=landing-spec; count=18
+      key=landing-spec; count=19
     else
       key=landing; count=12
     fi

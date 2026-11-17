@@ -57,6 +57,37 @@ def receipt(path, schema, sha, target=None):
     return path.read_text().splitlines() == expected
 
 
+def farm_timeout():
+    raw = os.environ.get("FM_TESTFARM_TIMEOUT", "10")
+    return int(raw) if raw.isdigit() and 1 <= int(raw) <= 60 else 10
+
+
+def fetch_receipt(request, path, schema, sha, target=None):
+    """Fetch a passed request's farm receipt when the local file is missing.
+
+    The text is checked against the exact candidate before an atomic publish.
+    An unreadable farm or a receipt naming another SHA leaves the path untouched.
+    """
+    if receipt(path, schema, sha, target):
+        return True
+    if path.is_symlink() or not isinstance(request, str):
+        return False
+    try:
+        result = run(os.environ.get("FM_TESTFARM_BIN") or "testfarm", "receipt", "get", request, check=False, timeout=farm_timeout())
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if result.returncode:
+        return False
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=".candidate-receipt.", delete=False) as handle:
+        handle.write(result.stdout)
+        name = handle.name
+    if receipt(Path(name), schema, sha, target):
+        os.replace(name, path)
+        return True
+    os.unlink(name)
+    return False
+
+
 def cancel(service, state):
     for key in ("suite_request", "quick_request"):
         rid = state.get(key)
@@ -265,7 +296,8 @@ def main(observe=False):
             output.append((task, "failed", "-", "-", "-", reason))
             continue
         if not (suite_row and suite_row.get("state") == "passed" and
-                suite_row.get("sha") == sha and receipt(full, "fm-full-suite.v1", sha)):
+                suite_row.get("sha") == sha
+                and fetch_receipt(state["suite_request"], full, "fm-full-suite.v1", sha)):
             output.append((task, "checking", sha, "-", "-", "-"))
             parent = sha
             continue
@@ -285,7 +317,8 @@ def main(observe=False):
             continue
         phase = "checking"
         if quick_row and quick_row.get("state") == "passed" and quick_row.get("sha") == sha \
-                and receipt(quick, "fm-quick-check.v1", sha, state["parent"]):
+                and fetch_receipt(state["quick_request"], quick, "fm-quick-check.v1",
+                                  sha, state["parent"]):
             phase = "ready"
             if not state.get("verified"):
                 state["verified"] = True

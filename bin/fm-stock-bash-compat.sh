@@ -20,7 +20,7 @@ WATCH_CHURN_TIMEOUT=${FM_STOCK_BASH_WATCH_CHURN_TIMEOUT:-60}
 LEARNING_TIMEOUT=${FM_STOCK_BASH_LEARNING_TIMEOUT:-30}
 MERGE_TIMEOUT=${FM_STOCK_BASH_MERGE_TIMEOUT:-120}
 LANDING_TIMEOUT=${FM_STOCK_BASH_LANDING_TIMEOUT:-90}
-LANDING_SPEC_TIMEOUT=${FM_STOCK_BASH_LANDING_SPEC_TIMEOUT:-120}
+LANDING_SPEC_TIMEOUT=${FM_STOCK_BASH_LANDING_SPEC_TIMEOUT:-240}
 WORKER_TIMING_TIMEOUT=${FM_STOCK_BASH_WORKER_TIMING_TIMEOUT:-30}
 TEARDOWN_FARM_TIMEOUT=${FM_STOCK_BASH_TEARDOWN_FARM_TIMEOUT:-90}
 DOORBELL_TIMEOUT=${FM_STOCK_BASH_DOORBELL_TIMEOUT:-90}
@@ -155,7 +155,7 @@ else
     env FM_LANDING_QUEUE_TEST_ONLY=farm \
     "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
 fi
-run_consumer landing-spec "landing queue speculative candidate and watcher auto-land" "$LANDING_SPEC_TIMEOUT" 18 \
+run_consumer landing-spec "landing queue speculative candidate and watcher auto-land" "$LANDING_SPEC_TIMEOUT" 19 \
   env FM_LANDING_QUEUE_TEST_ONLY=spec \
   "$STOCK_BASH" "$ROOT/tests/fm-landing-queue.test.sh"
 run_consumer worker-timing "worker timing status and teardown record" "$WORKER_TIMING_TIMEOUT" 6 \

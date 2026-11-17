@@ -1515,4 +1515,51 @@ spec_queue reconcile sweep >/dev/null
 expect_field "$(spec_queue status a)" status checking-candidate
 [ "$(spec_count full)" -eq 1 ] || fail 'lifting the project switch did not submit a candidate'
 pass 'per-project off switch overrides the home depth and can be lifted'
+
+spec_farm_receipts() { # mode: good|wrongsha|down
+  cat > "$CASE/bin/testfarm" <<'FARM'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+if sys.argv[1:3] != ['receipt', 'get'] or os.environ.get('STUB_RECEIPT_MODE') == 'down':
+    sys.exit(3)
+rows = json.loads(pathlib.Path(os.environ['STUB_FARM_STATE']).read_text())['requests']
+row = next(r for r in rows if r['id'] == sys.argv[3])
+sha = 'f' * 40 if os.environ.get('STUB_RECEIPT_MODE') == 'wrongsha' else row['sha']
+if row['check'] == 'full':
+    print(f"schema=fm-full-suite.v1\nsha={sha}\nfailures=0")
+else:
+    print(f"schema=fm-quick-check.v1\nsha={sha}\ntarget={row['target']}")
+FARM
+  chmod +x "$CASE/bin/testfarm"
+}
+spec_receipt_file() { # task, full|quick
+  python3 - "$CASE/farm.json" "$1" "$2" <<'PY'
+import json, sys
+rows = [r for r in json.load(open(sys.argv[1]))['requests']
+        if r['task'] == 'landing_' + sys.argv[1+1] and r['check'] == sys.argv[3]]
+print(rows[-1]['receipt'])
+PY
+}
+
+spec_case remote-receipts
+spec_farm_receipts
+car a; spec_join a >/dev/null
+spec_mark a full passed
+rm -f "$(spec_receipt_file a full)"
+STUB_RECEIPT_MODE=down spec_queue resolve sweep >/dev/null
+[ "$(spec_count quick)" -eq 0 ] || fail 'an unreadable farm still advanced to the phone check'
+[ ! -e "$(spec_receipt_file a full)" ] || fail 'an unreadable farm left a receipt file'
+STUB_RECEIPT_MODE=wrongsha spec_queue resolve sweep >/dev/null
+[ "$(spec_count quick)" -eq 0 ] || fail 'a receipt naming another SHA advanced to the phone check'
+[ ! -e "$(spec_receipt_file a full)" ] || fail 'a receipt naming another SHA was written'
+expect_field "$(spec_queue status a)" status checking-candidate
+spec_queue resolve sweep >/dev/null
+[ -f "$(spec_receipt_file a full)" ] || fail 'a missing suite receipt was not fetched from the farm'
+[ "$(spec_count quick)" -eq 1 ] || fail 'the fetched suite receipt did not submit the phone check'
+spec_mark a quick passed
+rm -f "$(spec_receipt_file a quick)"
+spec_queue resolve sweep >/dev/null
+[ -f "$(spec_receipt_file a quick)" ] || fail 'a missing phone receipt was not fetched from the farm'
+expect_field "$(spec_queue status a)" status ready-to-land
+pass 'missing farm-issued receipts are fetched exact-SHA and the train continues in one sweep'
 fi
