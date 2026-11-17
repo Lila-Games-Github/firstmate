@@ -4,17 +4,17 @@
 Usage: fm-crew-board-panels.py <fleet-snapshot.json>
        fm-crew-board-panels.py --refresh-allowance|--allowance-loop
 
-Registered phones and their live state come from the test farm's protected adb
-probe. The test queue reads the test farm's registered device list from its
-Python client and bounded `testfarm status --json` calls, cached per refresh.
-Service requests use `--no-probe`; live phone holders and waiters use the
-probing status.
-DEVICES, the phone sections, and TEST SERVICE show unavailable when their farm
-sources cannot be read. FrogPile tickets under FROGPILE_QUEUE_ROOT (default
-~/.frogpile-queues), the full-suite holder sidecar FROGPILE_SUITE_LOCK_HOLDER,
-and live Godot suite processes supply their separate rows. The older per-phone queue and
-kernel suite-lock readers remain for isolated test fixtures that set their
-legacy overrides. Daily routines come from this home's state/*-daily.check.sh
+Every test farm read goes through the `testfarm` command, never the farm's own
+files, so the farm can live on another host: phones, phone and suite tickets,
+and service requests (including `ci-*` requests, shown as "CI · <repo>#<PR>")
+come from bounded `testfarm status --json` calls cached per refresh, with suite
+progress from the request's progress field or else `testfarm log tail`.
+Service requests use `--no-probe`; phones and tickets use the probing status.
+DEVICES, the phone sections, the ticket list, and TEST SERVICE show unavailable
+when the farm cannot be read, never idle. The editor rows still use the local
+full-suite holder sidecar FROGPILE_SUITE_LOCK_HOLDER and live Godot suite
+processes. The older per-phone queue and kernel suite-lock readers remain for
+isolated test fixtures that set their legacy overrides. Daily routines come from this home's state/*-daily.check.sh
 scripts and their state/.<name>-last markers. Ready-for-you rows come from the
 fleet snapshot: a PR whose recorded run reports green checks, a finished
 local-only branch, a scout whose current state is done and whose report file
@@ -443,42 +443,95 @@ def playbot_workers():
     return rows, ""
 
 
-def phone_queue_root():
-    return Path(os.environ.get("FROGPILE_QUEUE_ROOT", Path.home() / ".frogpile-queues")) / "phones"
+@functools.lru_cache(maxsize=1)
+def farm_any_flags():
+    """Serial -> whether the farm includes it in any-phone runs, from the farm's
+    own `device list --json`; empty when that read fails (every phone then counts
+    as shared, and the rest of the board never depends on it)."""
+    try:
+        run = subprocess.run(["testfarm", "device", "list", "--json"], capture_output=True,
+                             text=True, timeout=TESTFARM_STATUS_TIMEOUT_S, check=False)
+        listing = json.loads(run.stdout) if run.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return {}
+    devices = listing.get("devices") if isinstance(listing, dict) else None
+    return {device["serial"]: device.get("any", True) for device in devices or []
+            if isinstance(device, dict) and isinstance(device.get("serial"), str)
+            and isinstance(device.get("any", True), bool)}
 
 
 @functools.lru_cache(maxsize=1)
 def registered_phones():
-    """Read the farm's device registry, preserving its registration order."""
-    checkout = Path(os.environ.get("TESTFARM_CHECKOUT", HOME / "projects/lila-test-farm"))
-    source = checkout / "src"
-    if not source.is_dir():
+    """The farm's phones in the order `testfarm status --json` reports them, or
+    None when the farm cannot be read. Never reads the farm's files directly."""
+    farm = testfarm_status(probe=True)
+    rows = farm.get("phones") if farm else None
+    if not isinstance(rows, list):
         return None
-    sys.path.insert(0, str(source))
-    try:
-        registry = importlib.import_module("lila_test_farm.registry")
-        devices = registry.load_devices()
-    except (ImportError, OSError, ValueError):
-        return None
-    finally:
-        sys.path.remove(str(source))
-    seen = set()
-    for device in devices:
-        if (not isinstance(device, dict) or not isinstance(device.get("serial"), str)
-                or not device["serial"] or device["serial"] in seen
-                or not isinstance(device.get("label"), str)
-                or not device["label"] or not isinstance(device.get("any", True), bool)):
+    flags = farm_any_flags()
+    devices, seen = [], set()
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("serial"), str)
+                or not row["serial"] or row["serial"] in seen
+                or not isinstance(row.get("label"), str) or not row["label"]):
             return None
-        seen.add(device["serial"])
+        seen.add(row["serial"])
+        devices.append({"serial": row["serial"], "label": row["label"],
+                        "any": flags.get(row["serial"], True)})
     return devices
 
 
-def suite_queue_root():
-    if os.environ.get("FROGPILE_SUITE_QUEUE"):
-        return Path(os.environ["FROGPILE_SUITE_QUEUE"])
-    if os.environ.get("FROGPILE_SUITE_LOCK"):
-        return Path(os.environ["FROGPILE_SUITE_LOCK"] + ".queue")
-    return Path(os.environ.get("FROGPILE_QUEUE_ROOT", Path.home() / ".frogpile-queues")) / "suite"
+CI_TASK_RE = re.compile(r"^ci-(.+)-pr(\d+)(?:-\d+)?$")
+
+
+def ci_label(task):
+    """CI jobs submit as ci-<repo>-pr<N>-<run>; show them as "CI · <repo>#<N>"."""
+    match = CI_TASK_RE.match(task or "")
+    return f"CI · {match[1]}#{match[2]}" if match else None
+
+
+class TaskTitles(dict):
+    """Backlog titles by task id; a CI request with no backlog item falls back to its CI label."""
+
+    def get(self, key, default=None):
+        return super().get(key) or ci_label(key) or default
+
+
+@functools.lru_cache(maxsize=1)
+def farm_tickets():
+    """The farm's live phone and suite tickets from status, or None when unreachable."""
+    farm = testfarm_status(probe=True)
+    tickets = farm.get("tickets") if farm else None
+    if not isinstance(tickets, dict):
+        return None
+    result = {}
+    for line in ("phones", "suite"):
+        rows = tickets.get(line, [])
+        result[line] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    return result
+
+
+def farm_phone_tickets():
+    """Phone tickets as (name, record) in the shape the board's rows read, or None."""
+    tickets = farm_tickets()
+    if tickets is None:
+        return None
+    rows = []
+    for row in tickets["phones"]:
+        since = row.get("since")
+        if not isinstance(since, (int, float)):
+            since = None
+        record = {"task": row.get("task"), "request": row.get("request"), "pid": row.get("pid"),
+                  "requested": row.get("requested"), "holding": row.get("holding")}
+        if since is not None:
+            record["acquired_unix_ns" if row.get("holding") else "requested_unix_ns"] = since * 1e9
+        rows.append((str(row.get("ticket") or len(rows) + 1), record))
+    return rows
+
+
+def farm_ticket_task(record):
+    """A farm ticket names its own task; its pid belongs to the farm host, not this one."""
+    return str(record.get("task") or record.get("request") or "unknown task")
 
 
 def suite_lock_paths():
@@ -504,30 +557,6 @@ def pid_alive(pid, ticks=None):
         return False
     observed = start_ticks(pid)
     return observed is not None and (ticks is None or observed == str(ticks))
-
-
-def live_tickets(queue):
-    """Observe tickets without pruning them or taking the producer's mutex."""
-    try:
-        paths = sorted((queue / "tickets").glob("*.json"))
-    except OSError:
-        return []
-    try:
-        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    except OSError:
-        boot = ""
-    rows = []
-    for path in paths:
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(record, dict) or (boot and record.get("boot_id") not in (None, boot)):
-                continue
-            if not pid_alive(int(record["pid"]), record.get("start_ticks")):
-                continue
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-        rows.append((path.stem, record))
-    return rows
 
 
 def phone_label(serial):
@@ -623,23 +652,6 @@ def epoch(value):
 
 def phone_queue(serial, trees, now):
     """Read one phone's FIFO: the live holder and live waiters in ticket order."""
-    if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ:
-        queue = phone_queue_root()
-        holder = None
-        waiting = []
-        for _ticket, owner in live_tickets(queue):
-            if owner.get("holding") != serial and owner.get("requested") != serial:
-                continue
-            pid = int(owner["pid"])
-            task, kind, _ = process_owner(pid, trees, owner.get("cwd", ""))
-            entry = {"task": task, "kind": kind, "pid": pid,
-                     "ticket_kind": phone_ticket_kind(owner),
-                     "for": since_unix(owner, "acquired_unix_ns" if owner.get("holding") else "requested_unix_ns", now)}
-            if owner.get("holding") == serial:
-                holder = entry
-            else:
-                waiting.append(entry)
-        return holder, waiting
     queue = Path(os.environ["FM_CREW_BOARD_PHONE_QUEUE_ROOT"]) / f"frogpile-phone-{serial}.queue"
     acquired = {}
     for line in tail_lines(queue / "events.jsonl"):
@@ -684,12 +696,10 @@ def any_phone_waiters(trees, now):
     if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" in os.environ:
         return []
     waiting = []
-    for _ticket, owner in live_tickets(phone_queue_root()):
+    for ticket, owner in farm_phone_tickets() or []:
         if owner.get("requested") != "any" or owner.get("holding"):
             continue
-        pid = int(owner["pid"])
-        task, kind, _ = process_owner(pid, trees, owner.get("cwd", ""))
-        waiting.append({"task": task, "kind": kind, "pid": pid,
+        waiting.append({"task": farm_ticket_task(owner), "kind": "", "pid": ticket,
                         "ticket_kind": phone_ticket_kind(owner),
                         "for": since_unix(owner, "requested_unix_ns", now)})
     return waiting
@@ -719,16 +729,19 @@ def queued_suite_waiters(lock, trees, now):
                  "wait_seconds": process_age(pid, now),
                  "for": duration(process_age(pid, now) or 0)} for pid in suite_waiters(lock)]
     waiting = []
-    for _ticket, owner in live_tickets(suite_queue_root()):
-        if owner.get("holding") or owner.get("acquired_unix_ns"):
+    for row in (farm_tickets() or {}).get("suite", []):
+        if "slot" in row or not row.get("ticket"):
             continue
-        pid = int(owner["pid"])
-        task, _, cwd = process_owner(pid, trees, owner.get("cwd", ""))
-        waiting.append({"pid": pid, "task": task,
-                        "cwd": cwd,
-                        "detail": f"pid {pid} in {cwd}",
-                        "wait_seconds": seconds_since(owner, "requested_unix", now),
-                        "for": since_unix(owner, "requested_unix", now)})
+        task = farm_ticket_task(row)
+        entry = {"pid": str(row["ticket"]), "task": task, "cwd": "",
+                 "detail": f"farm suite ticket {row['ticket']}"}
+        since = row.get("since")
+        if isinstance(since, (int, float)):
+            entry["wait_seconds"] = max(0, now - since)
+            entry["for"] = duration(entry["wait_seconds"])
+        else:
+            entry["wait_seconds"], entry["for"] = None, "unknown time"
+        waiting.append(entry)
     return waiting
 
 
@@ -778,31 +791,62 @@ def registered_suite_tests(project):
         return 0
 
 
-def suite_counts(path, project=""):
+def suite_counts_from_lines(lines, project=""):
     """Completed and total tests from the runner's own log lines, or None."""
+    done, selected, shards, completed = 0, 0, {}, []
+    try:
+        for line in lines:
+            if SUITE_DONE.match(line):
+                done += 1
+            elif match := SUITE_SELECTION.match(line):
+                selected = int(match[1])
+            elif match := SHARD_STARTED.match(line):
+                shards[int(match[1])] = int(match[2])
+            elif match := SHARD_COMPLETED.match(line):
+                completed = [int(part) for part in match[1].replace(",", " ").split()]
+    except ValueError:
+        return None
+    if shards:
+        done, total = sum(completed), sum(shards.values())
+    else:
+        total = selected or (registered_suite_tests(project) if project else 0)
+    return (done, total) if total and 0 <= done <= total else None
+
+
+def suite_counts(path, project=""):
+    """Completed and total tests from a runner log file, or None."""
     if not path:
         return None
     try:
         if not stat.S_ISREG(os.stat(path).st_mode):
             return None
-        done, selected, shards, completed = 0, 0, {}, []
         with open(path, errors="replace") as stream:
-            for line in stream:
-                if SUITE_DONE.match(line):
-                    done += 1
-                elif match := SUITE_SELECTION.match(line):
-                    selected = int(match[1])
-                elif match := SHARD_STARTED.match(line):
-                    shards[int(match[1])] = int(match[2])
-                elif match := SHARD_COMPLETED.match(line):
-                    completed = [int(part) for part in match[1].replace(",", " ").split()]
-    except (OSError, ValueError):
+            return suite_counts_from_lines(stream, project)
+    except OSError:
         return None
-    if shards:
-        done, total = sum(completed), sum(shards.values())
-    else:
-        total = selected or registered_suite_tests(project)
-    return (done, total) if total and 0 <= done <= total else None
+
+
+@functools.lru_cache(maxsize=16)
+def farm_log_tail(rid, step="suite"):
+    """The farm's own tail of one request step's log, through the testfarm command."""
+    try:
+        run = subprocess.run(["testfarm", "log", "tail", rid, step], capture_output=True,
+                             text=True, timeout=TESTFARM_STATUS_TIMEOUT_S, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    return tuple(run.stdout.splitlines()) if run.returncode == 0 else ()
+
+
+def farm_suite_progress(request, rid):
+    """Suite progress text: the status request's progress field when the farm
+    reports one, else the farm's log tail; empty when neither says."""
+    field = request.get("suite_progress")
+    if isinstance(field, dict) and isinstance(field.get("done"), int) and isinstance(field.get("total"), int):
+        return suite_progress((field["done"], field["total"])
+                              if field["total"] and 0 <= field["done"] <= field["total"] else None)
+    if isinstance(field, str) and field.strip():
+        return field.strip()
+    return suite_progress(suite_counts_from_lines(farm_log_tail(rid)))
 
 
 def suite_progress(counts):
@@ -1053,8 +1097,11 @@ def service_request_rows(snapshot, tags):
             else:
                 resource_tag(tags, task_id, 1, f"WAITING FOR TEST SERVICE: {word} #{waiter_positions[id(request)]}")
         build_prefix = f"{build_state.upper()} · " if build_state else ""
-        row = item(f"{build_prefix}{state.upper()}: {titles.get(task, task)} · {kind}",
-                   f"Task: {task}\nKind: {kind}\nRequest: {rid}\nBuild: {build_state or 'unknown'}\nAge: {age}",
+        progress = farm_suite_progress(request, rid) if running and options.get("suite") else ""
+        row = item(f"{build_prefix}{state.upper()}: {titles.get(task, task)} · {kind}"
+                   + (f" · {progress}" if progress else ""),
+                   f"Task: {task}\nKind: {kind}\nRequest: {rid}\nBuild: {build_state or 'unknown'}\nAge: {age}"
+                   + (f"\nProgress: {progress}" if progress else ""),
                    f"{state} {age}", item_id=f"service-{rid}")
         row["phone_title"] = f"{build_prefix}{state.upper()}: {titles.get(task, task)} · {kind_text(phone_label)}"
         rows.append(row)
@@ -1066,7 +1113,7 @@ def service_suite_rows(trees, now):
     status = testfarm_status()
     if status is None:
         return [], []
-    root = Path(os.environ.get("TESTFARM_STATE", Path.home() / ".local/state/testfarm"))
+    root = Path(os.environ.get("TESTFARM_STATE", Path.home() / ".local/state/testfarm"))  # run-dir identity only, never read
     running, waiting = [], []
     requests = status.get("requests")
     for request in requests if isinstance(requests, list) else []:
@@ -1087,10 +1134,9 @@ def service_suite_rows(trees, now):
                 ran = duration(now - float(started))
             except (ValueError, TypeError, OverflowError):
                 ran = "unknown time"
-            log = root / "logs" / f"{rid}-{request.get('generation', 0)}-suite.log"
             running.append({"pid": None, "task": task, "cwd": cwd, "for": ran,
-                            "version": str(request.get("sha") or "unknown")[:7], "progress": suite_progress(suite_counts(
-                                log, os.path.join(cwd, "prototype-game") if os.path.isdir(os.path.join(cwd, "prototype-game")) else cwd)),
+                            "version": str(request.get("sha") or "unknown")[:7],
+                            "progress": farm_suite_progress(request, rid),
                             "detail": f"test service request {rid} in {cwd}"})
         elif state in ("queued", "preparing"):
             try:
@@ -1103,8 +1149,8 @@ def service_suite_rows(trees, now):
 
 
 def task_titles(snapshot):
-    return {str(task.get("id")): str((task.get("backlog") or {}).get("title") or task.get("id"))
-            for task in snapshot.get("tasks", []) if isinstance(task, dict) and task.get("id")}
+    return TaskTitles({str(task.get("id")): str((task.get("backlog") or {}).get("title") or task.get("id"))
+                       for task in snapshot.get("tasks", []) if isinstance(task, dict) and task.get("id")})
 
 
 def resource_tag(tags, task, priority, text):
@@ -1245,32 +1291,35 @@ def test_queue(snapshot, phones, now, tags=None):
             entry["detail"] = f"{entry['ticket_kind']} · waiting for any phone"
         group("ANY PHONE", None, any_waiting, "phone-any")
     if "FM_CREW_BOARD_PHONE_QUEUE_ROOT" not in os.environ:
-        tickets = live_tickets(phone_queue_root())
+        tickets = farm_phone_tickets()
+        if tickets is None:
+            rows.append(item("PHONE TICKETS: unavailable", status="section", item_id="tickets-heading"))
+            rows.append(item("Test farm unavailable", "`testfarm status --json` did not return a usable result.",
+                             "unavailable", item_id="tickets-state"))
+        else:
+            def arrival(row):
+                try:
+                    return float(row[1].get("requested_unix_ns") or row[1]["acquired_unix_ns"]), row[0]
+                except (KeyError, TypeError, ValueError):
+                    return float("inf"), row[0]
 
-        def arrival(row):
-            try:
-                return int(row[1]["requested_unix_ns"]), row[0]
-            except (KeyError, TypeError, ValueError):
-                return float("inf"), row[0]
-
-        tickets.sort(key=arrival)
-        rows.append(item(f"PHONE TICKETS: {len(tickets)} pending", status="section", item_id="tickets-heading"))
-        if not tickets:
-            rows.append(item("Idle", status="idle", item_id="tickets-state"))
-        for position, (ticket, owner) in enumerate(tickets, 1):
-            pid = int(owner["pid"])
-            task, _, _ = process_owner(pid, trees, owner.get("cwd", ""))
-            held = owner.get("holding")
-            age = since_unix(owner, "acquired_unix_ns" if held else "requested_unix_ns", now)
-            kind = phone_ticket_kind(owner)
-            state = "running" if held else "waiting"
-            row = item(f"#{position}: {titles.get(task, task)} · {kind}"
-                       + (f" · holding {held}" if held else ""),
-                       f"Task: {task}\nTicket: {ticket}\nKind: {kind}\nHolding: {held or 'none'}\nAge: {age}",
-                       f"{state} {age}", item_id=f"ticket-{ticket}")
-            row["phone_title"] = (f"#{position}: {titles.get(task, task)} · {phone_ticket_kind(owner, phone_label)}"
-                                  + (f" · holding {phone_label(held)}" if held else ""))
-            rows.append(row)
+            tickets.sort(key=arrival)
+            rows.append(item(f"PHONE TICKETS: {len(tickets)} pending", status="section", item_id="tickets-heading"))
+            if not tickets:
+                rows.append(item("Idle", status="idle", item_id="tickets-state"))
+            for position, (ticket, owner) in enumerate(tickets, 1):
+                task = farm_ticket_task(owner)
+                held = owner.get("holding")
+                age = since_unix(owner, "acquired_unix_ns" if held else "requested_unix_ns", now)
+                kind = phone_ticket_kind(owner)
+                state = "running" if held else "waiting"
+                row = item(f"#{position}: {titles.get(task, task)} · {kind}"
+                           + (f" · holding {held}" if held else ""),
+                           f"Task: {task}\nTicket: {ticket}\nKind: {kind}\nHolding: {held or 'none'}\nAge: {age}",
+                           f"{state} {age}", item_id=f"ticket-{ticket}")
+                row["phone_title"] = (f"#{position}: {titles.get(task, task)} · {phone_ticket_kind(owner, phone_label)}"
+                                      + (f" · holding {phone_label(held)}" if held else ""))
+                rows.append(row)
     service_rows = service_request_rows(snapshot, tags)
     if service_rows is None:
         rows.append(item("TEST SERVICE: unavailable", status="section", item_id="service-heading"))
