@@ -759,7 +759,7 @@ EOF
 }
 
 test_ticketed_queue_without_adb() {
-  local home stub now held vip vip_two any suite_wait suite_hold boot ticks
+  local home stub now held vip vip_two any suite_wait suite_hold
   home=$(make_home ticketed_queue)
   make_farm_registry "$home"
   cat > "$home/farm-config/devices.json" <<'JSON'
