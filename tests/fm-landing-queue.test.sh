@@ -1073,6 +1073,9 @@ state['requests'].append({'id': rid, 'sha': sys.argv[4], 'state': 'queued',
     {'suite': '--suite' in args, 'check': option('--check') or 'full',
      'target': option('--target'), 'device_gate': option('--device-gate')}})
 path.write_text(json.dumps(state))
+if path.with_suffix('.slow').exists():
+    import time
+    time.sleep(30)
 print(rid)
 PY
   chmod +x "$CASE/bin/test-service"
@@ -1131,6 +1134,37 @@ print(sum(row['check'] == sys.argv[2] and (sys.argv[3] == 'all' or row['state'] 
           for row in data['requests']))
 PY
 }
+
+spec_case slow-submit
+car a
+touch "$CASE/farm.slow"
+FM_TESTFARM_SUBMIT_TIMEOUT=2 spec_join a >/dev/null
+[ "$(spec_count full)" = 1 ] || fail 'a timed-out submit did not leave exactly one accepted request'
+expect_field "$(spec_queue status a)" status checking-candidate
+rm -f "$CASE/farm.slow"
+spec_queue resolve sweep >/dev/null
+spec_queue resolve sweep >/dev/null
+[ "$(spec_count full)" = 1 ] || fail 'a retry after a timed-out submit duplicated the farm request'
+spec_mark a full passed
+spec_queue resolve sweep >/dev/null
+[ "$(spec_count full)" = 1 ] || fail 'adopting the accepted request still duplicated it'
+echo "ok: slow submit adopts the accepted request and retries do not duplicate it"
+
+cat > "$CASE/slow-status" <<'SLOW'
+#!/usr/bin/env bash
+sleep 60
+SLOW
+chmod +x "$CASE/slow-status"
+start=$(date +%s)
+FM_TESTFARM_SUBMIT_TIMEOUT=300 python3 - "$ROOT/bin/fm-landing-train.py" "$CASE/slow-status" <<'PY' || fail 'status read was not bounded by its short timeout'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("landing_train", sys.argv[1])
+train = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(train)
+assert train.request_status(sys.argv[2]) is None
+PY
+[ $(( $(date +%s) - start )) -lt 30 ] || fail 'a larger submit timeout loosened the status read bound'
+echo "ok: status reads keep their short timeout"
 
 spec_case all-pass
 mkdir -p "$CASE/home/data" "$CASE/home/state"
