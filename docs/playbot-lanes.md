@@ -360,6 +360,7 @@ The operator supplies an exact companion inventory for the task; an entire landi
 The command checks each authorized companion against a committed changed script, shader, or asset and requires the explicit landing branch's actual merge base to match the full `Guide-check-base` trailer.
 Uncommitted project inputs, ambiguous ownership, hidden index flags, Git operations, version drift, and unexpected output refuse rather than broaden that inventory.
 Unrelated staging and work outside the Godot project survive, injected addon bytes are backed up and preserved even when drifted, and generated commits contain only authorized companions.
+If the import itself rewrites, adds, or removes a file under an injected `addons/playbot` tree (such as a `.gd.uid` or `.gdextension.uid` sidecar), the command restores the pre-import bytes from that backup, lists the paths in `restoredAddonChurn`, and never commits them.
 An import that changes source, addon, or unrelated files leaves those mutations and the private evidence intact for inspection.
 A failed committed-head import-clean check retains and reports the generated head as well; it never rolls back prior work.
 

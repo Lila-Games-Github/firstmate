@@ -499,7 +499,8 @@ fs.writeFileSync(project+'/art.png.import','[remap]\nimporter="texture"\nuid="ui
 if(fs.existsSync(project+'/fx.gdshader'))fs.writeFileSync(project+'/fx.gdshader.uid','uid://shader123\n');
 if(mode==='source')fs.writeFileSync(project+'/new.gd','unexpected source mutation\n');
 if(mode==='unrelated')fs.writeFileSync(repo+'/unexpected.txt','unexpected product output\n');
-if(mode==='addon')fs.writeFileSync(project+'/addons/playbot/plugin.gd','unexpected addon mutation\n');
+if(mode==='addon-uid'){fs.writeFileSync(project+'/addons/playbot/plugin.gd.uid','uid://addon1\n');fs.writeFileSync(project+'/addons/playbot/native/helper.gdextension.uid','uid://addon2\n');fs.writeFileSync(project+'/addons/playbot/plugin.gd','rewritten addon\n');}
+if(mode==='addon-uid-mixed'){fs.writeFileSync(project+'/addons/playbot/plugin.gd.uid','uid://addon1\n');fs.writeFileSync(project+'/new.gd','unexpected source mutation\n');}
 if(mode==='second-pass'&&fs.readFileSync(root+'/imports','utf8').trim().split('\n').length>1)fs.writeFileSync(project+'/new.gd.uid','uid://changed456\n');
 if(mode==='lock-drift'){const lock=cp.execFileSync('git',['-C',repo,'rev-parse','--path-format=absolute','--git-path','index.lock'],{encoding:'utf8'}).trim();fs.renameSync(lock,lock+'.displaced');fs.writeFileSync(lock,'foreign lock owner');}
 if(mode==='head-drift')cp.execFileSync('git',['-C',repo,'update-ref','HEAD',fs.readFileSync(root+'/base','utf8').trim()]);
@@ -656,7 +657,14 @@ f=fixture();reject(f,{importTimeoutSeconds:1},/Godot import failed/,'slow');
 f=fixture();r=run(f,{importTimeoutSeconds:30},'slow');assert.equal(r.status,0,r.stderr);
 console.log('import timeout: out-of-range values refused; 1 s limit stops a slow import; 30 s limit lets it finish');
 console.log('import-clean: exact generated head passed a separate check with no commit or index change');
-for(const [mode,pattern,mutated] of [['source',/Unexpected import mutations preserved/,'prototype-game/new.gd'],['unrelated',/Unexpected import mutations preserved/,'unexpected.txt'],['addon',/Unexpected import mutations preserved/,'prototype-game/addons/playbot/plugin.gd'],['failed',/Godot import failed/,'prototype-game/new.gd.uid'],['malformed',/Malformed generated UID/,'prototype-game/new.gd.uid']]){
+f=fixture();r=run(f,{},'addon-uid');assert.equal(r.status,0,r.stderr);const churn=JSON.parse(r.stdout);
+assert.equal(fs.readFileSync(f.repo+'/prototype-game/addons/playbot/plugin.gd','utf8'),'bundled addon\n');assert(!fs.existsSync(f.repo+'/prototype-game/addons/playbot/plugin.gd.uid'));assert(!fs.existsSync(f.repo+'/prototype-game/addons/playbot/native/helper.gdextension.uid'));
+assert.deepEqual(churn.restoredAddonChurn.sort(),['prototype-game/addons/playbot/native/helper.gdextension.uid','prototype-game/addons/playbot/plugin.gd','prototype-game/addons/playbot/plugin.gd.uid']);
+assert.deepEqual(git(f.repo,'diff-tree','--no-commit-id','--name-only','-r',f.head,churn.head).split('\n').sort(),f.args.companions.slice().sort());
+console.log('addon churn: rewritten addon .uid/.gdextension.uid/plugin bytes restored from backup, absent from the generated commit');
+f=fixture();r=reject(f,{},/Unexpected import mutations preserved.*prototype-game\/new\.gd/,'addon-uid-mixed');assert.doesNotMatch(r.stderr.split('evidence/backups')[0],/addons\/playbot/);
+console.log('addon churn plus a real source mutation still refused, naming only the source file');
+for(const [mode,pattern,mutated] of [['source',/Unexpected import mutations preserved/,'prototype-game/new.gd'],['unrelated',/Unexpected import mutations preserved/,'unexpected.txt'],['failed',/Godot import failed/,'prototype-game/new.gd.uid'],['malformed',/Malformed generated UID/,'prototype-game/new.gd.uid']]){
   f=fixture();r=reject(f,{},pattern,mode);assert(fs.existsSync(f.repo+'/'+mutated));assert.match(r.stderr,/evidence\/backups:/);const scratch=r.stderr.trim().split('evidence/backups: ').at(-1);assert(fs.existsSync(scratch+'/index.before'));assert(fs.existsSync(scratch+'/addons/prototype-game/addons/playbot/plugin.gd'));
 }
 console.log('refusals: source/addon/unrelated mutations, failed import, malformed UID preserved outputs, index, head and private backups');
