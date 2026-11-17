@@ -489,6 +489,7 @@ if(args.length!==5||!expected.every((x,i)=>args[i]===x))throw Error('unsafe impo
 if(!process.env.XDG_CONFIG_HOME.includes('fm-lane-import-')||fs.readdirSync(process.env.ANDROID_HOME).length||process.env.ANDROID_HOME===process.env.HOSTILE_SDK)throw Error('host SDK/settings leaked');
 if(process.env.ADB_SERVER_SOCKET||process.env.GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD)throw Error('host ADB/credential environment leaked');
 fs.appendFileSync(root+'/imports',args[4]+'\n');
+if(mode==='slow')Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,4000);
 const project=args[4],repo=path.dirname(project);
 fs.mkdirSync(project+'/.godot/imported',{recursive:true});
 fs.writeFileSync(project+'/.godot/imported/cache','ignored cache');
@@ -650,6 +651,10 @@ function withShader(){const g=fixture();fs.writeFileSync(g.repo+'/prototype-game
 f=withShader();f.args.companions=[...f.args.companions,'prototype-game/fx.gdshader.uid'];r=run(f);assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).committedCompanions,3);assert.match(git(f.repo,'show','--name-only','--format=','HEAD'),/fx\.gdshader\.uid/);
 f=fixture();f.args.companions=[...f.args.companions,'prototype-game/fx.gdshader.uid'];reject(f,{},/not authorized by a changed branch/);
 console.log('shader companion: committed shader authorizes its .uid sidecar; sidecar without a committed shader refused');
+f=fixture();reject(f,{importTimeoutSeconds:0},/importTimeoutSeconds must be/);reject(f,{importTimeoutSeconds:3601},/importTimeoutSeconds must be/);reject(f,{importTimeoutSeconds:'900'},/importTimeoutSeconds must be/);
+f=fixture();reject(f,{importTimeoutSeconds:1},/Godot import failed/,'slow');
+f=fixture();r=run(f,{importTimeoutSeconds:30},'slow');assert.equal(r.status,0,r.stderr);
+console.log('import timeout: out-of-range values refused; 1 s limit stops a slow import; 30 s limit lets it finish');
 console.log('import-clean: exact generated head passed a separate check with no commit or index change');
 for(const [mode,pattern,mutated] of [['source',/Unexpected import mutations preserved/,'prototype-game/new.gd'],['unrelated',/Unexpected import mutations preserved/,'unexpected.txt'],['addon',/Unexpected import mutations preserved/,'prototype-game/addons/playbot/plugin.gd'],['failed',/Godot import failed/,'prototype-game/new.gd.uid'],['malformed',/Malformed generated UID/,'prototype-game/new.gd.uid']]){
   f=fixture();r=reject(f,{},pattern,mode);assert(fs.existsSync(f.repo+'/'+mutated));assert.match(r.stderr,/evidence\/backups:/);const scratch=r.stderr.trim().split('evidence/backups: ').at(-1);assert(fs.existsSync(scratch+'/index.before'));assert(fs.existsSync(scratch+'/addons/prototype-game/addons/playbot/plugin.gd'));
