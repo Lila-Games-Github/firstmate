@@ -16,6 +16,8 @@
 #   (k) landing a queued car steers its sleeping successor to the front once,
 #       and a landing without a train creates no queue state
 #   (l) a landing whose receipt cannot be recorded still exits 3 and steers
+#   (n) Playbot-injected churn does not block landing and is preserved; other
+#       dirt, or a candidate touching those paths, still refuses
 #   (m) a recorded feat/ task branch lands instead of a stale legacy fm/<id>
 #       branch, and a recorded branch missing from the project refuses
 set -u
@@ -629,6 +631,85 @@ test_quick_receipt_lands_without_claiming_full_health() {
   pass 'a quick front receipt lands without claiming a full suite ran on the rebased head'
 }
 
+setup_churn_case() { # <name>
+  local case_dir
+  case_dir=$(make_case "$1")
+  mkdir -p "$case_dir/project/prototype-game/addons/playbot"
+  printf 'v1\n' > "$case_dir/project/prototype-game/addons/playbot/plugin.cfg"
+  printf 'v1\n' > "$case_dir/project/prototype-game/project.godot"
+  git -C "$case_dir/project" add -A
+  git -C "$case_dir/project" commit -q -m 'playbot addon'
+  write_meta "$case_dir" "" local-only
+  printf '%s\n' "$case_dir"
+}
+
+churn_apply() { # <case-dir>
+  printf 'v2 injected\n' > "$1/project/prototype-game/addons/playbot/plugin.cfg"
+  printf 'rewritten\n' > "$1/project/prototype-game/project.godot"
+  printf 'new\n' > "$1/project/prototype-game/addons/playbot/playbot_player_control.gd"
+}
+
+test_playbot_churn_does_not_block_landing_and_is_preserved() {
+  local case_dir before after
+  case_dir=$(setup_churn_case playbot-churn-lands)
+  commit_task_change "$case_dir" main
+  churn_apply "$case_dir"
+  before=$(cd "$case_dir/project/prototype-game" && cat addons/playbot/plugin.cfg project.godot addons/playbot/playbot_player_control.gd)
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "playbot-churn: landing refused: $(cat "$case_dir/stderr")"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$(git -C "$case_dir/project" rev-parse fm/task-x1)" ] \
+    || fail "playbot-churn: main was not fast-forwarded"
+  after=$(cd "$case_dir/project/prototype-game" && cat addons/playbot/plugin.cfg project.godot addons/playbot/playbot_player_control.gd)
+  [ "$before" = "$after" ] || fail "playbot-churn: churn bytes changed"
+  pass "Playbot churn does not block a landing and stays byte-identical"
+}
+
+test_playbot_churn_plus_other_dirt_refuses() {
+  local case_dir rc
+  case_dir=$(setup_churn_case playbot-churn-other-dirt)
+  commit_task_change "$case_dir" main
+  churn_apply "$case_dir"
+  printf 'dirty\n' >> "$case_dir/project/task-unrelated.txt"
+  printf 'x\n' > "$case_dir/project/tracked.txt"
+  git -C "$case_dir/project" add tracked.txt
+  git -C "$case_dir/project" commit -q -m tracked
+  printf 'y\n' > "$case_dir/project/tracked.txt"
+  git -C "$case_dir/task-wt" rebase -q main
+  set +e
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "playbot-churn: other dirt should refuse"
+  assert_grep 'has a dirty working tree' "$case_dir/stderr" "playbot-churn: refusal not clear"
+  rm "$case_dir/project/task-unrelated.txt"
+  set +e
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "playbot-churn: tracked non-playbot modification should refuse"
+  pass "other dirt still refuses alongside Playbot churn"
+}
+
+test_playbot_churn_with_candidate_touching_addon_refuses() {
+  local case_dir rc before
+  case_dir=$(setup_churn_case playbot-churn-candidate-touch)
+  git -C "$case_dir/project" branch fm/task-x1 main
+  git -C "$case_dir/project" worktree add -q "$case_dir/task-wt" fm/task-x1
+  printf 'task\n' > "$case_dir/task-wt/prototype-game/addons/playbot/plugin.gd"
+  git -C "$case_dir/task-wt" add -A
+  git -C "$case_dir/task-wt" commit -q -m 'touch addon'
+  churn_apply "$case_dir"
+  before=$(git -C "$case_dir/project" rev-parse main)
+  set +e
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "playbot-churn: candidate touching addon should refuse"
+  assert_grep 'touches Playbot-managed paths' "$case_dir/stderr" "playbot-churn: message not clear"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$before" ] || fail "playbot-churn: main moved"
+  pass "a candidate touching a Playbot path refuses while churn is present"
+}
+
 test_recorded_nondefault_branch_never_merges_default
 test_absent_landing_branch_keeps_default_behavior
 test_recorded_feat_branch_lands_over_legacy_branch
@@ -636,6 +717,9 @@ test_recorded_fix_branch_missing_refuses
 test_unresolved_recorded_branch_refuses_without_fallback
 test_checkout_and_cleanliness_guard_resolved_target
 test_diverged_landing_branch_still_refuses
+test_playbot_churn_does_not_block_landing_and_is_preserved
+test_playbot_churn_plus_other_dirt_refuses
+test_playbot_churn_with_candidate_touching_addon_refuses
 test_lane_uses_recorded_worktree_branch
 test_lane_prefers_recorded_branch
 test_lane_recorded_branch_survives_retired_worktree

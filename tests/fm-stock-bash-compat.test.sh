@@ -50,7 +50,7 @@ case "${0##*/}" in
     ;;
   fm-worker-timing.test.sh) key=worker-timing; count=6 ;;
   fm-teardown.test.sh) key=teardown-farm; count=5 ;;
-  fm-merge-local.test.sh) key=merge; count=20 ;;
+  fm-merge-local.test.sh) key=merge; count=23 ;;
   fm-landing-conflicts.test.sh) key=landing-conflicts; count=4 ;;
   fm-worker-doorbell.test.sh) key=doorbell; count=5 ;;
   fm-lane-send.test.sh) key=lane-send; count=6 ;;
@@ -261,7 +261,7 @@ test_single_consumer_runs_with_own_temp_root() {
   [ -s "$log_root/stock-bash-PR-19-local-merge-branch-resolution.log" ] \
     || fail "selected consumer must stream its log under the local temp root"
   assert_contains "$out" "stock Bash runtime: /bin/bash " "the child runtime is reported"
-  assert_contains "$out" "Stock Bash consumer passed::PR 19 local-merge branch resolution emitted 20 expected assertions" \
+  assert_contains "$out" "Stock Bash consumer passed::PR 19 local-merge branch resolution emitted 23 expected assertions" \
     "selected consumer keeps its assertion floor"
   [ "$(printf '%s\n' "$out" | grep -c 'Stock Bash consumer passed::')" -eq 1 ] \
     || fail "single-consumer selection must produce exactly one verdict"

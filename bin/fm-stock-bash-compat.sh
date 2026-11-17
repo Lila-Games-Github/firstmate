@@ -143,13 +143,13 @@ run_consumer learning "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIME
   env FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
 # The watcher poll calls fm-landing-queue-sweep.sh and fm-landing-auto-land.sh.
-merge_assertions=20
+merge_assertions=23
 if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
   if [ "$selected" = all ] || [ "$selected" = landing ]; then
     ran_consumer=1
     echo '::notice::Skipping stock Bash landing queue farm checks: TESTFARM_READ_TOKEN is absent.'
   fi
-  merge_assertions=17
+  merge_assertions=20
 else
   run_consumer landing "landing-queue test farm resolve, watcher sweep, and front step-back" "$LANDING_TIMEOUT" 12 \
     env FM_LANDING_QUEUE_TEST_ONLY=farm \
