@@ -358,7 +358,7 @@ STUB
       "$mode: promoted worker was not told to verify its repository root"
     assert_grep "If either does not resolve to the worktree you were launched in, stop and escalate to firstmate" "$payload" \
       "$mode: promoted worker was not told to stop for any wrong worktree"
-    assert_grep "git checkout -b fm/$id" "$payload" \
+    assert_grep "git checkout -b feat/$id" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
     assert_grep "## Captain's intent" "$payload" \
       "$mode: promoted worker did not receive the Captain's intent subsection"
@@ -962,7 +962,7 @@ EOF
 
 # The promoted worker's base step is part of the generated ship-instructions
 # prompt; running the git commands it hands the worker in a scout worktree that
-# sits on main proves which base the promoted fm/<id> branch actually starts from.
+# sits on main proves which base the promoted feat/<slug> branch actually starts from.
 test_promotion_base_follows_landing_branch() {
   local root home origin proj id target wt step cmds cmd main_only lila_tip
   root="$TMP_ROOT/promotion-base"
@@ -1005,7 +1005,8 @@ test_promotion_base_follows_landing_branch() {
     done <<EOF
 $cmds
 EOF
-    [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD)" = "fm/$id" ] || fail "base step did not create fm/$id"
+    [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD)" = "feat/$id" ] || fail "base step did not create feat/$id"
+    grep -qx "branch=feat/$id" "$home/state/$id.meta" || fail "promotion did not record branch=feat/$id"
     if [ -n "$target" ]; then
       [ "$(git -C "$wt" rev-parse HEAD)" = "$lila_tip" ] || fail "promoted branch did not start at the landing tip"
       git -C "$wt" merge-base --is-ancestor "$main_only" HEAD && fail "promoted branch carries default-branch-only commits"
@@ -1104,19 +1105,20 @@ EOF
   id='remote-generated'
   FM_HOME="$home" "$BASH" "$BRIEF" "$id" proj --mode local-only --no-template 'Remote export contract' >/dev/null \
     || fail 'remote local-only brief generation failed'
-  assert_grep 'HEAD:refs/heads/fm/remote-generated' "$home/data/$id/brief.md" 'generated remote brief still uses local completion'
+  assert_grep 'HEAD:refs/heads/feat/remote-generated' "$home/data/$id/brief.md" 'generated remote brief still uses local completion'
   id='remote-old'
   write_brief "$home" "$id" local-only
   printf 'Do NOT push; join the workstation queue.\n' >> "$home/data/$id/brief.md"
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode local-only --yolo off)
   assert_grep '# Current remote local-only delivery contract' "$home/data/$id/launch-brief.md" "old remote brief lacks current export overlay: $out"
   assert_grep 'supersedes earlier local-only delivery, no-push' "$home/data/$id/launch-brief.md" 'launch overlay did not supersede stale rules'
+  assert_grep 'HEAD:refs/heads/fm/remote-old' "$home/data/$id/launch-brief.md" 'a legacy brief without a branch contract lost its fm/<task-id> export branch'
   id='remote-promoted'
   write_brief "$home" "$id"
   printf 'kind=scout\nwindow=fm-%s\nworktree=/tmp/remote-scout\n' "$id" > "$home/state/$id.meta"
   out=$(FM_HOME="$home" PATH="$fakebin:$PATH" "$BASH" "$PROMOTE" "$id" --mode local-only --yolo off 2>&1) \
     || fail "remote promotion failed: $out"
-  assert_grep 'HEAD:refs/heads/fm/remote-promoted' "$home/data/$id/ship-instructions.md" 'promoted remote scout missed export DOD'
+  assert_grep 'HEAD:refs/heads/feat/remote-promoted' "$home/data/$id/ship-instructions.md" 'promoted remote scout missed export DOD'
   pass 'remote local-only generated, old launch and promoted contracts all export task branches'
 }
 if [ "${FM_TASK_DELIVERY_TEST_ONLY:-}" = remote-local ]; then

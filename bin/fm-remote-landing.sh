@@ -4,13 +4,17 @@
 #          --remote-task <remote-task> --branch <reported-branch> --head <full-sha>
 #        FM_HOME=<main-home> fm-remote-landing.sh rebase <local-task>
 #          --remote-task <remote-task> --secondmate <remote-secondmate>
+#          [--branch <remote-task-branch>]
 #
 # The main worker's existing metadata must name mode=local-only, project,
 # worktree and landing_branch. This script neither creates task metadata nor
 # changes landing rules: submit the farm from the imported worktree, then use
 # fm-landing-queue.sh ready with its receipts and fm-merge-local.sh as usual.
 # import fetches ONLY origin's reported task branch and verifies the full head
-# before updating the workstation task branch. For kind=lane, the exact
+# before updating the workstation task branch. The workstation task branch is
+# the meta's recorded branch= (bin/fm-task-branch-lib.sh), else fm/<local-task>.
+# The reported remote branch must be feat/<slug>, fix/<slug>, or the legacy
+# fm/<remote-task>; rebase names it in the conflict steer when --branch is given. For kind=lane, the exact
 # branch is resolved from its recorded Playbot workspace and worktree identity.
 # Lane mutations use the Playbot addon guard to preserve complete injected
 # addon bytes and refuse unrelated dirty product work.
@@ -38,6 +42,8 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-task-branch-lib.sh
+. "$SCRIPT_DIR/fm-task-branch-lib.sh"
 fm_lease_forbid_branch 'remote local-only import/rebase'
 die() { echo "error: $*" >&2; exit 1; }
 [ "$#" -ge 2 ] || die 'expected import|rebase and local task id (see script header)'
@@ -67,8 +73,13 @@ field() { sed -n "s/^$1=//p" "$META" | tail -1; }
 [ "$(field mode)" = local-only ] || die 'workstation task must be local-only'
 PROJ=$(field project) WT=$(field worktree) LANDING=$(field landing_branch)
 KIND=$(field kind)
-TASK_BRANCH="fm/$ID"
+TASK_BRANCH=$(fm_task_branch "$META" "$ID")
 REMOTE_BRANCH="fm/$REMOTE_TASK"
+if [ "$KIND" != lane ] && [ -n "$BRANCH" ]; then
+  case "$BRANCH" in
+    feat/*|fix/*) fm_task_branch_value_valid "$BRANCH" || die 'reported branch is not feat/<slug> or fix/<slug>'; REMOTE_BRANCH=$BRANCH ;;
+  esac
+fi
 PLAYBOT_TOOL=${FM_PLAYBOT_LANES_TOOL:-$SCRIPT_DIR/fm-playbot-lanes.mjs}
 if [ "$KIND" = lane ]; then
   TASK_BRANCH=$(node --no-warnings "$PLAYBOT_TOOL" lane-task-branch "$META") || die 'recorded Playbot lane branch unavailable'
@@ -86,7 +97,7 @@ WT_COMMON=$(cd "$WT" && cd "$WT_COMMON" && pwd -P)
 git check-ref-format "refs/heads/$LANDING" >/dev/null || die 'invalid landing branch'
 git check-ref-format "refs/heads/$TASK_BRANCH" >/dev/null || die 'invalid task branch'
 git -C "$PROJ" rev-parse --verify "refs/heads/$LANDING^{commit}" >/dev/null || die 'landing branch missing'
-[ "$LANDING" != "$TASK_BRANCH" ] && [ "$LANDING" != "fm/$REMOTE_TASK" ] || die 'task branch equals landing branch'
+[ "$LANDING" != "$TASK_BRANCH" ] && [ "$LANDING" != "$REMOTE_BRANCH" ] || die 'task branch equals landing branch'
 if [ "$KIND" != lane ]; then
   [ -z "$(git -C "$WT" status --porcelain)" ] || die 'dirty workstation copy; preserve and reconcile its work'
 fi
@@ -100,7 +111,7 @@ if [ "$ACTION" = import ]; then
   if [ "$KIND" = lane ]; then
     [ "$BRANCH" = "$TASK_BRANCH" ] || die 'report branch differs from recorded Playbot workspace branch'
   else
-    [ "$BRANCH" = "fm/$REMOTE_TASK" ] || die 'report must name exactly fm/<remote-task>'
+    [ "$BRANCH" = "$REMOTE_BRANCH" ] || die 'report must name exactly feat/<slug>, fix/<slug>, or fm/<remote-task>'
   fi
   git check-ref-format "refs/heads/$BRANCH" >/dev/null || die 'invalid reported branch'
   case "$HEAD" in ''|*[!0-9a-f]*) die 'report needs a full lowercase SHA' ;; esac
@@ -146,11 +157,13 @@ else
     "$SCRIPT_DIR/fm-landing-queue.sh" ready "$ID" --project "$PROJ" --landing-branch "$LANDING" \
       --branch "$TASK_BRANCH" --head "$(git -C "$WT" rev-parse HEAD)" --target "$TARGET"
   else
+    REMOTE_BRANCH_DESC=$REMOTE_BRANCH
+    [ "$KIND" = lane ] || [ -n "$BRANCH" ] || REMOTE_BRANCH_DESC='its task branch'
     TARGET_BRANCH="fm/$ID-landing-target"
     [ "$LANDING" != "$TARGET_BRANCH" ] || die 'target transport ref equals landing branch'
     git -C "$WT" push origin "$TARGET:refs/heads/$TARGET_BRANCH" || die 'target publication failed; retry conflict handoff'
     "$SCRIPT_DIR/fm-send.sh" "$SECONDMATE" \
-      "Remote landing conflict: steer worker $REMOTE_TASK to fetch origin refs/heads/$TARGET_BRANCH, verify target $TARGET, resolve ${REMOTE_BRANCH} onto that target, then push only its task branch and report its new full head SHA. Workstation task=$ID; landing=$LANDING."
+      "Remote landing conflict: steer worker $REMOTE_TASK to fetch origin refs/heads/$TARGET_BRANCH, verify target $TARGET, resolve ${REMOTE_BRANCH_DESC} onto that target, then push only its task branch and report its new full head SHA. Workstation task=$ID; landing=$LANDING."
     echo "conflict: remote_task=$REMOTE_TASK target=$TARGET ref=$TARGET_BRANCH" >&2
     exit 3
   fi

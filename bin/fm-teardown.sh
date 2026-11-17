@@ -332,6 +332,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-task-branch-lib.sh
+. "$SCRIPT_DIR/fm-task-branch-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -2829,7 +2831,7 @@ require_reconcilable_slot_collision() {
       fi
       ;;
     *)
-      branch="fm/$ID"
+      branch=$(fm_task_branch "$META" "$ID")
       slot_branch=$(git -C "$slot" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
       if [ "$slot_branch" = "$branch" ]; then
         echo "REFUSED: $slot is still checked out on task $ID's own branch $branch, which contradicts its claim naming task $FM_TREEHOUSE_SLOT_OWNER_ID." >&2

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # task's recorded landing branch, or the project's default branch when none is
-# recorded, to the crewmate's fm/<id> branch or a lane's recorded or live branch.
+# recorded, to the crewmate's own task branch (its recorded branch=, else the legacy fm/<id>) or a lane's recorded or live branch.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -52,6 +52,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-landing-health-lib.sh
 . "$SCRIPT_DIR/fm-landing-health-lib.sh"
+# shellcheck source=bin/fm-task-branch-lib.sh
+. "$SCRIPT_DIR/fm-task-branch-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
@@ -157,7 +159,7 @@ if [ "$KIND" = lane ]; then
   fi
   git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: lane task $ID worktree $WORKTREE branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 else
-  BRANCH="fm/$ID"
+  BRANCH=$(fm_task_branch "$META" "$ID")
   git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 fi
 

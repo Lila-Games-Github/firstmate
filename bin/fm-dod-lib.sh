@@ -5,12 +5,15 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [landing-branch] [priority] prints
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [landing-branch] [priority] [task-branch] prints
 # the block on stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract. A
 # [priority] of "infra" (or the legacy "1") or "unblock" (local-only only) tells
 # the worker to join the landing queue with that `--priority`; omitted or "0"
 # keeps the ordinary join command unchanged.
+# [task-branch] is the worker's own branch chosen by bin/fm-task-branch-lib.sh
+# (feat/<slug> or fix/<slug>); omitted means the legacy fm/<task-id>. The same
+# optional trailing argument names it for fm_ship_rule_one and fm_remote_local_dod.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -134,8 +137,8 @@ fm_remote_local_landing() {
 
 # Also appended at launch so old/custom briefs and relaunches cannot retain the
 # workstation-only no-push/queue contract in a remote provisioned home.
-fm_remote_local_dod() { # <task-id> [lane]
-  local id=$1 kind=${2:-ship}
+fm_remote_local_dod() { # <task-id> [ship|lane] [task-branch]
+  local id=$1 kind=${2:-ship} branch=${3:-fm/$1}
   if [ "$kind" = lane ]; then
     cat <<'EOF'
 # Current remote local-only delivery contract
@@ -154,26 +157,26 @@ EOF
 # Current remote local-only delivery contract
 Delivery contract: mode=local-only
 This section supersedes earlier local-only delivery, no-push and landing-queue instructions in this brief.
-Commit your work on \`fm/$id\`, push only that task branch to origin with \`git push origin HEAD:refs/heads/fm/$id\`, and verify \`git ls-remote origin refs/heads/fm/$id\` equals your full HEAD SHA.
+Commit your work on \`$branch\`, push only that task branch to origin with \`git push origin HEAD:refs/heads/$branch\`, and verify \`git ls-remote origin refs/heads/$branch\` equals your full HEAD SHA.
 Never push a landing branch or the default branch, open a PR, merge, run the workstation farm, or join a landing queue from this remote home.
-Report \`done: remote branch=fm/$id head=<full HEAD SHA>\` to your secondmate and stop.
+Report \`done: remote branch=$branch head=<full HEAD SHA>\` to your secondmate and stop.
 The main home imports that report into its workstation landing worker, which owns farm submission, receipts, front-of-line rebases and landing under the existing merge authority.
 On a conflict steer, fetch the supplied target branch, verify its full target SHA, resolve your task branch against that target, then push and report the new head; a rewritten task branch may use \`--force-with-lease\` only for its previously reported remote head.
 EOF
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
-  local mode=$1 id=$2
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [task-branch]
+  local mode=$1 branch=${3:-fm/$2}
   case "$mode" in
     direct-PR)
-      printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR."
+      printf '%s\n' "1. Never push to the default branch (push only your \`$branch\` branch). Never merge a PR."
       ;;
     local-only)
       if fm_remote_local_landing; then
-        printf '%s\n' "1. Push only your task branch \`fm/$id\` to origin; never push a landing branch or open or merge a PR."
+        printf '%s\n' "1. Push only your task branch \`$branch\` to origin; never push a landing branch or open or merge a PR."
         return 0
       fi
-      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
+      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)."
       ;;
     no-mistakes)
       printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
@@ -456,8 +459,8 @@ landing_queue() {
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [landing-branch] [priority]
-  local mode=$1 id=$2 landing_branch=${3:-} priority=${4:-0} meta_file
+fm_dod_block() {  # <mode> <task-id> [landing-branch] [priority] [task-branch]
+  local mode=$1 id=$2 landing_branch=${3:-} priority=${4:-0} branch=${5:-fm/$2} meta_file
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -476,7 +479,7 @@ EOF
     local-only)
       if fm_remote_local_landing; then
         printf '%s\n' '# Definition of done'
-        fm_remote_local_dod "$id"
+        fm_remote_local_dod "$id" ship "$branch"
         return
       fi
       meta_file=$(fm_dod_quote "${STATE:-${FM_STATE_OVERRIDE:-${FM_HOME:-.}/state}}/$id.meta")
@@ -484,7 +487,7 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
-The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto your recorded landing branch - the \`landing_branch=\` firstmate recorded for this task in \`$meta_file\` (contract: bin/fm-spawn.sh's header), falling back to the default branch only when none is recorded.
 Use the queue's current assigned target below when rebasing.
 When it is implemented and committed, follow the self-service landing train below through landing.

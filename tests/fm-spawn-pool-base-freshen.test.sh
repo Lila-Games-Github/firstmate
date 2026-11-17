@@ -750,6 +750,53 @@ test_direct_pr_and_scout_refresh_before_launch() {
   pass "direct-PR ships and scouts both refresh stale pooled worktrees before launch"
 }
 
+# A brief's "Branch contract:" line (bin/fm-task-branch-lib.sh) becomes the
+# task's recorded branch=, a branch that already exists is refused before any
+# worker starts, and a legacy brief without the line records no branch=.
+test_brief_branch_contract_is_recorded_in_meta() {
+  local rec id out status
+  id='pool-branch-contract-r19'
+  rec=$(make_case branch-contract "$id")
+  read_case_record "$rec"
+  printf 'Branch contract: branch=fix/pool-branch-contract\n' >> "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "a spawn of a brief with a branch contract should launch"$'\n'"$out"
+  assert_grep 'branch=fix/pool-branch-contract' "$HOME_DIR/state/$id.meta" \
+    "the spawn did not record the brief's branch contract as branch="
+
+  id='pool-branch-taken-r20'
+  rec=$(make_case branch-taken "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch feat/already-here "$INITIAL_SHA"
+  printf 'Branch contract: branch=feat/already-here\n' >> "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn launched onto a task branch that already exists"$'\n'"$out"
+  assert_contains "$out" "task branch feat/already-here already exists" \
+    "the existing-branch refusal did not name the branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused spawn published a task record"
+
+  id='pool-branch-bad-r21'
+  rec=$(make_case branch-bad "$id")
+  read_case_record "$rec"
+  printf 'Branch contract: branch=FM/Not_Kebab\n' >> "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn accepted an invalid branch contract"$'\n'"$out"
+  assert_contains "$out" "invalid branch contract" "the invalid contract refusal did not say why"
+
+  id='pool-branch-legacy-r22'
+  rec=$(make_case branch-legacy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "a legacy brief without a branch contract should still launch"$'\n'"$out"
+  ! grep -q '^branch=' "$HOME_DIR/state/$id.meta" \
+    || fail "a legacy brief recorded a branch= the worker was never told about"
+  pass "a brief's branch contract is recorded as branch=, an existing or invalid branch refuses, and a legacy brief records none"
+}
+
 test_dirty_pool_refuses_without_discarding_work() {
   local rec id out status before
   id='pool-dirty-refusal-r4'
@@ -1224,5 +1271,6 @@ test_stale_pin_beside_other_dirt_reports_one_verdict
 test_green_final_head_requires_current_clean_base_receipt
 test_open_question_dependencies_refuse_dispatch
 test_registry_declared_register_requires_section_at_dispatch
+test_brief_branch_contract_is_recorded_in_meta
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

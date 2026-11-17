@@ -1144,7 +1144,7 @@ test_spawn_relaunch_carries_the_dispatch_preflight_record_without_reprobing() {
 }
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
-  local dir home id brief launch out mode rule
+  local dir home id brief launch out mode rule slug
   for mode in no-mistakes direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
@@ -1186,17 +1186,18 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       "$mode: the replacement launch did not receive the promoted task identity"
     assert_grep 'Any earlier "Never push" or scout-only delivery language in this file is superseded' "$launch" \
       "$mode: the replacement launch left the stale scout prohibition readable at face value"
+    slug=$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')
     case "$mode" in
       direct-PR)
-        rule="1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR." ;;
+        rule="1. Never push to the default branch (push only your \`feat/$slug\` branch). Never merge a PR." ;;
       local-only)
-        rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)." ;;
+        rule="1. Never push to any remote and never open a PR. Work only on your \`feat/$slug\` branch; firstmate handles the merge into your recorded landing branch (the default branch when none is recorded)." ;;
       *)
         rule='1. Never push to the default branch. Never merge a PR.' ;;
     esac
     assert_grep "$rule" "$launch" \
       "$mode: the replacement launch did not receive the current ship push and merge safety rule"
-    assert_grep "git checkout -b fm/$id" "$launch" \
+    assert_grep "git checkout -b feat/$slug" "$launch" \
       "$mode: the replacement launch did not receive its promoted branch name"
     assert_grep 'Inventory this worktree' "$launch" \
       "$mode: the replacement launch did not receive the scratch-state inventory step"

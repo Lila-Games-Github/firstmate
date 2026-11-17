@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--green-final-head] [--test-infra|--unblock] [--open-questions <register>] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab] [--template <file-or-name> [--set NAME=value|--set-file NAME=path]...] [--no-template <reason>]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--kind feat|fix] [--branch-name <slug>] [--green-final-head] [--test-infra|--unblock] [--open-questions <register>] [--lane --landing-branch <branch> [--lane-branch <branch>]] [--herdr-lab] [--template <file-or-name> [--set NAME=value|--set-file NAME=path]...] [--no-template <reason>]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   Private project templates live at data/brief-templates/<registry-project-name>/<name>.md.
@@ -96,6 +96,14 @@
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# --kind feat|fix and --branch-name <slug> choose a crewmate ship task's own
+# branch: feat/<slug> for a feature, fix/<slug> for a bug fix. --kind defaults to
+# feat when omitted (existing callers keep working), so pass --kind fix for a bug
+# fix. --branch-name defaults to the task id without a leading fm- or
+# <repo-name>- prefix. bin/fm-task-branch-lib.sh owns the naming rules. The brief
+# records the result as the fixed machine-readable "Branch contract: branch=<branch>"
+# line, which bin/fm-spawn.sh copies into the task's meta as branch=. Both flags
+# are refused on scout, secondmate and --lane scaffolds, whose branch is not chosen here.
 # Ship briefs carry `Execution contract: workspace=lane|crewmate`; fm-spawn
 # refuses lane briefs, and Playbot dispatch refuses marked crewmate briefs.
 # --lane writes the same ship contract for a Playbot lane. A lane brief is designed
@@ -104,7 +112,7 @@
 # every lane-specific instruction firstmate used to send by hand is generated here.
 # Three differences from a crewmate brief carry that:
 #   1. Branch. A lane's workspace already owns its branch, so every crewmate
-#      `fm/<task-id>` instruction - the setup step, rule 1, the definition of done,
+#      task-branch instruction (feat/<slug> or fix/<slug>) - the setup step, rule 1, the definition of done,
 #      and the ready status line - becomes "verify and stay on the workspace's own
 #      branch, and create or switch none".
 #   2. Base. firstmate creates a crewmate's worktree from the recorded landing
@@ -195,6 +203,8 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-task-branch-lib.sh
+. "$SCRIPT_DIR/fm-task-branch-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
 
@@ -278,6 +288,10 @@ LANE_BRANCH=
 LANE_BRANCH_SET=0
 LANDING_BRANCH=
 LANDING_BRANCH_SET=0
+BRANCH_KIND=feat
+BRANCH_KIND_SET=0
+BRANCH_NAME=
+BRANCH_NAME_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -290,6 +304,8 @@ for a in "$@"; do
       open-questions) OPEN_QUESTIONS=$a; OPEN_QUESTIONS_SET=1 ;;
       lane-branch) LANE_BRANCH=$a; LANE_BRANCH_SET=1 ;;
       landing-branch) LANDING_BRANCH=$a; LANDING_BRANCH_SET=1 ;;
+      kind) BRANCH_KIND=$a; BRANCH_KIND_SET=1 ;;
+      branch-name) BRANCH_NAME=$a; BRANCH_NAME_SET=1 ;;
       template) TEMPLATE=$a; TEMPLATE_SET=1 ;;
       no-template) NO_TEMPLATE=$a; NO_TEMPLATE_SET=1 ;;
       set) TEMPLATE_VALUES+=("$a") ;;
@@ -316,6 +332,10 @@ for a in "$@"; do
     --lane-branch=*) LANE_BRANCH=${a#--lane-branch=}; LANE_BRANCH_SET=1 ;;
     --landing-branch) want_value='landing-branch' ;;
     --landing-branch=*) LANDING_BRANCH=${a#--landing-branch=}; LANDING_BRANCH_SET=1 ;;
+    --kind) want_value=kind ;;
+    --kind=*) BRANCH_KIND=${a#--kind=}; BRANCH_KIND_SET=1 ;;
+    --branch-name) want_value='branch-name' ;;
+    --branch-name=*) BRANCH_NAME=${a#--branch-name=}; BRANCH_NAME_SET=1 ;;
     --template) want_value=template ;;
     --template=*) TEMPLATE=${a#--template=}; TEMPLATE_SET=1 ;;
     --no-template) want_value=no-template ;;
@@ -472,7 +492,7 @@ if [ "$LANE" -eq 1 ] && [ "$KIND" != ship ]; then
 fi
 if [ "$LANE_BRANCH_SET" -eq 1 ]; then
   [ "$LANE" -eq 1 ] || {
-    echo "error: --lane-branch requires --lane; a non-lane brief works on its own fm/<task-id> branch" >&2
+    echo "error: --lane-branch requires --lane; a non-lane brief works on its own feat/<slug> or fix/<slug> branch (--kind, --branch-name)" >&2
     exit 1
   }
   [ -n "$LANE_BRANCH" ] || { echo "error: --lane-branch requires a value" >&2; exit 1; }
@@ -485,6 +505,17 @@ if [ "$LANDING_BRANCH_SET" -eq 1 ]; then
   }
   [ -n "$LANDING_BRANCH" ] || { echo "error: --landing-branch requires a value" >&2; exit 1; }
   reject_unsafe_branch_value --landing-branch "$LANDING_BRANCH" || exit 1
+fi
+if [ "$BRANCH_KIND_SET" -eq 1 ] || [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  [ "$KIND" = ship ] && [ "$LANE" -eq 0 ] || {
+    echo "error: --kind and --branch-name apply only to crewmate ship briefs; a scout creates no branch, a secondmate charter is not a task, and a lane works on the branch its workspace owns" >&2
+    exit 1
+  }
+fi
+TASK_BRANCH=
+if [ "$KIND" = ship ] && [ "$LANE" -eq 0 ]; then
+  [ "$BRANCH_NAME_SET" -eq 1 ] || BRANCH_NAME=$(fm_task_branch_default_slug "${POS[0]:-}" "${POS[1]:-}")
+  TASK_BRANCH=$(fm_task_branch_compose "$BRANCH_KIND" "$BRANCH_NAME") || exit 1
 fi
 # The base check is the first thing a lane brief tells its worker to do, and it
 # cannot be written without the branch it compares against, so a lane brief that
@@ -876,7 +907,7 @@ EOF
   SETUP1=${SETUP1%$'\n'}
 else
   SETUP_PREAMBLE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of your task's base branch (its recorded landing branch, else the default branch)."
-  SETUP1="1. First action: create your branch: \`git checkout -b fm/$ID\`"
+  SETUP1="1. First action: create your branch: \`git checkout -b $TASK_BRANCH\`"
 fi
 
 # Ship task: shape Setup / Rule 1 by this task's explicit delivery mode, validated
@@ -896,13 +927,13 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
+RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$TASK_BRANCH") || exit 1
 # Ordinary briefs may precede metadata creation; spawn's overlay supplies the
 # final recorded target even for a custom/older brief (bin/fm-dod-lib.sh).
 if [ "$LANE" -eq 0 ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; }; then
   LANDING_BRANCH=$(fm_meta_get "$STATE/$ID.meta" landing_branch)
 fi
-DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH" "$QUEUE_PRIORITY") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH" "$QUEUE_PRIORITY" "$TASK_BRANCH") || exit 1
 if [ "$LANE" -eq 1 ] && [ "$MODE" = local-only ] && fm_remote_local_landing; then
   DOD=$(fm_remote_local_dod "$ID" lane) || exit 1
 fi
@@ -921,7 +952,7 @@ DOD_DEFAULT_KEEP="Keep your branch a clean fast-forward onto your recorded landi
 DOD_DEFAULT_MERGE="The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path."
 
 if [ "$LANE" -eq 1 ]; then
-  # A lane workspace owns its branch, so every `fm/<id>` instruction is
+  # A lane workspace owns its branch, so every crewmate task-branch instruction is
   # superseded. A PR-shipping lane must also target the landing branch, because a
   # PR opened without it goes to the repository default branch this lane must not
   # touch. The shared DOD target contracts handle both PR modes; the publication
@@ -998,6 +1029,9 @@ fi
 
 WORKSPACE_KIND=crewmate
 [ "$LANE" -eq 0 ] || WORKSPACE_KIND=lane
+BRANCH_CONTRACT_LINE=
+[ -z "$TASK_BRANCH" ] || BRANCH_CONTRACT_LINE="
+$FM_TASK_BRANCH_CONTRACT_PREFIX$TASK_BRANCH"
 TEST_SERVICE_GUIDANCE=
 TEST_SERVICE_PROJECT=$(FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-test-service.py" project-for-repo "$REPO" 2>/dev/null) || TEST_SERVICE_PROJECT=
 if [ -n "$TEST_SERVICE_PROJECT" ]; then
@@ -1068,7 +1102,7 @@ Each line above names a register question this work depends on and how it stands
 fi
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
-Execution contract: workspace=$WORKSPACE_KIND
+Execution contract: workspace=$WORKSPACE_KIND$BRANCH_CONTRACT_LINE
 
 $TASK_SECTION
 For a data-driven or tooling deliverable, the task specification must name the authoritative input and expected source counts; follow the evidence gate in the Definition of done below.
