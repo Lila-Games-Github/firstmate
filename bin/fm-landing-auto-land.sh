@@ -2,9 +2,10 @@
 # Settle verified speculative front cars from the watcher's poll without an agent turn.
 # Usage: FM_HOME=<home> fm-landing-auto-land.sh
 # The queue's status is rechecked before each guarded candidate merge. Only a
-# registered local-only +yolo project qualifies. ProjectWhite/prototype-game's
-# existing published landing path is pushed fast-forward after a local landing;
-# other local-only projects stay local. A pending push record survives a failed
+# registered local-only +yolo project qualifies. frogpile's (Lila-Games-Github/frogpile
+# main) published landing path is pushed fast-forward after a local landing;
+# other local-only projects stay local. The registry entry is found by clone
+# path, since a clone's basename need not equal its registry name. A pending push record survives a failed
 # publication and is retried without repeating the merge.
 set -eu
 
@@ -31,16 +32,24 @@ for queue in "$DATA"/landing-queue/*/queue; do
   primary=$(cd "$primary" && pwd -P) || continue
   git -C "$primary" check-ref-format "refs/heads/$landing" >/dev/null 2>&1 \
     || fail "invalid landing branch in $queue"
-  name=${primary##*/}
+  # Resolve the registry entry by its clone path: the clone's basename need not
+  # equal the registry name (frogpile lives at LILA/frogpile-godot).
+  name=
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    cand_path=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --path "$cand" 2>/dev/null) || continue
+    [ -d "$cand_path" ] || continue
+    cand_path=$(cd "$cand_path" && pwd -P) || continue
+    if [ "$cand_path" = "$primary" ]; then name=$cand; break; fi
+  done <<EOF_NAMES
+$(awk '$1=="-" && $2!="" {print $2}' "$DATA/projects.md" 2>/dev/null)
+EOF_NAMES
+  [ -n "$name" ] || continue
   registered=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$name" 2>/dev/null) || continue
   [ "$registered" = 'local-only on' ] || continue
-  registered_path=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --path "$name" 2>/dev/null) || continue
-  [ -d "$registered_path" ] || continue
-  registered_path=$(cd "$registered_path" && pwd -P) || continue
-  [ "$registered_path" = "$primary" ] || continue
 
   publish=0
-  case "$name" in ProjectWhite|prototype-game) publish=1 ;; esac
+  case "$name" in frogpile) publish=1 ;; esac
   for pending in "$dir"/pending-push-*; do
     [ -e "$pending" ] || continue
     [ -f "$pending" ] && [ ! -L "$pending" ] || fail "invalid pending push record $pending"
