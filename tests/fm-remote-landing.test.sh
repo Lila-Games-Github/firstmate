@@ -58,6 +58,29 @@ git -C "$PROJ" worktree add -qb fm/landing "$TMP_ROOT/final-worker" main
 "$BASH" "$ROOT/bin/fm-remote-landing.sh" import landing --remote-task remote-task --branch fm/remote-task --head "$HEAD_SHA" > "$TMP_ROOT/final.out" 2>&1
 pass 'unpublished workstation commits are retained when a report diverges'
 
+# New task branches are feat/<slug> or fix/<slug>: the workstation side uses its
+# recorded branch=, the remote side reports its own feat/ branch, and a branch
+# outside the task-branch forms is refused before anything is fetched.
+git -C "$REMOTE" checkout -qb feat/remote-feature "$HEAD_SHA"
+git -C "$REMOTE" push -q origin HEAD:refs/heads/feat/remote-feature
+git -C "$REMOTE" push -q origin HEAD:refs/heads/scratch/remote-feature
+git -C "$PROJ" worktree add -qb feat/workstation-feature "$TMP_ROOT/feat-worker" main
+fm_write_meta "$HOME_CASE/state/feat-task.meta" "project=$PROJ" "worktree=$TMP_ROOT/feat-worker" \
+  'kind=ship' 'mode=local-only' 'landing_branch=main' 'branch=feat/workstation-feature'
+if "$BASH" "$ROOT/bin/fm-remote-landing.sh" import feat-task --remote-task remote-feature \
+  --branch scratch/remote-feature --head "$HEAD_SHA" > "$TMP_ROOT/feat-bad.out" 2>&1; then
+  fail 'a non-task remote branch was imported'
+fi
+assert_grep 'report must name exactly' "$TMP_ROOT/feat-bad.out" 'non-task branch refusal did not explain itself'
+"$BASH" "$ROOT/bin/fm-remote-landing.sh" import feat-task --remote-task remote-feature \
+  --branch feat/remote-feature --head "$HEAD_SHA" > "$TMP_ROOT/feat.out" 2>&1 \
+  || fail "feat/ import failed: $(cat "$TMP_ROOT/feat.out")"
+[ "$(git -C "$PROJ" rev-parse refs/heads/feat/workstation-feature)" = "$HEAD_SHA" ] \
+  || fail 'feat/ import did not update the recorded workstation branch'
+git -C "$PROJ" rev-parse --verify --quiet refs/heads/fm/feat-task >/dev/null \
+  && fail 'feat/ import created a legacy fm/<task> branch'
+pass 'a reported feat/ branch imports into the recorded feat/ workstation branch, and a non-task branch is refused'
+
 # A Playbot lane records a workspace-owned branch rather than an fm/ task ref.
 LANE="$TMP_ROOT/lane"
 git clone -q "$TMP_ROOT/origin.git" "$LANE"

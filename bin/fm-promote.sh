@@ -7,7 +7,7 @@
 # data/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
 # that delivers it to the current worker. Those instructions carry the
 # scratch-state inventory, the clean
-# base (the recorded landing branch when set, else the default branch), the fm/<task-id> branch, and - rendered from
+# base (the recorded landing branch when set, else the default branch), the task's own branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
@@ -29,7 +29,12 @@
 # same owner fm-spawn.sh uses, against the meta's recorded project clone. The
 # promoted contract and every later relaunch then carry that landing target;
 # without the flag the task keeps default-branch behavior.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>]
+# Promotion also chooses the ship branch and records it as branch= in the meta:
+# --kind feat|fix (default feat) and --branch-name <slug> (default: the task id
+# without a leading fm- or <project>- prefix), with bin/fm-task-branch-lib.sh
+# owning the naming rules and bin/fm-spawn.sh's header the meta field. A branch
+# that already exists in the recorded project clone is refused.
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>] [--kind feat|fix] [--branch-name <slug>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,6 +47,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-task-branch-lib.sh
+. "$SCRIPT_DIR/fm-task-branch-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -63,6 +70,9 @@ MODE_SET=0
 YOLO_SET=0
 LANDING_BRANCH=
 LANDING_SET=0
+BRANCH_KIND=feat
+BRANCH_NAME=
+BRANCH_NAME_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -74,6 +84,8 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       landing-branch) LANDING_BRANCH=$a; LANDING_SET=1 ;;
+      kind) BRANCH_KIND=$a ;;
+      branch-name) BRANCH_NAME=$a; BRANCH_NAME_SET=1 ;;
     esac
     want_value=
     continue
@@ -85,11 +97,15 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --landing-branch) want_value='landing-branch' ;;
     --landing-branch=*) LANDING_BRANCH=${a#--landing-branch=}; LANDING_SET=1 ;;
+    --kind) want_value=kind ;;
+    --kind=*) BRANCH_KIND=${a#--kind=} ;;
+    --branch-name) want_value='branch-name' ;;
+    --branch-name=*) BRANCH_NAME=${a#--branch-name=}; BRANCH_NAME_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
-[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>]" >&2; exit 1; }
+[ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--landing-branch <branch>] [--kind feat|fix] [--branch-name <slug>]" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
   exit 1
@@ -175,6 +191,14 @@ if [ "$LANDING_SET" -eq 1 ]; then
 else
   LANDING_BRANCH=$(fm_meta_get "$META" landing_branch)
 fi
+PROMOTE_PROJ=$(fm_meta_get "$META" project)
+[ "$BRANCH_NAME_SET" -eq 1 ] || BRANCH_NAME=$(fm_task_branch_default_slug "$ID" "$(basename "${PROMOTE_PROJ:-}")")
+TASK_BRANCH=$(fm_task_branch_compose "$BRANCH_KIND" "$BRANCH_NAME") || exit 1
+if [ -n "$PROMOTE_PROJ" ] && [ -d "$PROMOTE_PROJ" ] &&
+  git -C "$PROMOTE_PROJ" show-ref --verify --quiet "refs/heads/$TASK_BRANCH"; then
+  echo "error: task branch $TASK_BRANCH already exists in $PROMOTE_PROJ; pass a distinct --branch-name" >&2
+  exit 1
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -210,16 +234,16 @@ PROMOTION_ASK_USER_BLOCK=
 if [ "$MODE" = no-mistakes ]; then
   PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
 fi
-PROMOTION_BASE_STEP="3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`."
+PROMOTION_BASE_STEP="3. Return to a clean default-branch base, then create your branch: \`git checkout -b $TASK_BRANCH\`."
 if [ -n "$LANDING_BRANCH" ]; then
   printf -v LANDING_Q '%q' "$LANDING_BRANCH"
   printf -v LANDING_REFSPEC_Q '%q' "+refs/heads/$LANDING_BRANCH:refs/remotes/origin/$LANDING_BRANCH"
   printf -v LANDING_ORIGIN_Q '%q' "origin/$LANDING_BRANCH"
-  PROMOTION_BASE_STEP="3. Return to a clean base on this task's recorded landing branch \`$LANDING_BRANCH\`, not the default branch, resolved the way a ship spawn resolves its base: run \`git fetch origin $LANDING_REFSPEC_Q\` and, when origin has that branch, create your branch from its fetched tip with \`git checkout -b fm/$ID $LANDING_ORIGIN_Q\`; only when origin has no such branch, use the local branch instead with \`git checkout -b fm/$ID $LANDING_Q\`. Never fall back to the default branch.
+  PROMOTION_BASE_STEP="3. Return to a clean base on this task's recorded landing branch \`$LANDING_BRANCH\`, not the default branch, resolved the way a ship spawn resolves its base: run \`git fetch origin $LANDING_REFSPEC_Q\` and, when origin has that branch, create your branch from its fetched tip with \`git checkout -b $TASK_BRANCH $LANDING_ORIGIN_Q\`; only when origin has no such branch, use the local branch instead with \`git checkout -b $TASK_BRANCH $LANDING_Q\`. Never fall back to the default branch.
    Follow the current delivery contract below when the landing branch advances."
 fi
 IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
-If these promotion steps were already completed before a relaunch, preserve the existing \`fm/$ID\` branch and continue from its current state; do not repeat them destructively.
+If these promotion steps were already completed before a relaunch, preserve the existing \`$TASK_BRANCH\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
 $PROMOTION_BASE_STEP
@@ -239,7 +263,7 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
-  fm_ship_rule_one "$MODE" "$ID"
+  fm_ship_rule_one "$MODE" "$ID" "$TASK_BRANCH"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
@@ -249,7 +273,7 @@ EOF
   # snapshot contract an ordinary brief carries (bin/fm-dod-lib.sh owns it).
   fm_long_suite_block
   printf '\n'
-  fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH"
+  fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH" 0 "$TASK_BRANCH"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
@@ -302,9 +326,10 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^landing_branch=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^landing_branch=' -e '^branch=' "$META" > "$TMP"
 {
   echo "kind=ship"
+  echo "branch=$TASK_BRANCH"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   [ -z "$LANDING_BRANCH" ] || echo "landing_branch=$LANDING_BRANCH"

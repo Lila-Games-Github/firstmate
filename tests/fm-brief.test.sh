@@ -1494,7 +1494,7 @@ test_non_lane_ship_briefs_carry_no_lane_vocabulary() {
     brief="$home/data/boundary-$mode/brief.md"
     assert_grep "Delivery contract: mode=$mode" "$brief" \
       "$mode: non-lane brief lost its delivery contract line"
-    assert_grep "git checkout -b fm/boundary-$mode" "$brief" \
+    assert_grep "git checkout -b feat/boundary-$(printf %s "$mode" | tr "[:upper:]" "[:lower:]")" "$brief" \
       "$mode: non-lane brief lost the crewmate branch convention"
     for lane_marker in "## Lane overrides" "Playbot lane workspace" \
       "fm-lane-base-check.sh" "never create or switch branches" \
@@ -1505,6 +1505,46 @@ test_non_lane_ship_briefs_carry_no_lane_vocabulary() {
     done
   done
   pass "fm-brief.sh: non-lane ship briefs keep the crewmate convention and no lane vocabulary"
+}
+
+# A crewmate ship task works on feat/<slug> or fix/<slug>, never fm/<task-id>
+# (bin/fm-task-branch-lib.sh owns the naming). The brief names that one branch
+# in its setup step, rule 1, the definition of done, and the machine-readable
+# "Branch contract:" line bin/fm-spawn.sh records as branch=.
+test_ship_briefs_name_a_feat_or_fix_branch() {
+  local home brief out rc
+  home="$TMP_ROOT/task-branch"
+  mkdir -p "$home/data"
+  run() { FM_HOME="$home" FM_ROOT_OVERRIDE=/FM_ROOT "$ROOT/bin/fm-brief.sh" "$@"; }
+
+  run fm-default-kind frogpile --mode direct-PR >/dev/null 2>&1 || fail "default-kind brief should scaffold"
+  brief="$home/data/fm-default-kind/brief.md"
+  assert_grep "Branch contract: branch=feat/default-kind" "$brief" "omitted --kind did not default to feat with the fm- prefix removed"
+  assert_grep "git checkout -b feat/default-kind" "$brief" "setup step does not create the feat/ branch"
+  assert_grep "push only your \`feat/default-kind\` branch" "$brief" "rule 1 does not name the feat/ branch"
+  assert_no_grep "fm/fm-default-kind" "$brief" "the brief still names the legacy fm/<task-id> branch"
+
+  run frogpile-crash-on-load frogpile --mode local-only --kind fix >/dev/null 2>&1 || fail "fix brief should scaffold"
+  brief="$home/data/frogpile-crash-on-load/brief.md"
+  assert_grep "Branch contract: branch=fix/crash-on-load" "$brief" "--kind fix did not name fix/<slug> without the project prefix"
+  assert_grep "committed on your branch \`fix/crash-on-load\`" "$brief" "local-only definition of done does not name the fix/ branch"
+
+  run task-named frogpile --mode no-mistakes --kind=feat --branch-name=shop-layout >/dev/null 2>&1 || fail "named brief should scaffold"
+  assert_grep "Branch contract: branch=feat/shop-layout" "$home/data/task-named/brief.md" "--branch-name did not set the slug"
+
+  for bad in "--kind bug" "--kind FEAT" "--branch-name Bad_Name" "--branch-name -lead" "--branch-name a--b" "--branch-name feat/x"; do
+    # shellcheck disable=SC2086  # each fixture is a flag and its value
+    out=$(run bad-branch frogpile --mode direct-PR $bad 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "fm-brief accepted the bad branch input: $bad"
+    [ ! -e "$home/data/bad-branch/brief.md" ] || fail "a refused branch input still wrote a brief: $bad"
+    case "$out" in *"error:"*) ;; *) fail "refusal for $bad gave no reason: $out" ;; esac
+  done
+  for refused in "--scout --kind fix" "--mode direct-PR --lane --landing-branch main --branch-name x"; do
+    # shellcheck disable=SC2086  # each fixture is a set of flags
+    run refused-kind frogpile $refused >/dev/null 2>&1 && fail "fm-brief accepted branch flags on: $refused"
+  done
+  pass "fm-brief.sh: ship briefs name one feat/ or fix/ branch everywhere, defaulting to feat, and refuse bad names"
 }
 
 # Every ship and scout brief tells the worker to report its own phase for the
@@ -2102,4 +2142,5 @@ test_lane_without_a_branch_name_stays_coherent
 test_lane_flag_combinations_are_refused
 test_lane_branch_values_must_be_safe_branch_names
 test_non_lane_ship_briefs_carry_no_lane_vocabulary
+test_ship_briefs_name_a_feat_or_fix_branch
 test_scout_lavish_line_follows_presentation_floor

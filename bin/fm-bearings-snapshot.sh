@@ -286,6 +286,16 @@ EOF
 $(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | .paths.worktree.path // empty')
 EOF
 
+    # A recorded branch= names its task (bin/fm-task-branch-lib.sh); a legacy
+    # fm/<task> head still maps by its suffix.
+    branch_tasks='{}'
+    snap_state=${FM_STATE_OVERRIDE:-$(printf '%s' "$SNAP" | jq -r '.fm_home // empty')/state}
+    for meta in "$snap_state"/*.meta; do
+      [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+      meta_branch=$(sed -n 's/^branch=//p' "$meta" | tail -n 1)
+      [ -n "$meta_branch" ] || continue
+      branch_tasks=$(jq -c --arg b "$meta_branch" --arg t "$(basename "$meta" .meta)" '. + {($b): $t}' <<<"$branch_tasks")
+    done
     for repo in $repos; do PR_REPOS_TOTAL=$((PR_REPOS_TOTAL + 1)); done
     nrepos=0; npr=0; nwarn=0; ncapped=0; rows='[]'
     pr_fetch_limit=$((FM_BEARINGS_PR_LIMIT + 1))
@@ -296,11 +306,11 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
+      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" --argjson branch_tasks "$branch_tasks" '
         [ .[] | {
           num:(.number|tostring),
           repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+          task:((.headRefName // "") as $h | if $branch_tasks[$h] then $branch_tasks[$h] elif ($h | startswith("fm/")) then ($h | ltrimstr("fm/")) else "-" end),
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),

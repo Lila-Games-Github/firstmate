@@ -143,13 +143,13 @@ run_consumer learning "PR 18 learning-candidate NUL enumeration" "$LEARNING_TIME
   env FM_LEARNING_TEST_ONLY=stock-bash-summary-enumeration \
   "$STOCK_BASH" "$ROOT/tests/fm-learning-candidate.test.sh"
 # The watcher poll calls fm-landing-queue-sweep.sh and fm-landing-auto-land.sh.
-merge_assertions=18
+merge_assertions=20
 if [ "${FM_SKIP_TESTFARM:-}" = 1 ]; then
   if [ "$selected" = all ] || [ "$selected" = landing ]; then
     ran_consumer=1
     echo '::notice::Skipping stock Bash landing queue farm checks: TESTFARM_READ_TOKEN is absent.'
   fi
-  merge_assertions=15
+  merge_assertions=17
 else
   run_consumer landing "landing-queue test farm resolve, watcher sweep, and front step-back" "$LANDING_TIMEOUT" 12 \
     env FM_LANDING_QUEUE_TEST_ONLY=farm \
@@ -174,8 +174,8 @@ run_consumer lane-send "lane test-service completion delivery" "$LANE_SEND_TIMEO
 # The watcher poll calls fm-farm-results.py, which delivers through fm-send.sh.
 run_consumer farm-results "watcher farm-result delivery and submit label" "$FARM_RESULTS_TIMEOUT" 7 \
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-farm-results.test.sh"
-remote_landing_assertions=13
-[ "${FM_SKIP_TESTFARM:-}" != 1 ] || remote_landing_assertions=10
+remote_landing_assertions=14
+[ "${FM_SKIP_TESTFARM:-}" != 1 ] || remote_landing_assertions=11
 run_consumer pr-wait "PR wait deadline and one-rerun observer" "$PR_WAIT_TIMEOUT" 1 \
   "$STOCK_BASH" "$ROOT/tests/fm-pr-wait.test.sh"
 run_consumer remote-landing "remote branch import and workstation landing" "$MERGE_TIMEOUT" "$remote_landing_assertions" \

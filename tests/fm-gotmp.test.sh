@@ -53,6 +53,8 @@ make_fake_root() {
   # fm-backend.sh is real, while its adapter is stubbed so this temp-cleanup
   # test cannot depend on or mutate a host tmux server.
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  # fm-task-branch-lib.sh: teardown resolves a task's own branch through it.
+  ln -s "$ROOT/bin/fm-task-branch-lib.sh" "$fake/bin/fm-task-branch-lib.sh"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
 fm_backend_tmux_kill() { return 0; }
 SH
@@ -162,6 +164,7 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-task-branch-lib.sh" "$fake/bin/fm-task-branch-lib.sh"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
 fm_backend_tmux_kill() { return 0; }
 SH

@@ -163,7 +163,7 @@ Seed that project with `--main-landing`; the [seed header](../bin/fm-remote-home
 Local secondmate seeding still refuses `local-only` projects.
 The remote project's registry keeps its `local-only` posture.
 The remote-parent binding selects the branch-publication contract owned by [fm-dod-lib.sh](../bin/fm-dod-lib.sh), including generated briefs, promoted scouts and launch overlays for old briefs or relaunches.
-An ordinary remote worker commits and pushes its `fm/<remote-task>` branch; a Playbot lane publishes the branch recorded for its workspace.
+An ordinary remote worker commits and pushes its own task branch (`feat/<slug>` or `fix/<slug>`, or a legacy `fm/<remote-task>`); a Playbot lane publishes the branch recorded for its workspace.
 Both report the exact branch and full head SHA to the secondmate, which relays the report to the main home.
 
 Keep the landing backlog item and worker in the main home, and route the implementation request separately to the remote secondmate.

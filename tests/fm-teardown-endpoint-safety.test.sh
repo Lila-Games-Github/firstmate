@@ -1590,6 +1590,39 @@ test_reconcile_slot_retires_the_landed_record_and_frees_the_survivor() {
   pass "fm-teardown: --reconcile-slot retires a landed record without touching the slot, and the survivor then tears down normally"
 }
 
+# A task briefed with a feat/ branch records branch= (bin/fm-task-branch-lib.sh),
+# and the landed-work check must judge that recorded branch, never a legacy
+# fm/<id> branch that happens to exist beside it.
+test_reconcile_slot_judges_the_recorded_feat_branch() {
+  local dir stale=feat-pipeline live=feat-scout rc
+  dir=$(make_collision_case reconcile-feat-landed "$stale" "$live" ship)
+  git -C "$dir/project" branch -m "fm/$stale" feat/landed-work
+  printf 'branch=feat/landed-work\n' >> "$dir/home/state/$stale.meta"
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--reconcile-slot refused a landed recorded feat/ branch: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$stale.meta" "the landed feat/ record survived"
+  assert_slot_untouched "$dir" "$live" "reconciled feat/ ship record"
+
+  dir=$(make_collision_case reconcile-feat-unlanded "$stale" "$live" ship unlanded)
+  git -C "$dir/project" branch -m "fm/$stale" feat/unlanded-work
+  # A landed legacy branch beside it must not stand in for the recorded one.
+  git -C "$dir/project" branch "fm/$stale" main
+  printf 'branch=feat/unlanded-work\n' >> "$dir/home/state/$stale.meta"
+  set +e
+  run_reconcile "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "--reconcile-slot retired a record whose recorded feat/ branch is not landed"
+  assert_contains "$(cat "$dir/stderr")" "feat/unlanded-work" \
+    "the refusal did not name the recorded feat/ branch"
+  assert_present "$dir/home/state/$stale.meta" "the refusal removed the unlanded feat/ record"
+  assert_slot_untouched "$dir" "$live" "unlanded feat/ ship record"
+  pass "fm-teardown: the landed-work check judges a recorded feat/ branch, not a legacy fm/<id> branch"
+}
+
 test_reconcile_slot_accepts_a_scout_whose_report_exists() {
   local dir stale=stale-scout live=live-scout rc
   dir=$(make_collision_case reconcile-scout "$stale" "$live" scout)
@@ -1735,6 +1768,7 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_reconcile_slot_retires_the_landed_record_and_frees_the_survivor
+test_reconcile_slot_judges_the_recorded_feat_branch
 test_reconcile_slot_preserved_ship_and_scout_retire_without_force
 test_reconcile_slot_refuses_work_beyond_preserved_ship
 test_reconcile_slot_accepts_a_scout_whose_report_exists

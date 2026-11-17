@@ -39,6 +39,8 @@ DIFF_CONTEXT=20
 WT=$1
 # shellcheck source=bin/fm-jev-adapter-lib.sh
 . "$SCRIPT_DIR/fm-jev-adapter-lib.sh"
+# shellcheck source=bin/fm-task-branch-lib.sh
+. "$SCRIPT_DIR/fm-task-branch-lib.sh"
 fm_jev_adapter_ready commit-lint || exit 0
 MODE=$FM_JEV_ADAPTER_MODE
 command -v jq >/dev/null 2>&1 || exit 0
@@ -51,7 +53,9 @@ BUDGET=$((BUDGET - BUDGET_MARGIN))
 
 BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 [ -n "$BRANCH" ] || exit 0
-case "$BRANCH" in fm/*) TASK_ID=${BRANCH#fm/} ;; *) TASK_ID=${BRANCH##*/} ;; esac
+# A recorded branch= (bin/fm-task-branch-lib.sh) names its task; otherwise the
+# legacy fm/<task> suffix, then the last path segment.
+TASK_ID=$(fm_task_for_branch "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "$BRANCH") || TASK_ID=${BRANCH##*/}
 case "$TASK_ID" in ''|.*|*[!A-Za-z0-9._-]*) TASK_ID=$(basename "$WT") ;; esac
 EVIDENCE=
 case "$TASK_ID" in ''|.*|*[!A-Za-z0-9._-]*) TASK_ID=unknown ;; *) EVIDENCE="$DATA/$TASK_ID/commit-lint.json" ;; esac

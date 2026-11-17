@@ -82,7 +82,8 @@ def main():
         target = fields.get("landing_branch") or default_branch(project)
         if target != landing:
             continue
-        branch = fields.get("lane_branch") if kind == "lane" else f"fm/{task}"
+        # A crewmate's own branch is its recorded branch= (bin/fm-task-branch-lib.sh), else legacy fm/<task>.
+        branch = fields.get("lane_branch") if kind == "lane" else (fields.get("branch") or f"fm/{task}")
         if kind == "lane" and not branch:
             worktree = fields.get("worktree")
             if worktree:

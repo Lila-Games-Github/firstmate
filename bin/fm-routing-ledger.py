@@ -151,7 +151,7 @@ def pipeline_rounds(meta, task_id, started):
             marks = ",".join("?" * len(repos))
             runs = [row[0] for row in db.execute(
                 "SELECT id FROM runs WHERE repo_id IN (%s) AND branch = ? AND created_at >= ? "
-                "ORDER BY created_at, id" % marks, (*repos, "fm/" + task_id, int(started)))]
+                "ORDER BY created_at, id" % marks, (*repos, meta.get("branch") or "fm/" + task_id, int(started)))]
             if not runs:
                 return unknown("no no-mistakes run recorded for the task branch")
             marks = ",".join("?" * len(runs))

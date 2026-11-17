@@ -833,6 +833,7 @@ tests/fm-stow-cascade.test.sh 3022
 tests/fm-subagent-pretool-check.test.sh 949
 tests/fm-supervision-events.test.sh 659
 tests/fm-tangle-guard.test.sh 7470
+tests/fm-task-branch-lib.test.sh 114
 tests/fm-task-delivery.test.sh 19784
 tests/fm-task-inbox.test.sh 30004
 tests/fm-tasks-axi.test.sh 1953

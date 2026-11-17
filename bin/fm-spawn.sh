@@ -86,6 +86,14 @@
 #   the value must pass git check-ref-format and resolve in the project clone as a
 #   local branch or an origin remote-tracking branch, so a typo fails the spawn
 #   instead of arming a landed-work test against a branch that does not exist.
+#   branch=<branch> records a fresh ship task's own work branch (feat/<slug> or
+#   fix/<slug>), copied from its brief's "Branch contract: branch=" line, which
+#   bin/fm-brief.sh writes from --kind/--branch-name; bin/fm-task-branch-lib.sh
+#   owns the naming rules and the fm_task_branch reader every landing, cleanup,
+#   review, and reporting script uses. A fresh spawn refuses a branch that already
+#   exists in the project clone, and --relaunch preserves the recorded value. A
+#   brief without that line (scaffolded before it existed) records no branch=,
+#   and readers then fall back to the legacy fm/<task-id>.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -594,6 +602,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # Read by the live-record slot guard's scan of every locally registered home.
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-task-branch-lib.sh
+. "$SCRIPT_DIR/fm-task-branch-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -2910,6 +2920,16 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       fi
     fi
   fi
+  # A ship task's own branch: a relaunch keeps the recorded branch=, and a fresh
+  # spawn records the brief's "Branch contract:" line (bin/fm-task-branch-lib.sh).
+  TASK_BRANCH=
+  if [ "$KIND" = ship ]; then
+    if [ "$RELAUNCH" -eq 1 ]; then
+      TASK_BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
+    else
+      TASK_BRANCH=$(fm_task_branch_from_brief "$BRIEF") || exit 1
+    fi
+  fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
@@ -2925,7 +2945,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       elif [ "$KIND" = ship ] && [ "$MODE" = direct-PR ]; then
         fm_direct_pr_target_block "$LANDING_BRANCH"
       elif [ "$KIND" = ship ] && [ "$MODE" = local-only ] && fm_remote_local_landing; then
-        fm_remote_local_dod "$ID"
+        fm_remote_local_dod "$ID" ship "${TASK_BRANCH:-fm/$ID}"
       fi &&
       # A relaunch keeps the fresh spawn's preflight outcome in front of the
       # replacement worker; a fresh spawn writes its own after the probes.
@@ -2985,6 +3005,14 @@ if [ "$KIND" = ship ]; then
   # it arms in fm-teardown.sh can never point at a ref that does not resolve.
   if [ "$LANDING_SET" -eq 1 ] && ! fm_landing_branch_check "$PROJ_ABS" "$LANDING_BRANCH"; then
     echo "error: --landing-branch '$LANDING_BRANCH' does not resolve in $PROJ_ABS as a local branch or an origin remote-tracking branch" >&2
+    exit 1
+  fi
+  # Task branches share one ref namespace per project clone, so a fresh spawn
+  # refuses a branch that already exists rather than launching a worker whose
+  # first step would fail or silently reuse another task's commits.
+  if [ "$RELAUNCH" -eq 0 ] && [ -n "${TASK_BRANCH:-}" ] &&
+    git -C "$PROJ_ABS" show-ref --verify --quiet "refs/heads/$TASK_BRANCH"; then
+    echo "error: task branch $TASK_BRANCH already exists in $PROJ_ABS; re-scaffold the brief with a distinct --branch-name" >&2
     exit 1
   fi
   PROJ_NAME=$(basename "$PROJ_ABS")
@@ -4766,7 +4794,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo landing_branch tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx routing_relaunches routing_harness_history", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo landing_branch branch tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx routing_relaunches routing_harness_history", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned) && $1 !~ /^routing_/
@@ -4787,6 +4815,7 @@ preserve_relaunch_routing_meta() {
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "$LANDING_BRANCH" ] || echo "landing_branch=$LANDING_BRANCH"
+  [ -z "${TASK_BRANCH:-}" ] || echo "branch=$TASK_BRANCH"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

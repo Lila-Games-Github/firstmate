@@ -16,6 +16,8 @@
 #   (k) landing a queued car steers its sleeping successor to the front once,
 #       and a landing without a train creates no queue state
 #   (l) a landing whose receipt cannot be recorded still exits 3 and steers
+#   (m) a recorded feat/ task branch lands instead of a stale legacy fm/<id>
+#       branch, and a recorded branch missing from the project refuses
 set -u
 export FM_LANDING_TRAIN=off
 
@@ -66,6 +68,7 @@ run_merge() {
     branch=$(sed -n 's/^worktree=//p' "$case_dir/state/task-x1.meta" | tail -1)
     branch=$(git -C "$branch" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   fi
+  [ -n "$branch" ] || branch=$(sed -n 's/^branch=//p' "$case_dir/state/task-x1.meta" | tail -1)
   [ -n "$branch" ] || branch=fm/task-x1
   sha=$(git -C "$case_dir/project" rev-parse "refs/heads/$branch" 2>/dev/null || git -C "$case_dir/project" rev-parse HEAD)
   receipt="$case_dir/receipt.txt"
@@ -220,6 +223,46 @@ test_absent_landing_branch_keeps_default_behavior() {
   [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$task_tip" ] \
     || fail "default-target: main did not receive the task tip"
   pass "absent landing_branch keeps default-branch fast-forward behavior"
+}
+
+test_recorded_feat_branch_lands_over_legacy_branch() {
+  local case_dir task_tip
+  case_dir=$(make_case feat-branch)
+  # A stale legacy fm/task-x1 at main must not be what lands.
+  git -C "$case_dir/project" branch fm/task-x1 main
+  git -C "$case_dir/project" worktree add -q -b feat/x1 "$case_dir/task-wt" main
+  printf 'feature\n' > "$case_dir/task-wt/feature.txt"
+  git -C "$case_dir/task-wt" add feature.txt
+  git -C "$case_dir/task-wt" commit -q -m 'feature change'
+  write_meta "$case_dir" "" local-only
+  printf 'branch=feat/x1\n' >> "$case_dir/state/task-x1.meta"
+  task_tip=$(git -C "$case_dir/project" rev-parse refs/heads/feat/x1)
+
+  run_merge "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "feat-branch: recorded feat/x1 merge failed: $(cat "$case_dir/stderr")"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$task_tip" ] \
+    || fail "feat-branch: main did not receive the recorded feat/x1 tip"
+  pass "a recorded feat/ task branch lands instead of the legacy fm/<id> branch"
+}
+
+test_recorded_fix_branch_missing_refuses() {
+  local case_dir main_before rc
+  case_dir=$(make_case fix-branch-missing)
+  commit_task_change "$case_dir" main
+  write_meta "$case_dir" "" local-only
+  printf 'branch=fix/x1\n' >> "$case_dir/state/task-x1.meta"
+  main_before=$(git -C "$case_dir/project" rev-parse refs/heads/main)
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$MERGE_LOCAL" task-x1 --receipt /dev/null > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "fix-branch-missing: merge succeeded without the recorded branch"
+  assert_grep 'branch fix/x1 does not exist' "$case_dir/stderr" \
+    "fix-branch-missing: refusal did not name the recorded branch"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/main)" = "$main_before" ] \
+    || fail "fix-branch-missing: main moved"
+  pass "a recorded fix/ branch missing from the project refuses instead of falling back to fm/<id>"
 }
 
 test_unresolved_recorded_branch_refuses_without_fallback() {
@@ -588,6 +631,8 @@ test_quick_receipt_lands_without_claiming_full_health() {
 
 test_recorded_nondefault_branch_never_merges_default
 test_absent_landing_branch_keeps_default_behavior
+test_recorded_feat_branch_lands_over_legacy_branch
+test_recorded_fix_branch_missing_refuses
 test_unresolved_recorded_branch_refuses_without_fallback
 test_checkout_and_cleanliness_guard_resolved_target
 test_diverged_landing_branch_still_refuses
