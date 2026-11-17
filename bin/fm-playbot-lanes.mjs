@@ -7638,6 +7638,23 @@ async function setup() {
 async function main() {
   const command = process.argv[2] ?? "serve";
   if (command === "help" || command === "--help" || command === "-h") return console.log(cliUsage());
+  if (command === "churn-split") {
+    // Reads `git status --porcelain -z` on stdin and prints one `churn` or `block` line per dirty path.
+    // Tracked changes use the tracked-churn allowlist; untracked files count only inside Playbot's addon directory.
+    const fields = fs.readFileSync(0, "utf8").split("\0");
+    const classify = (code, file) => (code === "??" ? file.startsWith(PLAYBOT_ADDON_PREFIX) : isTrackedPlaybotChurn(file)) ? "churn" : "block";
+    for (let i = 0; i < fields.length; i += 1) {
+      const entry = fields[i];
+      if (entry.length < 4) continue;
+      const code = entry.slice(0, 2);
+      const file = entry.slice(3);
+      if (/[RC]/.test(code)) {
+        const orig = fields[++i] ?? "";
+        console.log(`${classify(code, file) === "churn" && classify(code, orig) === "churn" ? "churn" : "block"}\t${file}`);
+      } else console.log(`${classify(code, file)}\t${file}`);
+    }
+    return;
+  }
   if (command === "serve") return serve();
   if (command === "call") return callFromCli(process.argv.slice(3));
   if (command === "install") return console.log(JSON.stringify(await install(), null, 2));

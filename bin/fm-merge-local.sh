@@ -179,10 +179,19 @@ fi
 # fast-forward lands predictably (firstmate never writes here otherwise).
 cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
 [ "$cur" = "$TARGET" ] || { echo "error: $PROJ is on '$cur', expected landing branch '$TARGET'; cannot merge safely" >&2; exit 1; }
-if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
+# Playbot's own injected engine-plugin churn (its owner list lives in
+# bin/fm-playbot-lanes.mjs `churn-split`) is not dirt: the fast-forward leaves it
+# untouched, and a candidate that touches those paths refuses below.
+CHURN_PATHS=
+if ! SPLIT=$(git -C "$PROJ" status --porcelain -z 2>/dev/null | node "$SCRIPT_DIR/fm-playbot-lanes.mjs" churn-split); then
+  echo "error: cannot inspect $PROJ working tree; refusing to merge into it" >&2
+  exit 1
+fi
+if printf '%s\n' "$SPLIT" | grep -q '^block'; then
   echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
   exit 1
 fi
+CHURN_PATHS=$(printf '%s\n' "$SPLIT" | sed -n 's/^churn\t//p')
 
 # Clean fast-forward only: TARGET must be an ancestor of BRANCH.
 if [ -z "$CANDIDATE" ] && ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "refs/heads/$BRANCH"; then
@@ -347,6 +356,15 @@ if [ "$INCOMING_COUNT" -gt 0 ]; then
   }
 fi
 
+if [ -n "$CHURN_PATHS" ]; then
+  # Any touched path the churn rules cover refuses, so the fast-forward never overwrites Playbot's files.
+  TOUCHED=$(git -C "$PROJ" diff --name-only -z "$CURRENT_SHA" "$INCOMING_SHA" | tr '\0' '\n' | awk 'NF { printf " M %s%c", $0, 0 }' \
+    | node "$SCRIPT_DIR/fm-playbot-lanes.mjs" churn-split | sed -n 's/^churn\t//p')
+  if [ -n "$TOUCHED" ]; then
+    printf 'error: candidate touches Playbot-managed paths while %s carries Playbot churn; refusing:\n%s\n' "$PROJ" "$TOUCHED" >&2
+    exit 1
+  fi
+fi
 before=$(git -C "$PROJ" rev-parse --short "$TARGET")
 merge_status=0
 [ "$(git -C "$PROJ" rev-parse "$TARGET_REF^{commit}")" = "$CURRENT_SHA" ] || {
