@@ -1249,15 +1249,15 @@ expect_field "$(spec_queue status a)" status landed
 pass 'speculative ready needs a worker editor receipt and +yolo auto-lands the tested candidate'
 
 spec_case auto-publish
-mv "$CASE/project" "$CASE/ProjectWhite"
-ln -s ProjectWhite "$CASE/project"
+mv "$CASE/project" "$CASE/frogpile-godot"
+ln -s frogpile-godot "$CASE/project"
 spec_register on
-printf '%s\n' "- ProjectWhite [local-only +yolo] - test at $CASE/ProjectWhite (added 2026-11-14)" > "$CASE/home/data/projects.md"
-fm_write_meta "$CASE/home/state/a.meta" "project=$CASE/ProjectWhite" 'mode=local-only' 'landing_branch=main' \
+printf '%s\n' "- frogpile [local-only +yolo] - test at $CASE/frogpile-godot (added 2026-11-14)" > "$CASE/home/data/projects.md"
+fm_write_meta "$CASE/home/state/a.meta" "project=$CASE/frogpile-godot" 'mode=local-only' 'landing_branch=main' \
   'kind=ship' 'harness=claude' 'window=sess:fm-notify'
 git init -q --bare "$CASE/origin.git"
-git -C "$CASE/ProjectWhite" remote add origin "$CASE/origin.git"
-git -C "$CASE/ProjectWhite" push -q origin main
+git -C "$CASE/frogpile-godot" remote add origin "$CASE/origin.git"
+git -C "$CASE/frogpile-godot" push -q origin main
 car a; spec_join a >/dev/null
 candidate=$(spec_queue status a | field candidate_sha)
 spec_mark a full passed
@@ -1271,13 +1271,13 @@ spec_auto_land > "$CASE/auto-land.log" 2>&1 || { cat "$CASE/auto-land.log" >&2; 
 pass 'authorized published landing branch fast-forward pushes the tested candidate'
 
 spec_case auto-push-retry
-mv "$CASE/project" "$CASE/ProjectWhite"
-ln -s ProjectWhite "$CASE/project"
+mv "$CASE/project" "$CASE/frogpile-godot"
+ln -s frogpile-godot "$CASE/project"
 spec_register on
-printf '%s\n' "- ProjectWhite [local-only +yolo] - test at $CASE/ProjectWhite (added 2026-11-14)" > "$CASE/home/data/projects.md"
-fm_write_meta "$CASE/home/state/a.meta" "project=$CASE/ProjectWhite" 'mode=local-only' 'landing_branch=main' \
+printf '%s\n' "- frogpile [local-only +yolo] - test at $CASE/frogpile-godot (added 2026-11-14)" > "$CASE/home/data/projects.md"
+fm_write_meta "$CASE/home/state/a.meta" "project=$CASE/frogpile-godot" 'mode=local-only' 'landing_branch=main' \
   'kind=ship' 'harness=claude' 'window=sess:fm-notify'
-git -C "$CASE/ProjectWhite" remote add origin "$CASE/recovered-origin.git"
+git -C "$CASE/frogpile-godot" remote add origin "$CASE/recovered-origin.git"
 car a; spec_join a >/dev/null
 candidate=$(spec_queue status a | field candidate_sha)
 spec_mark a full passed
@@ -1293,6 +1293,21 @@ spec_auto_land > "$CASE/retry-auto-land.log" 2>&1 || { cat "$CASE/retry-auto-lan
 [ "$(git -C "$CASE/recovered-origin.git" rev-parse refs/heads/main)" = "$candidate" ] \
   || fail 'retried publication pushed a SHA other than the tested candidate'
 pass 'a failed authorized push retries the tested landing without repeating the merge'
+
+spec_case auto-path-mismatch
+mv "$CASE/project" "$CASE/frogpile-godot"
+ln -s frogpile-godot "$CASE/project"
+spec_register on
+printf '%s\n' "- frogpile [local-only +yolo] - test at $CASE/elsewhere (added 2026-11-14)" > "$CASE/home/data/projects.md"
+car a; spec_join a >/dev/null
+candidate=$(spec_queue status a | field candidate_sha)
+spec_mark a full passed
+spec_queue resolve sweep >/dev/null
+spec_mark a quick passed
+spec_queue resolve sweep >/dev/null
+spec_auto_land > "$CASE/auto-land.log" 2>&1 || { cat "$CASE/auto-land.log" >&2; fail 'path-mismatch scan failed'; }
+[ "$(tip)" != "$candidate" ] || fail 'project whose registered path differs auto-landed'
+pass 'registry entry is matched by clone path and a non-matching path is skipped'
 
 spec_case auto-failed
 spec_register on
