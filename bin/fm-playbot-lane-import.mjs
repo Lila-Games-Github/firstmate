@@ -19,12 +19,14 @@
 // --path <exact-project>. Version must be 4.7.1.stable[.official.<hash>].
 // generate imports, commits, then requires a clean import on the committed
 // head. check imports once and requires no product change. Ignored .godot
-// caches are the only exempt output. All unexpected mutations stay in place.
+// caches are the only exempt output. All other unexpected mutations stay in place.
 // A private index builds one companion-only commit; an index lock and CAS ref
 // update protect existing staging. Only authorized index entries advance.
 // No Git commit hooks/filters, reset, clean, stash, host settings edits, ADB
 // or Playbot engine IPC.
 // JSON reports source counts, resulting head, exact companions and SHA-256s.
+// Import rewrites of Playbot's injected addons/playbot/** files (including
+// .uid sidecars) are restored from the pre-import backup and never committed.
 // Failure retains private evidence/backups in the Git directory and reports its
 // path; no automatic retry or destructive recovery is attempted.
 import crypto from "node:crypto";
@@ -231,7 +233,29 @@ export async function laneImport(args, { root, git, gitEnvironment, identity, gu
     const importArgs = ["--headless", "--recovery-mode", "--import", "--path", path.join(root, godotProject)];
     invoke(importArgs, "import", importTimeout);
     await checkIdentity();
-    const first = treeSnapshot(root, godotProject);
+    // Playbot's injected addon files are churn: restore their pre-import bytes
+    // from the backup instead of failing, and never commit them.
+    const addonBytes = new Map();
+    for (const addon of addons) for (const file of addon.files) addonBytes.set(`${addon.relative}/${file.name.split(path.sep).join("/")}`, file);
+    const restoredAddonChurn = new Set();
+    const restoreAddonChurn = () => {
+      const current = treeSnapshot(root, godotProject);
+      let restored = false;
+      for (const file of changes(before, current).filter(addonPath)) {
+        const target = path.join(root, file), stat = present(target);
+        if (stat && (!stat.isFile() || stat.isSymbolicLink())) continue;
+        if (!before.has(file)) { if (stat) { fs.unlinkSync(target); restored = true; restoredAddonChurn.add(file); } continue; }
+        const backup = addonBytes.get(file);
+        if (!backup) continue;
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, backup.bytes, { mode: backup.mode });
+        fs.chmodSync(target, backup.mode);
+        restored = true;
+        restoredAddonChurn.add(file);
+      }
+      return restored ? treeSnapshot(root, godotProject) : current;
+    };
+    const first = restoreAddonChurn();
     const mutations = changes(before, first);
     const unexpected = mutations.filter((file) => mode === "check" || !companions.includes(file));
     if (unexpected.length) throw new Error(`Unexpected import mutations preserved: ${JSON.stringify(unexpected)}`);
@@ -292,12 +316,12 @@ export async function laneImport(args, { root, git, gitEnvironment, identity, gu
         const receipt = JSON.parse(regular(root, "prototype-game/.godot/automation-data/guide-checks/import.json").toString("utf8"));
         if (receipt.schema !== "frogpile.import-clean.v1" || receipt.sha !== requiredHead || receipt.exit_code !== 0 || receipt.unchanged !== true) throw new Error("Import-clean gate did not certify the resulting head");
       } else invoke(importArgs, "import-clean", importTimeout);
-      const dirty = changes(first, treeSnapshot(root, godotProject));
+      const dirty = changes(first, restoreAddonChurn());
       if (dirty.length) throw new Error(`Import-clean failed on committed head ${requiredHead}; mutations preserved: ${JSON.stringify(dirty)}`);
     }
     await checkIdentity();
     if (!committedIndex.equals(fs.readFileSync(indexPath))) throw new Error("Index drift during committed-head import-clean check");
-    const result = { option: "B", mode, ...lane, branch: expectedBranch, sourceHead: expectedHead, head: published ?? expectedHead, base, godot: { path: selected, version, sha256: executableHash }, sourceCounts: { headTracked: tree.length, changed: sourcePaths.length, authorizedCompanions: companions.length }, committedCompanions: changed.length, companions: inventory, importClean: true, importCleanGuard: importCleanGuard ?? null, ...(importCleanGuard ? { importCleanReceipt: "prototype-game/.godot/automation-data/guide-checks/import.json" } : {}), evidence: scratch };
+    const result = { option: "B", mode, ...lane, branch: expectedBranch, sourceHead: expectedHead, head: published ?? expectedHead, base, godot: { path: selected, version, sha256: executableHash }, sourceCounts: { headTracked: tree.length, changed: sourcePaths.length, authorizedCompanions: companions.length }, committedCompanions: changed.length, companions: inventory, importClean: true, restoredAddonChurn: [...restoredAddonChurn].sort(), importCleanGuard: importCleanGuard ?? null, ...(importCleanGuard ? { importCleanReceipt: "prototype-game/.godot/automation-data/guide-checks/import.json" } : {}), evidence: scratch };
     writeJson(path.join(scratch, "result.json"), result);
     return result;
   } catch (error) {
