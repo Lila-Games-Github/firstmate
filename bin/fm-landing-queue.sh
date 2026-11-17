@@ -95,7 +95,10 @@
 # report its result. It reads `testfarm status --json --no-probe`
 # (FM_TESTFARM_BIN, default testfarm; bounded by FM_TESTFARM_TIMEOUT, default
 # 10 seconds, valid 1..60; an invalid value counts as an unreadable farm and
-# affects no other action) and selects the newest non-cancelled quick request
+# affects no other action; candidate submits use the separate, larger
+# FM_TESTFARM_SUBMIT_TIMEOUT, default 120 seconds, valid 1..900, and adopt an
+# already-accepted request for the same task and exact head instead of duplicating
+# it) and selects the newest non-cancelled quick request
 # for exactly the car's head and assigned target, submitted after the car's
 # latest admission and not already applied. A passed request records the farm's
 # fm-quick-check.v1 receipt exactly as receipt --receipt does; a failed or

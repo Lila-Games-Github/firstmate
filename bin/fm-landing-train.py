@@ -121,8 +121,42 @@ def request_status(service):
     return {row.get("id"): row for row in data["requests"] if isinstance(row, dict)}
 
 
-def submit(service, project_name, repo, sha, task, *options):
-    result = run(service, "submit", project_name, str(repo), sha, "--task", task, *options)
+def submit_timeout():
+    raw = os.environ.get("FM_TESTFARM_SUBMIT_TIMEOUT", "120")
+    if not raw.isdigit() or not 1 <= int(raw) <= 900:
+        raise RuntimeError("FM_TESTFARM_SUBMIT_TIMEOUT must be a whole number of seconds from 1 to 900")
+    return int(raw)
+
+
+def find_accepted(live, project_name, sha, task, check, target=None):
+    """Return the id of a farm request already accepted for this exact work."""
+    for rid, row in sorted((live or {}).items(), key=lambda item: str(item[0])):
+        options = row.get("options") if isinstance(row.get("options"), dict) else {}
+        label = row.get("task") or options.get("task")
+        if label != task or row.get("state") in ("failed", "conflict", "cancelled"):
+            continue
+        if row.get("project") not in (None, project_name):
+            continue
+        if matches_request(row, sha, check, target) and isinstance(rid, str):
+            return rid
+    return None
+
+
+def submit(service, project_name, repo, sha, task, *options, live=None):
+    """Submit once, adopting an accepted duplicate before and after a slow submit."""
+    check = options[options.index("--check") + 1] if "--check" in options else "full"
+    target = options[options.index("--target") + 1] if "--target" in options else None
+    existing = find_accepted(live, project_name, sha, task, check, target)
+    if existing:
+        return existing
+    try:
+        result = run(service, "submit", project_name, str(repo), sha, "--task", task, *options,
+                     timeout=submit_timeout())
+    except subprocess.TimeoutExpired:
+        adopted = find_accepted(request_status(service), project_name, sha, task, check, target)
+        if adopted:
+            return adopted
+        raise RuntimeError("test service submit timed out and no accepted request was found")
     rid = result.stdout.strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", rid):
         raise RuntimeError("test service returned an invalid request id")
@@ -220,7 +254,7 @@ def main(observe=False):
             continue
         if not state["suite_request"]:
             state["suite_request"] = submit(service, project_name, repo, sha,
-                                             f"landing_{task}", "--suite", "--receipt", str(full))
+                                             f"landing_{task}", "--suite", "--receipt", str(full), live=live)
             atomic_json(path, state)
         suite_row = live.get(state["suite_request"]) if live else None
         if not matches_request(suite_row, sha, "full"):
@@ -239,7 +273,7 @@ def main(observe=False):
             state["quick_request"] = submit(service, project_name, repo, sha,
                                              f"landing_{task}", "--suite", "--check", "quick",
                                              "--target", state["parent"], "--device-gate", "any",
-                                             "--receipt", str(quick))
+                                             "--receipt", str(quick), live=live)
             atomic_json(path, state)
         quick_row = live.get(state["quick_request"]) if live else None
         if not matches_request(quick_row, sha, "quick", state["parent"]):
