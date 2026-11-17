@@ -1481,8 +1481,8 @@ test_lane_branch_values_must_be_safe_branch_names() {
 # regenerated against upstream's reshaped brief from inside the merge. Assert the
 # boundary directly instead: a non-lane brief keeps the crewmate branch convention
 # and carries no lane vocabulary at all, in every delivery mode.
-# Follow-up: regenerate tests/fixtures/fm-brief/*.md with FM_BRIEF_FIXTURE_UPDATE=1
-# in an ordinary PR and restore the whole-brief comparison on top of this.
+# Follow-up: regenerate tests/fixtures/fm-brief/*.md and restore the whole-brief comparison
+# on top of this.
 test_non_lane_ship_briefs_carry_no_lane_vocabulary() {
   local home mode brief lane_marker
   home="$TMP_ROOT/non-lane-boundary"

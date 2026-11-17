@@ -10,9 +10,7 @@ metadata:
 
 # quiet
 
-Quiet supervision mode (kunchenguid/firstmate#2356): the same token-saving
-daemon tradeoff as `/afk`, made explicit for a captain who is staying,
-watching the session, and does not want to exit the mode just by chatting.
+Quiet supervision mode is the same token-saving daemon tradeoff as `/afk`, made explicit for a captain who is staying, watching the session, and does not want to exit the mode just by chatting.
 
 This skill is a thin wrapper.
 Every mechanism below - the daemon, its injection, its busy/composer guards,
@@ -70,7 +68,7 @@ a needs-decision finding keeps the `ask-user-authority` policy.
 
 ## Must not hide a decision or a failure
 
-Per the issue's own author triage: quiet mode is presentation only.
+Quiet mode is presentation only.
 Progress, retries, and internal mechanics stay below deck exactly as in away
 mode, but review-ready work, findings, decisions, failures, and credentials
 escalate every time, through the same classification policy `/afk` owns.
