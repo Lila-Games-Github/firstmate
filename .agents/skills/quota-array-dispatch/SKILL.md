@@ -38,11 +38,11 @@ The opt-in `bin/fm-dispatch-resolve.sh` (`docs/configuration.md` "Typed dispatch
 ## Read the default TOON
 
 Start each intake by running `quota-axi` once with no `--json`, and reuse that TOON for every candidate.
-Post-consolidation quota-axi (the floor owned by `bin/fm-quota-axi-lib.sh`) puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
+quota-axi at or above the floor owned by `bin/fm-quota-axi-lib.sh` puts `spendPriority` in the default `quota[]` block beside `effectivePercentRemaining`, `runway`, `confidence`, `limitedBy`, and `resetsAt`.
 Sparse `exhaustion[]` carries finite-runway seconds only for `projected_exhaustion` and `exhausted_now`.
 Sparse `attention[]` names auth, stale, and unmeasurable facts.
 `spendPriority` is THE quota-perspective ranker.
-It already computes the economics that older instructions reconstructed by hand from headroom, pace, reserve, and window-id lists; do not recompute those.
+It already folds in headroom, pace, reserve, and window state, so use it as published.
 Do not read `--json` on the normal path, and do not reach for `--full` to rebuild that economics.
 
 After reading the TOON, fall back to one `quota-axi --json` call only when that TOON is genuinely ambiguous for the decision, or when the installed quota-axi is somehow below the floor so its TOON lacks `spendPriority`.

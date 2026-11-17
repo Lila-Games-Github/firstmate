@@ -104,6 +104,7 @@ The tool refuses a task the wake being handled did not name, fleet included (a h
 An acknowledgement that consumed nothing says so and names the exact command for the current wake; run that printed command, do not drain again.
 
 # Recovery playbook (verbatim copy of the tracked skill)
+Your role limits above outrank this playbook: where it names an action they forbid, such as spawning through `bin/fm-spawn.sh` or telling the captain, stop and report verdict captain with what you observed instead.
 
 PROMPT
 cat "$FM_TRACKED_ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
