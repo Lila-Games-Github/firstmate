@@ -7496,7 +7496,7 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs serve",
     "  fm-playbot-lanes.mjs setup|doctor|install",
     "  fm-playbot-lanes.mjs tracked-churn-allowlist",
-    "  fm-playbot-lanes.mjs addon-guard verify|check-index|reset <ref>|remote-checkout <branch> <head>|remote-rebase <target> <from>|stash [--all|--include-untracked] [--message text]",
+    "  fm-playbot-lanes.mjs addon-guard verify|check-index|reset <ref>|lane-rebase <target>|remote-checkout <branch> <head>|remote-rebase <target> <from>|stash [--all|--include-untracked] [--message text]",
     "  fm-playbot-lanes.mjs lane-import <arguments-json|->  # operator only; see fm-playbot-lane-import.mjs",
     "  fm-playbot-lanes.mjs lane-task-state <task.meta> [state-dir]",
     "  fm-playbot-lanes.mjs lane-task-branch <task.meta>",

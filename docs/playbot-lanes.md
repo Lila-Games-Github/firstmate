@@ -378,6 +378,11 @@ Lane workers run `node --no-warnings <Firstmate-code-root>/bin/fm-playbot-lanes.
 The command binds the current Git worktree to one registered Playbot workspace, discovers every Git-visible Godot project with an `addons/playbot` tree, and requires each such addon to be complete and match the observed app bundle before mutation.
 It reads only `app:metadata` and the packaged bundle, so it does not depend on the version-pinned engine snapshot IPC; a worktree with no addon tree preserves nothing and still applies every other check.
 Reset preserves every tracked, untracked, and ignored addon file, including native files, restores their exact bytes and modes after Git, and verifies them against a fresh app-bundle read.
+`lane-rebase <target>` is the supported way for a lane worker to rebase onto a new tip.
+It snapshots the addon trees with modes, resets only the tracked addon paths to `HEAD` and removes only the untracked and ignored addon files, runs `git rebase <target>`, then restores the snapshot bytes and modes and verifies them against the app bundle.
+Untracked addon copies byte-identical to files the target newly tracks, and Playbot-rewritten or deleted tracked addon files such as `.gd.uid`, therefore never block it.
+Untracked paths outside the addon trees, such as the duplicate root project or task notes, are left untouched and are not a reason to refuse unless the target would write over one.
+It refuses before Git runs on tracked product changes outside the addon trees, and on a real conflict it aborts the rebase, restores every addon file, and names the conflicted paths.
 Stash excludes the exact addon trees from its pathspec and verifies their bytes afterward; it does not stash the injected helpers.
 The reset guard additionally refuses backward/divergent history, hidden index flags, untracked product files, and tracked product changes outside the addon trees.
 The only tracked changes it reverts outside those trees are paths on the tracked-churn allowlist (such as `prototype-game/project.godot`), whose diff it prints before resetting; the lane brief requires disclosing that diff first.
