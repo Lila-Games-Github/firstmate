@@ -7,6 +7,8 @@
 // Git-root relative .gd.uid/.gdshader.uid/.gdshaderinc.uid/.import paths). mode is generate (default) or check.
 // base must equal git merge-base expectedHead refs/heads/<landingBranch> and
 // the sole full-SHA Guide-check-base trailer on expectedHead.
+// Optional importTimeoutSeconds (integer 1-3600, default 900) bounds each import
+// and import-clean run; the version/help probes keep a fixed 10 s limit.
 // Optional importCleanGuard="scripts/check_import_clean.py" runs the existing
 // project receipt gate on the resulting committed head (no overrides).
 // Run at the exact registered lane Git root; Playbot-owned branch names work.
@@ -96,9 +98,11 @@ export function companionSources(companions, godotProject) {
 
 export async function laneImport(args, { root, git, gitEnvironment, identity, guards, addonProjects }) {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("lane-import requires a JSON object");
-  const allowed = ["project", "workspace", "expectedBranch", "expectedHead", "base", "landingBranch", "godotProject", "godot", "companions", "mode", "importCleanGuard"];
+  const allowed = ["project", "workspace", "expectedBranch", "expectedHead", "base", "landingBranch", "godotProject", "godot", "companions", "mode", "importCleanGuard", "importTimeoutSeconds"];
   if (Object.keys(args).some((key) => !allowed.includes(key))) throw new Error("Unknown lane-import argument");
-  const { expectedBranch, expectedHead, base, landingBranch, godotProject, godot, companions, mode = "generate", importCleanGuard } = args;
+  const { expectedBranch, expectedHead, base, landingBranch, godotProject, godot, companions, mode = "generate", importCleanGuard, importTimeoutSeconds = 900 } = args;
+  if (!Number.isInteger(importTimeoutSeconds) || importTimeoutSeconds < 1 || importTimeoutSeconds > 3600) throw new Error("importTimeoutSeconds must be an integer from 1 to 3600");
+  const importTimeout = importTimeoutSeconds * 1000;
   if (!["generate", "check"].includes(mode) || !SHA.test(expectedHead ?? "") || !SHA.test(base ?? "") || typeof expectedBranch !== "string" || !expectedBranch || expectedBranch.startsWith("refs/")) throw new Error("Require mode generate|check, literal expectedBranch, full expectedHead and base SHA");
   if (typeof godot !== "string" || !path.isAbsolute(godot) || typeof godotProject !== "string") throw new Error("Require absolute godot executable and relative godotProject directory");
   if (godotProject !== ".") relativeFile(godotProject);
@@ -225,7 +229,7 @@ export async function laneImport(args, { root, git, gitEnvironment, identity, gu
     for (const flag of ["--headless", "--recovery-mode", "--import", "--path"]) if (!help.includes(flag)) throw new Error(`Godot editor does not advertise ${flag}`);
     await checkIdentity();
     const importArgs = ["--headless", "--recovery-mode", "--import", "--path", path.join(root, godotProject)];
-    invoke(importArgs, "import");
+    invoke(importArgs, "import", importTimeout);
     await checkIdentity();
     const first = treeSnapshot(root, godotProject);
     const mutations = changes(before, first);
@@ -284,10 +288,10 @@ export async function laneImport(args, { root, git, gitEnvironment, identity, gu
     if (mode === "generate" || importCleanGuard) {
       if (importCleanGuard) {
         verifyGate();
-        invoke(["-B", path.join(root, importCleanGuard), "--", selected, ...importArgs], "import-clean-gate", 120000, "python3");
+        invoke(["-B", path.join(root, importCleanGuard), "--", selected, ...importArgs], "import-clean-gate", importTimeout, "python3");
         const receipt = JSON.parse(regular(root, "prototype-game/.godot/automation-data/guide-checks/import.json").toString("utf8"));
         if (receipt.schema !== "frogpile.import-clean.v1" || receipt.sha !== requiredHead || receipt.exit_code !== 0 || receipt.unchanged !== true) throw new Error("Import-clean gate did not certify the resulting head");
-      } else invoke(importArgs, "import-clean");
+      } else invoke(importArgs, "import-clean", importTimeout);
       const dirty = changes(first, treeSnapshot(root, godotProject));
       if (dirty.length) throw new Error(`Import-clean failed on committed head ${requiredHead}; mutations preserved: ${JSON.stringify(dirty)}`);
     }
