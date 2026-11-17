@@ -495,6 +495,7 @@ fs.writeFileSync(project+'/.godot/imported/cache','ignored cache');
 const uid=mode==='malformed'?'handcrafted garbage\n':'uid://abc123\n';
 fs.writeFileSync(project+'/new.gd.uid',uid);
 fs.writeFileSync(project+'/art.png.import','[remap]\nimporter="texture"\nuid="uid://asset123"\n\n[deps]\nsource_file="res://art.png"\n\n[params]\n');
+if(fs.existsSync(project+'/fx.gdshader'))fs.writeFileSync(project+'/fx.gdshader.uid','uid://shader123\n');
 if(mode==='source')fs.writeFileSync(project+'/new.gd','unexpected source mutation\n');
 if(mode==='unrelated')fs.writeFileSync(repo+'/unexpected.txt','unexpected product output\n');
 if(mode==='addon')fs.writeFileSync(project+'/addons/playbot/plugin.gd','unexpected addon mutation\n');
@@ -645,6 +646,10 @@ f=fixture();r=run(f,{importCleanGuard:'scripts/check_import_clean.py'});assert.e
 console.log('native gate routing: guard subprocess received pinned import with isolated environment and certified resulting committed head');
 f=fixture();r=run(f,{importCleanGuard:'scripts/check_import_clean.py'},'gate-no-receipt');assert.notEqual(r.status,0);assert.notEqual(git(f.repo,'rev-parse','HEAD'),f.head);assert.match(r.stderr,/no such file|did not certify/);assert(!fs.existsSync(f.index+'.lock'));
 console.log('native gate refusal: a zero exit without a resulting-head receipt cannot certify import-clean');
+function withShader(){const g=fixture();fs.writeFileSync(g.repo+'/prototype-game/fx.gdshader','shader_type canvas_item;\n');git(g.repo,'add','prototype-game/fx.gdshader');git(g.repo,'commit','-qm','shader\n\nGuide-check-base: '+g.base);g.head=git(g.repo,'rev-parse','HEAD');g.args.expectedHead=g.head;g.indexBefore=fs.readFileSync(g.index);return g;}
+f=withShader();f.args.companions=[...f.args.companions,'prototype-game/fx.gdshader.uid'];r=run(f);assert.equal(r.status,0,r.stderr);assert.equal(JSON.parse(r.stdout).committedCompanions,3);assert.match(git(f.repo,'show','--name-only','--format=','HEAD'),/fx\.gdshader\.uid/);
+f=fixture();f.args.companions=[...f.args.companions,'prototype-game/fx.gdshader.uid'];reject(f,{},/not authorized by a changed branch/);
+console.log('shader companion: committed shader authorizes its .uid sidecar; sidecar without a committed shader refused');
 console.log('import-clean: exact generated head passed a separate check with no commit or index change');
 for(const [mode,pattern,mutated] of [['source',/Unexpected import mutations preserved/,'prototype-game/new.gd'],['unrelated',/Unexpected import mutations preserved/,'unexpected.txt'],['addon',/Unexpected import mutations preserved/,'prototype-game/addons/playbot/plugin.gd'],['failed',/Godot import failed/,'prototype-game/new.gd.uid'],['malformed',/Malformed generated UID/,'prototype-game/new.gd.uid']]){
   f=fixture();r=reject(f,{},pattern,mode);assert(fs.existsSync(f.repo+'/'+mutated));assert.match(r.stderr,/evidence\/backups:/);const scratch=r.stderr.trim().split('evidence/backups: ').at(-1);assert(fs.existsSync(scratch+'/index.before'));assert(fs.existsSync(scratch+'/addons/prototype-game/addons/playbot/plugin.gd'));

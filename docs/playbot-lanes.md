@@ -348,7 +348,7 @@ When a lane's validation is defined by its suite runner's verdict, route that su
 
 ### Owned companion import
 
-An operator can generate lane `.gd.uid` and asset `.import` companions with `node --no-warnings <Firstmate-code-root>/bin/fm-playbot-lanes.mjs lane-import - < <operator-request.json>` from the exact registered lane Git root.
+An operator can generate lane `.gd.uid`, `.gdshader.uid`, `.gdshaderinc.uid`, and asset `.import` companions with `node --no-warnings <Firstmate-code-root>/bin/fm-playbot-lanes.mjs lane-import - < <operator-request.json>` from the exact registered lane Git root.
 This is the supported option B when a lane has no usable engine bridge; LLM implementation workers must never invoke it with real Godot.
 The JSON contract and execution/recovery mechanics belong to [`fm-playbot-lane-import.mjs`](../bin/fm-playbot-lane-import.mjs).
 The command runs locally on Linux workstation and server hosts, reads existing Playbot registration without IPC, resolves stored path aliases to one exact physical checkout, and requires the current Git branch and full head to match the operator request.
@@ -356,7 +356,7 @@ An in-place branch rename may leave Playbot's stored branch name stale; the resu
 It changes no Playbot session or engine setting and establishes no engine-readiness or suite verdict.
 
 The operator supplies an exact companion inventory for the task; an entire landing-base diff is insufficient task ownership because it can include other lanes' work.
-The command checks each authorized companion against a committed changed script/asset and requires the explicit landing branch's actual merge base to match the full `Guide-check-base` trailer.
+The command checks each authorized companion against a committed changed script, shader, or asset and requires the explicit landing branch's actual merge base to match the full `Guide-check-base` trailer.
 Uncommitted project inputs, ambiguous ownership, hidden index flags, Git operations, version drift, and unexpected output refuse rather than broaden that inventory.
 Unrelated staging and work outside the Godot project survive, injected addon bytes are backed up and preserved even when drifted, and generated commits contain only authorized companions.
 An import that changes source, addon, or unrelated files leaves those mutations and the private evidence intact for inspection.

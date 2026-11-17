@@ -4,7 +4,7 @@
 // branch), expectedHead, base (full local ancestor SHAs), landingBranch (explicit
 // local landing branch), godotProject (Git-root
 // relative directory, or "."), godot (absolute executable), companions (exact
-// Git-root relative .gd.uid/.import paths). mode is generate (default) or check.
+// Git-root relative .gd.uid/.gdshader.uid/.gdshaderinc.uid/.import paths). mode is generate (default) or check.
 // base must equal git merge-base expectedHead refs/heads/<landingBranch> and
 // the sole full-SHA Guide-check-base trailer on expectedHead.
 // Optional importCleanGuard="scripts/check_import_clean.py" runs the existing
@@ -88,7 +88,7 @@ export function companionSources(companions, godotProject) {
   if (!Array.isArray(companions) || new Set(companions).size !== companions.length) throw new Error("Companion inventory must be a unique array");
   return companions.map((file) => {
     relativeFile(file);
-    const source = file.endsWith(".gd.uid") ? file.slice(0, -4) : file.endsWith(".import") && ASSET.test(file.slice(0, -7)) ? file.slice(0, -7) : null;
+    const source = /\.(?:gd|gdshader|gdshaderinc)\.uid$/.test(file) ? file.slice(0, -4) : file.endsWith(".import") && ASSET.test(file.slice(0, -7)) ? file.slice(0, -7) : null;
     if (!source || (godotProject !== "." && !source.startsWith(`${godotProject}/`)) || /(?:^|\/)addons\/playbot(?:\/|$)/.test(source)) throw new Error(`Companion is not authorized by a script/asset: ${file}`);
     return { path: file, source };
   });
@@ -233,7 +233,7 @@ export async function laneImport(args, { root, git, gitEnvironment, identity, gu
     if (unexpected.length) throw new Error(`Unexpected import mutations preserved: ${JSON.stringify(unexpected)}`);
     const inventory = companions.map((file) => {
       const bytes = regular(root, file);
-      if (file.endsWith(".gd.uid")) {
+      if (/\.(?:gd|gdshader|gdshaderinc)\.uid$/.test(file)) {
         if (!/^uid:\/\/[a-z0-9]+\n?$/.test(bytes.toString("utf8"))) throw new Error(`Malformed generated UID: ${file}`);
       } else {
         const text = bytes.toString("utf8"), source = file.slice(0, -7);
