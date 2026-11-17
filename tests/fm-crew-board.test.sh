@@ -800,7 +800,6 @@ EOF
   suite_wait=$(sleeper_in "$home/wt-alpha")
   suite_hold=$(sleeper_in "$home/wt-beta")
   now=$(date +%s)
-  boot=$(cat /proc/sys/kernel/random/boot_id)
   printf 'pid=%s\ncwd=%s\nstarted=%s\nheartbeat=%s\n' "$suite_hold" "$home/wt-beta" "$((now-300))" "$now" > "$home/queues/suite.holder"
   mkdir -p "$home/test-service"
   cat > "$home/test-service/status.json" <<JSON
