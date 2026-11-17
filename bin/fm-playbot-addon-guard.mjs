@@ -12,6 +12,13 @@
 // the injected trees out of the stash. Neither operation stages addon files.
 // Remote landing mutations refuse unrelated dirty product work and staged addon
 // changes, then preserve addon bytes and modes through the Git operation.
+// lane-rebase <target> is the supported lane rebase: it snapshots the addon
+// trees, takes only addon paths out of the way (tracked ones reset to HEAD,
+// untracked/ignored ones removed), rebases onto the target without touching any
+// other untracked path, restores the snapshot bytes and modes, and verifies them
+// against the bundle. A real conflict aborts the rebase, restores everything and
+// refuses; tracked product changes or untracked paths colliding with target
+// files refuse before Git runs.
 // verify requires current bundle identity; check-index also refuses staged
 // addon changes so injected helpers cannot enter a product commit.
 import fs from "node:fs";
@@ -93,9 +100,36 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
     }
     return { operation, verified: true, addons: addons.map((addon) => addon.relative) };
   }
-  if (!["reset", "stash", "remote-checkout", "remote-rebase"].includes(operation)) throw new Error("addon-guard expects verify, check-index, reset <ref>, remote-checkout <branch> <head>, remote-rebase <target> <from>, or stash [--all|--include-untracked] [--message text]");
-  let command, followup, churn = [];
-  if (operation === "reset") {
+  if (!["reset", "stash", "remote-checkout", "remote-rebase", "lane-rebase"].includes(operation)) throw new Error("addon-guard expects verify, check-index, reset <ref>, lane-rebase <target>, remote-checkout <branch> <head>, remote-rebase <target> <from>, or stash [--all|--include-untracked] [--message text]");
+  let command, followup, churn = [], prep;
+  if (operation === "lane-rebase") {
+    if (args.length !== 1 || !args[0] || args[0].startsWith("-")) throw new Error("addon-guard lane-rebase requires exactly one target ref");
+    const target = git(root, ["rev-parse", "--verify", `${args[0]}^{commit}`]).trim();
+    if (operations.length) throw new Error("lane-rebase refuses an in-progress Git operation");
+    if (indexFlags.length) throw new Error("lane-rebase refuses assume-unchanged or skip-worktree index flags");
+    const staged = git(root, ["diff", "--cached", "--name-only", "-z", "HEAD", "--"]).split("\0").filter(Boolean);
+    if (staged.filter(owned).length) throw new Error(`lane-rebase refuses staged addon changes: ${staged.filter(owned).join(", ")}`);
+    const changed = git(root, ["diff", "HEAD", "--name-only", "-z", "--"]).split("\0").filter(Boolean);
+    churn = changed.filter((file) => !owned(file) && trackedChurn(file));
+    const tracked = changed.filter((file) => !owned(file) && !churn.includes(file));
+    if (tracked.length) throw new Error(`lane-rebase would risk tracked product changes outside preserved addons: ${tracked.join(", ")}; commit or stash them first`);
+    const targetPaths = git(root, ["ls-tree", "-r", "--name-only", "-z", target]).split("\0").filter(Boolean);
+    if (!addons.length && targetPaths.some((file) => /(^|\/)addons\/playbot\//.test(file))) throw new Error("lane-rebase target contains an addon but this worktree has no verified addon to preserve");
+    // Untracked and ignored paths elsewhere stay put; only one the target would
+    // write over is a real collision.
+    const others = git(root, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
+    const ignored = git(root, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
+    const collide = [...others, ...ignored].filter((file) => !owned(file) && targetPaths.some((targetPath) => file === targetPath || file.startsWith(`${targetPath}/`) || targetPath.startsWith(`${file}/`)));
+    if (collide.length) throw new Error(`lane-rebase target would overwrite untracked paths outside preserved addons: ${collide.join(", ")}`);
+    command = ["rebase", target];
+    prep = () => {
+      if (churn.length) git(root, ["checkout", "HEAD", "--", ...churn.map((file) => `:(literal)${file}`)]);
+      for (const addon of addons) {
+        git(root, ["checkout", "HEAD", "--", `:(literal)${addon.relative}`]);
+        git(root, ["clean", "-fdxq", "--", `:(literal)${addon.relative}`]);
+      }
+    };
+  } else if (operation === "reset") {
     if (args.length !== 1 || !args[0] || args[0].startsWith("-")) throw new Error("addon-guard reset requires exactly one target ref");
     const target = git(root, ["rev-parse", "--verify", `${args[0]}^{commit}`]).trim();
     git(root, ["merge-base", "--is-ancestor", "HEAD", target]);
@@ -159,13 +193,16 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
       if (!file.bytes.equals(fs.readFileSync(path.join(addon.directory, file.name)))) throw new Error(`Addon changed after backup: ${file.name}`);
     }
   } catch (error) { throw new Error(`${error.message}; Git was not run; complete addon backup retained at ${backup}`); }
-  let commandError;
+  let commandError, laneRefusal;
   try {
     if (operation === "remote-rebase") git(root, ["reset", "--hard", "HEAD"]);
+    if (prep) prep();
     git(root, command);
     if (followup) git(root, followup);
   } catch (error) { commandError = error; }
-  if (commandError && operation === "remote-rebase") {
+  let conflicts = [];
+  if (commandError && (operation === "remote-rebase" || operation === "lane-rebase")) {
+    try { conflicts = git(root, ["diff", "--name-only", "--diff-filter=U"]).split("\n").filter(Boolean); } catch {}
     try { git(root, ["rebase", "--abort"]); } catch (error) {
       commandError = new Error(`${commandError.message}; rebase abort failed: ${error.message}`);
     }
@@ -179,9 +216,17 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
       if (!file.bytes.equals(fs.readFileSync(restored)) || (fs.statSync(restored).mode & 0o777) !== file.mode) throw new Error(`Preserved addon byte or mode verification failed: ${file.name}`);
     }
     verifiedAddons(root, await verify());
+    if (commandError && operation === "lane-rebase" && !commandError.message.includes("rebase abort failed")) {
+      fs.rmSync(backup, { recursive: true });
+      laneRefusal = new Error(`lane-rebase stopped on a real conflict${conflicts.length ? ` in ${conflicts.join(", ")}` : ""}; the rebase was aborted and every addon file restored: ${commandError.message}`);
+      throw laneRefusal;
+    }
     if (commandError && operation !== "remote-rebase") throw commandError;
     if (commandError?.message.includes("rebase abort failed")) throw commandError;
     fs.rmSync(backup, { recursive: true });
-    return { operation, preserved: true, verified: true, addons: addons.map((addon) => addon.relative), ...(operation === "reset" ? { revertedChurn: churn } : {}), ...(operation === "remote-rebase" ? { conflict: Boolean(commandError) } : {}) };
-  } catch (error) { throw new Error(`${error.message}; complete addon backup retained at ${backup}`); }
+    return { operation, preserved: true, verified: true, addons: addons.map((addon) => addon.relative), ...(operation === "reset" ? { revertedChurn: churn } : {}), ...(operation === "lane-rebase" ? { rebasedOnto: args[0], revertedChurn: churn } : {}), ...(operation === "remote-rebase" ? { conflict: Boolean(commandError) } : {}) };
+  } catch (error) {
+    if (error === laneRefusal) throw error;
+    throw new Error(`${error.message}; complete addon backup retained at ${backup}`);
+  }
 }

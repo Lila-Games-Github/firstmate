@@ -425,6 +425,51 @@ fs.writeFileSync(path.join(game,'product.txt'),'new');
 fs.rmSync(path.join(proj,'addons/playbot/plugin.gd'));
 const incomplete=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','reset',base],{cwd:game,encoding:'utf8'});
 assert.notEqual(incomplete.status,0); assert.equal(git('rev-parse','HEAD'),base);
+// lane-rebase: untracked addon copies byte-identical to newly tracked target
+// files, rewritten tracked addon files, and unrelated untracked paths never
+// block; a real conflict restores everything and refuses.
+{
+  const other=path.join(root,'rebase-other');
+  const og=(...a)=>{const r=spawnSync('git',['-C',other,...a],{encoding:'utf8'}); assert.equal(r.status,0,r.stderr); return r.stdout.trim();};
+  assert.equal(spawnSync('git',['clone','-q',game,other]).status,0);
+  og('config','user.name','Fixture'); og('config','user.email','fixture@example.invalid');
+  fs.writeFileSync(path.join(other,'prototype-game/addons/playbot/untracked-helper.gd'),'injected helper');
+  fs.writeFileSync(path.join(other,'target.txt'),'target advance');
+  og('add','-f','.'); og('commit','-q','-m','target adds helper'); const tgt=og('rev-parse','HEAD');
+  fs.writeFileSync(path.join(other,'product.txt'),'target edit'); og('commit','-q','-am','target product'); const tgt2=og('rev-parse','HEAD');
+  git('fetch','-q',other,'main'); git('update-ref','refs/heads/tgt',tgt); git('update-ref','refs/heads/tgt2',tgt2);
+  fs.writeFileSync(path.join(game,'lane.txt'),'lane work'); git('add','lane.txt'); git('commit','-q','-m','lane work');
+  fs.mkdirSync(path.join(game,'dupproj')); fs.writeFileSync(path.join(game,'dupproj/project.godot'),'dup');
+  fs.mkdirSync(path.join(game,'.task')); fs.writeFileSync(path.join(game,'.task/note'),'note');
+  fs.writeFileSync(path.join(proj,'addons/playbot/plugin.gd'),'bundled code\n');
+  const pre=['untracked-helper.gd','plugin.gd','native/library.so'].map(f=>fs.readFileSync(path.join(proj,'addons/playbot',f)));
+  const done=guard('lane-rebase','tgt');
+  assert.equal(done.rebasedOnto,'tgt'); assert.equal(git('rev-parse','HEAD~1'),git('rev-parse','tgt'));
+  assert.equal(fs.readFileSync(path.join(game,'lane.txt'),'utf8'),'lane work');
+  assert.equal(fs.readFileSync(path.join(game,'target.txt'),'utf8'),'target advance');
+  assert.equal(fs.readFileSync(path.join(game,'dupproj/project.godot'),'utf8'),'dup');
+  assert.equal(fs.readFileSync(path.join(game,'.task/note'),'utf8'),'note');
+  ['untracked-helper.gd','plugin.gd','native/library.so'].forEach((f,i)=>assert(fs.readFileSync(path.join(proj,'addons/playbot',f)).equals(pre[i]),f));
+  assert.equal(fs.statSync(path.join(proj,'addons/playbot/native/library.so')).mode&0o777,0o755);
+  // A tracked product edit is refused before Git runs.
+  fs.writeFileSync(path.join(game,'product.txt'),'unsaved');
+  const dirty=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','lane-rebase','tgt2'],{cwd:game,encoding:'utf8'});
+  assert.notEqual(dirty.status,0); assert.match(dirty.stderr,/product\.txt/); assert.equal(fs.readFileSync(path.join(game,'product.txt'),'utf8'),'unsaved');
+  git('checkout','--','product.txt');
+  // A real conflict aborts, restores every addon file and leaves the lane as it was.
+  fs.writeFileSync(path.join(game,'product.txt'),'lane edit'); git('commit','-q','-am','lane product');
+  const before=git('rev-parse','HEAD');
+  const bad=spawnSync(process.execPath,['--no-warnings',process.env.SCRIPT,'addon-guard','lane-rebase','tgt2'],{cwd:game,encoding:'utf8'});
+  assert.notEqual(bad.status,0); assert.match(bad.stderr,/real conflict in product\.txt/);
+  assert.equal(git('rev-parse','HEAD'),before); assert.equal(git('status','--porcelain','--untracked-files=no').includes('UU'),false);
+  assert(!fs.existsSync(path.join(game,'.git/rebase-merge'))); assert.equal(fs.readFileSync(path.join(game,'.task/note'),'utf8'),'note');
+  ['untracked-helper.gd','plugin.gd','native/library.so'].forEach((f,i)=>assert(fs.readFileSync(path.join(proj,'addons/playbot',f)).equals(pre[i]),f));
+  git('reset','-q','--hard',base);
+  fs.writeFileSync(path.join(proj,'addons/playbot/untracked-helper.gd'),'injected helper');
+  fs.rmSync(path.join(game,'dupproj'),{recursive:true}); fs.rmSync(path.join(game,'.task'),{recursive:true});
+  fs.cpSync(bundle,path.join(proj,'addons/playbot'),{recursive:true}); fs.chmodSync(path.join(proj,'addons/playbot/native/library.so'),0o755);
+  console.log('lane-rebase: collision, churn, unrelated-untracked and conflict cases passed');
+}
 // A target replacing an addon ancestor with a symlink must never redirect
 // restoration outside the worktree; its complete recovery backup remains.
 fs.copyFileSync(path.join(bundle,'plugin.gd'),path.join(proj,'addons/playbot/plugin.gd'));
