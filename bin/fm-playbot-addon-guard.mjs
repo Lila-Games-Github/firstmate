@@ -13,8 +13,9 @@
 // Remote landing mutations refuse unrelated dirty product work and staged addon
 // changes, then preserve addon bytes and modes through the Git operation.
 // lane-rebase <target> is the supported lane rebase: it snapshots the addon
-// trees, takes only addon paths out of the way (tracked ones reset to HEAD,
-// untracked/ignored ones removed), rebases onto the target without touching any
+// trees, takes tracked addon trees out of the way (HEAD files reset and
+// untracked/ignored files inside those trees removed), rebases without touching
+// an entirely untracked addon tree or any
 // other untracked path, restores the snapshot bytes and modes, and verifies them
 // against the bundle. A real conflict aborts the rebase, restores everything and
 // refuses; tracked product changes or untracked paths colliding with target
@@ -114,18 +115,23 @@ export async function guardAddon({ root, report, operation, args, git, indexFlag
     const tracked = changed.filter((file) => !owned(file) && !churn.includes(file));
     if (tracked.length) throw new Error(`lane-rebase would risk tracked product changes outside preserved addons: ${tracked.join(", ")}; commit or stash them first`);
     const targetPaths = git(root, ["ls-tree", "-r", "--name-only", "-z", target]).split("\0").filter(Boolean);
+    const headAddonFiles = new Map(addons.map((addon) => [addon.relative,
+      git(root, ["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", `:(literal)${addon.relative}`]).split("\0").filter(Boolean)]));
+    const movedAside = (file) => addons.some((addon) => headAddonFiles.get(addon.relative).length && file.startsWith(`${addon.relative}/`));
     if (!addons.length && targetPaths.some((file) => /(^|\/)addons\/playbot\//.test(file))) throw new Error("lane-rebase target contains an addon but this worktree has no verified addon to preserve");
     // Untracked and ignored paths elsewhere stay put; only one the target would
     // write over is a real collision.
     const others = git(root, ["ls-files", "--others", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
     const ignored = git(root, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]).split("\0").filter(Boolean);
-    const collide = [...others, ...ignored].filter((file) => !owned(file) && targetPaths.some((targetPath) => file === targetPath || file.startsWith(`${targetPath}/`) || targetPath.startsWith(`${file}/`)));
+    const collide = [...others, ...ignored].filter((file) => !movedAside(file) && targetPaths.some((targetPath) => file === targetPath || file.startsWith(`${targetPath}/`) || targetPath.startsWith(`${file}/`)));
     if (collide.length) throw new Error(`lane-rebase target would overwrite untracked paths outside preserved addons: ${collide.join(", ")}`);
     command = ["rebase", target];
     prep = () => {
       if (churn.length) git(root, ["checkout", "HEAD", "--", ...churn.map((file) => `:(literal)${file}`)]);
       for (const addon of addons) {
-        git(root, ["checkout", "HEAD", "--", `:(literal)${addon.relative}`]);
+        const trackedFiles = headAddonFiles.get(addon.relative);
+        if (!trackedFiles.length) continue;
+        git(root, ["checkout", "HEAD", "--", ...trackedFiles.map((file) => `:(literal)${file}`)]);
         git(root, ["clean", "-fdxq", "--", `:(literal)${addon.relative}`]);
       }
     };
