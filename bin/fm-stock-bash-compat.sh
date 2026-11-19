@@ -172,7 +172,7 @@ run_consumer doorbell "worker gate and job doorbells" "$DOORBELL_TIMEOUT" 5 \
 run_consumer lane-send "lane test-service completion delivery" "$LANE_SEND_TIMEOUT" 6 \
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-lane-send.test.sh"
 # The watcher poll calls fm-farm-results.py, which delivers through fm-send.sh.
-run_consumer farm-results "independent and watcher farm-result delivery and submit label" "$FARM_RESULTS_TIMEOUT" 11 \
+run_consumer farm-results "fallback farm-result delivery and submit worker binding" "$FARM_RESULTS_TIMEOUT" 9 \
   env FM_STOCK_BASH_BIN="$STOCK_BASH" "$STOCK_BASH" "$ROOT/tests/fm-farm-results.test.sh"
 remote_landing_assertions=14
 [ "${FM_SKIP_TESTFARM:-}" != 1 ] || remote_landing_assertions=11

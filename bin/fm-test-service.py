@@ -7,9 +7,11 @@ the farm through TESTFARM_CHECKOUT or the installed testfarm command.
 
 Firstmate-side addition kept when that copy is refreshed: `submit` without a
 task label (`--task ID`, matching [A-Za-z0-9][A-Za-z0-9_-]*) is refused before
-the farm sees it, because bin/fm-farm-results.py delivers finished results and
-quiets idle alarms by that label, so an unlabeled request would be invisible.
+the farm sees it, because testfarm routes completion to that worker. Before submission the shim
+freezes its current identity in FM_FARM_WORKER_BINDING and a local descriptor
+owned by bin/fm-farm-deliver.py. Missing or ambiguous worker records are refused.
 """
+import importlib.util
 import os
 import re
 import shutil
@@ -30,4 +32,21 @@ if not farm:
     farm = os.path.dirname(os.path.dirname(os.path.realpath(command)))
 os.environ.setdefault("FM_HOME", os.path.dirname(here))
 os.environ.setdefault("FIRSTMATE_BIN", here)
+if sys.argv[1:2] == ["submit"]:
+    # Capture before invoking the client: a request can finish before submit
+    # returns. The farm freezes this binding locally before its remote call.
+    spec = importlib.util.spec_from_file_location("farm_delivery", os.path.join(here, "fm-farm-deliver.py"))
+    delivery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(delivery)
+    home = os.environ["FM_HOME"]
+    state = os.environ.get("FM_STATE_OVERRIDE") or os.path.join(home, "state")
+    if len(set(labels)) != 1:
+        sys.exit("error: submit must name exactly one worker task")
+    try:
+        os.environ["FM_FARM_WORKER_BINDING"] = delivery.capture(home, state, labels[0])
+    except (ValueError, OSError) as error:
+        sys.exit("error: cannot bind submitting worker: " + str(error))
+    # Older remote clients ignore hooks. Their parser must refuse this flag
+    # before any push/submit rather than silently falling back to polling.
+    sys.argv.append("--require-notification-delivery")
 os.execv(sys.executable, [sys.executable, os.path.join(farm, "compat", "fm-test-service.py"), *sys.argv[1:]])

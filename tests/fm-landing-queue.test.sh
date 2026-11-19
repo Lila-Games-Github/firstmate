@@ -30,6 +30,9 @@ assert observed is not None
 print(f"ok: landing train reads real service requests (source={len(source_requests)}, observed={len(observed)})")
 PY
 fi
+# Every remaining compatibility call belongs to a private fixture farm.
+# An installed workstation remote config must not override those registrations.
+export TESTFARM_REMOTE_CONFIG="$TMP_ROOT/absent-remote.json"
 make_case() {
   CASE="$TMP_ROOT/$1"
   mkdir -p "$CASE/home" "$CASE/project"
@@ -615,7 +618,7 @@ TMUX
   export FM_TESTFARM_BIN="$CASE/bin/testfarm"
   export PATH="$CASE/bin:$ORIGINAL_PATH"
 }
-worker_meta() { fm_write_meta "$CASE/home/state/$1.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude'; }
+worker_meta() { fm_write_meta "$CASE/home/state/$1.meta" 'window=sess:fm-notify' 'kind=ship' 'harness=claude' "spawn_gen=fixture-$1"; }
 # farm_request <id> <car> <state> [error] [submitted]: one quick request for the
 # car's current head and assigned target.
 farm_request() {
@@ -692,6 +695,7 @@ pass 'the farm accepted rebase phone request settles only after the earlier quic
 # Submit through the Firstmate shim into a stub farm. Its refusal preserves the
 # farm's reason, and the worker's exact-head fallback produces queue evidence.
 farm_case farm-refused-patch
+worker_meta a
 car a
 admitted=$(head_of a)
 join a >/dev/null
@@ -738,15 +742,15 @@ else:
     raise SystemExit('unexpected stub farm request')
 FARM_STUB
 export STUB_FARM_LOG="$CASE/farm-submits.log"
-if TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+if FM_HOME="$CASE/home" TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
   --task a --suite --check quick --target "$(tip)" --device-gate any --rebase-basis "$admitted" > "$CASE/refusal" 2>&1; then
   fail 'stub farm accepted a changed rebased patch'
 fi
 grep -q 'rebase changed the patch' "$CASE/refusal" || fail 'farm refusal reason was hidden by the shim'
-TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+FM_HOME="$CASE/home" TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
   --task a --suite --receipt "$CASE/fallback.full" > "$CASE/fallback.request"
 [ "$(cat "$CASE/fallback.request")" = editor-suite ] || fail 'exact-head editor suite did not submit'
-TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+FM_HOME="$CASE/home" TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
   --task a --suite --check quick --target "$(tip)" --device-gate any --receipt "$CASE/fallback.quick" > "$CASE/fallback.request"
 [ "$(cat "$CASE/fallback.request")" = short-phone ] || fail 'exact-head short phone did not submit'
 out=$(queue receipt a --head "$(head_of a)" --target "$(tip)" --receipt "$CASE/fallback.quick")
@@ -759,6 +763,7 @@ pass 'stub farm rejects a changed patch and the fallback uses editor suite then 
 
 stub_checkout="$CASE/farm-checkout"
 farm_case farm-missing-basis
+worker_meta a
 car a
 admitted=$(head_of a)
 join a >/dev/null
@@ -768,12 +773,12 @@ git -C "$CASE/project" commit -qm landing
 prepare a
 cp -a "$stub_checkout" "$CASE/farm-checkout"
 export STUB_FARM_LOG="$CASE/farm-submits.log"
-accepted=$(TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+accepted=$(FM_HOME="$CASE/home" TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
   --task a --suite --check quick --target "$(tip)" --device-gate any --rebase-basis "$admitted")
 [ "$accepted" = admitted-short-phone ] || fail 'stub farm did not accept a clean rebased patch on the short route'
 grep -q -- "--suite --check quick --target $(tip) --device-gate any --rebase-basis $admitted" "$STUB_FARM_LOG" \
   || fail 'clean code rebase without a save cache did not request the short phone route'
-if STUB_FARM_MISSING=1 TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
+if STUB_FARM_MISSING=1 FM_HOME="$CASE/home" TESTFARM_CHECKOUT="$CASE/farm-checkout" "$ROOT/bin/fm-test-service.py" submit project "$CASE/a" "$(head_of a)" \
   --task a --suite --check quick --target "$(tip)" --device-gate any --rebase-basis "$admitted" > "$CASE/refusal" 2>&1; then
   fail 'stub farm accepted a basis without its green full-suite result'
 fi
@@ -1020,6 +1025,9 @@ if [ "${FM_LANDING_QUEUE_TEST_ONLY:-}" != farm ]; then
 # only the external test service and stores every submitted request durably.
 spec_case() {
   make_case "spec-$1"
+  # Sequential farm cases use a status-only executable override. Speculative
+  # cases resolve their own testfarm (including receipt get) through PATH.
+  unset FM_TESTFARM_BIN
   mkdir -p "$CASE/bin" "$CASE/fm-root/bin"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE/fm-root/bin/fm-guard.sh"
   chmod +x "$CASE/fm-root/bin/fm-guard.sh"

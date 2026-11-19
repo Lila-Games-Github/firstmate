@@ -16,22 +16,19 @@ The crew board reads testfarm's `status.json` through the existing `~/.local/sta
 
 A worker submits its committed SHA with `--task`, then ends the turn until its completion reaches the same worker through its steering inbox or recorded Playbot chat.
 The entry point refuses a submit without a task label, because firstmate finds every result by that label.
-`bin/fm-farm-results.py`, run independently by the workstation notifier and as a fallback from the watcher poll, delivers any finished result its task does not already hold, whatever delivery hook the request carried, without ever sending the same result twice, and lists open requests so an idle worker or Playbot lane waiting on one raises no stale or idle alarm until the request finishes; its header owns the contract.
-The installed remote client accepts `--notify` for compatibility but does not execute it remotely.
-Enable the independent Linux workstation notifier from the stable installed Firstmate copy, using the owning home's explicit `FM_HOME`:
+For remote submissions, testfarm captures the exact worker binding before submitting and routes the server's durable notification outbox through its own workstation listener to `bin/fm-farm-deliver.py`.
+The binding pins the Playbot project, workspace, thread and worker generation, or a shell worker's durable incarnation; a retired or reused task label cannot redirect completion to another worker.
+The listener requires no Firstmate chat turn, watcher, or Firstmate timer.
+The [testfarm server guide](https://github.com/Lila-Games-Github/lila-test-farm/blob/main/docs/SERVER.md) owns listener installation, status, removal, gateway authorization and delivery receipt inspection.
+Install or activate that service only with the host owner's authority after upgrading both the farm server and remote client.
+The Firstmate shim refuses clients that lack required notification support before they can silently submit without delivery.
 
-```sh
-loginctl enable-linger "$USER"
-FM_HOME=/path/to/firstmate /path/to/firstmate/bin/fm-farm-notifier.py install
-FM_HOME=/path/to/firstmate /path/to/firstmate/bin/fm-farm-notifier.py status
-FM_HOME=/path/to/firstmate /path/to/firstmate/bin/fm-farm-notifier.py uninstall
-```
-
-The notifier uses a systemd user timer so completion delivery continues while the Firstmate chat and foreground watcher are down.
-Its header and `--help` own installation prerequisites, timing, unit names, journal inspection, and removal mechanics.
-Playbot must be running to accept a chat notification; refused deliveries remain eligible for retry after it returns, while queued or unknown accepted deliveries are retained without resending.
-The sweep header owns history eligibility and retry limits; farm status retention still bounds recoverability.
-The executable regressions in `tests/fm-farm-results.test.sh` exercise the independent service command, generated units, concurrent fallback, failures, and retired tasks.
+`bin/fm-farm-results.py` remains a watcher fallback and lists open requests so waiting workers raise no stale or idle alarm.
+For a bound remote request, it validates the immutable local descriptor and uses the same receiver and lock as direct delivery.
+The receiver's header owns request-level deduplication and receipt storage; a reconstructed fallback body cannot cause a second delivery of the same completion.
+Playbot must be running to accept chat notifications; refused deliveries retry, while queued and unknown acceptance remain distinct from confirmed delivery in the audit receipt.
+A receiver interrupted during an uncertain send retains an unknown receipt for reconciliation instead of blindly sending another copy.
+The executable regressions in `tests/fm-farm-results.test.sh` cover startup completion, racing fallback, terminal results, retries and worker retirement.
 
 For a full-suite gate, use the receipt path printed in the task brief.
 

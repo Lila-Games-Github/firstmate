@@ -6,9 +6,9 @@ Usage: fm-farm-results.py sweep [--force] [--report]
        fm-farm-results.py inspect
        fm-farm-results.py initialize
 
-bin/fm-farm-notifier.py and bin/fm-watch.sh run `sweep` independently.
+bin/fm-watch.sh runs `sweep` only as fallback for testfarm-owned delivery.
 An OS-owned flock on state/.farm-results.lock serializes the entire read, send
-and ledger transaction across both callers, and releases on process exit.
+and ledger transaction across direct delivery and fallback callers, and releases on process exit.
 The watcher runs `sweep` from its poll once the stamp below is due; the
 sweep does real work at most once per FM_FARM_RESULTS_SECS (default 30, valid
 5..600) per home, tracked by the epoch in state/.last-farm-results-sweep, and
@@ -17,7 +17,11 @@ reads `testfarm status --json --no-probe` once (FM_TESTFARM_BIN, default
 testfarm; bounded by FM_TESTFARM_TIMEOUT, default 10 seconds, valid 1..60), the
 same request store bin/fm-landing-queue.sh resolve reads, and only requests
 whose task label names a state/<task>.meta in this home count. A request whose
-options name a different submitting home is never touched.
+options name a different submitting home is never touched. A remote notify_owner
+must match a local immutable farm-bindings descriptor and the current worker
+incarnation. Those requests use fm-farm-deliver.py under this same lock, with
+request-level receipts shared with direct delivery; endpoint presence also
+receives the ordinary hook grace period.
 
 Open requests. Every request still preparing, queued, or running is written to
 state/.farm-open-requests, replaced atomically on each successful read: a
@@ -37,7 +41,7 @@ bin/fm-send.sh with FM_SEND_IDEMPOTENT=1, so a hook delivery and a sweep
 delivery of the same result collapse into one record: the inbox plane and
 bin/fm-lane-send.sh both drop an exact repeat. A task already has a result when
 any record in state/<task>.inbox/ (pending or handled/) or state/<task>.lane-sent/
-names `request=<id> `, or when this sweep's own ledger of settled requests
+names `Test service completion: request=<id> `, or when this sweep's own ledger of settled requests
 (state/.farm-results-delivered) lists it, so a body that differs from the
 hook's - a receipt moved after completion - is still never sent twice.
 A result the task has moved past is settled without being sent: when the task
@@ -47,7 +51,7 @@ running side by side are both delivered, because neither was submitted after
 the other finished.
 A request that carried a hook is left to that hook for FM_FARM_RESULTS_GRACE
 seconds after it finished (default 120); one without a hook is delivered on the
-first sweep that sees it. Only results finished after this home's initialization
+first sweep that sees it. Legacy results must have finished after this home's initialization
 (state/.farm-results-baseline) and within FM_FARM_RESULTS_MAX_AGE seconds
 (default 86400) are delivered, so enabling the sweep never replays history.
 A failed send is retried on every later sweep, even after the age window; its first failure prints one
@@ -62,14 +66,15 @@ FM_SEND_BIN to replace bin/fm-send.sh (tests only). Exits nonzero with one
 error line only when the sweep itself cannot run; an unreadable farm is
 silent and leaves the previous open-request file to age out.
 With --report, print JSON request/owned/sent/settled/retrying counts and report an
-unreadable farm as exit 1 for the independent service journal. `inspect` reads
+unreadable farm as exit 1 for an explicit caller. `inspect` reads
 status and prints request/owned/open/finished counts without writing or sending.
 `initialize` establishes the history baseline under the same sweep lock without
-reading farm status or sending. The notifier installer calls it before enabling
-its timer; an existing baseline is preserved. A watcher-only home initializes
-on its first successful sweep.
+reading farm status or sending. An existing baseline is preserved. Legacy homes initialize on their first
+successful sweep. Submission-bound remote results have independent durable
+bindings and do not depend on that baseline.
 """
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -83,6 +88,9 @@ TASK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 RID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 OPEN = ("preparing", "queued", "running")
 FINISHED = ("passed", "failed", "cancelled")
+_delivery_spec = importlib.util.spec_from_file_location("farm_delivery", Path(__file__).with_name("fm-farm-deliver.py"))
+delivery = importlib.util.module_from_spec(_delivery_spec)
+_delivery_spec.loader.exec_module(delivery)
 
 
 def bounded(name, default, low, high):
@@ -157,7 +165,7 @@ def completion_message(row, farm_state):
 
 def task_holds(state, task, rid):
     """True when the task's inbox or lane chat record already carries this request's result."""
-    needle = f"request={rid} ".encode()
+    needle = f"Test service completion: request={rid} ".encode()
     folders = [state / f"{task}.inbox", state / f"{task}.inbox" / "handled", state / f"{task}.lane-sent"]
     for folder in folders:
         try:
@@ -192,8 +200,32 @@ def owned_requests(rows, home, state):
         meta = state / f"{task}.meta"
         if not meta.is_file() or meta.is_symlink():
             continue
+        if opts.get("notify_endpoint") and not opts.get("notify_owner"):
+            # Generic remote callbacks belong to their own receiver. A shared
+            # task label alone is insufficient authority to claim that result.
+            continue
+        if opts.get("notify_owner"):
+            try:
+                binding = remote_binding(opts["notify_owner"], state)
+                if binding["task"] != task or binding["home"] != str(Path(home).resolve()) or binding["state"] != str(state.resolve()):
+                    continue
+                delivery.validate(binding)
+            except (OSError, ValueError, KeyError):
+                continue
         mine.append((task, rid, row, opts))
     return mine
+
+
+def remote_binding(owner, state):
+    if not isinstance(owner, str) or not re.fullmatch(r"[0-9a-f]{64}", owner):
+        raise ValueError("invalid notification owner")
+    path = state / "farm-bindings" / (owner + ".json")
+    if path.is_symlink():
+        raise ValueError("symlinked worker binding")
+    binding = json.loads(path.read_text())
+    if delivery.owner_for(json.dumps(binding, sort_keys=True, separators=(",", ":"))) != owner:
+        raise ValueError("worker binding checksum mismatch")
+    return binding
 
 
 def ensure_baseline(state, now):
@@ -248,7 +280,7 @@ def locked_sweep(home, state, force, report):
     rows = farm_requests()
     if rows is None:
         if report:
-            print("error: farm status unreadable; will retry on the next timer tick", file=sys.stderr)
+            print("error: farm status unreadable; will retry on the next fallback sweep", file=sys.stderr)
             return 1
         return 0
     mine = owned_requests(rows, home, state)
@@ -277,7 +309,7 @@ def locked_sweep(home, state, force, report):
         submitted = submitted_at(row)
         if rid in delivered:
             held.setdefault(task, []).append(submitted)
-        elif rid in failed or (finished >= baseline and now - finished <= max_age):
+        elif rid in failed or ((opts.get("notify_owner") or finished >= baseline) and now - finished <= max_age):
             if task_holds(state, task, rid):
                 delivered.add(rid)
                 held.setdefault(task, []).append(submitted)
@@ -286,18 +318,23 @@ def locked_sweep(home, state, force, report):
     # Newest first, so a result delivered now settles any older one it supersedes.
     pending.sort(key=lambda item: submitted_at(item[2]), reverse=True)
     for task, rid, row, opts, finished in pending:
-        if (opts.get("notify") or opts.get("home")) and now - finished < grace:
+        if (opts.get("notify") or opts.get("home") or opts.get("notify_endpoint")) and now - finished < grace:
             continue
         if any(submitted > finished for submitted in held.get(task, [])):
             delivered.add(rid)
             continue
         env = dict(os.environ, FM_HOME=home, FM_STATE_OVERRIDE=str(state), FM_SEND_IDEMPOTENT="1")
         try:
-            sent = subprocess.run([send, task, completion_message(row, farm_state)], env=env,
-                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                  text=True, timeout=60, check=False)
-            reason = (sent.stderr.strip().splitlines() or [f"fm-send exited {sent.returncode}"])[-1] if sent.returncode else ""
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            if opts.get("notify_owner"):
+                delivery.deliver_locked(remote_binding(opts["notify_owner"], state), opts["notify_owner"],
+                                        rid, completion_message(row, farm_state))
+                reason = ""
+            else:
+                sent = subprocess.run([send, task, completion_message(row, farm_state)], env=env,
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                      text=True, timeout=60, check=False)
+                reason = (sent.stderr.strip().splitlines() or [f"fm-send exited {sent.returncode}"])[-1] if sent.returncode else ""
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             reason = str(exc) or type(exc).__name__
         if not reason:
             sent_count += 1
