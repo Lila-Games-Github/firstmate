@@ -334,9 +334,15 @@ test_independent_failures_and_retirement() {
 }
 
 test_notifier_unit_lifecycle() {
-  local dir
-  dir=$(setup_case unit-lifecycle)
+  local dir mode=${1:-existing}
+  dir=$(setup_case "unit-lifecycle-$mode")
   farm "$dir" "unit-result:lane1:passed:30:0"
+  if [ "$mode" = startup ]; then
+    rm "$dir/home/state/.farm-results-baseline"
+    farm "$dir" "unit-result:lane1:running:-:0"
+  fi
+  mkdir -p "$dir/receipts with % and dollar\$/results/unit-result"
+  : >"$dir/receipts with % and dollar\$/results/unit-result/$(printf 'a%.0s' $(seq 40)).receipt"
   cat >"$dir/fakebin/loginctl" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${FAKE_LINGER:-yes}"
@@ -345,7 +351,7 @@ SH
   # ExecStart as systemd would. It runs delivery without starting a watcher.
   cat >"$dir/fakebin/systemctl" <<'PYTHON'
 #!/usr/bin/env python3
-import configparser, json, os, pathlib, shlex, subprocess, sys
+import configparser, json, os, pathlib, shlex, subprocess, sys, time
 args = sys.argv[1:]
 with open(os.environ["MANAGER_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
@@ -354,7 +360,21 @@ if "enable" in args:
     unit = configparser.ConfigParser(interpolation=None)
     unit.read(service)
     env = dict(os.environ)
+    # A user manager does not inherit the invoking terminal's optional setting.
+    env.pop("FM_TEST_SERVICE_STATE", None)
     env.update(value.replace("%%", "%").split("=", 1) for value in shlex.split(unit["Service"]["Environment"]))
+    if os.environ["UNIT_TEST_MODE"] == "startup":
+        baseline = pathlib.Path(env["FM_HOME"]) / "state/.farm-results-baseline"
+        assert baseline.is_file(), "timer activated before completion eligibility existed"
+        data = pathlib.Path(os.environ["FAKE_FARM_JSON"])
+        status = json.loads(data.read_text())
+        finished = time.time()
+        status["requests"][0].update(state="passed", finished=finished)
+        data.write_text(json.dumps(status))
+        # Cross a whole second before the first sweep. A late baseline would
+        # exclude this completion instead of accidentally passing by rounding.
+        while int(time.time()) <= finished:
+            time.sleep(0.01)
     command = [arg.replace("%%", "%").replace("$$", "$") for arg in shlex.split(unit["Service"]["ExecStart"])]
     sys.exit(subprocess.run(command, env=env).returncode)
 if "show" in args:
@@ -369,11 +389,14 @@ PYTHON
   mv "$dir/home" "$dir/unused-home"
   ln -s "$dir/home with % and dollar\$" "$dir/home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" XDG_CONFIG_HOME="$dir/units" \
+    UNIT_TEST_MODE="$mode" FM_TEST_SERVICE_STATE="$dir/receipts with % and dollar\$" \
     MANAGER_LOG="$dir/manager.log" FAKE_FARM_JSON="$dir/farm.json" \
     FM_PLAYBOT_LANES_TOOL="$FAKE_TOOL" FAKE_LANES_LOG="$dir/lanes.log" \
     python3 "$ROOT/bin/fm-farm-notifier.py" install >"$dir/install.out" 2>"$dir/install.err" ||
     fail "generated service must execute its own delivery: $(cat "$dir/install.err")"
   [ "$(wc -l <"$dir/lanes.log" | tr -d ' ')" = 1 ] || fail "manager must deliver without any watcher/chat process"
+  assert_contains "$(cat "$dir/lanes.log")" "receipt=$dir/receipts with % and dollar\$/results/unit-result/" \
+    "the service must retain the configured receipt path without inheriting the submitter's environment"
   if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze --user verify "$dir/units/systemd/user/"*.service "$dir/units/systemd/user/"*.timer >"$dir/verify.out" 2>&1 ||
       fail "systemd must accept generated units: $(cat "$dir/verify.out")"
@@ -394,7 +417,7 @@ PYTHON
     >"$dir/bad.out" 2>"$dir/bad.err" && fail "installation without logout/reboot persistence must be refused"
   assert_contains "$(cat "$dir/bad.err")" 'loginctl enable-linger' "bad configuration must identify remedy"
   [ "$(find "$dir/units" -type f | wc -l | tr -d ' ')" = 0 ] || fail "rejected install must publish no units"
-  pass "fm-farm-results: generated units run independent delivery, parse in systemd, expose status, uninstall and reject missing persistence"
+  pass "fm-farm-results: $mode installation delivers with retained receipt configuration, valid systemd units and guarded lifecycle"
 }
 
 test_unhooked_result_delivered_once
@@ -407,3 +430,4 @@ test_submit_requires_task_label
 test_independent_notifier_and_race
 test_independent_failures_and_retirement
 test_notifier_unit_lifecycle
+test_notifier_unit_lifecycle startup

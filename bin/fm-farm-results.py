@@ -4,6 +4,7 @@ record which tasks are waiting on an open farm request.
 
 Usage: fm-farm-results.py sweep [--force] [--report]
        fm-farm-results.py inspect
+       fm-farm-results.py initialize
 
 bin/fm-farm-notifier.py and bin/fm-watch.sh run `sweep` independently.
 An OS-owned flock on state/.farm-results.lock serializes the entire read, send
@@ -46,7 +47,7 @@ running side by side are both delivered, because neither was submitted after
 the other finished.
 A request that carried a hook is left to that hook for FM_FARM_RESULTS_GRACE
 seconds after it finished (default 120); one without a hook is delivered on the
-first sweep that sees it. Only results finished after this home's first sweep
+first sweep that sees it. Only results finished after this home's initialization
 (state/.farm-results-baseline) and within FM_FARM_RESULTS_MAX_AGE seconds
 (default 86400) are delivered, so enabling the sweep never replays history.
 A failed send is retried on every later sweep, even after the age window; its first failure prints one
@@ -63,6 +64,10 @@ silent and leaves the previous open-request file to age out.
 With --report, print JSON request/owned/sent/settled/retrying counts and report an
 unreadable farm as exit 1 for the independent service journal. `inspect` reads
 status and prints request/owned/open/finished counts without writing or sending.
+`initialize` establishes the history baseline under the same sweep lock without
+reading farm status or sending. The notifier installer calls it before enabling
+its timer; an existing baseline is preserved. A watcher-only home initializes
+on its first successful sweep.
 """
 import fcntl
 import json
@@ -191,7 +196,18 @@ def owned_requests(rows, home, state):
     return mine
 
 
-def sweep(force, report=False, inspect=False):
+def ensure_baseline(state, now):
+    """Caller holds the sweep lock; preserve the home's original eligibility."""
+    baseline_file = state / ".farm-results-baseline"
+    lines = read_lines(baseline_file)
+    if lines and lines[0].isdigit():
+        return int(lines[0])
+    baseline = int(now)
+    atomic_write(baseline_file, f"{baseline}\n")
+    return baseline
+
+
+def sweep(force, report=False, inspect=False, initialize=False):
     home = os.environ.get("FM_HOME")
     if not home:
         sys.exit("error: FM_HOME must explicitly select the owning home")
@@ -210,6 +226,9 @@ def sweep(force, report=False, inspect=False):
     # Never unlink this lock: every caller must lock the same inode.
     with (state / ".farm-results.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if initialize:
+            ensure_baseline(state, time.time())
+            return 0
         return locked_sweep(home, state, force, report)
 
 
@@ -236,13 +255,7 @@ def locked_sweep(home, state, force, report):
     atomic_write(state / ".farm-open-requests", "fm-farm-open.v1\n" + "".join(
         f"{task} {rid} {row.get('state')}\n" for task, rid, row, _ in mine if row.get("state") in OPEN))
 
-    baseline_file = state / ".farm-results-baseline"
-    lines = read_lines(baseline_file)
-    if lines and lines[0].isdigit():
-        baseline = int(lines[0])
-    else:
-        baseline = int(now)
-        atomic_write(baseline_file, f"{baseline}\n")
+    baseline = ensure_baseline(state, now)
     grace = bounded("FM_FARM_RESULTS_GRACE", 120, 0, 3600)
     max_age = bounded("FM_FARM_RESULTS_MAX_AGE", 86400, 600, 30 * 86400)
     farm_state = Path(os.environ.get("FM_TEST_SERVICE_STATE")
@@ -313,9 +326,11 @@ def main(argv):
         return 0
     if argv == ["inspect"]:
         return sweep(False, inspect=True)
+    if argv == ["initialize"]:
+        return sweep(False, initialize=True)
     if not argv or argv[0] != "sweep" or len(set(argv[1:])) != len(argv[1:]) or any(
             arg not in ("--force", "--report") for arg in argv[1:]):
-        print("usage: fm-farm-results.py sweep [--force] [--report] | inspect", file=sys.stderr)
+        print("usage: fm-farm-results.py sweep [--force] [--report] | inspect | initialize", file=sys.stderr)
         return 2
     return sweep("--force" in argv, "--report" in argv)
 

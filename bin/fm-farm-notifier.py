@@ -18,6 +18,10 @@ so node/ssh and the exact-task fm-send path work without a login shell.
 It calls fm-farm-results.py sweep --report; that script owns selection, body,
 retry, baseline, shared locking, and ledgers. No foreground watcher or chat is
 required. Playbot must be running to accept chat messages; refused sends retry.
+Installation initializes completion eligibility before enabling the timer so a
+result finishing before its first poll remains eligible, preserving an existing
+baseline. FM_TEST_SERVICE_STATE, when configured, is retained as an absolute
+path in the service environment for the same receipt lookup as the watcher.
 Service failures are journalled and retried on the next tick. systemd imposes
 no invocation timeout; the existing farm and send calls retain their own bounds.
 
@@ -107,6 +111,8 @@ def main():
     if not client:
         raise ValueError("installed testfarm client not found")
     env = {"FM_HOME": str(home), "FM_TESTFARM_BIN": os.path.abspath(client), "PATH": os.environ["PATH"]}
+    if os.environ.get("FM_TEST_SERVICE_STATE"):
+        env["FM_TEST_SERVICE_STATE"] = os.path.abspath(os.environ["FM_TEST_SERVICE_STATE"])
     header = OWNER + f"# Home: {home}\n"
     service_text = header + "[Unit]\nDescription=Firstmate remote farm completion delivery\n\n[Service]\nType=oneshot\n"
     service_text += "Environment=" + " ".join(quote(f"{key}={value}") for key, value in env.items()) + "\n"
@@ -120,6 +126,11 @@ def main():
     directory.mkdir(parents=True, exist_ok=True)
     for path, content in ((service, service_text), (timer, timer_text)):
         path.write_text(content)
+    initialized = subprocess.run([sys.executable, str(code.with_name("fm-farm-results.py")), "initialize"],
+                                 env=dict(os.environ, FM_HOME=str(home), FM_STATE_OVERRIDE=str(state)),
+                                 stdin=subprocess.DEVNULL, check=False)
+    if initialized.returncode:
+        raise ValueError("cannot initialize completion eligibility; timer was not activated")
     command(["systemctl", "--user", "daemon-reload"])
     command(["systemctl", "--user", "enable", "--now", timer.name])
     print("installed; use status to inspect delivery and journal output")
