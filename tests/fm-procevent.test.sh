@@ -129,8 +129,8 @@ wait_for_lines() {
   return 1
 }
 
-hold_source_lock() {  # <source-id> <ready-file> <release-file>
-  local id=$1 ready=$2 release=$3 parent=$$
+hold_source_lock() {  # <source-id> <ready-file> <release-file> [registration-to-remove]
+  local id=$1 ready=$2 release=$3 parent=$$ registration=${4-}
   FM_HOME="$TMP_ROOT/lock-helper-home" bash -c '
     . "$1/bin/fm-pr-lib.sh"
     . "$1/bin/fm-wake-lib.sh"
@@ -142,7 +142,10 @@ hold_source_lock() {  # <source-id> <ready-file> <release-file>
       kill -0 "$5" 2>/dev/null || exit 0
       sleep 0.02
     done
-  ' _ "$ROOT" "$id" "$ready" "$release" "$parent" &
+    # A fixture can withdraw a registration while still holding its lock, so
+    # reconcile passes this barrier without launching another source.
+    [ -z "$6" ] || rm -- "$6"
+  ' _ "$ROOT" "$id" "$ready" "$release" "$parent" "$registration" &
   HOLDER_PID=$!
 }
 
@@ -1632,6 +1635,9 @@ pass "reconcile reports a launch it could not confirm instead of counting it as 
 # lock of the second source, and the holder is released only once the fast
 # runner has captured its result and let go of both its claim and its runner
 # record. Confirmation therefore starts strictly after the fast runner is gone.
+# A final registration holds confirmation until the second runner has claimed,
+# then is withdrawn under its lock. Its startup must not race the two-second
+# confirmation window: this case tests evidence left by the finished runner.
 HFC="$TMP_ROOT/hfc"; new_home "$HFC"
 FC_FAST="$TMP_ROOT/fast-source.sh"
 cat > "$FC_FAST" <<'SH'
@@ -1642,25 +1648,36 @@ chmod +x "$FC_FAST"
 FC_TRIGGER="$TMP_ROOT/fast-hold-trigger"
 pe_register "$HFC" lavish aa-fast-src -- "$FC_FAST" >/dev/null
 pe_register "$HFC" lavish zz-hold-src -- "$BLOCKER" "$FC_TRIGGER" "held" >/dev/null
+pe_register "$HFC" lavish zzz-confirm-fence -- "$FC_FAST" >/dev/null
+FC_FENCE_READY="$TMP_ROOT/fast-fence-ready"; FC_FENCE_RELEASE="$TMP_ROOT/fast-fence-release"
+hold_source_lock zzz-confirm-fence "$FC_FENCE_READY" "$FC_FENCE_RELEASE" \
+  "$HFC/state/procevent/zzz-confirm-fence.source"
+FC_FENCE_HOLDER=$HOLDER_PID
+wait_for "$FC_FENCE_READY" || fail "the fast-source fixture could not hold its confirmation barrier"
 FC_READY="$TMP_ROOT/fast-hold-ready"; FC_RELEASE="$TMP_ROOT/fast-hold-release"
 hold_source_lock zz-hold-src "$FC_READY" "$FC_RELEASE"
 wait_for "$FC_READY" || fail "the fast-source fixture could not hold a source lock"
 (
+  trap ': > "$FC_RELEASE"; : > "$FC_FENCE_RELEASE"' EXIT
   for _ in $(seq 1 600); do
     if first_result "$HFC" aa-fast-src >/dev/null 2>&1 \
       && [ ! -e "$HFC/state/procevent/aa-fast-src.runner" ] \
       && [ ! -e "$FM_PROCEVENT_CLAIM_ROOT/aa-fast-src.claim" ]; then
+      : > "$FC_RELEASE"
       break
     fi
     sleep 0.05
   done
-  : > "$FC_RELEASE"
+  [ -e "$FC_RELEASE" ] || exit 1
+  wait_for "$FM_PROCEVENT_CLAIM_ROOT/zz-hold-src.claim" || exit 1
+  : > "$FC_FENCE_RELEASE"
 ) &
 FC_RELEASER=$!
 fc_rc=0
 fc_out=$(FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=2 pe "$HFC" reconcile) || fc_rc=$?
-wait "$FC_RELEASER" 2>/dev/null || true
+wait "$FC_RELEASER" 2>/dev/null || fail "the fast-source fixture never reached both confirmation barriers: $fc_out"
 wait "$HOLDER_PID" 2>/dev/null || true
+wait "$FC_FENCE_HOLDER" 2>/dev/null || fail "the fast-source fixture could not withdraw its confirmation barrier"
 first_result "$HFC" aa-fast-src >/dev/null \
   || fail "fixture invalid: the fast source never produced a result: $fc_out"
 assert_contains "$fc_out" "started=2" \
