@@ -3912,11 +3912,27 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'args=%s\n' "$*" >> "${FM_ARM_LOG:?}"
+if [ "$(wc -l < "$FM_ARM_LOG")" -gt 1 ]; then
+  # Start the retry while the guard is still running, then release its output
+  # only after the blind-turn prompt arrives. Neither child exit order nor a
+  # fixed delay guarantees that prompt order on a fast or busy CI runner.
+  printf 'waiting\n' > "$FM_ARM_LOG.retry-waiting"
+  for _ in $(seq 1 500); do
+    [ ! -e "$FM_ARM_LOG.retry-release" ] || break
+    sleep 0.01
+  done
+  [ -e "$FM_ARM_LOG.retry-release" ] || exit 75
+fi
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "${FM_GUARD_LOG:?}"
+for _ in $(seq 1 500); do
+  [ ! -e "$FM_ARM_LOG.retry-waiting" ] || break
+  sleep 0.01
+done
+[ -e "$FM_ARM_LOG.retry-waiting" ] || exit 75
 printf 'guard ran after external healthy watcher\n' >&2
 exit 2
 SH
@@ -3931,7 +3947,11 @@ const promptBodies = [];
 const client = {
   session: {
     promptAsync: async (request) => {
-      promptBodies.push(request.body.parts[0].text);
+      const text = request.body.parts[0].text;
+      promptBodies.push(text);
+      if (text.includes("TURN WOULD END BLIND")) {
+        writeFileSync(`${process.env.FM_ARM_LOG}.retry-release`, "release\n");
+      }
     },
   },
 };
@@ -3966,8 +3986,7 @@ if (!promptBodies.some((body) => body.includes("TURN WOULD END BLIND"))) {
   console.error(`missing blind-turn prompt: ${promptBodies.join("\n")}`);
   process.exit(1);
 }
-// The external arm 250ms retry may deliver another prompt after the guard.
-// Observe that later delivery so a last-prompt-only assertion cannot pass by timing.
+// The retry was held until the guard prompt, so observe its later delivery.
 for (let i = 0; i < 250 && !promptBodies.some((body) => body.includes("continuity retry")); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -3982,7 +4001,7 @@ if (promptBodies.at(-1).includes("TURN WOULD END BLIND")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
+  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm: $out"
   [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }

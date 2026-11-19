@@ -38,7 +38,8 @@ cat >"$FAKE_TOOL" <<'JS'
 import fs from "node:fs";
 const input = fs.readFileSync(0, "utf8");
 fs.appendFileSync(process.env.FAKE_LANES_LOG, JSON.stringify(JSON.parse(input)) + "\n");
-const value = { thread: {}, delivery: { state: "delivered" } };
+if (process.env.FAKE_LANES_DELAY) await new Promise(resolve => setTimeout(resolve, Number(process.env.FAKE_LANES_DELAY)));
+const value = { thread: {}, delivery: { state: process.env.FAKE_LANES_VERDICT || "delivered" } };
 console.log(JSON.stringify({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value }));
 JS
 
@@ -234,7 +235,11 @@ lane1 o2 running" "$open" "only this home's open requests should be listed"
   assert_contains "$(cat "$dir/out")" "farm-result undelivered task=t1 request=f1:" "a failed send should be reported"
   run_sweep "$dir"
   [ ! -s "$dir/out" ] || fail "a failed send is reported once, then retried silently"
-  pass "fm-farm-results: open requests are listed, an unreadable farm changes nothing, and send failures report once"
+  fm_write_meta "$dir/home/state/t1.meta" "kind=ship" "harness=claude" "window=sess:fm-t1"
+  farm "$dir" "f1:t1:failed:90000:0"
+  run_sweep "$dir"
+  [ "$(records "$dir" t1)" = 1 ] || fail "an already failed send must retry beyond the history age limit"
+  pass "fm-farm-results: outages preserve state and failed sends remain retryable beyond the history limit"
 }
 
 run_submit() { # <case-dir> <args...>: the shim against a stand-in farm checkout
@@ -245,7 +250,8 @@ run_submit() { # <case-dir> <args...>: the shim against a stand-in farm checkout
 
 test_submit_requires_task_label() {
   local dir="$TMP_ROOT/submit"
-  mkdir -p "$dir/farm/compat"
+  mkdir -p "$dir/farm/compat" "$dir/state"
+  fm_write_meta "$dir/state/t1.meta" "kind=ship" "spawn_gen=g1" "window=sess:fm-t1"
   printf '%s\n' 'import sys' \
     'with open(sys.argv[0] + ".log", "a") as log:' \
     '    log.write(" ".join(sys.argv[1:]) + "\n")' >"$dir/farm/compat/fm-test-service.py"
@@ -257,9 +263,129 @@ test_submit_requires_task_label() {
   [ ! -e "$dir/farm/compat/fm-test-service.py.log" ] || fail "a refused submit must never reach the farm"
   run_submit "$dir" submit frogpile /w abc --task t1 --suite || fail "a labeled submit should pass through: $(cat "$dir/err")"
   run_submit "$dir" status --json || fail "other commands need no label"
-  assert_equals "submit frogpile /w abc --task t1 --suite
+  fm_write_meta "$dir/state/old.meta" "kind=ship" "window=sess:old"
+  run_submit "$dir" submit frogpile /w abc --task old && fail "an ordinary worker without a generation cannot be bound safely"
+  assert_contains "$(cat "$dir/err")" "no spawn_gen" "missing incarnation must be explicit"
+  assert_equals "submit frogpile /w abc --task t1 --suite --require-notification-delivery
 status --json" "$(cat "$dir/farm/compat/fm-test-service.py.log")" "labeled submits and other commands should reach the farm unchanged"
   pass "fm-test-service: submit refuses a missing or malformed task label before the farm sees it"
+}
+
+# Exercise submission capture and the farm hook receiver, without a supervisor,
+# watcher or timer. The farm integration test covers the remote outbox transport.
+calls() { wc -l <"$1/lanes.log" | tr -d ' '; }
+
+freeze_worker() {
+  local dir=$1 task=$2
+  mkdir -p "$dir/farm/compat"
+  cat >"$dir/farm/compat/fm-test-service.py" <<'PYFIXTURE'
+import os
+from pathlib import Path
+Path(os.environ["BINDING_OUT"]).write_text(os.environ["FM_FARM_WORKER_BINDING"])
+print("startup-result")
+PYFIXTURE
+  env FM_HOME="$dir/home" TESTFARM_CHECKOUT="$dir/farm" BINDING_OUT="$dir/binding.json" \
+    python3 "$ROOT/bin/fm-test-service.py" submit sample /unused abc --task "$task" >"$dir/submit.out" 2>"$dir/err"
+}
+
+receive() {
+  local dir=$1 rid=$2 message=$3
+  shift 3
+  printf '%s' "$message" | env FM_FARM_WORKER_BINDING="$(cat "$dir/binding.json")" \
+    TESTFARM_NOTIFY_TASK=lane1 TESTFARM_NOTIFY_REQUEST="$rid" \
+    FM_PLAYBOT_LANES_TOOL="$FAKE_TOOL" FAKE_LANES_LOG="$dir/lanes.log" "$@" \
+    "$ROOT/bin/fm-farm-deliver.py" deliver >"$dir/receipt.out" 2>"$dir/err"
+}
+
+remote_row() {
+  local dir=$1 rid=$2 result=$3
+  python3 - "$dir" "$rid" "$result" <<'PYFIXTURE'
+import hashlib, json, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+owner = hashlib.sha256((root / 'binding.json').read_bytes()).hexdigest()
+now = time.time()
+(root / 'farm.json').write_text(json.dumps({'requests': [{
+ 'id': sys.argv[2], 'state': sys.argv[3], 'sha': 'a' * 40,
+ 'finished': now, 'submitted': now - 1,
+ 'options': {'task': 'lane1', 'notify_owner': owner, 'notify_endpoint': 'e' * 32}}]}))
+PYFIXTURE
+}
+
+test_bound_startup_and_fallback_race() {
+  local dir rid result direct_pid fallback_pid
+  for result in passed failed cancelled; do
+    dir=$(setup_case "bound-$result")
+    # No fallback baseline or listener turn exists when submission starts.
+    rm "$dir/home/state/.farm-results-baseline"
+    freeze_worker "$dir" lane1 || fail "could not bind submission: $(cat "$dir/err")"
+    rid="startup-$result"
+    remote_row "$dir" "$rid" "$result"
+    receive "$dir" "$rid" "$(expected_body "$rid" "$result" - -)" FAKE_LANES_DELAY=250 &
+    direct_pid=$!
+    run_sweep "$dir" FM_FARM_RESULTS_GRACE=0 &
+    fallback_pid=$!
+    wait "$direct_pid" || fail "direct delivery failed: $(cat "$dir/err")"
+    wait "$fallback_pid" || fail "fallback failed"
+    [ "$(calls "$dir")" = 1 ] || fail "bound result must reach frozen worker once across racing delivery paths"
+    # A moved receipt or changed failure detail must not defeat request dedupe.
+    receive "$dir" "$rid" "Test service completion: request=$rid state=$result receipt=/moved" || fail "replay failed"
+    [ "$(calls "$dir")" = 1 ] || fail "replayed result was duplicated"
+    python3 - "$dir" <<'PYFIXTURE' || fail "wrong worker or missing auditable receipt"
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+call = json.loads((root / 'lanes.log').read_text())
+assert call['project'] == 'project_abc' and call['workspace'] == 'ws_123' and call['thread'] == 'chat-lane-1', call
+receipts = list((root / 'home/state/farm-delivery').glob('*/*.json'))
+assert len(receipts) == 1
+receipt = json.loads(receipts[0].read_text())
+assert receipt['state'] in ('delivered', 'already-held'), receipt
+assert receipt['request'].startswith('startup-') and receipt['message_sha256']
+PYFIXTURE
+  done
+  pass "farm delivery: startup passed/failed/cancelled results reach the bound worker once while fallback races"
+}
+
+test_bound_identity_and_retry() {
+  local dir
+  dir=$(setup_case bound-retry)
+  freeze_worker "$dir" lane1 || fail "could not bind lane"
+  receive "$dir" retry-result "$(expected_body retry-result failed - -)" FAKE_LANES_VERDICT=failed && fail "refused send must retry"
+  receive "$dir" retry-result "$(expected_body retry-result failed - -)" || fail "retry failed"
+  [ "$(calls "$dir")" = 2 ] || fail "refusal must remain retryable"
+  receive "$dir" queued-result "$(expected_body queued-result cancelled - -)" FAKE_LANES_VERDICT=queued || fail "queue failed"
+  receive "$dir" queued-result "$(expected_body queued-result cancelled - -)" || fail "queued replay failed"
+  [ "$(calls "$dir")" = 3 ] || fail "accepted queue must not be resent"
+  receive "$dir" unknown-result "$(expected_body unknown-result passed - -)" FAKE_LANES_VERDICT=unknown || fail "unknown receipt failed"
+  receive "$dir" unknown-result "$(expected_body unknown-result passed - -)" || fail "unknown replay failed"
+  [ "$(calls "$dir")" = 4 ] || fail "unknown acceptance must not be resent"
+  fm_write_meta "$dir/home/state/lane1.meta" "kind=lane" "playbot_project=proj" \
+    "playbot_workspace=ws" "playbot_thread=reused-chat"
+  receive "$dir" changed-result "$(expected_body changed-result failed - -)"
+  expect_code 3 "$?" "reused label must retire the original endpoint"
+  remote_row "$dir" changed-result failed
+  run_sweep "$dir"
+  [ "$(calls "$dir")" = 4 ] || fail "fallback must not reroute to the reused task"
+  rm "$dir/home/state/lane1.meta"
+  receive "$dir" retired-result "$(expected_body retired-result cancelled - -)"
+  expect_code 3 "$?" "removed task must retire the endpoint"
+  freeze_worker "$dir" missing && fail "unregistered submit must be refused"
+  dir=$(setup_case bound-step-failure)
+  freeze_worker "$dir" lane1 || fail "could not bind lane"
+  receive "$dir" result-failure-1-suite "Test service step failed: request=result state=failed" || fail "step failure failed"
+  receive "$dir" result "$(expected_body result failed - -)" || fail "completion after step failure failed"
+  [ "$(calls "$dir")" = 2 ] || fail "a step failure must not suppress the terminal completion"
+  dir=$(setup_case bound-shell)
+  fm_write_meta "$dir/home/state/t1.meta" "kind=ship" "harness=claude" "window=sess:fm-t1" "spawn_gen=worker-1"
+  freeze_worker "$dir" t1 || fail "could not bind shell worker"
+  printf '%s' "$(expected_body shell-result passed - -)" | env PATH="$dir/fakebin:$PATH" \
+    FM_FARM_WORKER_BINDING="$(cat "$dir/binding.json")" TESTFARM_NOTIFY_TASK=t1 \
+    TESTFARM_NOTIFY_REQUEST=shell-result FM_SEND_SETTLE=0 "$ROOT/bin/fm-farm-deliver.py" deliver \
+    >"$dir/receipt.out" 2>"$dir/err" || fail "bound shell delivery failed: $(cat "$dir/err")"
+  [ "$(records "$dir" t1)" = 1 ] || fail "the bound shell worker must receive its durable inbox record"
+  [ "$(calls "$dir")" = 0 ] || fail "shell delivery must not use a Playbot thread"
+  pass "farm delivery: refusal retries, accepted queues do not repeat, and frozen identity rejects reused or retired workers"
 }
 
 test_unhooked_result_delivered_once
@@ -269,3 +395,5 @@ test_lane_result_delivered_once
 test_known_bad_requests_rejected
 test_open_requests_and_failures
 test_submit_requires_task_label
+test_bound_startup_and_fallback_race
+test_bound_identity_and_retry

@@ -14,9 +14,22 @@ Both settings use safe relative globs, and the queue script's header owns the ad
 `bin/fm-landing-health-lib.sh` validates the three-line `fm-full-suite.v1` receipt for the exact tested SHA.
 The crew board reads testfarm's `status.json` through the existing `~/.local/state/firstmate-test-service` link; the `fm-test-service.v1` status schema remains supported.
 
-A worker submits its committed SHA with `--task`, then ends the turn until testfarm delivers the completion message to its steering inbox.
+A worker submits its committed SHA with `--task`, then ends the turn until its completion reaches the same worker through its steering inbox or recorded Playbot chat.
 The entry point refuses a submit without a task label, because firstmate finds every result by that label.
-`bin/fm-farm-results.py`, run from the watcher poll, delivers any finished result its task does not already hold, whatever delivery hook the request carried, without ever sending the same result twice, and lists open requests so an idle worker or Playbot lane waiting on one raises no stale or idle alarm until the request finishes; its header owns the contract.
+For remote submissions, testfarm captures the exact worker binding before submitting and routes the server's durable notification outbox through its own workstation listener to `bin/fm-farm-deliver.py`.
+The binding pins the Playbot project, workspace, thread and worker generation, or a shell worker's durable incarnation; a retired or reused task label cannot redirect completion to another worker.
+The listener requires no Firstmate chat turn, watcher, or Firstmate timer.
+The [testfarm server guide](https://github.com/Lila-Games-Github/lila-test-farm/blob/main/docs/SERVER.md) owns listener installation, status, removal, gateway authorization and delivery receipt inspection.
+Install or activate that service only with the host owner's authority after upgrading both the farm server and remote client.
+The Firstmate shim refuses clients that lack required notification support before they can silently submit without delivery.
+
+`bin/fm-farm-results.py` remains a watcher fallback and lists open requests so waiting workers raise no stale or idle alarm.
+For a bound remote request, it validates the immutable local descriptor and uses the same receiver and lock as direct delivery.
+The receiver's header owns request-level deduplication and receipt storage; a reconstructed fallback body cannot cause a second delivery of the same completion.
+Playbot must be running to accept chat notifications; refused deliveries retry, while queued and unknown acceptance remain distinct from confirmed delivery in the audit receipt.
+A receiver interrupted during an uncertain send retains an unknown receipt for reconciliation instead of blindly sending another copy.
+The executable regressions in `tests/fm-farm-results.test.sh` cover startup completion, racing fallback, terminal results, retries and worker retirement.
+
 For a full-suite gate, use the receipt path printed in the task brief.
 
 ```sh
