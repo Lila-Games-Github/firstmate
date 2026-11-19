@@ -2,9 +2,13 @@
 """fm-farm-results.py - deliver finished test-farm results to their tasks, and
 record which tasks are waiting on an open farm request.
 
-Usage: fm-farm-results.py sweep [--force]
+Usage: fm-farm-results.py sweep [--force] [--report]
+       fm-farm-results.py inspect
 
-bin/fm-watch.sh runs `sweep` from its poll once the stamp below is due; the
+bin/fm-farm-notifier.py and bin/fm-watch.sh run `sweep` independently.
+An OS-owned flock on state/.farm-results.lock serializes the entire read, send
+and ledger transaction across both callers, and releases on process exit.
+The watcher runs `sweep` from its poll once the stamp below is due; the
 sweep does real work at most once per FM_FARM_RESULTS_SECS (default 30, valid
 5..600) per home, tracked by the epoch in state/.last-farm-results-sweep, and
 --force skips that cadence. One sweep
@@ -45,7 +49,7 @@ seconds after it finished (default 120); one without a hook is delivered on the
 first sweep that sees it. Only results finished after this home's first sweep
 (state/.farm-results-baseline) and within FM_FARM_RESULTS_MAX_AGE seconds
 (default 86400) are delivered, so enabling the sweep never replays history.
-A failed send is retried on every later sweep; its first failure prints one
+A failed send is retried on every later sweep, even after the age window; its first failure prints one
 `farm-result undelivered task=<id> request=<id>: <reason>` line, recorded in
 state/.farm-results-failed, and the watcher turns any output into one
 `check: farm-results` wake. Prints nothing otherwise.
@@ -56,7 +60,11 @@ read only to name a passed request's receipt exactly as the farm does), and
 FM_SEND_BIN to replace bin/fm-send.sh (tests only). Exits nonzero with one
 error line only when the sweep itself cannot run; an unreadable farm is
 silent and leaves the previous open-request file to age out.
+With --report, print JSON request/owned/sent/settled/retrying counts and report an
+unreadable farm as exit 1 for the independent service journal. `inspect` reads
+status and prints request/owned/open/finished counts without writing or sending.
 """
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -164,13 +172,48 @@ def task_holds(state, task, rid):
     return False
 
 
-def sweep(force):
+def owned_requests(rows, home, state):
+    """Validate the farm's labels against this home's authoritative task records."""
+    mine = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        opts = row.get("options") if isinstance(row.get("options"), dict) else {}
+        task, rid = opts.get("task") or "", row.get("id") or ""
+        if not (isinstance(task, str) and TASK_RE.fullmatch(task) and isinstance(rid, str) and RID_RE.fullmatch(rid)):
+            continue
+        if opts.get("home") and os.path.realpath(str(opts["home"])) != os.path.realpath(home):
+            continue
+        meta = state / f"{task}.meta"
+        if not meta.is_file() or meta.is_symlink():
+            continue
+        mine.append((task, rid, row, opts))
+    return mine
+
+
+def sweep(force, report=False, inspect=False):
     home = os.environ.get("FM_HOME")
     if not home:
         sys.exit("error: FM_HOME must explicitly select the owning home")
     state = Path(os.environ.get("FM_STATE_OVERRIDE") or os.path.join(home, "state"))
     if not state.is_dir() or state.is_symlink():
         return 0
+    if inspect:
+        rows = farm_requests()
+        if rows is None:
+            sys.exit("error: farm status unreadable")
+        mine = owned_requests(rows, home, state)
+        print(json.dumps({"requests": len(rows), "owned": len(mine),
+                          "open": sum(row.get("state") in OPEN for _, _, row, _ in mine),
+                          "finished": sum(row.get("state") in FINISHED for _, _, row, _ in mine)}))
+        return 0
+    # Never unlink this lock: every caller must lock the same inode.
+    with (state / ".farm-results.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return locked_sweep(home, state, force, report)
+
+
+def locked_sweep(home, state, force, report):
     now = time.time()
     stamp = state / ".last-farm-results-sweep"
     if not force and stamp.is_file() and not stamp.is_symlink():
@@ -185,23 +228,11 @@ def sweep(force):
 
     rows = farm_requests()
     if rows is None:
+        if report:
+            print("error: farm status unreadable; will retry on the next timer tick", file=sys.stderr)
+            return 1
         return 0
-    home_real = os.path.realpath(home)
-    mine = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        opts = row.get("options") if isinstance(row.get("options"), dict) else {}
-        task = opts.get("task") or ""
-        rid = row.get("id") or ""
-        if not (isinstance(task, str) and TASK_RE.fullmatch(task) and isinstance(rid, str) and RID_RE.fullmatch(rid)):
-            continue
-        if opts.get("home") and os.path.realpath(str(opts["home"])) != home_real:
-            continue
-        if not (state / f"{task}.meta").is_file():
-            continue
-        mine.append((task, rid, row, opts))
-
+    mine = owned_requests(rows, home, state)
     atomic_write(state / ".farm-open-requests", "fm-farm-open.v1\n" + "".join(
         f"{task} {rid} {row.get('state')}\n" for task, rid, row, _ in mine if row.get("state") in OPEN))
 
@@ -222,6 +253,7 @@ def sweep(force):
     failed = set(read_lines(failed_file))
     send = os.environ.get("FM_SEND_BIN") or str(Path(__file__).resolve().parent / "fm-send.sh")
     out = []
+    sent_count = 0
     # First settle what each task already holds, so a result the task has moved
     # past is never delivered late (see the header's superseded rule).
     held, pending = {}, []
@@ -232,7 +264,7 @@ def sweep(force):
         submitted = submitted_at(row)
         if rid in delivered:
             held.setdefault(task, []).append(submitted)
-        elif finished >= baseline and now - finished <= max_age:
+        elif rid in failed or (finished >= baseline and now - finished <= max_age):
             if task_holds(state, task, rid):
                 delivered.add(rid)
                 held.setdefault(task, []).append(submitted)
@@ -255,6 +287,7 @@ def sweep(force):
         except (OSError, subprocess.TimeoutExpired) as exc:
             reason = str(exc) or type(exc).__name__
         if not reason:
+            sent_count += 1
             delivered.add(rid)
             failed.discard(rid)
             held.setdefault(task, []).append(submitted_at(row))
@@ -263,11 +296,14 @@ def sweep(force):
             out.append(f"farm-result undelivered task={task} request={rid}: {reason}")
 
     # Forget ids the farm no longer lists, so both ledgers stay bounded by its retention.
-    listed = {row.get("id") for row in rows if isinstance(row, dict)}
+    listed = {row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)}
     atomic_write(ledger_file, "".join(f"{rid}\n" for rid in sorted(delivered & listed)))
     atomic_write(failed_file, "".join(f"{rid}\n" for rid in sorted(failed & listed)))
     for line in out:
-        print(line)
+        print(line, file=sys.stderr if report else sys.stdout)
+    if report:
+        print(json.dumps({"requests": len(rows), "owned": len(mine), "sent": sent_count,
+                          "settled": len(delivered & listed), "retrying": len(failed & listed)}))
     return 0
 
 
@@ -275,10 +311,13 @@ def main(argv):
     if argv[:1] in (["-h"], ["--help"]):
         print(__doc__.strip())
         return 0
-    if not argv or argv[0] != "sweep" or argv[1:] not in ([], ["--force"]):
-        print("usage: fm-farm-results.py sweep [--force]", file=sys.stderr)
+    if argv == ["inspect"]:
+        return sweep(False, inspect=True)
+    if not argv or argv[0] != "sweep" or len(set(argv[1:])) != len(argv[1:]) or any(
+            arg not in ("--force", "--report") for arg in argv[1:]):
+        print("usage: fm-farm-results.py sweep [--force] [--report] | inspect", file=sys.stderr)
         return 2
-    return sweep(argv[1:] == ["--force"])
+    return sweep("--force" in argv, "--report" in argv)
 
 
 if __name__ == "__main__":
