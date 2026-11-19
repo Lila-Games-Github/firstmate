@@ -54,7 +54,7 @@ case "${0##*/}" in
   fm-landing-conflicts.test.sh) key=landing-conflicts; count=4 ;;
   fm-worker-doorbell.test.sh) key=doorbell; count=5 ;;
   fm-lane-send.test.sh) key=lane-send; count=6 ;;
-  fm-farm-results.test.sh) key=farm-results; count=7 ;;
+  fm-farm-results.test.sh) key=farm-results; count=9 ;;
   fm-pr-wait.test.sh) key=pr-wait; count=1 ;;
   fm-remote-landing.test.sh) key=remote-landing; count=14 ;;
   fm-task-delivery.test.sh) key=remote-export; count=1 ;;
@@ -205,7 +205,7 @@ merge|PR 19 local-merge branch resolution
 landing-conflicts|post-landing trial merge notification
 doorbell|worker gate and job doorbells
 lane-send|lane test-service completion delivery
-farm-results|watcher farm-result delivery and submit label
+farm-results|fallback farm-result delivery and submit worker binding
 pr-wait|PR wait deadline and one-rerun observer
 EOF
   pass "stock Bash compatibility: every hung consumer is named, streamed, and independently bounded"
