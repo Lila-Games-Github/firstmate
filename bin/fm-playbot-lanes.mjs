@@ -641,6 +641,7 @@ function threadRows() {
     const columns = new Set(queryAll(db, "PRAGMA table_info(workspace_threads)").map((column) => column.name));
     const executionModel = columns.has("execution_model") ? "t.execution_model" : "NULL";
     const executionReasoningLevel = columns.has("execution_reasoning_level") ? "t.execution_reasoning_level" : "NULL";
+    const ephemeral = columns.has("ephemeral") ? "t.ephemeral" : "0";
     return queryAll(db, `
       SELECT
         t.id AS thread_id,
@@ -654,6 +655,7 @@ function threadRows() {
         t.archived,
         t.approval_mode,
         t.plan_mode,
+        ${ephemeral} AS ephemeral,
         ${executionModel} AS execution_model,
         ${executionReasoningLevel} AS execution_reasoning_level,
         t.last_user_activity_at,
@@ -3679,6 +3681,7 @@ function publicThread(row) {
     hasUnread: Boolean(row.has_unread),
     isActive: Boolean(row.is_active),
     archived: Boolean(row.archived),
+    ephemeral: Boolean(row.ephemeral),
     updatedAt: row.updated_at,
     url: `playbot://workspace/${row.workspace_id}/thread/${row.thread_id}`,
   };
@@ -5637,6 +5640,78 @@ function laneIdentityHelperPath() {
   return path.join(path.dirname(supervisionSelfScript()), "fm-pr-lib.sh");
 }
 
+function homeCommand(script, args, timeout = 15_000) {
+  const result = spawnSync(path.join(path.dirname(supervisionSelfScript()), script), args, {
+    env: { ...process.env, FM_HOME: controllerRoot(), FM_STATE_OVERRIDE: supervisionStateDir() },
+    encoding: "utf8", timeout, windowsHide: true,
+  });
+  if (result.error || result.signal || result.status !== 0) {
+    throw new Error(`${script} failed: ${(result.stderr ?? "").trim() || result.error?.message || `exit ${result.status}`}`);
+  }
+  return result.stdout;
+}
+
+async function adoptPr(project, args) {
+  const number = args.pullRequestNumber;
+  if (!Number.isSafeInteger(number) || number < 1 || args.url !== `https://github.com/Lila-Games-Github/frogpile/pull/${number}`) throw new Error("adopt_pr requires one canonical FrogPile PR URL and number");
+  if (!/^ET-[0-9]+$/.test(args.ticketId ?? "") || !/^[0-9a-f]{40}$/.test(args.expectedHead ?? "")) throw new Error("adopt_pr requires an ET ticket id and full head SHA");
+  const workspace = resolveWorkspace(project, args.workspace);
+  if (workspace.id !== args.workspace || workspace.archiveState !== "active") throw new Error("adopt_pr requires an exact active workspace id");
+  const roots = workspace.roots.filter((root) => root.branch === args.expectedBranch);
+  if (roots.length !== 1) throw new Error("adopt_pr branch must match exactly one workspace root");
+  const db = openDb(appDbPath());
+  let binding;
+  try { binding = queryOne(db, "SELECT pull_request_number FROM workspace_roots WHERE workspace_id = ? AND project_root_id = ?", [workspace.id, roots[0].projectRootId]); }
+  finally { db.close(); }
+  if (binding?.pull_request_number !== number) throw new Error("Playbot workspace is not bound to this PR");
+  if (git(roots[0].path, ["rev-parse", "HEAD"]).trim() !== args.expectedHead) throw new Error("Playbot workspace head differs from the PR head");
+  const chats = threadsForProject(project.id, workspace.id).filter((row) => !row.ephemeral && !row.archived);
+  if (chats.length !== 1) throw new Error(`adopt_pr requires the sole original non-ephemeral chat; found ${chats.length}`);
+  const worker = chats[0];
+  const taskId = `frogpile-playbot-pr-${number}`;
+  const metaPath = path.join(supervisionStateDir(), `${taskId}.meta`);
+  if (fs.existsSync(metaPath)) {
+    const meta = laneMeta(metaPath);
+    if (meta.kind !== "lane" || meta.playbot_workspace !== workspace.id || meta.playbot_thread !== worker.thread_id || (meta.pr && meta.pr !== args.url) || meta.ticket_id !== args.ticketId || meta.landing_branch !== "development") throw new Error(`existing task ${taskId} does not match this PR and original chat`);
+    if (!meta.pr) homeCommand("fm-pr-check.sh", [taskId, args.url], 15_000);
+    return { taskId, thread: publicThread(worker), workspaceId: workspace.id, url: args.url, adopted: false };
+  }
+  const briefDir = path.join(controllerRoot(), "data", taskId);
+  fs.mkdirSync(briefDir, { recursive: true, mode: 0o700 });
+  const brief = path.join(briefDir, "brief.md");
+  const briefText = `# Adopted Playbot pull request\n\nTrack ${args.url} against development and carry its landing through Firstmate.\nAfter merge, ask the original Playbot chat to move Rocketboard ticket ${args.ticketId} to Done.\n`;
+  if (!fs.existsSync(brief)) fs.writeFileSync(brief, briefText, { flag: "wx", mode: 0o600 });
+  else if (fs.readFileSync(brief, "utf8") !== briefText) throw new Error(`existing brief for ${taskId} does not match this PR and ticket`);
+  const show = spawnSync(path.join(path.dirname(supervisionSelfScript()), "fm-tasks-axi.sh"), ["show", taskId], { env: { ...process.env, FM_HOME: controllerRoot() }, encoding: "utf8", timeout: 10_000 });
+  if (show.status === 1) homeCommand("fm-tasks-axi.sh", ["add", taskId, `Land Playbot ${args.ticketId} pull request`, "--kind", "ship", "--repo", "frogpile", "--queue"], 10_000);
+  else if (show.status !== 0) throw new Error(`backlog lookup for ${taskId} failed: ${show.stderr || show.error?.message || `exit ${show.status}`}`);
+  const captured = preflightTerminalLaneIdentity(taskId, worker);
+  await ensureTerminalLaneIdentity(taskId, worker, "development", "direct-PR", captured, { ticket_id: args.ticketId });
+  homeCommand("fm-pr-check.sh", [taskId, args.url], 15_000);
+  return { taskId, thread: publicThread(worker), workspaceId: workspace.id, url: args.url, adopted: true };
+}
+
+async function postMergeTicket(args) {
+  if (!supervisionTaskIdValid(args.taskId)) throw new Error("post_merge_ticket task id is invalid");
+  const meta = laneMeta(path.join(supervisionStateDir(), `${args.taskId}.meta`));
+  if (meta.kind !== "lane" || meta.pr !== args.url || meta.ticket_id !== args.ticketId || !/^ET-[0-9]+$/.test(args.ticketId)) throw new Error("post_merge_ticket does not match the adopted task record");
+  const number = /^https:\/\/github\.com\/Lila-Games-Github\/frogpile\/pull\/([1-9][0-9]*)$/.exec(args.url)?.[1];
+  if (!number) throw new Error("post_merge_ticket requires the canonical FrogPile PR URL");
+  const forge = spawnSync("gh-axi", ["api", `repos/Lila-Games-Github/frogpile/pulls/${number}`, "--jq", "{merged,html_url}|@base64"], { encoding: "utf8", timeout: 8_000 });
+  if (forge.status !== 0 || forge.error) throw new Error(`post_merge_ticket could not verify the merged PR: ${forge.stderr || forge.error?.message}`);
+  const encoded = /^  body: ([A-Za-z0-9+/=]+)$/m.exec(forge.stdout ?? "")?.[1];
+  if (!encoded || !/\n  truncated: false(?:\n|$)/.test(forge.stdout)) throw new Error("post_merge_ticket received incomplete PR evidence");
+  const verified = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  if (verified.merged !== true || verified.html_url !== args.url) throw new Error("post_merge_ticket refuses a PR that is not confirmed merged");
+  const row = resolveThread(meta.playbot_project, meta.playbot_workspace, meta.playbot_thread);
+  const marker = path.join(supervisionStateDir(), `${args.taskId}.post-merge-ticket`);
+  if (fs.existsSync(marker)) return { sent: false, reserved: true, threadId: meta.playbot_thread };
+  fs.writeFileSync(marker, `${args.url}\n${args.ticketId}\n${meta.playbot_thread}\n`, { flag: "wx", mode: 0o600 });
+  const message = `The pull request ${args.url} has merged. Move Rocketboard ticket ${args.ticketId} to Done, then report the result.`;
+  const sent = await sendMessage(row, message);
+  return { sent: true, threadId: meta.playbot_thread, delivery: sent.delivery };
+}
+
 function laneIdentityBoundElsewhere(state, taskId, worker) {
   const meta = laneMeta(path.join(state, `${taskId}.meta`));
   if (meta.kind === "lane" && (!worker || meta.playbot_workspace !== worker.workspace_id || meta.playbot_thread !== worker.thread_id)) {
@@ -5716,7 +5791,7 @@ function preflightTerminalLaneIdentity(taskId, worker) {
   return captured;
 }
 
-async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, mode, captured) {
+async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, mode, captured, extraFields = {}) {
   const state = supervisionStateDir();
   const helper = laneIdentityHelperPath();
   if (captured !== "missing") {
@@ -5745,6 +5820,7 @@ async function ensureTerminalLaneIdentity(taskId, worker, landingBranch, mode, c
       worktree: supervisionPath(root.path, "lane workspace root"),
       landing_branch: landingBranch ?? projectRoot.defaultBranch,
       mode: explicitLaneMode("dispatch", mode),
+      ...extraFields,
     };
     if (Object.values(fields).some((value) => typeof value !== "string" || !value || /[\0\r\n]/.test(value))) {
       throw new Error("lane task identity has an empty or malformed field");
@@ -6812,6 +6888,21 @@ function toolDefinitions() {
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name"), newWorkspace: newWorkspace(), title: string("Chat title"), approvalMode: { type: "string", enum: ["default", "auto-review", "full-access"] }, planMode: boolean("Create in Plan mode", false), model: nullableString("Optional model slug from Playbot's model catalog; null is treated as omitted"), reasoningEffort: nullableString("Optional reasoning level supported by model; requires model, null uses the model's catalog default") }, ["project", "title"]),
     },
     {
+      name: "launch_fix_checks",
+      description: "Invoke Playbot's own Fix CI checks quick action for one exact PR-bound workspace root. Playbot creates and starts the ephemeral chat; this call verifies the returned chat in persisted Playbot state. The caller must already have classified the failure and enforced its attempt limit.",
+      inputSchema: object({ project: string("Exact project id or root"), workspace: string("Exact workspace id"), pullRequestNumber: { type: "integer", minimum: 1 }, expectedBranch: string("Exact PR head branch"), expectedHead: string("Full PR head SHA") }, ["project", "workspace", "pullRequestNumber", "expectedBranch", "expectedHead"]),
+    },
+    {
+      name: "adopt_pr",
+      description: "Adopt one existing Playbot-raised FrogPile PR into a Firstmate lane task, binding its sole original non-ephemeral chat, workspace, development landing branch, ticket id, and canonical PR URL. Creates the queued backlog row and brief through supported Firstmate helpers, then arms the normal PR poll. Idempotent for the same identity.",
+      inputSchema: object({ project: string("Exact Playbot project id"), workspace: string("Exact Playbot workspace id"), pullRequestNumber: { type: "integer", minimum: 1 }, url: string("Canonical FrogPile PR URL"), ticketId: string("Rocketboard ticket id, for example ET-725"), expectedBranch: string("Exact PR head branch"), expectedHead: string("Full PR head SHA") }, ["project", "workspace", "pullRequestNumber", "url", "ticketId", "expectedBranch", "expectedHead"]),
+    },
+    {
+      name: "post_merge_ticket",
+      description: "After Firstmate merges an adopted PR, send one fixed instruction to the original recorded Playbot chat to move its Rocketboard ticket to Done. Requires the recorded exact PR URL and ticket id; a durable reservation prevents duplicate sends after interruption.",
+      inputSchema: object({ taskId: string("Adopted task id returned by adopt_pr"), url: string("Merged canonical PR URL"), ticketId: string("Recorded Rocketboard ticket id") }, ["taskId", "url", "ticketId"]),
+    },
+    {
       name: "send_message",
       description: `Send a message to an existing Playbot chat in any project without selecting or focusing that chat. Reports delivery from Playbot's own response: state "delivered" means the worker accepted it, "sending" means it is in flight, "queued" means Playbot is HOLDING it and the worker has not seen it, "steering" means Playbot marked the exact message for the current active turn, "failed" carries Playbot's reason, and "unknown" means delivery could not be confirmed. force=true explicitly promotes a queued message into the active turn through Playbot ${VERIFIED_PLAYBOT_VERSIONS} threads:steerMessage without interrupting that turn; it does not answer a pending card. Never treat a queued or unknown send as delivered.`,
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Optional workspace id, path, or name; omit to resolve the thread anywhere in the project's active workspaces"), thread: string("Thread id, Codex session id, or unique exact title"), message: string("Message to send"), force: boolean("Promote this exact message into a currently active turn instead of leaving it queued; Playbot 0.95.x only", false) }, ["project", "thread", "message"]),
@@ -6913,6 +7004,7 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
       : { controller: "external-terminal", thread: null };
   }
   const caller = callerMode === "external-terminal" ? null : controllerForTool(name);
+  if (name === "post_merge_ticket") return postMergeTicket(args);
   const projects = topology();
   if (name === "list_projects") return { projects };
   if (name === "get_worktree_root" || name === "canonicalize_worktree_root") {
@@ -7064,6 +7156,32 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     const wantsNewWorkspace = assertNewWorkspaceRequest(name, args);
     return { thread: await createChat({ project: project.id, workspace: args.workspace, newWorkspace: wantsNewWorkspace ? args.newWorkspace : undefined, title: args.title, approvalMode: args.approvalMode, planMode: args.planMode, model: args.model, reasoningEffort: args.reasoningEffort }) };
   }
+  if (name === "launch_fix_checks") {
+    if (!Number.isSafeInteger(args.pullRequestNumber) || args.pullRequestNumber < 1) throw new Error("pullRequestNumber must be a positive integer");
+    if (!/^[0-9a-f]{40}$/.test(args.expectedHead ?? "")) throw new Error("expectedHead must be a full Git SHA");
+    const workspace = resolveWorkspace(project, args.workspace);
+    if (workspace.id !== args.workspace || workspace.archiveState !== "active") throw new Error("launch_fix_checks requires an exact active workspace id");
+    const roots = workspace.roots.filter((root) => root.branch === args.expectedBranch);
+    if (roots.length !== 1) throw new Error("PR branch must match exactly one workspace root");
+    const db = openDb(appDbPath());
+    let binding;
+    try {
+      binding = queryOne(db, "SELECT pull_request_number FROM workspace_roots WHERE workspace_id = ? AND project_root_id = ?", [workspace.id, roots[0].projectRootId]);
+    } finally { db.close(); }
+    if (binding?.pull_request_number !== args.pullRequestNumber) throw new Error("Playbot workspace is not bound to this PR");
+    if (git(roots[0].path, ["rev-parse", "HEAD"]).trim() !== args.expectedHead) throw new Error("Workspace head differs from the failing PR head");
+    const activeFix = threadsForProject(project.id, workspace.id).filter((row) => row.ephemeral && !["ready", "error"].includes(row.agent_status));
+    if (activeFix.length) throw new Error("A Fix CI checks chat is already active in this workspace");
+    const result = await playbotInvoke("git-actions:launch", { workspaceId: workspace.id, projectRootId: roots[0].projectRootId, action: "fix-checks", pullRequestNumber: args.pullRequestNumber, activate: false });
+    if (!result?.threadId) throw new Error("Playbot did not return the Fix CI checks chat id; inspect Playbot before retrying");
+    const row = resolveThread(project.id, workspace.id, result.threadId);
+    if (!row.ephemeral) throw new Error(`Playbot returned chat ${result.threadId} without an ephemeral record`);
+    if (row.execution_model !== "gpt-6.2-sol" || row.execution_reasoning_level !== "medium") {
+      throw new Error(`Playbot started Fix CI checks chat ${result.threadId} with model ${row.execution_model ?? "null"} and effort ${row.execution_reasoning_level ?? "null"}; expected gpt-6.2-sol medium`);
+    }
+    return { mechanism: "git-actions:launch", thread: publicThread(row) };
+  }
+  if (name === "adopt_pr") return adoptPr(project, args);
 
   if (name === "dispatch") {
     const engineDependent = engineDependentRequest(args);

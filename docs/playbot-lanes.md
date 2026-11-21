@@ -10,6 +10,29 @@ Run its `setup` command to ensure the complete integration is ready in one fail-
 A normal terminal can invoke any lane tool through `node --no-warnings bin/fm-playbot-lanes.mjs call <tool> '<arguments-json>'`; the command returns the same result object as the MCP `tools/call` path.
 Passing `-` instead of inline JSON reads the arguments object from standard input.
 
+## FrogPile CI and adopted pull requests
+
+`bin/fm-playbot-ci-autofix.mjs` owns the poll, its private attempt ledger, failure classification, and the private watcher check installed by `arm`.
+Run `FM_HOME=<firstmate-home> node --no-warnings bin/fm-playbot-ci-autofix.mjs arm` once from the deployed Firstmate code root to register the check.
+Use `poll --dry-run` to inspect the current open FrogPile pull requests and Playbot workspace bindings without creating tasks or chats.
+Each poll reports source and observed counts on standard error; watcher wakes appear on standard output.
+
+The poll adopts open Playbot-bound FrogPile pull requests against `development` into Firstmate lane task records through the `adopt_pr` lane command.
+Adoption requires the workspace's sole original non-ephemeral chat and preserves that chat id, its workspace, the canonical pull request URL, and the ET ticket id.
+The normal PR poll then supports `fm-pr-check.sh`, `fm-pr-merge.sh`, and `fm-teardown.sh` for that task.
+An ambiguous chat, mismatched workspace head, or incomplete adoption wakes Firstmate instead of choosing an identity.
+
+The `launch_fix_checks` lane command invokes Playbot's own `git-actions:launch` IPC, which creates the same ephemeral Fix CI checks chat as the button.
+Playbot's packaged action selects `gpt-6.2-sol` at medium reasoning, and the lane command verifies those persisted execution fields after launch.
+Only an explicit test, documentation, or gameplay step failure is eligible; infrastructure or unknown steps wake Firstmate.
+The ledger permits one attempt per failing head, blocks another while an ephemeral workspace chat is active, and stops after two failed rounds.
+Checks queued for more than 30 minutes also wake Firstmate as infrastructure.
+Fully green current-head checks and merge conflicts with `development` produce separate wakes; the poll never merges.
+
+After Firstmate confirms a merge, call `post_merge_ticket` with the adopted task id, the merged pull request URL, and the recorded ET ticket id.
+It verifies the merge through `gh-axi`, then sends one fixed instruction to the original Playbot chat to move its Rocketboard ticket to Done.
+A durable reservation prevents a retry from sending that instruction twice after an uncertain delivery.
+
 ## Captain startup trigger
 
 The exact captain phrase `Ahoy Playbot!` loads the internal `ahoy-playbot` skill and runs the `setup` command.
