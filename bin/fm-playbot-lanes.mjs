@@ -5863,6 +5863,16 @@ function laneTaskLandedVia(project, meta, namedCommits) {
   return commits.join(",");
 }
 
+function laneWorkspaceAndChatAbsent(meta) {
+  const db = openDb(appDbPath());
+  try {
+    return !queryOne(db, "SELECT id FROM workspaces WHERE id = ?", [meta.playbot_workspace])
+      && !queryOne(db, "SELECT id FROM workspace_threads WHERE id = ?", [meta.playbot_thread]);
+  } finally {
+    db.close();
+  }
+}
+
 function laneTaskState(file, retirable = false, state = path.dirname(file), landedVia = null) {
   const meta = laneMeta(file);
   if (meta.kind !== "lane" || !meta.spawn_gen || !meta.playbot_project || !meta.playbot_workspace || !meta.playbot_thread) throw new Error("lane task identity is incomplete");
@@ -5890,9 +5900,11 @@ function laneTaskState(file, retirable = false, state = path.dirname(file), land
     }
     const project = resolveProject(meta.playbot_project);
     const workspace = project.workspaces.find((candidate) => candidate.id === meta.playbot_workspace);
-    if (!workspace) throw new Error("lane workspace identity is absent; preserving supervision");
-    if (!workspace.roots.length) throw new Error("lane workspace has no recorded roots");
     if (!meta.landing_branch) throw new Error("lane task has no recorded landing branch");
+    if (!workspace && !(landedVia !== null && laneWorkspaceAndChatAbsent(meta))) {
+      throw new Error("lane workspace identity is absent; preserving supervision");
+    }
+    if (workspace && !workspace.roots.length) throw new Error("lane workspace has no recorded roots");
     if (landedVia !== null) {
       console.log(laneTaskLandedVia(project, meta, landedVia));
       return;
