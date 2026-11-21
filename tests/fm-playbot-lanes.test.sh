@@ -4324,6 +4324,7 @@ fi
 assert_grep 'only to kind=lane' "$FIXTURE_ROOT/lane-via-non-lane.out" "non-lane refusal was unclear"
 [ -e "$FM_HOME_FIXTURE/state/fm-lane-not-lane.meta" ] || fail "non-lane refusal removed metadata"
 rm "$FM_HOME_FIXTURE/state/fm-lane-not-lane.meta"
+cp "$FM_HOME_FIXTURE/state/fm-lane-via.meta" "$FIXTURE_ROOT/lane-via-before-retirement.meta"
 FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-via --landed-via "$lane_landed_commit" > "$FIXTURE_ROOT/lane-via-teardown.out" 2>&1 \
   || fail "commit-proof lane teardown failed: $(cat "$FIXTURE_ROOT/lane-via-teardown.out")"
 assert_absent "$FM_HOME_FIXTURE/state/fm-lane-via.meta" "commit-proof lane teardown retained its task identity"
@@ -4332,6 +4333,54 @@ tasks-axi show fm-lane-via --file "$FM_HOME_FIXTURE/data/backlog.md" > "$FIXTURE
   || fail "could not read commit-proof lane backlog after cleanup"
 assert_grep 'state: queued' "$FIXTURE_ROOT/lane-via.out" "commit-proof lane teardown ignored the manual backlog posture"
 pass "fm-playbot-lanes: explicit commit proof retires only a lane and preserves manual backlog ownership"
+
+# Playbot may have already deleted both records before local supervision is
+# retired. The exact IDs must be absent in its readable DB, while Git still
+# proves every named commit on the recorded landing branch.
+for task in fm-lane-gone-landed fm-lane-gone-unlanded fm-lane-gone-unreadable; do
+  sed -e "s/^playbot_workspace=.*/playbot_workspace=ws-lane-gone/" \
+      -e "s/^playbot_thread=.*/playbot_thread=chat-lane-gone/" \
+      "$FIXTURE_ROOT/lane-via-before-retirement.meta" > "$FM_HOME_FIXTURE/state/$task.meta"
+  chmod 0600 "$FM_HOME_FIXTURE/state/$task.meta"
+done
+FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "could not stage then retire Playbot workspace and chat"
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(path.join(process.env.FIXTURE_ROOT, 'desktop', 'playbot.db'));
+const now = '2099-08-25T12:06:00.000Z';
+db.prepare('INSERT INTO workspaces VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+  .run('ws-lane-gone', 'project-worker', 'retired lane', 'worktree', 0, 'archived', now, now);
+db.prepare(`INSERT INTO workspace_threads (id, workspace_id, title, position, is_active, session_id, approval_mode,
+  plan_mode, ephemeral, draft_input, pending_queue_json, agent_status, has_unread, last_user_activity_at,
+  created_at, updated_at, archived) VALUES (?, ?, ?, 0, 0, NULL, 'default', 0, 0, '', '[]', 'ready', 0, NULL, ?, ?, 0)`)
+  .run('chat-lane-gone', 'ws-lane-gone', 'Retired lane', now, now);
+db.prepare('DELETE FROM workspace_threads WHERE id = ?').run('chat-lane-gone');
+db.prepare('DELETE FROM workspaces WHERE id = ?').run('ws-lane-gone');
+if (db.prepare('SELECT count(*) AS n FROM workspaces WHERE id = ?').get('ws-lane-gone').n !== 0) process.exit(1);
+if (db.prepare('SELECT count(*) AS n FROM workspace_threads WHERE id = ?').get('chat-lane-gone').n !== 0) process.exit(1);
+db.close();
+NODE
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-gone-unlanded --landed-via "$lane_unlanded_commit" \
+    > "$FIXTURE_ROOT/lane-gone-unlanded.out" 2>&1; then
+  fail "absent Playbot workspace retired an unlanded commit"
+fi
+assert_grep "$lane_unlanded_commit" "$FIXTURE_ROOT/lane-gone-unlanded.out" "absent workspace unlanded refusal lost commit evidence"
+[ -e "$FM_HOME_FIXTURE/state/fm-lane-gone-unlanded.meta" ] || fail "unlanded absent workspace lost supervision"
+mv "$PLAYBOT_DESKTOP_DIR/playbot.db" "$PLAYBOT_DESKTOP_DIR/playbot.db.unreadable"
+if FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-gone-unreadable --landed-via "$lane_landed_commit" \
+    > "$FIXTURE_ROOT/lane-gone-unreadable.out" 2>&1; then
+  fail "unreadable Playbot DB allowed absent-workspace retirement"
+fi
+mv "$PLAYBOT_DESKTOP_DIR/playbot.db.unreadable" "$PLAYBOT_DESKTOP_DIR/playbot.db"
+assert_grep 'Playbot database not found' "$FIXTURE_ROOT/lane-gone-unreadable.out" "unreadable Playbot DB refusal was unclear"
+[ -e "$FM_HOME_FIXTURE/state/fm-lane-gone-unreadable.meta" ] || fail "unreadable Playbot DB lost supervision"
+FM_HOME="$FM_HOME_FIXTURE" "$ROOT/bin/fm-teardown.sh" fm-lane-gone-landed --landed-via "$lane_landed_commit" \
+  > "$FIXTURE_ROOT/lane-gone-landed.out" 2>&1 \
+  || fail "absent Playbot workspace blocked landed commit: $(cat "$FIXTURE_ROOT/lane-gone-landed.out")"
+assert_absent "$FM_HOME_FIXTURE/state/fm-lane-gone-landed.meta" "absent workspace retained landed task supervision"
+assert_grep "Landed via commits: $lane_landed_commit" "$FM_HOME_FIXTURE/data/fm-lane-gone-landed/retirement.md" \
+  "absent workspace retirement lacked commit audit"
+pass "fm-playbot-lanes: absent workspace and chat retire only landed commits from readable Playbot state"
 
 # Authorized discard keeps the task record until the guarded Playbot delete
 # has captured exact unlanded commits and removed the workspace.
