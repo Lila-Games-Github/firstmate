@@ -641,6 +641,7 @@ function threadRows() {
     const columns = new Set(queryAll(db, "PRAGMA table_info(workspace_threads)").map((column) => column.name));
     const executionModel = columns.has("execution_model") ? "t.execution_model" : "NULL";
     const executionReasoningLevel = columns.has("execution_reasoning_level") ? "t.execution_reasoning_level" : "NULL";
+    const ephemeral = columns.has("ephemeral") ? "t.ephemeral" : "0";
     return queryAll(db, `
       SELECT
         t.id AS thread_id,
@@ -654,7 +655,7 @@ function threadRows() {
         t.archived,
         t.approval_mode,
         t.plan_mode,
-        t.ephemeral,
+        ${ephemeral} AS ephemeral,
         ${executionModel} AS execution_model,
         ${executionReasoningLevel} AS execution_reasoning_level,
         t.last_user_activity_at,

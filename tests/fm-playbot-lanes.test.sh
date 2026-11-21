@@ -9406,8 +9406,8 @@ ADOPT_OUT="$adopt_out" node --no-warnings <<'NODE' || fail "adopt_pr did not bin
 const v=JSON.parse(process.env.ADOPT_OUT).structuredContent;
 if(v.taskId!=='frogpile-playbot-pr-41'||v.thread.id!=='chat-adopt'||v.workspaceId!=='ws-adopt'||!v.adopted)process.exit(1);
 NODE
-rg -q '^playbot_thread=chat-adopt$' "$adopt_home/state/frogpile-playbot-pr-41.meta" || fail "adoption lost original chat"
-rg -q '^pr=https://github.com/Lila-Games-Github/frogpile/pull/41$' "$adopt_home/state/frogpile-playbot-pr-41.meta" || fail "adoption did not arm canonical PR"
+grep -q '^playbot_thread=chat-adopt$' "$adopt_home/state/frogpile-playbot-pr-41.meta" || fail "adoption lost original chat"
+grep -q '^pr=https://github.com/Lila-Games-Github/frogpile/pull/41$' "$adopt_home/state/frogpile-playbot-pr-41.meta" || fail "adoption did not arm canonical PR"
 [ -f "$adopt_home/state/frogpile-playbot-pr-41.check.sh" ] || fail "adoption did not arm merge poll"
 pass "fm-playbot-lanes: adoption creates a supported task with original chat and PR poll"
 

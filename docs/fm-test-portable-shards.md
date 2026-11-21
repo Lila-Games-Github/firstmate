@@ -115,6 +115,9 @@ Existing job timeouts remain hang tripwires; they are not the desired healthy du
 
 Refresh the CI-derived hints by downloading the per-shard timing artifacts from several green CI runs and replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the slowest measured `duration_ms` per `path`:
 
+The `fm-playbot-ci-autofix.test.sh` entry is provisionally based on a 3125 ms local run because CI run 44910954258 failed before the test completed.
+Replace it with a successful CI sample from the next run.
+
 ```sh
 for run in <run-id> <run-id> <run-id>; do
   gh run download "$run" -R kunchenguid/firstmate --pattern 'fm-test-timing-portable-serial-*' -D "/tmp/fm-serial/$run"
