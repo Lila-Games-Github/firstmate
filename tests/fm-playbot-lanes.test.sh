@@ -1336,7 +1336,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup did not fail closed 
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== false || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== false || value.checks.controllerPresent !== true) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 26) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 29) process.exit(1);
 NODE
 threads_after=$(FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -1717,7 +1717,7 @@ async function electronInvoke(channel, payload) {
         name: 'playbot_lanes',
         enabled: true,
         error: null,
-        toolCount: 26,
+        toolCount: 29,
         env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.9.0') },
       }];
     }
@@ -1732,6 +1732,13 @@ async function electronInvoke(channel, payload) {
         throw new Error('unexpected workspace validation shape');
       }
       return launchThread(db, payload);
+    }
+    if (channel === 'git-actions:launch') {
+      if (payload.action !== 'fix-checks' || payload.activate !== false) throw new Error('unexpected quick action');
+      const id = 'chat-fix-action';
+      db.prepare(`INSERT INTO workspace_threads (id,workspace_id,title,position,is_active,session_id,approval_mode,plan_mode,ephemeral,draft_input,pending_queue_json,agent_status,has_unread,last_user_activity_at,created_at,updated_at,archived,execution_model,execution_reasoning_level) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id,payload.workspaceId,`Fix failing CI checks for pull request #${payload.pullRequestNumber}, verify the fix, commit it, and push the branch`,0,0,null,'full-access',0,1,'',null,'working',0,'','','',0,'gpt-6.2-sol','medium');
+      return { threadId: id };
     }
     if (channel === 'workspace:create') {
       if (mode !== 'legacy') throw new Error("No handler registered for 'workspace:create'");
@@ -1994,7 +2001,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup accepted a stale loa
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.toolCount !== 26) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.toolCount !== 29) process.exit(1);
 if (value.checks.configuredSchemaVersion !== '0.9.0') process.exit(1);
 if (value.checks.schemaVersion !== '0.9.0' || value.checks.expectedSchemaVersion !== '0.9.0') process.exit(1);
 if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
@@ -2003,7 +2010,7 @@ setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" 
 OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup reloaded an MCP whose build identity was already current"
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== false) process.exit(1);
-if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 26) process.exit(1);
+if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 29) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project"
 
@@ -2053,7 +2060,7 @@ rm -f "$FIXTURE_ROOT/mcp-channels"
 out=$(node --no-warnings "$SCRIPT" doctor)
 OUT="$out" node --no-warnings <<'NODE' || fail "doctor did not fall back to the legacy codex:mcpServers channels"
 const value = JSON.parse(process.env.OUT);
-if (value.mcpServerChannels !== 'codex:mcpServers' || value.mcpServer?.toolCount !== 26) process.exit(1);
+if (value.mcpServerChannels !== 'codex:mcpServers' || value.mcpServer?.toolCount !== 29) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads through current unprefixed MCP channels and falls back to legacy ones"
 
@@ -6481,7 +6488,7 @@ retirement_call() {
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace retirement tools were not exposed with one-at-a-time schemas"
 const tools = JSON.parse(process.env.OUT).result.tools;
-if (tools.length !== 26) process.exit(1);
+if (tools.length !== 29) process.exit(1);
 const freshness = tools.find(tool => tool.name === 'get_workspace_freshness');
 const list = tools.find(tool => tool.name === 'list_retirable_workspaces');
 const retire = tools.find(tool => tool.name === 'retire_workspace');
@@ -9365,3 +9372,63 @@ case "$refusal" in
   *) fail "the too-old FM_TEST_NODE refusal did not name the path and the version it reported: $refusal" ;;
 esac
 pass "fm-playbot-lanes: an unusable FM_TEST_NODE is refused by path and reason"
+
+# Adopt an existing Playbot PR through the real lane identity and PR poll
+# helpers. The source chat is the sole original chat in this workspace.
+adopt_home="$FIXTURE_ROOT/adopt-home"
+adopt_tree="$FIXTURE_ROOT/worker-adopt"
+mkdir -p "$adopt_home/state" "$adopt_home/data" "$adopt_home/config" "$FIXTURE_ROOT/adopt-bin"
+: > "$adopt_home/data/backlog.md"
+git -C "$FIXTURE_ROOT/worker" worktree add -b fix/adopt "$adopt_tree" main >/dev/null || fail "could not stage adoption worktree"
+adopt_head=$(git -C "$adopt_tree" rev-parse HEAD)
+ADOPT_TREE="$adopt_tree" PLAYBOT_DESKTOP_DIR="$PLAYBOT_DESKTOP_DIR" node --no-warnings <<'NODE'
+const path=require('node:path');const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(path.join(process.env.PLAYBOT_DESKTOP_DIR,'playbot.db'));
+d.exec('ALTER TABLE workspace_roots ADD COLUMN pull_request_number INTEGER');
+d.prepare('INSERT INTO workspaces VALUES (?,?,?,?,?,?,?,?)').run('ws-adopt','project-worker','adopt','worktree',0,'active','','');
+d.prepare('INSERT INTO workspace_roots (workspace_id,project_root_id,path,branch,pull_request_number) VALUES (?,?,?,?,?)').run('ws-adopt','root-worker',process.env.ADOPT_TREE,'fix/adopt',41);
+d.prepare(`INSERT INTO workspace_threads (id,workspace_id,title,position,is_active,session_id,approval_mode,plan_mode,ephemeral,draft_input,pending_queue_json,agent_status,has_unread,last_user_activity_at,created_at,updated_at,archived) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+ .run('chat-adopt','ws-adopt','ET-725 original chat',0,1,null,'full-access',0,0,'',null,'ready',0,'','','',0);
+NODE
+cat > "$FIXTURE_ROOT/adopt-bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$ADOPT_HEAD"
+SH
+cat > "$FIXTURE_ROOT/adopt-bin/gh-axi" <<'SH'
+#!/usr/bin/env node
+const value={merged:true,html_url:'https://github.com/Lila-Games-Github/frogpile/pull/41'};
+process.stdout.write('api_response:\n  body: '+Buffer.from(JSON.stringify(value)).toString('base64')+'\n  truncated: false\n');
+SH
+chmod +x "$FIXTURE_ROOT/adopt-bin/gh" "$FIXTURE_ROOT/adopt-bin/gh-axi"
+adopt_args=$(ADOPT_HEAD="$adopt_head" node -p 'JSON.stringify({project:"project-worker",workspace:"ws-adopt",pullRequestNumber:41,url:"https://github.com/Lila-Games-Github/frogpile/pull/41",ticketId:"ET-725",expectedBranch:"fix/adopt",expectedHead:process.env.ADOPT_HEAD})')
+adopt_out=$(ADOPT_HEAD="$adopt_head" PATH="$FIXTURE_ROOT/adopt-bin:$PATH" PLAYBOT_LANES_CONTROLLER_ROOT="$adopt_home" FM_HOME="$adopt_home" node --no-warnings "$SCRIPT" call adopt_pr "$adopt_args") || fail "adopt_pr failed"
+ADOPT_OUT="$adopt_out" node --no-warnings <<'NODE' || fail "adopt_pr did not bind the original chat"
+const v=JSON.parse(process.env.ADOPT_OUT).structuredContent;
+if(v.taskId!=='frogpile-playbot-pr-41'||v.thread.id!=='chat-adopt'||v.workspaceId!=='ws-adopt'||!v.adopted)process.exit(1);
+NODE
+rg -q '^playbot_thread=chat-adopt$' "$adopt_home/state/frogpile-playbot-pr-41.meta" || fail "adoption lost original chat"
+rg -q '^pr=https://github.com/Lila-Games-Github/frogpile/pull/41$' "$adopt_home/state/frogpile-playbot-pr-41.meta" || fail "adoption did not arm canonical PR"
+[ -f "$adopt_home/state/frogpile-playbot-pr-41.check.sh" ] || fail "adoption did not arm merge poll"
+pass "fm-playbot-lanes: adoption creates a supported task with original chat and PR poll"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+fix_args=$(ADOPT_HEAD="$adopt_head" node -p 'JSON.stringify({project:"project-worker",workspace:"ws-adopt",pullRequestNumber:41,expectedBranch:"fix/adopt",expectedHead:process.env.ADOPT_HEAD})')
+fix_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$adopt_home" node --no-warnings "$SCRIPT" call launch_fix_checks "$fix_args") || fail "launch_fix_checks failed"
+FIX_OUT="$fix_out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "Fix CI checks did not use Playbot quick-action IPC"
+const fs=require('node:fs'),v=JSON.parse(process.env.FIX_OUT).structuredContent,calls=fs.readFileSync(process.env.CALLS,'utf8').trim().split('\n').map(JSON.parse);
+if(v.mechanism!=='git-actions:launch'||v.thread.id!=='chat-fix-action'||!v.thread.ephemeral||v.thread.model!=='gpt-6.2-sol'||v.thread.reasoningEffort!=='medium')process.exit(1);
+if(calls.length!==1||calls[0].channel!=='git-actions:launch'||calls[0].payload.action!=='fix-checks'||calls[0].payload.activate!==false)process.exit(1);
+NODE
+pass "fm-playbot-lanes: Fix CI checks invokes Playbot quick action and verifies model"
+
+rm -f "$FIXTURE_ROOT/ipc-calls.jsonl"
+post_args='{"taskId":"frogpile-playbot-pr-41","url":"https://github.com/Lila-Games-Github/frogpile/pull/41","ticketId":"ET-725"}'
+post_out=$(PATH="$FIXTURE_ROOT/adopt-bin:$PATH" PLAYBOT_LANES_CONTROLLER_ROOT="$adopt_home" FM_HOME="$adopt_home" node --no-warnings "$SCRIPT" call post_merge_ticket "$post_args") || fail "post_merge_ticket failed"
+POST_OUT="$post_out" CALLS="$FIXTURE_ROOT/ipc-calls.jsonl" node --no-warnings <<'NODE' || fail "post-merge command did not send the fixed ticket instruction"
+const fs=require('node:fs'),v=JSON.parse(process.env.POST_OUT).structuredContent,calls=fs.readFileSync(process.env.CALLS,'utf8').trim().split('\n').map(JSON.parse);
+const sent=calls.filter(x=>x.channel==='threads:send');
+if(!v.sent||v.threadId!=='chat-adopt'||sent.length!==1||sent[0].payload.threadId!=='chat-adopt'||sent[0].payload.text!=='The pull request https://github.com/Lila-Games-Github/frogpile/pull/41 has merged. Move Rocketboard ticket ET-725 to Done, then report the result.')process.exit(1);
+NODE
+post_again=$(PATH="$FIXTURE_ROOT/adopt-bin:$PATH" PLAYBOT_LANES_CONTROLLER_ROOT="$adopt_home" FM_HOME="$adopt_home" node --no-warnings "$SCRIPT" call post_merge_ticket "$post_args") || fail "post_merge_ticket retry failed"
+POST_AGAIN="$post_again" node --no-warnings -e 'if(JSON.parse(process.env.POST_AGAIN).structuredContent.sent)process.exit(1)' || fail "post-merge command sent twice"
+pass "fm-playbot-lanes: post-merge ticket command sends once to original chat"
