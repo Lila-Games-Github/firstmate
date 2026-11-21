@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build and settle one bounded landing train window under fm-landing-queue.sh's lock.
 
-The queue header owns the protocol. Input rows are id, branch, source SHA, and
-replay base SHA; output rows are id, phase, candidate SHA, suite receipt, quick
+The queue header owns the protocol. Input rows are id, branch, source SHA,
+replay base SHA, and owner task; output rows are id, phase, candidate SHA, suite receipt, quick
 receipt, and reason. This helper never advances the landing branch.
 """
 
@@ -217,7 +217,7 @@ def main(observe=False):
     repo, directory = Path(repo), Path(directory)
     depth = int(depth)
     rows = [line.split("\t") for line in Path(rows_file).read_text().splitlines()]
-    if any(len(row) != 4 for row in rows):
+    if any(len(row) != 5 for row in rows):
         raise RuntimeError("invalid train input")
     if not observe:
         # A bounded sweep may have killed a prior build. The queue lock
@@ -239,7 +239,7 @@ def main(observe=False):
         print("!farm\tunreachable\t-\t-\t-\tstatus unavailable")
     parent = tip
     output = []
-    for place, (task, branch, source, base) in enumerate(rows, 1):
+    for place, (task, branch, source, base, owner) in enumerate(rows, 1):
         path = directory / f"candidate-{task}.json"
         ref = f"refs/landing-candidates/{key}/{task}"
         state = read_state(path)
@@ -248,7 +248,7 @@ def main(observe=False):
                 retire(repo, service, path, state, ref)
             output.append((task, "waiting", "-", "-", "-", "-"))
             continue
-        valid = state and state.get("branch") == branch and state.get("source") == source \
+        valid = state and state.get("branch") == branch and state.get("owner") == owner and state.get("source") == source \
             and state.get("base") == base and state.get("parent") == parent \
             and git(repo, "rev-parse", "--verify", ref, check=False).stdout.strip() == state.get("sha")
         if observe:
@@ -272,7 +272,7 @@ def main(observe=False):
             if sha is None:
                 output.append((task, "failed", "-", "-", "-", "candidate merge conflict"))
                 continue
-            state = {"schema": "fm-landing-candidate.v1", "branch": branch,
+            state = {"schema": "fm-landing-candidate.v1", "branch": branch, "owner": owner,
                      "source": source, "base": base, "parent": parent, "sha": sha,
                      "suite_request": None, "quick_request": None, "verified": False}
             atomic_json(path, state)
@@ -285,7 +285,7 @@ def main(observe=False):
             continue
         if not state["suite_request"]:
             state["suite_request"] = submit(service, project_name, repo, sha,
-                                             f"landing_{task}", "--suite", "--receipt", str(full), live=live)
+                                             owner, "--suite", "--receipt", str(full), live=live)
             atomic_json(path, state)
         suite_row = live.get(state["suite_request"]) if live else None
         if not matches_request(suite_row, sha, "full"):
@@ -303,7 +303,7 @@ def main(observe=False):
             continue
         if not state["quick_request"]:
             state["quick_request"] = submit(service, project_name, repo, sha,
-                                             f"landing_{task}", "--suite", "--check", "quick",
+                                             owner, "--suite", "--check", "quick",
                                              "--target", state["parent"], "--device-gate", "any",
                                              "--receipt", str(quick), live=live)
             atomic_json(path, state)

@@ -1048,7 +1048,7 @@ if [ "$SPEC_DEPTH" -gt 0 ]; then
   SPEC_RESULT=$(mktemp "$DIR/.spec-result.XXXXXX")
   for ((i=0; i<count; i++)); do
     [ "${states[i]}" = active ] || continue
-    printf '%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${bases[i]}" >> "$SPEC_ROWS"
+    printf '%s\t%s\t%s\t%s\t%s\n' "${ids[i]}" "${branches[i]}" "${heads[i]}" "${bases[i]}" "${owners[i]}" >> "$SPEC_ROWS"
   done
   if [ -s "$SPEC_ROWS" ]; then
     spec_mode=''
