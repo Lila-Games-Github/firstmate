@@ -1094,8 +1094,9 @@ spec_queue() {
 }
 spec_join() {
   local id=$1
+  shift
   full_receipt "$id"
-  spec_queue ready "$id" --branch "fm/$id" --head "$(head_of "$id")" --target "$(tip)" --receipt "$CASE/$id.full"
+  spec_queue ready "$id" --branch "fm/$id" --head "$(head_of "$id")" --target "$(tip)" --receipt "$CASE/$id.full" "$@"
 }
 spec_auto_land() {
   PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" \
@@ -1112,13 +1113,13 @@ spec_register() { # on|off
   fm_write_meta "$CASE/home/state/a.meta" "project=$CASE/project" 'mode=local-only' 'landing_branch=main' \
     'kind=ship' 'harness=claude' 'window=sess:fm-notify'
 }
-spec_mark() { # task, full|quick, passed|failed
-  python3 - "$CASE/farm.json" "$1" "$2" "$3" <<'PY'
+spec_mark() { # queue task, full|quick, passed|failed, optional owner task
+  python3 - "$CASE/farm.json" "${4:-$1}" "$2" "$3" <<'PY'
 import json, pathlib, sys
 path, task, check, verdict = sys.argv[1:]
 path = pathlib.Path(path)
 data = json.loads(path.read_text())
-matches = [row for row in data['requests'] if row['task'] == 'landing_' + task
+matches = [row for row in data['requests'] if row['task'] == task
            and row['check'] == check and row['state'] != 'cancelled']
 assert matches, (task, check, verdict)
 row = matches[-1]
@@ -1142,6 +1143,69 @@ print(sum(row['check'] == sys.argv[2] and (sys.argv[3] == 'all' or row['state'] 
           for row in data['requests']))
 PY
 }
+
+# Drive candidate submission through the production shim. The stub represents
+# only the remote farm client and records the immutable worker binding it gets.
+spec_case binding
+mkdir -p "$CASE/home/state" "$CASE/farm-checkout/compat"
+cat > "$CASE/farm-checkout/compat/fm-test-service.py" <<'PY'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+if sys.argv[1] == 'submit':
+    binding = json.loads(os.environ['FM_FARM_WORKER_BINDING'])
+    with pathlib.Path(os.environ['STUB_BINDING_LOG']).open('a') as stream:
+        stream.write(json.dumps(binding, sort_keys=True) + '\n')
+os.execv(os.environ['STUB_SERVICE_BIN'], [os.environ['STUB_SERVICE_BIN'], *sys.argv[1:]])
+PY
+export TESTFARM_CHECKOUT="$CASE/farm-checkout"
+export STUB_SERVICE_BIN="$CASE/bin/test-service"
+export STUB_BINDING_LOG="$CASE/bindings.jsonl"
+spec_shim_queue() {
+  PATH="$CASE/bin:$PATH" FM_ROOT_OVERRIDE="$CASE/fm-root" FM_HOME="$CASE/home" FM_LANDING_TRAIN=3 \
+    FM_TEST_SERVICE_BIN="$ROOT/bin/fm-test-service.py" STUB_FARM_STATE="$CASE/farm.json" \
+    "$QUEUE" "$@" --project "$CASE/project" --landing-branch main
+}
+spec_shim_join() {
+  local id=$1
+  shift
+  full_receipt "$id"
+  spec_shim_queue ready "$id" --branch "fm/$id" --head "$(head_of "$id")" --target "$(tip)" \
+    --receipt "$CASE/$id.full" "$@"
+}
+car a
+fm_write_meta "$CASE/home/state/lane_worker.meta" "project=$CASE/project" 'kind=lane' \
+  'lane_branch=fm/a' 'playbot_project=project' 'playbot_workspace=workspace' 'playbot_thread=thread'
+spec_shim_join a --owner-task lane_worker >/dev/null
+spec_mark a full passed lane_worker
+spec_shim_queue resolve sweep >/dev/null
+car b
+fm_write_meta "$CASE/home/state/b.meta" "project=$CASE/project" 'kind=ship' 'spawn_gen=ordinary-generation'
+spec_shim_join b >/dev/null
+spec_mark b full passed
+spec_shim_queue resolve sweep >/dev/null
+python3 - "$CASE/farm.json" "$CASE/bindings.jsonl" <<'PY' || fail 'candidate submissions did not bind both real workers'
+import json, sys
+requests = json.load(open(sys.argv[1]))['requests']
+bindings = [json.loads(line) for line in open(sys.argv[2])]
+assert len(requests) == len(bindings) == 4, (requests, bindings)
+assert [(row['task'], row['check']) for row in requests] == [
+    ('lane_worker', 'full'), ('lane_worker', 'quick'), ('b', 'full'), ('b', 'quick')]
+assert [row['task'] for row in bindings] == [row['task'] for row in requests]
+assert bindings[0]['identity']['kind'] == 'lane'
+assert bindings[2]['identity']['spawn_gen'] == 'ordinary-generation'
+print(f"ok: farm requests source={len(requests)} bound={len(bindings)}")
+PY
+car c
+if spec_shim_join c --owner-task unknown_worker >"$CASE/unknown-refusal" 2>&1; then
+  fail 'unknown worker candidate reached the farm'
+fi
+grep -q 'worker metadata is absent or symlinked' "$CASE/unknown-refusal" \
+  || fail 'unknown worker refusal did not identify missing metadata'
+[ "$(spec_count full)" = 2 ] && [ "$(spec_count quick)" = 2 ] \
+  || fail 'refused unknown worker changed the farm request count'
+echo 'ok: unknown worker refused; farm requests remain 4'
+pass 'candidate suite and quick submissions bind lane and ordinary owners; unknown owner is refused'
+unset TESTFARM_CHECKOUT STUB_SERVICE_BIN STUB_BINDING_LOG
 
 spec_case slow-submit
 car a
@@ -1544,7 +1608,7 @@ spec_receipt_file() { # task, full|quick
   python3 - "$CASE/farm.json" "$1" "$2" <<'PY'
 import json, sys
 rows = [r for r in json.load(open(sys.argv[1]))['requests']
-        if r['task'] == 'landing_' + sys.argv[1+1] and r['check'] == sys.argv[3]]
+        if r['task'] == sys.argv[2] and r['check'] == sys.argv[3]]
 print(rows[-1]['receipt'])
 PY
 }
