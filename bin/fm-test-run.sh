@@ -767,6 +767,7 @@ tests/fm-omp-primary-live-e2e.test.sh 46
 tests/fm-on.test.sh 11001
 tests/fm-opencode-primary-live-e2e.test.sh 48
 tests/fm-operational-input.test.sh 221
+tests/fm-playbot-ci-autofix.test.sh 2702
 tests/fm-peek-remote.test.sh 964
 tests/fm-pending-reply.test.sh 28255
 tests/fm-pi-branch-extension.test.sh 60394
