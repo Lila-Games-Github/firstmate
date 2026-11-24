@@ -13,6 +13,7 @@
     {
       "when": "The task is a big or ambiguous multi-file feature, a risky refactor, or work that requires holding many moving parts in mind.",
       "use": [
+        { "surface": "playbot", "model": "gpt-6.2-sol", "effort": "medium" },
         { "harness": "claude", "model": "claude-sonnet-5", "effort": "high" },
         { "harness": "codex", "model": "gpt-5.5", "effort": "high" }
       ],

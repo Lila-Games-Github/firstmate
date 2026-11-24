@@ -25,6 +25,9 @@ RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
+mkdir -p "$TMP_ROOT/playbot-harness"
+printf '%s\n' '{"models":[{"slug":"gpt-6.2-sol","supported_reasoning_levels":[{"effort":"medium"}]}]}' > "$TMP_ROOT/playbot-harness/playbot-model-catalog.json"
+export PLAYBOT_HARNESS_HOME="$TMP_ROOT/playbot-harness"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
@@ -643,6 +646,20 @@ for bad in \
   assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "malformed rules are named: ${bad#*|}"
 done
 assert_absent "$LOG/argv" "configuration errors never reach the network"
+cp "$BASE_RULES" "$RULES"
+printf '%s\n' '{"rules":[{"when":"A simple bug fix with a stated root cause.","use":[{"surface":"playbot","model":"gpt-6.2-sol","effort":"medium"},{"harness":"codex","model":"gpt-5.6-sol","effort":"high"}]}]}' > "$RULES"
+write_response "$RESPONSE" rule_1 0.9
+jq '.answers.rule.probabilities = {"rule_1":0.9,"default":0.1}' "$RESPONSE" > "$TMP_ROOT/playbot-response.json"
+cp "$TMP_ROOT/playbot-response.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "Playbot profile resolves"
+assert_contains "$out" '  profile: surface=playbot model=gpt-6.2-sol effort=medium' "Playbot route is explicit"
+assert_contains "$out" '  fallback: codex/gpt-5.6-sol/high' "next profile is exposed"
+assert_not_contains "$out" '  profile: --harness' "Playbot never becomes spawn flags"
+printf '%s\n' '{"rules":[{"when":"A simple bug fix with a stated root cause.","use":[{"surface":"playbot","model":"not-listed","effort":"medium"},{"harness":"codex"}]}]}' > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 2 "$code" "unknown Playbot model exits 2"
+assert_contains "$err" 'unknown Playbot model: not-listed' "resolver rejects known-bad model"
 cp "$BASE_RULES" "$RULES"
 for removed in --json --rules --quota; do
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" "$removed"

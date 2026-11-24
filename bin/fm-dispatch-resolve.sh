@@ -33,8 +33,8 @@
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
-#     profile: --harness <h> [--model <m>] [--effort <e>] --routing-rule <when|default> --routing-provider <provider>     (status clear only)
-#   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
+#     profile: --harness <h> ... | surface=playbot model=<m> effort=<e> (status clear only)
+#   clear     -> pass harness flags to fm-spawn.sh; dispatch Playbot profiles through fm-playbot-lanes.mjs
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
@@ -70,6 +70,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 # shellcheck source=bin/fm-codex-catalog-lib.sh
 . "$SCRIPT_DIR/fm-codex-catalog-lib.sh"
+# shellcheck source=bin/fm-playbot-catalog-lib.sh
+. "$SCRIPT_DIR/fm-playbot-catalog-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
@@ -149,13 +151,14 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --argjson c
         end);
   def profile_bad($p):
     ($p | type) != "object"
-    or (($p.harness | type) != "string") or (($p.harness | length) == 0)
+    or (if $p.surface? == "playbot" then ($p | has("harness")) or (($p.model | type) != "string") or (($p.model | length) == 0)
+        else ($p | has("surface")) or (($p.harness | type) != "string") or (($p.harness | length) == 0) end)
     or ($p | has("model") and ((.model | type) != "string" or (.model | length) == 0))
     or ($p | has("effort") and ((.effort | type) != "string" or (.effort | length) == 0))
     or ($p | has("provider") and (provider_id(.provider) | not))
     or ($p | has("floor") and floor_bad(.floor; false));
   def duplicate_profiles($items):
-    ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
+    ($items | map([(.harness // .surface), (.model // null), (.effort // null)] | @json)) as $keys
     | ($keys | length) != ($keys | unique | length);
   if type != "object" then "top-level value must be an object"
   elif has("rules") and (.rules | type) != "array" then "rules must be an array"
@@ -169,21 +172,22 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --argjson c
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
-  elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
-  elif any((.rules // [])[] | profiles(.use)[]; (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
+  elif any((.rules // [])[] | profiles(.use)[] | select(.surface? != "playbot"); (verified(.harness) | not)) then "each use profile must name a verified harness"
+  elif any((.rules // [])[] | profiles(.use)[] | select(.surface? != "playbot"); (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
   elif has("default") and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
   elif has("default") and any(profiles(.default)[]; profile_bad(.)) then "each default profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif has("default") and duplicate_profiles(profiles(.default)) then "default must not contain duplicate harness, model, and effort profiles"
-  elif has("default") and any(profiles(.default)[]; (verified(.harness) | not)) then "each default profile must name a verified harness"
-  elif has("default") and any(profiles(.default)[]; (effort_ok(.harness; .model; .effort) | not)) then "each default profile effort must be supported by its harness and model"
+  elif has("default") and any(profiles(.default)[] | select(.surface? != "playbot"); (verified(.harness) | not)) then "each default profile must name a verified harness"
+  elif has("default") and any(profiles(.default)[] | select(.surface? != "playbot"); (effort_ok(.harness; .model; .effort) | not)) then "each default profile effort must be supported by its harness and model"
   else empty end
 ' "$RULES" 2>/dev/null) || die "malformed rules file: $RULES_PATH (not JSON)"
 [ -z "$rules_err" ] || die "malformed rules file: $RULES_PATH - $rules_err"
+playbot_err=$(fm_playbot_profiles_error "$RULES") || die "malformed rules file: $RULES_PATH - $playbot_err"
 
 missing_provider=$(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
-  ((.rules // [])[] | profiles(.use)[] | select(has("provider") | not) | "use\t\(.harness)"),
-  (profiles(.default // null)[] | select(has("provider") | not) | "default\t\(.harness)")
+  ((.rules // [])[] | profiles(.use)[] | select(.surface? != "playbot" and (has("provider") | not)) | "use\t\(.harness)"),
+  (profiles(.default // null)[] | select(.surface? != "playbot" and (has("provider") | not)) | "default\t\(.harness)")
 ' "$RULES" | while IFS=$'\t' read -r location harness; do
   if ! fm_quota_single_provider_for_harness "$harness" >/dev/null; then
     printf '%s\t%s\n' "$location" "$harness"
@@ -204,7 +208,7 @@ while IFS= read -r h; do
 done < <(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   ([((.rules // [])[]) | profiles(.use)[]] + profiles(.default // null))
-  | map(.harness) | unique | .[]' "$RULES")
+  | map(.harness) | map(select(. != null)) | unique | .[]' "$RULES")
 
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
@@ -275,7 +279,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
   def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
-  def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
+  def provider_of($c): ($c.provider // (if $c.harness? then $pmap[$c.harness] else null end) // null);
   def measured($p):
     (prov($p) != null and (["known", "partial"] | index(prov($p).quotaSemantics.status)) != null);
   def applicable($p; $m):
@@ -297,7 +301,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
     (provider_of($c)) as $p |
-    if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
+    if $p == null and $c.surface? == "playbot" then {profile: $c, eligible: true, unranked: true, unknown: true, reason: "Playbot quota not mapped; verify live lane quota"}
+    elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p) == null then {profile: $c, provider: $p, eligible: true, unranked: true, reason: "provider \($p) not in the quota snapshot"}
     else
       (applicable($p; ($c.model // ""))) as $rows |
@@ -368,9 +373,13 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
     ($sel.use | map(evaluate(.))) as $cands |
+    ([$cands[] | select(.profile.surface? == "playbot" and .eligible)] | first) as $playbot |
     ([$cands[] | select(.eligible and ((.unranked // false) | not))]) as $elig |
     ([$cands[] | select(.unranked)]) as $unranked |
-    if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
+    if $playbot != null then $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $playbot,
+      fallback: ([$sel.use[] | select(. != $playbot.profile)] | first),
+      routing_rule: (if $sel.source == "default" then "default" else $rule.when end)}
+    elif ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
       ($elig | max_by(.spendPriority)) as $best |
       ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
@@ -396,14 +405,17 @@ TEXT=$(jq -r '
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
-  (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
+  (.candidates[]? | "  candidate: \((.profile.harness // .profile.surface) | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
-  (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
+  (if .chosen and .chosen.profile.surface? == "playbot" then
+      "  profile: surface=playbot model=\(.chosen.profile.model | flat) effort=\(.chosen.profile.effort | flat) routing-rule=\(.routing_rule | flat)"
+    elif .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end)
-      + " --routing-rule \(.routing_rule | shell_arg) --routing-provider \(.chosen.provider | shell_arg)" else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+      + " --routing-rule \(.routing_rule | shell_arg) --routing-provider \(.chosen.provider | shell_arg)" else empty end),
+  (if .fallback then "  fallback: \((.fallback.harness // .fallback.surface) | flat)/\(.fallback.model | flat)/\(.fallback.effort | flat)" else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
 exit 0
