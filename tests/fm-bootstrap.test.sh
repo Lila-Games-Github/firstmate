@@ -1466,6 +1466,8 @@ test_crew_dispatch_validation() {
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
     codex_home="$case_dir/codex-home"
+    mkdir -p "$case_dir/playbot-harness"
+    printf '%s\n' '{"models":[{"slug":"gpt-6.2-sol","supported_reasoning_levels":[{"effort":"medium"}]}]}' > "$case_dir/playbot-harness/playbot-model-catalog.json"
     case "$label" in
       "codex Luna max effort is accepted via catalog")
         mkdir -p "$codex_home"
@@ -1478,7 +1480,7 @@ test_crew_dispatch_validation() {
         printf '%s\n' '{"models":[{"slug":"gpt-5","supported_reasoning_levels":[{"effort":"high"},{"effort":"xhigh"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"max"}]}]}' > "$codex_home/models_cache.json" ;;
     esac
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      CODEX_HOME="$codex_home" TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+      CODEX_HOME="$codex_home" PLAYBOT_HARNESS_HOME="$case_dir/playbot-harness" TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
@@ -1490,6 +1492,8 @@ test_crew_dispatch_validation() {
   done <<'ROWS'
 malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
+Playbot profile is accepted^{"rules":[{"when":"FrogPile work","use":[{"surface":"playbot","model":"gpt-6.2-sol","effort":"medium"},{"harness":"codex"}]}]}^empty^
+unknown Playbot model is flagged^{"rules":[{"when":"FrogPile work","use":{"surface":"playbot","model":"not-listed","effort":"medium"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown Playbot model: not-listed
 codex Luna max effort is accepted via catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^empty^
 codex gpt-6-luna max effort is accepted via catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-6-luna","effort":"max"}}]}^empty^
 codex Luna max effort is flagged without a readable catalog^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5.6-luna","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max

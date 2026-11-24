@@ -1250,7 +1250,8 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | select((.use? | type) != "object" and (.use? | type) != "array")] | length > 0 then "each rule needs use"
     elif [(.rules // [])[]? | select((.use? | type) == "array" and (.use | length) == 0)] | length > 0 then "each rule needs at least one use profile"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
-    elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
+    elif [(.rules // [])[]? | profiles(.use?)[]? | select((.surface? != "playbot") and ((.harness? | type) != "string" or (.harness | length) == 0))] | length > 0 then "each use profile needs harness"
+    elif [(.rules // [])[]? | profiles(.use?)[]? | select(has("surface") and (.surface != "playbot" or has("harness") or (.model? | type) != "string" or (.model | length) == 0))] | length > 0 then "invalid Playbot use profile"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then
       if $typed then "use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "use profile model and effort must be non-empty strings when present"
@@ -1264,7 +1265,8 @@ crew_dispatch_validate() {
     elif has("default") and ((.default | type) != "object" and (.default | type) != "array") then "default must be a profile object or non-empty profile array"
     elif has("default") and ((.default | type) == "array" and (.default | length) == 0) then "default needs at least one profile"
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
-    elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
+    elif has("default") and ([profiles(.default)[]? | select((.surface? != "playbot") and ((.harness? | type) != "string" or (.harness | length) == 0))] | length) > 0 then "each default profile needs harness"
+    elif has("default") and ([profiles(.default)[]? | select(has("surface") and (.surface != "playbot" or has("harness") or (.model? | type) != "string" or (.model | length) == 0))] | length) > 0 then "invalid Playbot default profile"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then
       if $typed then "default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
       else "default profile model and effort must be non-empty strings when present"
@@ -1286,10 +1288,16 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
     return 0
   fi
+  # shellcheck source=bin/fm-playbot-catalog-lib.sh
+  . "$SCRIPT_DIR/fm-playbot-catalog-lib.sh"
+  if ! err=$(fm_playbot_profiles_error "$file"); then
+    echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
+    return 0
+  fi
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ]; then
     jq -r '
     def profile($p):
-      ($p.harness | tostring)
+      (($p.harness // $p.surface) | tostring)
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
