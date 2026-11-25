@@ -3,6 +3,10 @@
 Playbot lanes let a normal terminal or one Playbot chat control chats in Playbot projects without selecting those chats in the UI.
 A Playbot-chat controller can register durable worker routes and receive background completion notifications.
 A normal-terminal controller has no Playbot chat to wake, so `dispatch` arms that worker's firstmate watcher poll for it and it supervises through bounded status and conversation reads.
+For a task-bound lane, dispatch prepares an ignored `.firstmate/<task-id>/` exchange inside the registered workspace before sending the task.
+The lane writes status, handoffs, receipts, and captures there; the watcher poll collects them into the owning Firstmate home and runs supported helper requests on the lane's behalf.
+Firstmate sends instructions and test results through the lane's Playbot chat.
+`bin/fm-lane-workspace-bridge.py` owns the exchange and request protocol.
 
 `bin/fm-playbot-lanes.mjs` is the single owner of the tool schemas, private state format, install command, hook behavior, and exact failure rules.
 Run its `doctor` command for bounded local diagnostics and its `install` command to register the server and hooks in Playbot's managed Codex home.

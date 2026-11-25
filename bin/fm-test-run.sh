@@ -754,6 +754,7 @@ tests/fm-home-summary-refresh.test.sh 37264
 tests/fm-inactive-reconcile.test.sh 53178
 tests/fm-kimi-harness.test.sh 19151
 tests/fm-lane-send.test.sh 14552
+tests/fm-lane-workspace-bridge.test.sh 2706
 tests/fm-lint-workflows.test.sh 785
 tests/fm-live-gate.test.sh 1755
 tests/fm-mail-check.test.sh 9162

@@ -116,6 +116,7 @@ Existing job timeouts remain hang tripwires; they are not the desired healthy du
 Refresh the CI-derived hints by downloading the per-shard timing artifacts from several green CI runs and replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the slowest measured `duration_ms` per `path`:
 
 The `fm-playbot-ci-autofix.test.sh` entry uses the successful 2702 ms sample from CI run 44913072719, portable serial shard 6.
+The `fm-lane-workspace-bridge.test.sh` entry uses the successful 2706 ms sample from CI run 45644907154, portable serial shard 5.
 
 ```sh
 for run in <run-id> <run-id> <run-id>; do

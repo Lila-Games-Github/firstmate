@@ -6762,6 +6762,13 @@ git -C "$FIXTURE_ROOT/worker/.worktrees/alt" push origin HEAD:main >/dev/null \
   || fail "could not land the upstream and empty-subject fixture commits"
 pass "fm-playbot-lanes: explicit landing names and encoded commit subjects remain exact"
 
+# Earlier dispatch cases prepared ignored task exchange data in this fixture
+# worktree. Preserve those bytes outside the worktree before the independent
+# churn and retirement cases below, whose initial state is intentionally clean.
+if [ -d "$FIXTURE_ROOT/worker/.worktrees/alt/.firstmate" ]; then
+  mv "$FIXTURE_ROOT/worker/.worktrees/alt/.firstmate" "$FIXTURE_ROOT/alt-lane-exchange-preserved"
+fi
+
 # Dirty representative tracked addon paths and the exact project settings path.
 # Untracked files and neighbouring trees are tested separately.
 for churn_path in \
