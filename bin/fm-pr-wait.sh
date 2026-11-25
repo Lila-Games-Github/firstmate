@@ -69,9 +69,10 @@ rerun=0
 notified=0
 old_head=
 old_condition=
+old_class=
 if [ -f "$record" ]; then
   [ "$(fm_pr_file_link_count "$record")" = 1 ] || exit 1
-  IFS=$'\t' read -r old_head old_condition old_first rerun notified < "$record" || true
+  IFS=$'\t' read -r old_head old_condition old_first rerun notified old_class < "$record" || true
   if [ "$old_head" = "$head" ]; then
     if [ "$old_condition" = "$condition" ] \
       || { [ "$old_condition" = red ] && [ "$condition" = conflict ]; } \
@@ -84,41 +85,94 @@ if [ -f "$record" ]; then
   else
     rerun=0
     notified=0
+    old_class=
   fi
 fi
-# A failed check is classified against the changed paths. Shared CI/config
-# changes are related; a matching test or component token is related; other
-# names with no path match are reported as not plausibly touched.
-relation=unknown
-if [ "$condition" = red ] && [ "$rerun" -eq 0 ]; then
-  paths=$(gh pr diff "$url" --name-only 2>/dev/null || true)
-  [ -z "$paths" ] || relation=not-plausibly-touched
-  if printf '%s\n' "$paths" | grep -Eq '(^|/)(\.github/workflows/|bin/fm-test|tests/lib\.sh)' ; then
-    relation=plausibly-related
+# A red rollup is not evidence that another attempt will help. Inspect all
+# same-head runs and failed-step logs before reserving the one rerun attempt.
+class=
+detail=
+rerun_id=
+repo_path=${url#https://github.com/}
+repo_path=${repo_path%/pull/*}
+if [ "$condition" = red ]; then
+  runs=$(gh run list --repo "$repo_path" --commit "$head" --json databaseId,conclusion,status --limit 100 2>/dev/null) || runs=
+  if ! printf '%s' "$runs" | jq -e 'type=="array" and length<100 and all(.[]; (.databaseId|type)=="number" and (.status|type)=="string")' >/dev/null 2>&1; then
+    class=unknown
+    detail="failing check $red; same-head run list unavailable"
   else
-    while IFS= read -r path; do
-      [ -n "$path" ] || continue
-      stem=${path##*/}
-      stem=${stem%%.*}
-      case "$red" in *"$stem"*) relation=plausibly-related; break ;; esac
-    done <<< "$paths"
+    sibling=$(printf '%s' "$runs" | jq -r '[.[] | select(.status|IN("queued","in_progress","requested","waiting","pending")) | .databaseId] | first // empty')
+    cancelled=$(printf '%s' "$runs" | jq -r '[.[] | select(.conclusion=="cancelled")] | length')
+    if [ -n "$sibling" ]; then
+      class=sibling
+      detail="failing check $red; active same-head run $sibling; cancelled runs $cancelled"
+    else
+      run_ids=$(printf '%s' "$runs" | jq -r '.[] | select(.conclusion|IN("failure","timed_out","action_required")) | .databaseId')
+      class=unknown
+      detail="failing check $red; no inspectable failed run"
+      if [ -n "$run_ids" ]; then
+        class=infrastructure
+        while IFS= read -r run_id; do
+          jobs=$(gh run view "$run_id" --repo "$repo_path" --json jobs 2>/dev/null) || jobs=
+          job_name=$(printf '%s' "$jobs" | jq -r '[.jobs[]? | select(.conclusion|IN("failure","timed_out","action_required")) | .name] | first // empty' 2>/dev/null) || job_name=
+          if [ -z "$job_name" ]; then
+            class=unknown
+            detail="run $run_id; failing check $red; failed job evidence unavailable"
+            break
+          fi
+          log=$(gh run view "$run_id" --repo "$repo_path" --log-failed 2>/dev/null) || log=
+          infra_line=$(printf '%s\n' "$log" | grep -Eim1 'runner (lost|disconnected)|lost communication with (the )?runner|farm (unreachable|unavailable)|connection refused.*farm|import.*(timed out|timeout)|timeout.*import' || true)
+          test_line=$(printf '%s\n' "$log" | grep -Eim1 '(^|[[:space:]])(FAIL:|FAILED |AssertionError|Error:|✖)|[[:space:]](test|spec|lint|docs?|description|rule)[^[:cntrl:]]*fail|PR description|description rule' || true)
+          if [ "$test_line" = "$infra_line" ]; then
+            test_line=
+          fi
+          if [ -n "$test_line" ]; then
+            class=genuine
+            detail="run $run_id job $job_name; first failing test or rule: $test_line"
+            break
+          elif [ -n "$infra_line" ]; then
+            rerun_id=$run_id
+            detail="run $run_id job $job_name; infrastructure: $infra_line"
+          else
+            class=unknown
+            detail="run $run_id job $job_name; failing check $red; no recognized failure line"
+            break
+          fi
+        done <<< "$run_ids"
+      fi
+    fi
   fi
-  # Mark the head before asking the forge. A failed or interrupted request is
-  # still the one automatic attempt and cannot form an unbounded retry loop.
-  rerun=1
-  tmp=$(mktemp "$state_dir/.fm-pr-wait.XXXXXX") || exit 1
-  printf '%s\t%s\t%s\t%s\t%s\n' "$head" "$condition" "$first" "$rerun" "$notified" > "$tmp"
-  chmod 0600 "$tmp"
-  mv -f -- "$tmp" "$record"
-  repo_path=${url#https://github.com/}
-  repo_path=${repo_path%/pull/*}
-  runs=$(gh run list --repo "$repo_path" --commit "$head" --json databaseId,conclusion --limit 100 2>/dev/null || true)
-  run_ids=$(printf '%s' "$runs" | jq -r '.[] | select(.conclusion|IN("failure","timed_out","action_required","cancelled")) | .databaseId' 2>/dev/null || true)
-  while IFS= read -r run_id; do
-    case "$run_id" in ''|*[!0-9]*) continue ;; esac
-    gh run rerun "$run_id" --failed --repo "$repo_path" >/dev/null 2>&1 || true
-  done <<< "$run_ids"
-  printf 'working: PR %s head %s failed checks (%s; %s); automatic failed-job rerun attempted once\n' "$url" "$head" "$red" "$relation" >> "$state_dir/$id.status"
+  detail=$(printf '%s' "$detail" | tr '\r\n\t' '   ' | cut -c1-500)
+  reason="$class: $detail"
+  if [ "$class" = infrastructure ] && [ "$rerun" -eq 0 ]; then
+    # Recheck the sibling gate immediately before reserving the attempt.
+    latest=$(gh run list --repo "$repo_path" --commit "$head" --json databaseId,conclusion,status --limit 100 2>/dev/null) || latest=
+    if ! printf '%s' "$latest" | jq -e 'type=="array" and length<100 and all(.[]; (.status|type)=="string")' >/dev/null 2>&1; then
+      class=unknown
+      detail="run $rerun_id job $job_name; same-head sibling recheck unavailable"
+    else
+      sibling=$(printf '%s' "$latest" | jq -r '[.[] | select(.status|IN("queued","in_progress","requested","waiting","pending")) | .databaseId] | first // empty')
+      if [ -n "$sibling" ]; then
+        class=sibling
+        detail="run $rerun_id job $job_name; active same-head run $sibling"
+      fi
+    fi
+    if [ "$class" = infrastructure ]; then
+      # Persist the reservation before the forge request so an interrupted
+      # request cannot create an unbounded retry loop.
+      rerun=1
+      tmp=$(mktemp "$state_dir/.fm-pr-wait.XXXXXX") || exit 1
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$head" "$condition" "$first" "$rerun" "$notified" "$class" > "$tmp"
+      chmod 0600 "$tmp"
+      mv -f -- "$tmp" "$record"
+      gh run rerun "$rerun_id" --failed --repo "$repo_path" >/dev/null 2>&1 || true
+      detail="$detail; automatic failed-job rerun attempted once"
+    fi
+  fi
+  reason="$class: $detail"
+  if [ "$old_class" != "$class" ]; then
+    printf 'working: PR %s head %s class=%s: %s\n' "$url" "$head" "$class" "$detail" >> "$state_dir/$id.status"
+  fi
 fi
 if [ "$notified" -ne 1 ] && [ "$((now-first))" -ge "$bound" ]; then
   minutes=$(((now-first)/60))
@@ -139,6 +193,6 @@ if [ "$notified" -ne 1 ] && [ "$((now-first))" -ge "$bound" ]; then
   fi
 fi
 tmp=$(mktemp "$state_dir/.fm-pr-wait.XXXXXX") || exit 1
-printf '%s\t%s\t%s\t%s\t%s\n' "$head" "$condition" "$first" "$rerun" "$notified" > "$tmp"
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$head" "$condition" "$first" "$rerun" "$notified" "$class" > "$tmp"
 chmod 0600 "$tmp"
 mv -f -- "$tmp" "$record"
