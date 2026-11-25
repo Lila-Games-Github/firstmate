@@ -64,7 +64,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 python3 "$bridge" collect "$home" sample "$worker" > /dev/null
 wait "$request_pid" || fail "workspace helper base check failed: $(cat "$tmp/base-check.out")"
-rg -q 'current:' "$tmp/base-check.out" || fail "workspace helper did not return the base verdict"
+grep -q 'current:' "$tmp/base-check.out" || fail "workspace helper did not return the base verdict"
 (cd "$worker" && python3 .firstmate/sample/fm-lane-workspace-bridge.py request uid-collisions check "$target" > "$tmp/uid.out" 2>&1) &
 request_pid=$!
 for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -100,7 +100,7 @@ PY
 for mode in local-only direct-PR no-mistakes; do
   FM_HOME="$home" TESTFARM_CHECKOUT="$tmp/testfarm" "$ROOT/bin/fm-brief.sh" "brief-$mode" fixture --mode "$mode" --lane --landing-branch main --no-template fixture > /dev/null
   file="$home/data/brief-$mode/brief.md"
-  if rg -F "$tmp" "$file" >/dev/null || rg -F "$ROOT" "$file" >/dev/null; then
+  if grep -F "$tmp" "$file" >/dev/null || grep -F "$ROOT" "$file" >/dev/null; then
     fail "$mode lane brief named a path outside its workspace"
   fi
   python3 - "$file" <<'PY' || fail "$mode lane brief contains an absolute filesystem path"
@@ -114,12 +114,12 @@ absolute = r"(?<![\w/])/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]*"
 assert re.search(absolute, "Read /var/private/reference before dispatch")
 assert not re.search(absolute, text)
 PY
-  rg -q "\.firstmate/brief-$mode/status.log" "$file" || fail "$mode lane brief lacks its workspace status path"
-  rg -q 'request test-service submit fixture-suite' "$file" || fail "$mode lane brief omitted its workspace service request"
+  grep -q "\.firstmate/brief-$mode/status.log" "$file" || fail "$mode lane brief lacks its workspace status path"
+  grep -q 'request test-service submit fixture-suite' "$file" || fail "$mode lane brief omitted its workspace service request"
 done
 if FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-herdr fixture --mode direct-PR --lane --landing-branch main --herdr-lab --no-template fixture > "$tmp/herdr.out" 2>&1; then
   fail "lane brief allowed an outside-workspace Herdr helper"
 fi
-rg -q 'workspace exchange' "$tmp/herdr.out" || fail "Herdr refusal omitted the workspace reason"
+grep -q 'workspace exchange' "$tmp/herdr.out" || fail "Herdr refusal omitted the workspace reason"
 
 pass "lane workspace exchange: 2 status lines and 3 files collected; base and UID checks ran on the real worktree; bad request and symlink rejected; 3 lane modes stay workspace-local"

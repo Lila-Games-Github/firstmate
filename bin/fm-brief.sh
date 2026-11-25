@@ -324,7 +324,7 @@ for a in "$@"; do
     --open-questions) want_value='open-questions' ;;
     --open-questions=*) OPEN_QUESTIONS=${a#--open-questions=}; OPEN_QUESTIONS_SET=1 ;;
     --lane) LANE=1 ;;
-    --lane-branch) want_value=lane-branch ;;
+    --lane-branch) want_value='lane-branch' ;;
     --lane-branch=*) LANE_BRANCH=${a#--lane-branch=}; LANE_BRANCH_SET=1 ;;
     --landing-branch) want_value='landing-branch' ;;
     --landing-branch=*) LANDING_BRANCH=${a#--landing-branch=}; LANDING_BRANCH_SET=1 ;;
