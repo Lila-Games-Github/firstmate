@@ -376,10 +376,17 @@ EOF
 # long final suite.
 # A missed trigger would lose the whole protection, so every ship gets it.
 fm_long_suite_block() {
+  # shellcheck disable=SC2016 # Literal command example in generated Markdown.
+  local observer='For your own background job outside the test service, register a completion observer with `FM_HOME=<firstmate-home> <firstmate-code-root>/bin/fm-procevent-worker-job.sh arm <task-id> <job-name> -- <blocking-observer-command> [args...]`; that command must wait for the existing job to end and be safe to rerun after a watcher restart.'
+  if [ "${1:-}" = lane ]; then
+    observer='For a background job outside the test service, report its job identifier in the workspace status log so firstmate can register a completion observer.'
+  fi
   cat <<'EOF'
 # Long-suite and evidence snapshot contract
 When the definition of done requires a long-running suite, run it as a durable job that outlives one execution session: keep its progress and its identifier outside the process that started it (a log path plus a recorded job or session identifier), and reattach through that identifier instead of re-running the suite.
-For your own background job outside the test service, register a completion observer with `FM_HOME=<firstmate-home> <firstmate-code-root>/bin/fm-procevent-worker-job.sh arm <task-id> <job-name> -- <blocking-observer-command> [args...]`; that command must wait for the existing job to end and be safe to rerun after a watcher restart.
+EOF
+  printf '%s\n' "$observer"
+  cat <<'EOF'
 A required suite that is still running, or queued behind a shared suite lock, is work under way rather than a stalled task: report it as the declared external wait rule 4 defines, naming its identifier and what it is waiting on, and never abandon, duplicate, or restart it because one command call was killed, timed out, or hit an execution-session limit.
 For a test-service request, append `paused: test-service request=<request-id>` and end your turn after submission; resume on its durable completion message, without polling status or holding a waiter session.
 Evidence must describe one snapshot: every capture and artifact you cite and the final suite receipt must all name the same commit.
@@ -399,13 +406,26 @@ fm_dod_quote() {
 
 # Shared worker handoff, also rendered on scout promotion. The queue executable
 # owns mechanics; this block supplies the task-bound invocation and next steps.
-fm_landing_queue_block() { # <task-id> [landing-branch] [priority]
-  local id=$1 landing=${2:-} priority=${3:-0} root home state data queue_command queue_target='' priority_arg=''
+fm_landing_queue_block() { # <task-id> [landing-branch] [priority] [lane]
+  local id=$1 landing=${2:-} priority=${3:-0} lane=${4:-} root home state data queue_command queue_target='' queue_identity='' priority_arg='' queue_owner queue_access queue_message queue_firstmate
   root=${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
   home=${FM_HOME:-$root}
   state=${STATE:-${FM_STATE_OVERRIDE:-$home/state}}
   data=${DATA:-${FM_DATA_OVERRIDE:-$home/data}}
   queue_command="FM_HOME=$(fm_dod_quote "$home") FM_STATE_OVERRIDE=$(fm_dod_quote "$state") FM_DATA_OVERRIDE=$(fm_dod_quote "$data") $(fm_dod_quote "$root/bin/fm-landing-queue.sh")"
+  queue_owner="The tool's header and \`--help\` own the protocol."
+  queue_access='You may update this task'"'"'s shared queue and receipt state through this tool, including when its home is outside your worktree.'
+  queue_message='The queue sends your steering inbox one message'
+  queue_firstmate="Firstmate handles those wakes under the existing merge authority; \`$root/.agents/skills/landing-queue/SKILL.md\` owns that procedure."
+  if [ "$lane" = lane ]; then
+    queue_command="python3 \"\$(git rev-parse --show-toplevel)/.firstmate/$id/fm-lane-workspace-bridge.py\" request landing-queue"
+    queue_owner="Ask firstmate for the queue protocol when a result is unclear."
+    queue_access='Firstmate runs each request from this workspace through the controller.'
+    queue_message='Firstmate sends one Playbot message'
+    queue_firstmate='Firstmate handles those wakes under the existing merge authority.'
+  else
+    queue_identity=" $(fm_dod_quote "$id") --project ."
+  fi
   [ -z "$landing" ] || queue_target=" --landing-branch $(fm_dod_quote "$landing")"
   case "$priority" in
     ''|0) ;;
@@ -417,14 +437,14 @@ fm_landing_queue_block() { # <task-id> [landing-branch] [priority]
 
 ## Self-service landing train
 Use the queue tool for your place, rebase target, and final receipt; do not wait for a firstmate message assigning or updating them.
-The tool's header and \`--help\` own the protocol.
-You may update this task's shared queue and receipt state through this tool, including when its home is outside your worktree.
+$queue_owner
+$queue_access
 Define this helper in your worker shell:
 \`\`\`sh
 landing_queue() {
   local action=\$1
   shift
-  $queue_command "\$action" $(fm_dod_quote "$id") --project .$queue_target "\$@"
+  $queue_command "\$action"$queue_identity$queue_target "\$@"
 }
 \`\`\`
 1. Rebase your branch onto the current landing tip in the same worktree that owns your branch, commit, and run the affected internal and focused tests locally on this exact head through the available engine.
@@ -436,7 +456,7 @@ landing_queue() {
 2. Run \`landing_queue status\` before rebasing at the sequential/off front and whenever you resume waiting.
    Read its \`place\`, \`target_ref\`, \`target_sha\`, and \`rebase_from\`; these replace any earlier target, even if another car failed or landed.
    At \`waiting-for-front\`, do not rebase or rerun checks even when the target changes: append \`paused: landing-queue waiting-for-front\` and end your turn without polling.
-   The queue sends your steering inbox one message when your car reaches bottom; resume then with \`landing_queue status\`.
+   $queue_message when your car reaches bottom; resume then with \`landing_queue status\`.
    At the sequential/off bottom (\`place=1\`), when the base changes, rebase your own commits in this branch's existing worktree with \`git rebase --onto <target_sha> <rebase_from>\`, then acknowledge the prepared head with \`landing_queue ready --branch "\$(git branch --show-current)" --head "\$(git rev-parse HEAD)" --target <target_sha>\`.
    In speculative mode, the line builds and checks the candidate; do not rebase or acknowledge a new front head after joining.
    Resolve rebase conflicts yourself; do not merge or keep commits from a failed lower car.
@@ -452,15 +472,15 @@ landing_queue() {
    Use \`landing_queue fail --reason <failure>\` only when leaving the train. A later \`landing_queue ready\` re-enrolls a failed id and branch at its priority position (the tool's header owns ordering).
    At \`failed\`, report \`failed:\` with the status \`reason\` and stop unless you are ready to re-enroll.
 4. At \`ready-to-land\` or \`needs-baseline\`, append \`paused: landing-queue <status>\` and end your turn without polling; a pending test-service request instead follows the submit-and-end-turn rule above.
-   The queue sends your steering inbox one message when your car lands, fails, its baseline resolves, or a moved head or target returns work to you; resume then with \`landing_queue status\`.
+   $queue_message when your car lands, fails, its baseline resolves, or a moved head or target returns work to you; resume then with \`landing_queue status\`.
    The tool emits the readiness or baseline wake only for the bottom car with a valid receipt; do not add a ready \`done:\` or ask firstmate to coordinate the queue.
-   Firstmate handles those wakes under the existing merge authority; \`$root/.agents/skills/landing-queue/SKILL.md\` owns that procedure.
+   $queue_firstmate
    A changed target returns you to preparation; at \`landed\`, append \`done: landed {branch} at {head}\` and stop.
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [landing-branch] [priority] [task-branch]
-  local mode=$1 id=$2 landing_branch=${3:-} priority=${4:-0} branch=${5:-fm/$2} meta_file
+fm_dod_block() {  # <mode> <task-id> [landing-branch] [priority] [task-branch] [lane]
+  local mode=$1 id=$2 landing_branch=${3:-} priority=${4:-0} branch=${5:-fm/$2} lane=${6:-} meta_file
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -493,7 +513,7 @@ Use the queue's current assigned target below when rebasing.
 When it is implemented and committed, follow the self-service landing train below through landing.
 The configured merge authority approves the ready branch, then firstmate merges it into that same recorded landing branch, or the default branch when none is recorded, through the guarded fast-forward path.
 EOF
-      fm_landing_queue_block "$id" "$landing_branch" "$priority"
+      fm_landing_queue_block "$id" "$landing_branch" "$priority" "$lane"
       ;;
     no-mistakes)
       cat <<EOF

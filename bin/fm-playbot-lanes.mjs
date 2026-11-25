@@ -5072,6 +5072,7 @@ function serverBuildIdentity() {
     .update(fs.readFileSync(supervisionSelfScript()))
     .update(fs.readFileSync(new URL("./fm-playbot-engine-readiness.mjs", import.meta.url)))
     .update(fs.readFileSync(new URL("./fm-playbot-addon-guard.mjs", import.meta.url)))
+    .update(fs.readFileSync(new URL("./fm-lane-workspace-bridge.py", import.meta.url)))
     .digest("hex")}`;
 }
 
@@ -5125,6 +5126,18 @@ function supervisionWriteCheck(state, taskId, script) {
 // retires or the task is torn down.
 function supervisionSidecarPath(state, taskId) {
   return path.join(state, `${taskId}.lane-poll`);
+}
+
+// The worker's exchange is inside its registered worktree; only this controller
+// calls the bridge with a Firstmate home or runs the privileged helper commands.
+function laneWorkspaceBridge(verb, state, taskId, root) {
+  const script = new URL("./fm-lane-workspace-bridge.py", import.meta.url);
+  const result = spawnSync("python3", [script.pathname, verb, path.dirname(state), taskId, root], {
+    encoding: "utf8", timeout: 180_000,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(`lane workspace ${verb} failed: ${(result.stderr ?? result.error?.message ?? "").trim() || `exit ${result.status}`}`);
+  }
 }
 
 // One observation is a status AND the row's updated_at, because a bare status
@@ -5952,6 +5965,11 @@ function laneWorkspaceAndChatAbsent(meta) {
 function laneTaskState(file, retirable = false, state = path.dirname(file), landedVia = null) {
   const meta = laneMeta(file);
   if (meta.kind !== "lane" || !meta.spawn_gen || !meta.playbot_project || !meta.playbot_workspace || !meta.playbot_thread) throw new Error("lane task identity is incomplete");
+  const canonicalTaskState = process.env.FM_STATE_OVERRIDE ?? (process.env.FM_HOME ? path.join(process.env.FM_HOME, "state") : null);
+  if (canonicalTaskState && path.resolve(file) === path.resolve(canonicalTaskState, path.basename(file))
+    && meta.worktree && pathPresence(path.join(meta.worktree, ".firstmate", path.basename(file, ".meta")))) {
+    laneWorkspaceBridge("collect", canonicalTaskState, path.basename(file, ".meta"), meta.worktree);
+  }
   process.env.PLAYBOT_DESKTOP_DIR = supervisionPath(meta.playbot_desktop, "lane desktop directory");
   process.env.PLAYBOT_HARNESS_HOME = supervisionPath(meta.playbot_harness_home, "lane harness directory");
   const row = threadRowById(meta.playbot_thread);
@@ -6454,6 +6472,15 @@ async function supervisionPoll(argv) {
       }
       if ((previous.generation ?? null) !== generation) return { line: null };
       try {
+        try {
+          const meta = laneMeta(path.join(state, `${task}.meta`));
+          if (meta.kind === "lane") {
+            if (!meta.worktree || meta.playbot_thread !== thread) throw new Error("lane output identity differs from the armed worker");
+            laneWorkspaceBridge("collect", state, task, meta.worktree);
+          }
+        } catch (error) {
+          return { line: `playbot lane ${task}: workspace output collection failed: ${supervisionErrorDetail(error)}; this poll stays armed` };
+        }
         const decision = supervisionPollDecision(task, thread, previous, undefined, supervisionFarmRequestOpen(state, task));
         let line = decision.line;
         if (decision.retire) {
@@ -7317,6 +7344,9 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
     if (laneIdentityHome) {
       try {
         await ensureTerminalLaneIdentity(requestedTaskId, worker, landingBranch, args.mode, laneCapture);
+        const state = supervisionStateDir();
+        const meta = laneMeta(path.join(state, `${requestedTaskId}.meta`));
+        if (meta.kind === "lane") laneWorkspaceBridge("prepare", state, requestedTaskId, meta.worktree);
       } catch (error) {
         if (!createdChat) throw error;
         const reason = supervisionErrorDetail(error);

@@ -1227,7 +1227,7 @@ test_lane_brief_verifies_its_base_before_working() {
   # The base check is part of the first action, before any task work.
   assert_grep "1. First action: verify your starting point before you touch anything." "$brief" \
     "lane brief does not make starting-point verification the first action"
-  assert_grep "Run \`'/FM_ROOT/bin/fm-lane-base-check.sh' proto/godot/frog-pile --publishes\`" "$brief" \
+  assert_grep "request base-check proto/godot/frog-pile --publishes" "$brief" \
     "lane brief does not run the base check with its landing branch"
   assert_grep "act on its EXIT CODE" "$brief" \
     "lane brief does not bind the worker to the check's exit code"
@@ -1258,7 +1258,7 @@ test_lane_brief_verifies_its_base_before_working() {
     FM_HOME="$home" FM_ROOT_OVERRIDE=/FM_ROOT "$ROOT/bin/fm-brief.sh" "publishes-$mode" some-proj \
       --mode "$mode" --lane --landing-branch proto/godot/frog-pile >/dev/null 2>&1 \
       || fail "$mode lane brief should scaffold"
-    assert_grep "fm-lane-base-check.sh' proto/godot/frog-pile --publishes" \
+    assert_grep "request base-check proto/godot/frog-pile --publishes" \
       "$home/data/publishes-$mode/brief.md" \
       "$mode lane brief does not declare that it publishes through a PR"
   done
@@ -1460,7 +1460,7 @@ test_lane_branch_values_must_be_safe_branch_names() {
     || fail "the canonical multi-segment landing branch should scaffold"
   brief="$home/data/value-ok/brief.md"
   assert_present "$brief" "the canonical multi-segment landing branch wrote no brief"
-  assert_grep "fm-lane-base-check.sh' proto/godot/frog-pile" "$brief" \
+  assert_grep "request base-check proto/godot/frog-pile" "$brief" \
     "the canonical landing branch is not what the base check is given"
 
   # A remote-tracking spelling is accepted at scaffold time on purpose: only the
@@ -1469,7 +1469,7 @@ test_lane_branch_values_must_be_safe_branch_names() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" value-remote some-proj --mode no-mistakes --lane \
     --landing-branch origin/main >/dev/null 2>&1 \
     || fail "a ref-safe remote-tracking spelling should scaffold and be settled by the base check"
-  assert_grep "fm-lane-base-check.sh' origin/main" \
+  assert_grep "request base-check origin/main" \
     "$home/data/value-remote/brief.md" \
     "the accepted value is not the branch the base check is given"
   pass "fm-brief.sh: --landing-branch and --lane-branch refuse values that are not plain branch names"
@@ -1497,7 +1497,7 @@ test_non_lane_ship_briefs_carry_no_lane_vocabulary() {
     assert_grep "git checkout -b feat/boundary-$(printf %s "$mode" | tr "[:upper:]" "[:lower:]")" "$brief" \
       "$mode: non-lane brief lost the crewmate branch convention"
     for lane_marker in "## Lane overrides" "Playbot lane workspace" \
-      "fm-lane-base-check.sh" "never create or switch branches" \
+      "request base-check" "never create or switch branches" \
       "Delivery contract - READ THIS BEFORE YOU SHIP ANYTHING"; do
       if grep -qF -- "$lane_marker" "$brief"; then
         fail "$mode: non-lane brief leaked lane text: $lane_marker"
@@ -1957,7 +1957,7 @@ test_worker_owned_finalization() {
     assert_grep 'run the short phone check only when `gate_exemption=-`' "$brief" 'queue omitted the non-exempt quick phone gate'
     if [ "$lane" = lane ]; then
       assert_grep 'Keep front-of-queue integration in this registered Playbot workspace' "$brief" 'lane moved integration away from its engine'
-      assert_grep 'fm-playbot-uid-collisions.py check <target_sha>' "$brief" 'lane omitted UID collision preflight'
+      assert_grep 'request uid-collisions check <target_sha>' "$brief" 'lane omitted UID collision preflight'
       assert_grep 'preserve <target_sha>' "$brief" 'lane omitted safe UID preservation'
       assert_grep 'reset_engine_workspace_cache' "$brief" 'lane omitted supported engine cache refresh'
     fi

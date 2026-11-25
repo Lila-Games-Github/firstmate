@@ -106,10 +106,9 @@
 # are refused on scout, secondmate and --lane scaffolds, whose branch is not chosen here.
 # Ship briefs carry `Execution contract: workspace=lane|crewmate`; fm-spawn
 # refuses lane briefs, and Playbot dispatch refuses marked crewmate briefs.
-# --lane writes the same ship contract for a Playbot lane. A lane brief is designed
-# to need ZERO dispatch-time overrides: a caller hands it over with nothing but
-# "read the brief at <path> and follow it exactly" plus a one-line task summary, so
-# every lane-specific instruction firstmate used to send by hand is generated here.
+# --lane writes a Playbot worker contract. Firstmate sends the generated text
+# through Playbot after dispatch prepares the workspace exchange; the worker
+# reads and writes only its registered workspace.
 # Three differences from a crewmate brief carry that:
 #   1. Branch. A lane's workspace already owns its branch, so every crewmate
 #      task-branch instruction (feat/<slug> or fix/<slug>) - the setup step, rule 1, the definition of done,
@@ -118,7 +117,8 @@
 #   2. Base. firstmate creates a crewmate's worktree from the recorded landing
 #      branch locally, while Playbot creates a lane workspace from that branch's
 #      REMOTE tip, so an unpushed landing leaves the workspace behind. Setup step 1b
-#      runs bin/fm-lane-base-check.sh, whose own header and --help own that check's
+#      requests bin/fm-lane-base-check.sh through the workspace bridge, whose
+#      header and --help own that check's
 #      contract and exit codes, and the generated brief carries only its invocation
 #      plus the three arms of that exit code: proceed, reset to the ref it names
 #      after disclosing any Playbot churn it names, or stop with the line it
@@ -128,9 +128,8 @@
 #      Herdr and setup sections, repeating only the machine-readable contract line
 #      and that mode's one prohibition and pointing at the Definition of done as the
 #      only authority, so firstmate never needs to restate the mode on dispatch.
-# Everything else, including the worktree-isolation assertion, the status protocol,
-# the shared-daemon rule, and the {TASK} placeholder, is identical to a non-lane
-# brief of the same mode. Task-specific content still belongs in {TASK}.
+# The lane status, handoff, receipt, and capture paths are relative to its
+# ignored workspace exchange. Non-lane briefs retain their existing home paths.
 # --lane-branch <branch> names the workspace branch exactly (Playbot's generated
 # task/<task-id>-<date>, for example); without it the brief refers to the branch the
 # workspace was created on rather than inventing a name. It requires --lane.
@@ -160,9 +159,8 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
-# Every scaffold also carries the steering-inbox receive-and-ack section:
-# process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
-# handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Non-lane scaffolds carry the steering-inbox receive-and-ack section; lane
+# scaffolds receive firstmate messages through their Playbot chat.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -171,11 +169,9 @@
 # Scaffolds carry only a one-line crewmate identity and no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
-# Ship and scout briefs also carry one conditional terminal-lifecycle pointer to
-# the learning-candidate skill plus an absolute shell-quoted capture invocation
-# bound to the selected private home and tracked command. It causes no completion
-# audit: a routine success does nothing, an originating lane performs bounded
-# capture only after a named qualifying signal, and curation never blocks cleanup.
+# Non-lane ship and scout briefs carry the conditional learning-candidate
+# capture invocation. Lane briefs ask workers to record the signal in their
+# workspace exchange for firstmate to capture from its own home.
 # Ship and scout briefs carry one worktree runbook section for context handoffs.
 # Secondmate charters exit before that section is rendered.
 # Refuses to overwrite an existing brief.
@@ -524,6 +520,10 @@ if [ "$LANE" -eq 1 ] && [ "$LANDING_BRANCH_SET" -ne 1 ]; then
   echo "error: --lane requires --landing-branch <branch>: a lane verifies its base against that branch as its first action, and a Playbot lane has no recorded landing branch to fall back on" >&2
   exit 1
 fi
+if [ "$LANE" -eq 1 ] && [ "$HERDR_LAB" -eq 1 ]; then
+  echo "error: --lane --herdr-lab is unavailable until Herdr lifecycle helpers can run through the workspace exchange" >&2
+  exit 1
+fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
@@ -531,7 +531,9 @@ mkdir -p "$DATA/$ID"
 
 ASK_USER_BLOCK=
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-  ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
+  ASK_USER_DATA=$DATA
+  [ "$LANE" -eq 0 ] || ASK_USER_DATA=.firstmate
+  ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$ASK_USER_DATA" "$ID")
 fi
 
 shell_quote() {
@@ -543,6 +545,11 @@ shell_quote() {
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 META_FILE=$(shell_quote "$STATE/$ID.meta")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
+LANE_BOX=".firstmate/$ID"
+LANE_REQUEST="python3 \"\$(git rev-parse --show-toplevel)/$LANE_BOX/fm-lane-workspace-bridge.py\" request"
+if [ "$LANE" -eq 1 ]; then
+  STATUS_FILE="\"\$(git rev-parse --show-toplevel)/$LANE_BOX/status.log\""
+fi
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
@@ -556,6 +563,10 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+if [ "$LANE" -eq 1 ]; then
+  INBOX_SECTION="# Firstmate messages
+Firstmate sends steering and completion notices through this Playbot chat. Read each delivered message here; do not open a Firstmate inbox path."
+fi
 
 # The phase half of the status protocol, shared by ship and scout briefs. The
 # vocabulary and how a log folds into a phase are fm-classify-lib.sh's; a phase
@@ -572,7 +583,12 @@ phase_protocol() {  # <ship|scout>
     "   A phase line never wakes firstmate, so append one each time you move between phases;" \
     "   it adds to the states above and never replaces them: needs-decision, blocked, $PAUSED_VERB, done, and" \
     "   failed are reported only with their own lines, never as a phase."
-  fm_worker_context_block "$DATA" "$ID"
+  if [ "$LANE" -eq 1 ]; then
+    # shellcheck disable=SC2016 # Render command substitution for the worker.
+    fm_worker_context_block '$(git rev-parse --show-toplevel)/.firstmate' "$ID"
+  else
+    fm_worker_context_block "$DATA" "$ID"
+  fi
   if [ "$1" = ship ]; then
     printf '%s\n' \
       "   When your work is ready to merge, append \`${FM_CLASSIFY_PHASE_VERB:-$FM_CLASSIFY_PHASE_VERB_DEFAULT}: ready-to-merge - {PR URL or branch}\` just" \
@@ -738,6 +754,11 @@ LEARNING_SECTION=$(printf '%s\n' \
 '```' \
 'Do not run a completion audit to search for candidates; routine success adds nothing.' \
 "The originating lane captures only, and neither later classification nor curation may block this task's cleanup.")
+if [ "$LANE" -eq 1 ]; then
+  LEARNING_SECTION='# Learning-candidate reminder
+When a meaningful incident occurs, write its evidence under your workspace exchange and report the signal to firstmate through the status log.
+Firstmate owns private learning-candidate capture.'
+fi
 
 IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 # Task
@@ -882,13 +903,13 @@ if [ "$LANE" -eq 1 ]; then
   # the landing branch as published, so those lanes may not start from a local
   # landing branch carrying commits the remote tip lacks. local-only publishes
   # nothing and makes no remote comparison.
-  LANE_BASE_CHECK=$(shell_quote "$FM_ROOT/bin/fm-lane-base-check.sh")" $LANDING_BRANCH"
-  LANE_ADDON_GUARD="node --no-warnings $(shell_quote "$FM_ROOT/bin/fm-playbot-lanes.mjs") addon-guard"
+  LANE_BASE_CHECK="$LANE_REQUEST base-check $LANDING_BRANCH"
+  LANE_ADDON_GUARD="$LANE_REQUEST addon-guard"
   case "$MODE" in
     local-only) ;;
     *) LANE_BASE_CHECK="$LANE_BASE_CHECK --publishes" ;;
   esac
-  SETUP_PREAMBLE="You are in a Playbot lane workspace: an isolated git worktree of $REPO that Playbot created and already checked out on the branch that workspace owns."
+  SETUP_PREAMBLE="You are in a Playbot lane workspace: an isolated git worktree of $REPO that Playbot created and already checked out on the branch that workspace owns. Firstmate prepared $LANE_BOX as your ignored exchange directory. Run relative receipt and capture paths from the workspace root; firstmate collects its status log and files."
   IFS= read -r -d '' SETUP1 <<EOF || true
 1. First action: verify your starting point before you touch anything. Both checks below are mandatory; this brief is complete, so nothing outside it will tell you to run them.
 
@@ -898,7 +919,7 @@ if [ "$LANE" -eq 1 ]; then
       Never run \`git checkout -b\` or \`git switch -c\`, and never switch branches: a branch of your own steps off the one your workspace owns.
 
    b. **Base.** Playbot creates a lane workspace from the REMOTE tip of the landing branch, so a landing that has not been pushed yet leaves your workspace behind and you would build on stale code. One command decides whether your base is safe to start from; act on its EXIT CODE, never on your own reading of the repository.
-      Run \`$LANE_BASE_CHECK\` from the top of your workspace. It writes nothing - no reset, no fetch, no ref update - it only reports.
+      Run \`$LANE_BASE_CHECK\` from the top of your workspace. The base check changes no Git state; the request and response stay in your ignored exchange.
       - exit 0 (\`current: ...\`): your base is safe; proceed.
       - exit 10: it printed \`reset-required: <ref>\` and \`churn-paths: <paths>\`. When \`churn-paths\` names any path, DISCLOSE BEFORE YOU RESET: run \`git diff HEAD -- <exactly those paths>\` and leave its complete output in your log, untruncated and unsummarized - \`prototype-game/project.godot\` may be among them, and it is a hand-editable settings file rather than a generated one, so it can carry real human edits - then append \`working: preserving injected addon before guarded base reset: {those paths}\` to the status file. With paths named and that diff uncaptured or that line unappended, do not reset. Then run \`$LANE_ADDON_GUARD reset <the ref it printed>\` and proceed only on success; it reverts only those listed tracked churn paths (printing their diff again), preserves any injected addon, and preserves nothing when no addon tree exists. When \`churn-paths\` is empty there is nothing to disclose, but the same guarded reset remains mandatory. If the guard refuses, append its exact evidence as a blocker and stop.
       - exit 20: it printed one \`blocked: ...\` line naming the evidence. STOP - append that exact line to the status file and stop.
@@ -933,7 +954,9 @@ RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$TASK_BRANCH") || exit 1
 if [ "$LANE" -eq 0 ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = direct-PR ]; }; then
   LANDING_BRANCH=$(fm_meta_get "$STATE/$ID.meta" landing_branch)
 fi
-DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH" "$QUEUE_PRIORITY" "$TASK_BRANCH") || exit 1
+DOD_KIND=
+[ "$LANE" -eq 0 ] || DOD_KIND=lane
+DOD=$(fm_dod_block "$MODE" "$ID" "$LANDING_BRANCH" "$QUEUE_PRIORITY" "$TASK_BRANCH" "$DOD_KIND") || exit 1
 if [ "$LANE" -eq 1 ] && [ "$MODE" = local-only ] && fm_remote_local_landing; then
   DOD=$(fm_remote_local_dod "$ID" lane) || exit 1
 fi
@@ -986,11 +1009,11 @@ if [ "$LANE" -eq 1 ]; then
 
 ## Lane overrides
 This task runs in a Playbot lane workspace: your branch already exists and is $LANE_BRANCH_DESC, so every delivery instruction above applies to that branch and to no other.
-For engine readiness and bounded engine-call handling, follow \`docs/playbot-lanes.md\`'s Engine readiness contract in the Firstmate code root.
-Use its Addon preservation contract before any reset, stash, engine validation, or product commit; never use a raw reset or stash that bypasses that guard.
+Use Playbot's engine readiness tools before validation and preserve its injected addon before reset, stash, engine validation, or product commit.
+Never use a raw reset or stash that bypasses the workspace helper's addon guard.
 To rebase this workspace onto a new tip, run \`$LANE_ADDON_GUARD lane-rebase <target>\` instead of a raw rebase or a hand-made stash: it handles injected addon copies, rewritten addon files, and your untracked scratch paths, and on a real conflict it restores everything and refuses.
 Keep front-of-queue integration in this registered Playbot workspace so the engine's project path and the submitted Git head stay together.
-Before the front rebase, run \`$FM_ROOT/bin/fm-playbot-uid-collisions.py check <target_sha>\` in this workspace; if it reports generated UID collisions, run its \`preserve <target_sha>\` action and keep the printed ignored backup and manifest until every preserved UID is accounted for.
+Before the front rebase, run \`$LANE_REQUEST uid-collisions check <target_sha>\` in this workspace; if it reports generated UID collisions, run its \`preserve <target_sha>\` action and keep the printed ignored backup and manifest until every preserved UID is accounted for.
 The helper refuses other untracked collisions; never overwrite a newly tracked UID or move the branch to another worktree.
 After a rebase removes or renames scripts, call \`reset_engine_workspace_cache\` with this workspace and the full committed HEAD, then confirm \`get_engine_readiness\` and run the affected tests through that engine.
 Before farm certification, run the affected tests locally on the exact head you will submit; if the engine remains unavailable, submit the affected tests as a focused farm request first, record the engine blocker and selected tests, and require that request to pass on the same head.
@@ -1030,6 +1053,16 @@ fi
 
 WORKSPACE_KIND=crewmate
 [ "$LANE" -eq 0 ] || WORKSPACE_KIND=lane
+RULE2="2. Stay inside this worktree; modify nothing outside it except the phase-handoff note at \`$DATA/$ID/phase-handoff.md\` and a private learning candidate created through the conditional lifecycle above."
+PROJECT_MEMORY="If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+Record only project knowledge useful to almost every future session.
+For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
+If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
+Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge."
+if [ "$LANE" -eq 1 ]; then
+  RULE2="2. Work inside this Playbot workspace. Write status and phase lines to \`$LANE_BOX/status.log\`, a handoff to \`$LANE_BOX/phase-handoff.md\`, receipts to \`$LANE_BOX/receipts/\`, and captures to \`$LANE_BOX/captures/\`. Firstmate collects them."
+  PROJECT_MEMORY="If project memory needs checking, run \`$LANE_REQUEST ensure-agents\` from this workspace. Keep project knowledge proportionate."
+fi
 BRANCH_CONTRACT_LINE=
 [ -z "$TASK_BRANCH" ] || BRANCH_CONTRACT_LINE="
 $FM_TASK_BRANCH_CONTRACT_PREFIX$TASK_BRANCH"
@@ -1037,6 +1070,15 @@ TEST_SERVICE_GUIDANCE=
 TEST_SERVICE_PROJECT=$(FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-test-service.py" project-for-repo "$REPO" 2>/dev/null) || TEST_SERVICE_PROJECT=
 if [ -n "$TEST_SERVICE_PROJECT" ]; then
   TEST_SERVICE_RECEIPT="$DATA/$ID/suite.receipt"
+  TEST_SERVICE_COMMAND="FM_HOME=$(shell_quote "$FM_HOME") $FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID'"
+  TEST_SERVICE_DOC="See \`$FM_ROOT/docs/test-service.md\` for the full contract."
+  TEST_SERVICE_MESSAGE='the service sends your steering inbox the request id, final state, SHA, receipt path, and first failure.'
+  if [ "$LANE" -eq 1 ]; then
+    TEST_SERVICE_RECEIPT="$LANE_BOX/receipts/suite.receipt"
+    TEST_SERVICE_COMMAND="$LANE_REQUEST test-service submit $TEST_SERVICE_PROJECT"
+    TEST_SERVICE_DOC='Firstmate runs the service request from its controller and collects the receipt into this workspace exchange.'
+    TEST_SERVICE_MESSAGE='firstmate sends the request id and final result through this Playbot chat.'
+  fi
   TEST_SERVICE_RECEIPT_ARG=$(shell_quote "$TEST_SERVICE_RECEIPT")
   TEST_SERVICE_OPENING="When this ship's test step calls for the full suite and device play-through, commit the exact version first, then submit through the Firstmate test service with explicit FM_HOME."
   TEST_SERVICE_PREJOIN='In a landing train, submit the full suite and device play-through before joining on your branch rebased onto the current tip.'
@@ -1050,12 +1092,15 @@ The line then runs the editor suite followed by its short phone check on the exa
     # shellcheck disable=SC2016 # The backticks are literal generated brief text.
     TEST_SERVICE_PHONE_GUIDANCE='After the editor suite passes, submit `--suite --check quick --target <pre-queue-tip-sha> --device-gate any --receipt <quick-receipt-path>` on the same head; its passed result supplies the phone evidence for the configured landing gate.'
   fi
+  if [ "$LANE" -eq 1 ]; then
+    TEST_SERVICE_OPENING='Commit the exact version first, then submit through the workspace helper; firstmate runs the test-service command for this lane.'
+  fi
   TEST_SERVICE_GUIDANCE="# Test service gate
 $TEST_SERVICE_OPENING
 $TEST_SERVICE_PREJOIN
 When \`landing_queue status\` reports \`candidate_sha\`, the queue builds and tests the candidate itself; after joining, wait for its status and do not rebase or submit the front check.
 When status has no \`candidate_sha\`, submit a quick check on the rebased front head unless queue status requires a full rerun.
-Use \`FM_HOME=$(shell_quote "$FM_HOME") $FM_ROOT/bin/fm-test-service.py submit $TEST_SERVICE_PROJECT \"\$PWD\" \"\$(git rev-parse HEAD)\" --task '$ID' $TEST_SERVICE_FULL_OPTIONS --receipt $TEST_SERVICE_RECEIPT_ARG\`.
+Use \`$TEST_SERVICE_COMMAND $TEST_SERVICE_FULL_OPTIONS --receipt $TEST_SERVICE_RECEIPT_ARG\`.
 $TEST_SERVICE_PHONE_GUIDANCE
 For the front quick check, read \`gate_exemption\` and \`rebase_basis\` from the current \`landing_queue status\` after acknowledging any rebase.
 When \`rebase_basis\` is a SHA and \`gate_exemption=-\`, submit \`--suite --check quick --target <front-target-sha> --device-gate any --suite-exemption exempt --receipt <quick-receipt-path>\` and wait for its green result; the farm runs the touched editor tests and short phone command.
@@ -1064,7 +1109,7 @@ If the farm refuses the basis at submit, show its exact error, then run the exac
 The farm alone verifies that its full-suite result for the basis and exact-head quick result are green and that the rebased patch is unchanged; the queue's \`rebase_basis\` is only a candidate from its retained admission receipt.
 When \`rebase_basis=-\` and \`gate_exemption=-\`, use \`--suite --check quick --target <front-target-sha> --device-gate any --receipt <quick-receipt-path>\` instead of the full check options.
 When \`gate_exemption\` names a real-phone exemption, use \`--suite --check quick --target <front-target-sha> --receipt <quick-receipt-path>\` so the quick check runs the suite without a device gate.
-Follow the Long-suite and evidence snapshot contract below to pause and end your turn; the service sends your steering inbox the request id, final state, SHA, receipt path, and first failure.
+Follow the Long-suite and evidence snapshot contract below to pause and end your turn; $TEST_SERVICE_MESSAGE
 On success, the service automatically writes \`$TEST_SERVICE_RECEIPT\` in exactly this three-line form for the tested full SHA:
 \`\`\`text
 schema=fm-full-suite.v1
@@ -1072,16 +1117,22 @@ sha=<full tested SHA>
 failures=0
 \`\`\`
 Add \`--scenario <name>\` or \`--harness <committed-relative-path>\` for any scenario or benchmark you wrote.
-See \`$FM_ROOT/docs/test-service.md\` for the full contract.
+$TEST_SERVICE_DOC
 "
 fi
 HEALTH_MARKER=
 # The durable long-suite and evidence snapshot contract is rendered into every
 # ship brief; its text and its supervision counterpart are owned elsewhere.
-LONG_SUITE_SECTION=$(fm_long_suite_block)
+LONG_SUITE_KIND=
+[ "$LANE" -eq 0 ] || LONG_SUITE_KIND=lane
+LONG_SUITE_SECTION=$(fm_long_suite_block "$LONG_SUITE_KIND")
 if [ "$GREEN_FINAL_HEAD" -eq 1 ]; then
   HEALTH_MARKER='Final-head health: green'
   if [ -z "$TEST_SERVICE_PROJECT" ]; then
+    if [ "$LANE" -eq 1 ]; then
+      HEALTH_MARKER="$HEALTH_MARKER
+No test-service project is configured; report a blocker to firstmate before submitting the final head."
+    else
     HEALTH_MARKER="$HEALTH_MARKER
 The final-head suite receipt belongs at \`$DATA/$ID/suite.receipt\`.
 Its sanctioned producer is the Firstmate test service, \`$FM_ROOT/bin/fm-test-service.py\`, which writes exactly this three-line form for the full tested head SHA:
@@ -1091,6 +1142,7 @@ sha=<full tested SHA>
 failures=0
 \`\`\`
 No test-service project is configured for this repository; ask firstmate to configure one before submitting the final head."
+    fi
   fi
 fi
 OPEN_QUESTIONS_SECTION=
@@ -1129,7 +1181,7 @@ $SETUP1$SETUP2
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it except the phase-handoff note at \`$DATA/$ID/phase-handoff.md\` and a private learning candidate created through the conditional lifecycle above.
+$RULE2
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
@@ -1170,11 +1222,7 @@ $ASK_USER_BLOCK
 $INBOX_SECTION
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
-Record only project knowledge useful to almost every future session.
-For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+$PROJECT_MEMORY
 
 $LONG_SUITE_SECTION
 
