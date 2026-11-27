@@ -2092,7 +2092,6 @@ done
 
 # The channel commands run through the same public CLI/MCP path as Playbot
 # callers, against the fixture's stateful IPC rather than source inspection.
-channel_project=project-worker
 channel_list=$(node --no-warnings "$SCRIPT" call list_channels '{"project":"project-worker"}') || fail "list_channels failed"
 CHANNEL_LIST="$channel_list" node --no-warnings -e 'const x=JSON.parse(process.env.CHANNEL_LIST).structuredContent;if(x.sourceCount!==1||x.channels.length!==1||x.channels[0].boundToProject)process.exit(1)' || fail "channel list source count or binding was wrong"
 channel_create=$(node --no-warnings "$SCRIPT" call create_channel '{"project":"project-worker","name":"fixture-channel"}') || fail "create_channel failed"
