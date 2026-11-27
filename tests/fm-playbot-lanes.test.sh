@@ -1336,7 +1336,7 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup did not fail closed 
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== false || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== false || value.checks.controllerPresent !== true) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 29) process.exit(1);
+if (!value.checks.hooks.ready || value.checks.expectedToolCount !== 39) process.exit(1);
 NODE
 threads_after=$(FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE'
 const path = require('node:path');
@@ -1376,6 +1376,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 const desktop = path.join(process.env.FIXTURE_ROOT, 'desktop');
 const callsFile = path.join(process.env.FIXTURE_ROOT, 'ipc-calls.jsonl');
+const channelFile = path.join(process.env.FIXTURE_ROOT, 'channel-state.json');
+const channelBadFile = path.join(process.env.FIXTURE_ROOT, 'channel-bad');
 const modeFile = path.join(process.env.FIXTURE_ROOT, 'ipc-mode');
 const snapshotFile = path.join(process.env.FIXTURE_ROOT, 'snapshots.json');
 const capturedEnvelope = JSON.parse(fs.readFileSync(process.env.PLAYBOT_0117_SNAPSHOT_FIXTURE, 'utf8'));
@@ -1654,6 +1656,54 @@ async function electronInvoke(channel, payload) {
   if (missingChannels().includes(channel)) throw new Error(`No handler registered for '${channel}'`);
   const db = new DatabaseSync(path.join(desktop, 'playbot.db'));
   try {
+    if (channel.startsWith('conversations:')) {
+      const initialId = '11111111-1111-4111-8111-111111111111';
+      const initial = { channels: [{ id: initialId, name: 'fixture', kind: 'channel', memberCount: 2 }], members: { [initialId]: [{ type: 'user', id: '22222222-2222-4222-8222-222222222222', name: 'Owner' }, { type: 'agent', id: '33333333-3333-4333-8333-333333333333', name: 'Firstmate' }] }, messages: { [initialId]: [] } };
+      const state = fs.existsSync(channelFile) ? JSON.parse(fs.readFileSync(channelFile, 'utf8')) : initial;
+      const save = () => fs.writeFileSync(channelFile, JSON.stringify(state));
+      if (channel === 'conversations:channels') return fs.existsSync(channelBadFile) ? { broken: true } : state.channels;
+      if (channel === 'conversations:organizationMembers') return { members: [{ id: '22222222-2222-4222-8222-222222222222', name: 'Owner' }, { id: '44444444-4444-4444-8444-444444444444', name: 'Colleague' }], canManage: false };
+      if (channel === 'conversations:agents') return [{ id: '33333333-3333-4333-8333-333333333333', name: 'Firstmate' }];
+      if (channel === 'conversations:create') {
+        const row = { id: crypto.randomUUID(), name: payload.name, kind: 'channel', memberCount: 1 };
+        state.channels.push(row); state.members[row.id] = [initial.members[initialId][0]]; state.messages[row.id] = []; save(); return row;
+      }
+      const id = payload?.conversationId;
+      if (!state.channels.some((item) => item.id === id)) throw new Error(`Unknown conversation ${id}`);
+      if (channel === 'conversations:participants') return { participants: state.members[id] };
+      if (channel === 'conversations:addMember' || channel === 'conversations:joinAgent') {
+        const member = channel.endsWith('addMember') ? { type: 'user', id: payload.userId, name: 'Member' } : { type: 'agent', id: payload.agentId, name: 'Agent' };
+        if (!state.members[id].some((item) => item.type === member.type && item.id === member.id)) state.members[id].push(member);
+        save(); return member;
+      }
+      if (channel === 'conversations:post') {
+        const existing = state.messages[id].find((item) => item.clientMessageId === payload.clientMessageId);
+        if (existing) return existing;
+        const item = { id: crypto.randomUUID(), seq: state.messages[id].length + 1, conversationId: id, sender: initial.members[initialId][0], clientMessageId: payload.clientMessageId, body: payload.body, mentions: payload.mentions ?? [], payload: { kind: 'text' }, parentMessageId: payload.parentMessageId ?? null, alsoInChannel: payload.alsoInChannel ?? false, createdAt: new Date().toISOString() };
+        state.messages[id].push(item); save(); return item;
+      }
+      if (channel === 'conversations:read' || channel === 'conversations:messages') {
+        const all = channel.endsWith('read') || !payload.withChanges
+          ? state.messages[id].filter((item) => !item.parentMessageId || item.alsoInChannel)
+          : state.messages[id];
+        const selected = all.filter((item) => payload.after === undefined || item.seq > payload.after).filter((item) => payload.before === undefined || item.seq < payload.before);
+        // The live raw IPC can return one message while head is farther ahead
+        // and hasMore is false; the watcher must follow head, not that flag.
+        const bounded = channel.endsWith('messages') ? selected.slice(0, 1) : selected.slice(0, payload.limit ?? 40);
+        const messages = bounded.map((item) => channel.endsWith('read')
+          ? { id: item.id, seq: item.seq, from: item.sender, kind: item.payload.kind, text: item.body, files: [], parentMessageId: item.parentMessageId, sentAt: item.createdAt }
+          : item);
+        return { messages, hasMore: channel.endsWith('messages') ? false : selected.length > messages.length, head: state.messages[id].length };
+      }
+      if (channel === 'conversations:replies') {
+        const parent = state.messages[id].find((item) => item.id === payload.messageId);
+        if (!parent) throw new Error('Message not found');
+        const selected = state.messages[id].filter((item) => item.parentMessageId === parent.id && (payload.after === undefined || item.seq > payload.after));
+        const replies = selected.slice(0, payload.limit ?? 40);
+        return { parent, replies, hasMore: selected.length > replies.length };
+      }
+      throw new Error(`fixture does not implement channel ${channel}`);
+    }
     if (channel === 'engine:listWorkspaceProjects') return [];
     if (channel === 'app:metadata') {
       // One transient failure, then healthy again: a version read must recover
@@ -1712,13 +1762,13 @@ async function electronInvoke(channel, payload) {
       // serve only the codex:-prefixed ones.
       const current = readFileOr(mcpChannelsFile, '') === 'current';
       if (channel.startsWith('codex:') === current) throw new Error(`No handler registered for '${channel}'`);
-      if (channel.endsWith(':reload')) fs.writeFileSync(mcpSchemaVersionFile, '0.9.0\n');
+      if (channel.endsWith(':reload')) fs.writeFileSync(mcpSchemaVersionFile, '0.10.0\n');
       return [{
         name: 'playbot_lanes',
         enabled: true,
         error: null,
-        toolCount: 29,
-        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.9.0') },
+        toolCount: 39,
+        env: { PLAYBOT_LANES_SCHEMA_VERSION: readFileOr(mcpSchemaVersionFile, '0.10.0') },
       }];
     }
     if (channel === 'threads:launch') {
@@ -2040,6 +2090,80 @@ for _ in $(seq 1 50); do
 done
 [ -f "$PLAYBOT_DESKTOP_DIR/DevToolsActivePort" ] || fail "fake Playbot DevTools endpoint did not start"
 
+# The channel commands run through the same public CLI/MCP path as Playbot
+# callers, against the fixture's stateful IPC rather than source inspection.
+channel_list=$(node --no-warnings "$SCRIPT" call list_channels '{"project":"project-worker"}') || fail "list_channels failed"
+CHANNEL_LIST="$channel_list" node --no-warnings -e 'const x=JSON.parse(process.env.CHANNEL_LIST).structuredContent;if(x.sourceCount!==1||x.channels.length!==1||x.channels[0].boundToProject)process.exit(1)' || fail "channel list source count or binding was wrong"
+channel_create=$(node --no-warnings "$SCRIPT" call create_channel '{"project":"project-worker","name":"fixture-channel"}') || fail "create_channel failed"
+channel_id=$(CHANNEL_CREATE="$channel_create" node --no-warnings -e 'const x=JSON.parse(process.env.CHANNEL_CREATE).structuredContent;if(x.beforeCount!==1||x.afterCount!==2||x.delivery.state!=="confirmed")process.exit(1);console.log(x.channel.id)') || fail "channel create readback failed"
+channel_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID})')
+channel_members=$(node --no-warnings "$SCRIPT" call list_channel_members "$channel_args") || fail "list_channel_members failed"
+CHANNEL_MEMBERS="$channel_members" node --no-warnings -e 'const x=JSON.parse(process.env.CHANNEL_MEMBERS).structuredContent;if(x.sourceCount!==1||x.participants.length!==1||x.availableSourceCounts.people!==2||x.availableSourceCounts.agents!==1||x.available.people.length!==2||x.available.agents.length!==1)process.exit(1)' || fail "channel member or available roster source count was wrong"
+add_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,type:"agent",id:"33333333-3333-4333-8333-333333333333"})')
+add_result=$(node --no-warnings "$SCRIPT" call add_channel_member "$add_args") || fail "add_channel_member failed"
+ADD_RESULT="$add_result" node --no-warnings -e 'const x=JSON.parse(process.env.ADD_RESULT).structuredContent;if(!x.added||x.delivery.state!=="confirmed")process.exit(1)' || fail "agent addition was not confirmed"
+post_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,body:"Fixture root post",links:["https://example.com/result"],clientMessageId:"fixture-root"})')
+post_result=$(node --no-warnings "$SCRIPT" call post_channel_message "$post_args") || fail "post_channel_message failed"
+post_id=$(POST_RESULT="$post_result" node --no-warnings -e 'const x=JSON.parse(process.env.POST_RESULT).structuredContent;if(x.delivery.state!=="confirmed")process.exit(1);console.log(x.messageId)') || fail "root post delivery was not confirmed"
+reply_args=$(CHANNEL_ID="$channel_id" POST_ID="$post_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,body:"Fixture reply",parentMessageId:process.env.POST_ID,clientMessageId:"fixture-reply"})')
+reply_result=$(node --no-warnings "$SCRIPT" call post_channel_message "$reply_args") || fail "thread reply failed"
+REPLY_RESULT="$reply_result" node --no-warnings -e 'const x=JSON.parse(process.env.REPLY_RESULT).structuredContent;if(x.delivery.state!=="confirmed")process.exit(1)' || fail "thread reply delivery was not confirmed"
+replies_args=$(CHANNEL_ID="$channel_id" POST_ID="$post_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,messageId:process.env.POST_ID})')
+replies_result=$(node --no-warnings "$SCRIPT" call read_channel_replies "$replies_args") || fail "read_channel_replies failed"
+REPLIES_RESULT="$replies_result" node --no-warnings -e 'const x=JSON.parse(process.env.REPLIES_RESULT).structuredContent;if(x.sourceCount!==1||x.replies.length!==1)process.exit(1)' || fail "reply source count was wrong"
+read_result=$(node --no-warnings "$SCRIPT" call read_channel "$channel_args") || fail "read_channel failed"
+READ_RESULT="$read_result" node --no-warnings -e 'const x=JSON.parse(process.env.READ_RESULT).structuredContent;if(x.sourceCount!==1||x.messages.length!==1||x.taskCards.length!==0)process.exit(1)' || fail "channel read source count was wrong"
+CHANNEL_ID="$channel_id" FIXTURE_ROOT="$FIXTURE_ROOT" node --no-warnings <<'NODE' || fail "could not stage a fixture task card"
+const fs=require('node:fs');const path=require('node:path');const file=path.join(process.env.FIXTURE_ROOT,'channel-state.json');const state=JSON.parse(fs.readFileSync(file,'utf8'));const rows=state.messages[process.env.CHANNEL_ID];rows.push({id:'55555555-5555-4555-8555-555555555555',seq:rows.length+1,conversationId:process.env.CHANNEL_ID,sender:{type:'agent',id:'33333333-3333-4333-8333-333333333333'},clientMessageId:'fixture-task',body:'Task card',mentions:[],payload:{kind:'task'},parentMessageId:null,alsoInChannel:false,createdAt:new Date().toISOString()});fs.writeFileSync(file,JSON.stringify(state));
+NODE
+task_read=$(node --no-warnings "$SCRIPT" call read_channel "$channel_args") || fail "task card channel read failed"
+TASK_READ="$task_read" node --no-warnings -e 'const x=JSON.parse(process.env.TASK_READ).structuredContent;if(x.sourceCount!==2||x.taskCards.length!==1||x.taskCards[0].kind!=="task")process.exit(1)' || fail "exposed task card was not returned"
+bad_secret_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,body:"password=do-not-post"})')
+node --no-warnings "$SCRIPT" call post_channel_message "$bad_secret_args" >/dev/null 2>&1 && fail "obvious secret was posted"
+bad_link_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,body:"Link probe",links:["https://user:password@example.com/result"]})')
+node --no-warnings "$SCRIPT" call post_channel_message "$bad_link_args" >/dev/null 2>&1 && fail "URL credentials were posted"
+bad_token_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,body:"Link probe",links:["https://example.com/result?token=do-not-post"]})')
+node --no-warnings "$SCRIPT" call post_channel_message "$bad_token_args" >/dev/null 2>&1 && fail "token query parameter was posted"
+touch "$FIXTURE_ROOT/channel-bad"
+node --no-warnings "$SCRIPT" call list_channels '{"project":"project-worker"}' >/dev/null 2>&1 && fail "known-bad channel list was accepted"
+rm "$FIXTURE_ROOT/channel-bad"
+pass "fm-playbot-lanes: channel tools validate source counts, replies, members, secret guard, and a known-bad IPC fixture"
+
+mkdir -p "$PLAYBOT_LANES_CONTROLLER_ROOT/state"
+watch_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,taskId:"fixture-channel-watch",ownerId:"22222222-2222-4222-8222-222222222222",firstmateAgentId:"33333333-3333-4333-8333-333333333333"})')
+node --no-warnings "$SCRIPT" call arm_channel_watch "$watch_args" >/dev/null || fail "arm_channel_watch failed"
+watch_quiet=$(node --no-warnings "$SCRIPT" channel-poll --state "$PLAYBOT_LANES_CONTROLLER_ROOT/state" --task fixture-channel-watch) || fail "initial channel poll failed"
+[ -z "$watch_quiet" ] || fail "initial channel poll was not quiet"
+mention_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,body:"@Firstmate please inspect",mentions:[{type:"agent",id:"33333333-3333-4333-8333-333333333333"}],clientMessageId:"fixture-mention"})')
+node --no-warnings "$SCRIPT" call post_channel_message "$mention_args" >/dev/null || fail "fixture mention failed"
+watch_wake=$(node --no-warnings "$SCRIPT" channel-poll --state "$PLAYBOT_LANES_CONTROLLER_ROOT/state" --task fixture-channel-watch) || fail "addressed channel poll failed"
+case "$watch_wake" in *"unacknowledged addressed post"*) ;; *) fail "channel mention did not wake" ;; esac
+watch_list_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,taskId:"fixture-channel-watch"})')
+watch_list=$(node --no-warnings "$SCRIPT" call list_channel_watch "$watch_list_args") || fail "list_channel_watch failed"
+WATCH_LIST="$watch_list" node --no-warnings -e 'const x=JSON.parse(process.env.WATCH_LIST).structuredContent;if(x.sourceCount!==1||x.pending.length!==1||!x.pending[0].id||x.pending[0].parentMessageId!==null)process.exit(1)' || fail "channel watch pending identity was unreadable"
+watch_repeat=$(node --no-warnings "$SCRIPT" channel-poll --state "$PLAYBOT_LANES_CONTROLLER_ROOT/state" --task fixture-channel-watch) || fail "repeated channel poll failed"
+[ "$watch_repeat" = "$watch_wake" ] || fail "unacknowledged mention was not durable"
+mention_seq=$(CHANNEL_ID="$channel_id" node --no-warnings "$SCRIPT" call read_channel "$channel_args" | node --no-warnings -e 'let s="";process.stdin.on("data",x=>s+=x).on("end",()=>{const x=JSON.parse(s).structuredContent;console.log(x.messages.at(-1).seq)})')
+ack_args=$(CHANNEL_ID="$channel_id" SEQ="$mention_seq" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,taskId:"fixture-channel-watch",through:Number(process.env.SEQ)})')
+node --no-warnings "$SCRIPT" call ack_channel_watch "$ack_args" >/dev/null || fail "ack_channel_watch failed"
+watch_after=$(node --no-warnings "$SCRIPT" channel-poll --state "$PLAYBOT_LANES_CONTROLLER_ROOT/state" --task fixture-channel-watch) || fail "post-ack channel poll failed"
+[ -z "$watch_after" ] || fail "acknowledged mention kept waking"
+pass "fm-playbot-lanes: registered channel watch wakes until the addressed post is acknowledged"
+
+all_watch_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,taskId:"fixture-all-watch",ownerId:"22222222-2222-4222-8222-222222222222"})')
+all_watch=$(node --no-warnings "$SCRIPT" call arm_channel_watch "$all_watch_args") || fail "external Firstmate channel watch failed"
+ALL_WATCH="$all_watch" node --no-warnings -e 'const x=JSON.parse(process.env.ALL_WATCH).structuredContent;if(x.mode!=="all-activity")process.exit(1)' || fail "external Firstmate watch did not cover all activity"
+unmentioned_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,body:"Unmentioned request for external Firstmate",clientMessageId:"fixture-unmentioned"})')
+node --no-warnings "$SCRIPT" call post_channel_message "$unmentioned_args" >/dev/null || fail "unmentioned fixture post failed"
+unmentioned_reply_args=$(CHANNEL_ID="$channel_id" POST_ID="$post_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,body:"Unmentioned reply for external Firstmate",parentMessageId:process.env.POST_ID,clientMessageId:"fixture-unmentioned-reply"})')
+node --no-warnings "$SCRIPT" call post_channel_message "$unmentioned_reply_args" >/dev/null || fail "unmentioned fixture reply failed"
+all_wake=$(node --no-warnings "$SCRIPT" channel-poll --state "$PLAYBOT_LANES_CONTROLLER_ROOT/state" --task fixture-all-watch) || fail "external Firstmate channel poll failed"
+case "$all_wake" in *"unacknowledged new post"*) ;; *) fail "external Firstmate missed unmentioned channel activity" ;; esac
+all_list_args=$(CHANNEL_ID="$channel_id" node --no-warnings -p 'JSON.stringify({project:"project-worker",channel:process.env.CHANNEL_ID,taskId:"fixture-all-watch"})')
+all_list=$(node --no-warnings "$SCRIPT" call list_channel_watch "$all_list_args") || fail "external Firstmate watch list failed"
+ALL_LIST="$all_list" POST_ID="$post_id" node --no-warnings -e 'const x=JSON.parse(process.env.ALL_LIST).structuredContent;if(x.sourceCount!==2||x.pending.length!==2||!x.pending.some(p=>p.parentMessageId===process.env.POST_ID))process.exit(1)' || fail "channel watch skipped a reply behind the live head"
+pass "fm-playbot-lanes: external Firstmate watch catches unstructured channel requests"
+
 INSTALLATION="$PLAYBOT_LANES_STATE_DIR/installation.json" node --no-warnings <<'NODE' || fail "could not stage the stale loaded MCP identity"
 const fs = require('node:fs');
 const value = JSON.parse(fs.readFileSync(process.env.INSTALLATION, 'utf8'));
@@ -2052,16 +2176,16 @@ OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup accepted a stale loa
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== true) process.exit(1);
 if (value.checks.renderer !== true || value.checks.controllerPresent !== false) process.exit(1);
-if (!value.checks.hooks.ready || value.checks.toolCount !== 29) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.9.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.9.0' || value.checks.expectedSchemaVersion !== '0.9.0') process.exit(1);
+if (!value.checks.hooks.ready || value.checks.toolCount !== 39) process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.10.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.10.0' || value.checks.expectedSchemaVersion !== '0.10.0') process.exit(1);
 if (!value.checks.buildIdentityMatches || value.installation?.reloadSucceeded !== true) process.exit(1);
 NODE
 setup_out=$(PLAYBOT_LANES_CONTROLLER_ROOT="$FIXTURE_ROOT/not-a-playbot-project" node --no-warnings "$SCRIPT" setup)
 OUT="$setup_out" node --no-warnings <<'NODE' || fail "setup reloaded an MCP whose build identity was already current"
 const value = JSON.parse(process.env.OUT);
 if (value.ready !== true || value.changed !== false) process.exit(1);
-if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 29) process.exit(1);
+if (!value.checks.buildIdentityMatches || value.checks.toolCount !== 39) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads a stale MCP identity without requiring a controller project"
 
@@ -2074,8 +2198,8 @@ const value = JSON.parse(process.env.OUT);
 const calls = fs.readFileSync(process.env.CALLS, 'utf8').trim().split('\n').map(JSON.parse);
 const mcpCalls = calls.filter(call => call.channel.startsWith('codex:mcpServers:'));
 if (value.ready !== true || value.changed !== true) process.exit(1);
-if (value.checks.configuredSchemaVersion !== '0.9.0') process.exit(1);
-if (value.checks.schemaVersion !== '0.9.0' || value.checks.expectedSchemaVersion !== '0.9.0') process.exit(1);
+if (value.checks.configuredSchemaVersion !== '0.10.0') process.exit(1);
+if (value.checks.schemaVersion !== '0.10.0' || value.checks.expectedSchemaVersion !== '0.10.0') process.exit(1);
 if (!value.installation.reload.startsWith('reloaded ')) process.exit(1);
 if (mcpCalls.filter(call => call.channel === 'codex:mcpServers:reload').length !== 1) process.exit(1);
 if (mcpCalls.some(call => !['codex:mcpServers:list', 'codex:mcpServers:reload'].includes(call.channel))) process.exit(1);
@@ -2111,7 +2235,7 @@ rm -f "$FIXTURE_ROOT/mcp-channels"
 out=$(node --no-warnings "$SCRIPT" doctor)
 OUT="$out" node --no-warnings <<'NODE' || fail "doctor did not fall back to the legacy codex:mcpServers channels"
 const value = JSON.parse(process.env.OUT);
-if (value.mcpServerChannels !== 'codex:mcpServers' || value.mcpServer?.toolCount !== 29) process.exit(1);
+if (value.mcpServerChannels !== 'codex:mcpServers' || value.mcpServer?.toolCount !== 39) process.exit(1);
 NODE
 pass "fm-playbot-lanes: setup reloads through current unprefixed MCP channels and falls back to legacy ones"
 
@@ -6701,7 +6825,7 @@ retirement_call() {
 out=$(rpc '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}')
 OUT="$out" node --no-warnings <<'NODE' || fail "workspace retirement tools were not exposed with one-at-a-time schemas"
 const tools = JSON.parse(process.env.OUT).result.tools;
-if (tools.length !== 29) process.exit(1);
+if (tools.length !== 39) process.exit(1);
 const freshness = tools.find(tool => tool.name === 'get_workspace_freshness');
 const list = tools.find(tool => tool.name === 'list_retirable_workspaces');
 const retire = tools.find(tool => tool.name === 'retire_workspace');
