@@ -1,5 +1,35 @@
 # Playbot lanes
 
+## Channels
+
+Playbot 0.157.0 exposes channels through its internal `conversations:*` IPC rather than a published external agent API.
+`conversations:channels` lists every organization channel, including channels the local user has not joined, while `conversations:list` lists the user's conversations.
+The verified live response contained 3 organization channels and 4 joined conversations before the throwaway probe.
+Playbot channels are organization-wide and have no project id field, so Firstmate requires an exact Playbot project id and stores a private binding for each channel it creates.
+The `list_channels` result states the organization scope and marks which channels are bound to the requested project.
+Channel creation calls `conversations:create` with `name` and optional existing `agentIds`; the returned id must appear in a fresh `conversations:channels` read before Firstmate records the binding.
+`list_channel_members` reads `conversations:participants`, whose live response has a `participants` array with `{ type, id, name }` entries; Playbot tags a person as `type: user`, and the probe channel initially contained its creator as one user.
+It also lists candidate ids and names from the organization's 20 people and 1 hosted agent observed in the live roster, without exposing agent instructions.
+`add_channel_member` uses `conversations:addMember` for a person and `conversations:joinAgent` for an existing agent, and confirms the exact participant on readback.
+`read_channel` uses `conversations:read`, whose live response has `messages` and `hasMore`; each message has an id, sequence, sender, kind, text, optional parent message id, and files.
+`read_channel_replies` uses `conversations:replies`, whose live response has `parent`, `replies`, `hasMore`, `direction`, and `followedThreads`.
+Task cards appear as messages with `kind: task` when Playbot exposes them in channel history; this build has no channel-specific task-card list IPC.
+`post_channel_message` uses `conversations:post` with text, optional HTTP links, structured participant mentions, a category, and an optional parent message id for a thread reply.
+It rejects obvious secrets, keys, passwords, bearer tokens, and obfuscation maps before IPC.
+A confirmed delivery means a fresh read found the exact message id; an unknown delivery must be inspected with `read_channel` or `read_channel_replies` before resending, using the same `clientMessageId` if a retry is needed.
+`arm_channel_watch` installs a registered Firstmate watcher check at the current channel head and requires the exact owner-person id from `list_channel_members`.
+When a Firstmate conversation agent is a channel participant, pass its id too and the poll reads structured `mentions` through `conversations:messages` to wake for posts addressed to either id.
+Without a Firstmate agent participant, the poll watches every new channel post so an external Firstmate can still see requests that cannot carry a structured agent mention.
+Both modes wake repeatedly until Firstmate calls `list_channel_watch`, reads each pending post or reply by id, and calls `ack_channel_watch` with the handled sequence.
+The live raw message page has `messages`, `hasMore`, `changes`, `head`, and `followedThreads`; the poll passes `withChanges: true` to include replies and pages until it reaches `head`, because a live page returned `hasMore: false` while a later reply still had a higher sequence.
+The watch keeps unacknowledged ids and their parent message ids in private state so replies remain findable.
+The watcher check and its cursor live under the configured Firstmate home and use the existing `fm-check-register.sh` trust binding.
+
+An external Claude Code firstmate cannot register itself as a Playbot conversation agent through this IPC: `conversations:addAgent` creates an agent hosted by a signed-in Playbot device, and `conversations:joinAgent` admits an existing hosted agent.
+A dedicated Playbot agent could join a channel as `Firstmate`, receive mentions and task messages, and relay them to the external firstmate, but that relay and agent-authored reply path would need a separate bridge.
+The current terminal MCP calls `conversations:post` through the renderer as the signed-in person, so channel members see the owner's account as the sender.
+Playbot also lets a plugin panel post as the person, which has the same visible identity and does not give the external firstmate an agent identity.
+
 Playbot lanes let a normal terminal or one Playbot chat control chats in Playbot projects without selecting those chats in the UI.
 A Playbot-chat controller can register durable worker routes and receive background completion notifications.
 A normal-terminal controller has no Playbot chat to wake, so `dispatch` arms that worker's firstmate watcher poll for it and it supervises through bounded status and conversation reads.

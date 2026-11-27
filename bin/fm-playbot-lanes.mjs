@@ -6,7 +6,7 @@
 // caller without one is an external terminal that dispatches without a lane
 // and supervises by polling.
 //
-// This executable has fifteen entry points:
+// This executable has sixteen entry points:
 //   serve             Run the stdio MCP server.
 //   call              Invoke one MCP tool from a terminal and print the same
 //                     result object the stdio transport returns.
@@ -15,6 +15,8 @@
 //   hook-stop         Wake a routed controller after a worker turn completes.
 //   supervision-poll  Report one dispatched worker's persisted state as the
 //                     firstmate watcher check that dispatch armed for it.
+//   channel-poll      Read new channel posts for a registered Firstmate watch
+//                     and repeat wakes until its posts are acknowledged.
 //   lane-task-state   Read a lane metadata record's persisted worker state.
 //   board-lanes       Read current, trusted Playbot lanes for the crew board.
 //   lane-task-retirable  Refuse local record cleanup while its worker or queue
@@ -90,7 +92,7 @@ import { addonPreservationReport, engineBundle, engineReadinessReport } from "./
 import { guardAddon } from "./fm-playbot-addon-guard.mjs";
 
 const SERVER_NAME = "playbot_lanes";
-const SERVER_VERSION = "0.9.0";
+const SERVER_VERSION = "0.10.0";
 const MCP_SCHEMA_VERSION = SERVER_VERSION;
 const CALLER_MAX_AGE_MS = 15_000;
 const WAKE_PREFIX = "[PLAYBOT_LANE_WAKE v1]";
@@ -190,6 +192,148 @@ function modelCatalogPath() {
 
 function stateDir() {
   return path.resolve(process.env.PLAYBOT_LANES_STATE_DIR ?? path.join(os.homedir(), ".playbot", "mcp", "project-chat"));
+}
+
+function channelBindingsDir() {
+  return path.join(stateDir(), "channel-bindings");
+}
+
+function channelBindingPath(id) {
+  if (typeof id !== "string" || !/^[a-f0-9-]{36}$/i.test(id)) throw new Error("channel must be an exact UUID");
+  return path.join(channelBindingsDir(), `${id}.json`);
+}
+
+function channelBinding(id) {
+  return readJson(channelBindingPath(id));
+}
+
+function requireChannelBinding(project, id) {
+  const binding = channelBinding(id);
+  if (!binding || binding.projectId !== project.id || binding.channelId !== id) {
+    throw new Error(`Channel ${id} has no local binding to Playbot project ${project.id}`);
+  }
+  return binding;
+}
+
+function channelRecord(value) {
+  if (!value || typeof value !== "object" || typeof value.id !== "string" || value.kind !== "channel" || typeof value.name !== "string") {
+    throw new Error("Playbot returned an unreadable channel record");
+  }
+  return value;
+}
+
+async function playbotChannels() {
+  const rows = await playbotInvoke("conversations:channels", undefined);
+  if (!Array.isArray(rows)) throw new Error("Playbot returned an unreadable channel list");
+  return rows.map(channelRecord);
+}
+
+async function boundChannel(project, id) {
+  requireChannelBinding(project, id);
+  const channel = (await playbotChannels()).find((item) => item.id === id);
+  if (!channel) throw new Error(`Channel ${id} is absent from Playbot`);
+  return channel;
+}
+
+function channelText(body, links = []) {
+  if (typeof body !== "string" || !body.trim()) throw new Error("body must be nonempty text");
+  if (!Array.isArray(links) || !links.every((url) => typeof url === "string" && /^https?:\/\/[^\s]+$/i.test(url))) {
+    throw new Error("links must be HTTP or HTTPS URLs");
+  }
+  if (links.some((link) => {
+    const parsed = new URL(link);
+    return parsed.username || parsed.password;
+  })) throw new Error("Channel post refused: a link contains URL credentials");
+  const text = [body.trim(), ...links].join("\n");
+  const secret = /-----BEGIN (?:[A-Z ]*PRIVATE KEY|OPENSSH PRIVATE KEY)-----|\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{12,}|AKIA[0-9A-Z]{16})\b|\b(?:password|passwd|secret|token|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[:=]\s*\S+|\bBearer\s+[A-Za-z0-9._~-]{12,}|\b(?:obfuscation|redaction)\s+map\b/i;
+  if (secret.test(text)) throw new Error("Channel post refused: text or links appear to contain a secret or obfuscation map");
+  if (text.length > 20000) throw new Error("Channel post is too long");
+  return text;
+}
+
+function channelMessages(value) {
+  if (!value || !Array.isArray(value.messages) || typeof value.hasMore !== "boolean") throw new Error("Playbot returned an unreadable channel message page");
+  for (const item of value.messages) {
+    if (!item || typeof item.id !== "string" || !Number.isInteger(item.seq) || item.seq < 1 || typeof item.kind !== "string") throw new Error("Playbot returned an unreadable channel message");
+  }
+  return value;
+}
+
+async function readChannelMessages(id, options = {}) {
+  return channelMessages(await playbotInvoke("conversations:read", { conversationId: id, ...options }));
+}
+
+function channelWatchFile(state, taskId) {
+  if (!supervisionTaskIdValid(taskId)) throw new Error("Invalid channel watch task id");
+  return path.join(state, `${taskId}.channel-poll.json`);
+}
+
+function channelWatchState(state, taskId) {
+  const value = readJson(channelWatchFile(state, taskId));
+  if (!value || value.version !== 1 || !Number.isInteger(value.cursor) || value.cursor < 0 || !Array.isArray(value.pending)) throw new Error(`Channel watch ${taskId} has unreadable state`);
+  return value;
+}
+
+function channelWatchSave(state, taskId, value) {
+  supervisionPublish(state, `${taskId}.channel-poll.json`, `${JSON.stringify(value)}\n`, 0o600);
+}
+
+async function channelWatchPoll(state, taskId) {
+  const watch = channelWatchState(state, taskId);
+  let cursor = watch.cursor;
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    const before = cursor;
+    const page = await playbotInvoke("conversations:messages", { conversationId: watch.channelId, after: cursor, limit: 40, withChanges: true });
+    if (!page || !Array.isArray(page.messages) || typeof page.hasMore !== "boolean" || !Number.isInteger(page.head)) throw new Error("Playbot returned an unreadable channel poll page");
+    for (const message of page.messages) {
+      if (!message || !Number.isInteger(message.seq) || typeof message.id !== "string" || !Array.isArray(message.mentions)) throw new Error("Playbot returned an unreadable channel poll message");
+      if (message.seq <= cursor) continue;
+      if (watch.allActivity || message.mentions.some((mention) => watch.addressed.some((target) => mention.type === target.type && mention.id === target.id))) {
+        if (!watch.pending.some((item) => item.id === message.id)) watch.pending.push({ id: message.id, seq: message.seq, parentMessageId: message.parentMessageId ?? null });
+      }
+      cursor = message.seq;
+    }
+    if (cursor >= page.head && !page.hasMore) {
+      watch.cursor = cursor;
+      channelWatchSave(state, taskId, watch);
+      if (watch.pending.length) console.log(`check: Playbot channel ${watch.channelId} has ${watch.pending.length} unacknowledged ${watch.allActivity ? "new" : "addressed"} post(s); list_channel_watch then read and ack for task ${taskId}`);
+      return;
+    }
+    if (cursor === before) {
+      if (page.hasMore) throw new Error("Playbot channel poll did not advance while more messages remain");
+      watch.cursor = page.head;
+      channelWatchSave(state, taskId, watch);
+      if (watch.pending.length) console.log(`check: Playbot channel ${watch.channelId} has ${watch.pending.length} unacknowledged ${watch.allActivity ? "new" : "addressed"} post(s); list_channel_watch then read and ack for task ${taskId}`);
+      return;
+    }
+  }
+  throw new Error("Playbot channel poll exceeded 100 pages; no cursor was advanced");
+}
+
+async function armChannelWatch(project, args) {
+  const channel = await boundChannel(project, args.channel);
+  if (!supervisionTaskIdValid(args.taskId)) throw new Error("taskId must be a valid Firstmate task id");
+  const addressed = [{ type: "user", id: args.ownerId }, ...(args.firstmateAgentId ? [{ type: "agent", id: args.firstmateAgentId }] : [])];
+  const participants = await playbotInvoke("conversations:participants", { conversationId: channel.id });
+  if (!Array.isArray(participants?.participants) || !addressed.every((target) => participants.participants.some((item) => item.type === target.type && item.id === target.id))) throw new Error("Every watched person or agent id must be a channel participant");
+  const page = await playbotInvoke("conversations:messages", { conversationId: channel.id, after: 0, limit: 1 });
+  if (!Number.isInteger(page?.head) || page.head < 0) throw new Error("Playbot returned an unreadable channel head");
+  const state = supervisionStateDir();
+  const check = path.join(state, `${args.taskId}.check.sh`);
+  const watchFile = channelWatchFile(state, args.taskId);
+  if (fs.existsSync(check) || fs.existsSync(watchFile)) throw new Error(`Watcher check or channel watch state already exists for ${args.taskId}`);
+  const script = `#!/usr/bin/env bash\n# Registered Playbot channel mention poll; generated by fm-playbot-lanes.mjs.\nset -u\nexport PLAYBOT_DESKTOP_DIR=${shellQuote(desktopDir())}\nexec ${shellQuote(process.execPath)} ${shellQuote(supervisionSelfScript())} channel-poll --state ${shellQuote(state)} --task ${shellQuote(args.taskId)}\n`;
+  channelWatchSave(state, args.taskId, { version: 1, projectId: project.id, channelId: channel.id, addressed, allActivity: !args.firstmateAgentId, cursor: page.head, pending: [] });
+  try {
+    supervisionWriteCheck(state, args.taskId, script);
+    const register = supervisionRegister(args.taskId, path.join(path.dirname(supervisionSelfScript()), "fm-check-register.sh"));
+    if (!register.ok) throw new Error(register.detail);
+  } catch (error) {
+    fs.rmSync(check, { force: true });
+    fs.rmSync(watchFile, { force: true });
+    throw error;
+  }
+  return { taskId: args.taskId, channel: channel.id, cursor: page.head, check, armed: true, mode: args.firstmateAgentId ? "addressed" : "all-activity" };
 }
 
 function controllerRoot() {
@@ -6903,6 +7047,61 @@ function toolDefinitions() {
   });
   return [
     {
+      name: "list_channels",
+      description: "List Playbot's organization channels and mark channels locally bound to the explicit project. Channels themselves are organization-wide in Playbot.",
+      inputSchema: object({ project: string("Exact Playbot project id") }, ["project"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: "create_channel",
+      description: "Create one organization channel and bind it locally to the explicit project. A failed or uncertain response must be investigated with list_channels before retrying.",
+      inputSchema: object({ project: string("Exact Playbot project id"), name: string("Channel name"), agentIds: { type: "array", items: { type: "string" }, description: "Optional existing conversation agent ids" } }, ["project", "name"]),
+    },
+    {
+      name: "list_channel_members",
+      description: "List the people and agents in a project-bound channel, including exact ids for mentions and member changes.",
+      inputSchema: object({ project: string("Exact Playbot project id"), channel: string("Exact channel UUID") }, ["project", "channel"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: "add_channel_member",
+      description: "Add an organization person or an existing conversation agent to a project-bound channel. Check members before retrying an uncertain call.",
+      inputSchema: object({ project: string("Exact Playbot project id"), channel: string("Exact channel UUID"), type: { type: "string", enum: ["user", "agent"] }, id: string("Exact user or agent UUID") }, ["project", "channel", "type", "id"]),
+    },
+    {
+      name: "read_channel",
+      description: "Read recent channel posts or replies by sequence. Task cards appear as kind=task messages where Playbot exposes them.",
+      inputSchema: object({ project: string("Exact Playbot project id"), channel: string("Exact channel UUID"), after: { type: "integer", minimum: 0 }, before: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1, maximum: 40 } }, ["project", "channel"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: "read_channel_replies",
+      description: "Read a channel post and its thread replies, oldest first.",
+      inputSchema: object({ project: string("Exact Playbot project id"), channel: string("Exact channel UUID"), messageId: string("Exact message UUID"), after: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 40 } }, ["project", "channel", "messageId"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
+      name: "post_channel_message",
+      description: "Post a channel message or thread reply with text and HTTP links. Refuses obvious secrets and obfuscation maps. Returns confirmed or unknown delivery; inspect the channel before any retry.",
+      inputSchema: object({ project: string("Exact Playbot project id"), channel: string("Exact channel UUID"), body: string("Message text"), links: { type: "array", items: { type: "string" } }, parentMessageId: string("Optional post UUID for a thread reply"), alsoInChannel: boolean("Also show a reply in the channel", false), mentions: { type: "array", items: object({ type: { type: "string", enum: ["user", "agent"] }, id: string("Participant UUID") }, ["type", "id"]) }, category: { type: "string", enum: ["status", "answer", "question"] }, clientMessageId: string("Stable idempotency id, reused only after inspecting uncertain delivery") }, ["project", "channel", "body"]),
+    },
+    {
+      name: "arm_channel_watch",
+      description: "Register a Firstmate watcher check that wakes repeatedly until new posts are acknowledged. With a Firstmate agent participant it tracks structured owner and agent mentions; without one it tracks all channel activity so an external Firstmate cannot miss unstructured requests.",
+      inputSchema: object({ project: string("Exact Playbot project id"), channel: string("Exact channel UUID"), taskId: string("Unused Firstmate task id for the registered check"), ownerId: string("Owner's person UUID from list_channel_members"), firstmateAgentId: string("Optional Firstmate conversation agent UUID from list_channel_members") }, ["project", "channel", "taskId", "ownerId"]),
+    },
+    {
+      name: "ack_channel_watch",
+      description: "Acknowledge addressed channel posts through one sequence after Firstmate has read and handled them.",
+      inputSchema: object({ project: string("Exact Playbot project id"), channel: string("Exact channel UUID"), taskId: string("Armed channel watch task id"), through: { type: "integer", minimum: 1 } }, ["project", "channel", "taskId", "through"]),
+    },
+    {
+      name: "list_channel_watch",
+      description: "List every unacknowledged post id, sequence, and parent message id for a registered channel watch, so replies can be opened and handled before acknowledgment.",
+      inputSchema: object({ project: string("Exact Playbot project id"), channel: string("Exact channel UUID"), taskId: string("Armed channel watch task id") }, ["project", "channel", "taskId"]),
+      annotations: { readOnlyHint: true },
+    },
+    {
       name: "get_engine_readiness",
       description: "Read-only Godot readiness for one exact workspace: app/bundled/workspace addon versions and complete byte comparison, stored/canonical project identity, existing session startup/admission evidence, and selected executable when an existing launch log proves it. Reports Playbot's own bridge reachability separately from how the engine snapshot IPC contract was classified, the engine bridge handshake for each exact project path, and whether rendered editor capture is available or merely unproven. Starts no engine session or chat; unknown evidence is unconfirmed.",
       inputSchema: object({ project: string("Project id, root path, or unique project name"), workspace: string("Exact workspace id, path, or name") }, ["project", "workspace"]),
@@ -7188,6 +7387,108 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
 
   const project = resolveProject(args.project, projects);
+  if (["list_channels", "create_channel", "list_channel_members", "add_channel_member", "read_channel", "read_channel_replies", "post_channel_message", "arm_channel_watch", "ack_channel_watch", "list_channel_watch"].includes(name)) {
+    if (args.project !== project.id) throw new Error("Channel tools require an exact Playbot project id");
+    if (name === "list_channels") {
+      const channels = await playbotChannels();
+      return { project: project.id, scope: "organization", sourceCount: channels.length, channels: channels.map((item) => ({ ...item, boundToProject: channelBinding(item.id)?.projectId === project.id })) };
+    }
+    if (name === "create_channel") {
+      if (typeof args.name !== "string" || !args.name.trim()) throw new Error("name must be nonempty");
+      if (args.agentIds !== undefined && (!Array.isArray(args.agentIds) || !args.agentIds.every((id) => typeof id === "string"))) throw new Error("agentIds must be agent UUIDs");
+      const prior = await playbotChannels();
+      const created = channelRecord(await playbotInvoke("conversations:create", { name: args.name, agentIds: args.agentIds ?? [] }));
+      const after = await playbotChannels();
+      if (!after.some((item) => item.id === created.id)) throw new Error(`Playbot created channel ${created.id}, but it is absent on readback; inspect list_channels before retrying`);
+      fs.mkdirSync(channelBindingsDir(), { recursive: true, mode: 0o700 });
+      atomicWriteJson(channelBindingPath(created.id), { channelId: created.id, projectId: project.id, createdAt: nowIso() });
+      return { channel: created, project: project.id, beforeCount: prior.length, afterCount: after.length, delivery: { state: "confirmed", evidence: "channel id read back from Playbot" } };
+    }
+    const channel = await boundChannel(project, args.channel);
+    if (name === "arm_channel_watch") return armChannelWatch(project, args);
+    if (name === "list_channel_watch") {
+      const watch = channelWatchState(supervisionStateDir(), args.taskId);
+      if (watch.projectId !== project.id || watch.channelId !== channel.id) throw new Error("Channel watch identity does not match project and channel");
+      return { taskId: args.taskId, channel: channel.id, cursor: watch.cursor, sourceCount: watch.pending.length, pending: watch.pending };
+    }
+    if (name === "ack_channel_watch") {
+      const state = supervisionStateDir();
+      const watch = channelWatchState(state, args.taskId);
+      if (watch.projectId !== project.id || watch.channelId !== channel.id) throw new Error("Channel watch identity does not match project and channel");
+      if (!Number.isInteger(args.through) || args.through < 1 || !watch.pending.some((item) => item.seq === args.through)) throw new Error("through must name an outstanding addressed post sequence");
+      watch.pending = watch.pending.filter((item) => item.seq > args.through);
+      channelWatchSave(state, args.taskId, watch);
+      return { taskId: args.taskId, channel: channel.id, remaining: watch.pending.length };
+    }
+    if (name === "list_channel_members") {
+      const result = await playbotInvoke("conversations:participants", { conversationId: channel.id });
+      if (!result || !Array.isArray(result.participants)) throw new Error("Playbot returned unreadable channel participants");
+      const people = await playbotInvoke("conversations:organizationMembers", undefined);
+      const agents = await playbotInvoke("conversations:agents", undefined);
+      if (!Array.isArray(people?.members) || !Array.isArray(agents)) throw new Error("Playbot returned an unreadable organization roster");
+      return {
+        channel: channel.id,
+        sourceCount: result.participants.length,
+        participants: result.participants,
+        available: {
+          people: people.members.map((item) => ({ id: item.id, name: item.name })),
+          agents: agents.map((item) => ({ id: item.id, name: item.name })),
+        },
+        availableSourceCounts: { people: people.members.length, agents: agents.length },
+      };
+    }
+    if (name === "add_channel_member") {
+      if (!["user", "agent"].includes(args.type) || typeof args.id !== "string") throw new Error("member type and id are required");
+      const before = await playbotInvoke("conversations:participants", { conversationId: channel.id });
+      if (!Array.isArray(before?.participants)) throw new Error("Playbot returned unreadable channel participants");
+      if (before.participants.some((item) => item.type === args.type && item.id === args.id)) return { channel: channel.id, member: { type: args.type, id: args.id }, added: false, delivery: { state: "confirmed", evidence: "already in channel" } };
+      try {
+        await playbotInvoke(args.type === "user" ? "conversations:addMember" : "conversations:joinAgent", { conversationId: channel.id, [args.type === "user" ? "userId" : "agentId"]: args.id });
+      } catch (error) {
+        return { channel: channel.id, member: { type: args.type, id: args.id }, delivery: { state: "unknown", note: `Playbot did not confirm the member change: ${error instanceof Error ? error.message : String(error)}. Inspect members before retrying.` } };
+      }
+      let after;
+      try { after = await playbotInvoke("conversations:participants", { conversationId: channel.id }); }
+      catch { after = null; }
+      if (!Array.isArray(after?.participants)) return { channel: channel.id, member: { type: args.type, id: args.id }, delivery: { state: "unknown", note: "Playbot accepted the add but readback was unreadable; inspect members before retrying" } };
+      const added = after.participants.some((item) => item.type === args.type && item.id === args.id);
+      return { channel: channel.id, member: { type: args.type, id: args.id }, added, delivery: { state: added ? "confirmed" : "unknown", evidence: added ? "participant readback" : undefined } };
+    }
+    if (name === "read_channel") {
+      if (args.after !== undefined && args.before !== undefined) throw new Error("Pass either after or before");
+      const page = await readChannelMessages(channel.id, { ...(args.after !== undefined ? { after: args.after } : {}), ...(args.before !== undefined ? { before: args.before } : {}), limit: args.limit ?? 40 });
+      return { channel: channel.id, sourceCount: page.messages.length, ...page, taskCards: page.messages.filter((item) => item.kind === "task") };
+    }
+    if (name === "read_channel_replies") {
+      if (typeof args.messageId !== "string") throw new Error("messageId is required");
+      const page = await playbotInvoke("conversations:replies", { conversationId: channel.id, messageId: args.messageId, ...(args.after !== undefined ? { after: args.after } : {}), limit: args.limit ?? 40 });
+      if (!page || !Array.isArray(page.replies) || typeof page.hasMore !== "boolean") throw new Error("Playbot returned an unreadable channel replies page");
+      return { channel: channel.id, sourceCount: page.replies.length, ...page };
+    }
+    if (name === "post_channel_message") {
+      const body = channelText(args.body, args.links ?? []);
+      if (args.parentMessageId !== undefined && typeof args.parentMessageId !== "string") throw new Error("parentMessageId must be a message UUID");
+      if (args.alsoInChannel && !args.parentMessageId) throw new Error("alsoInChannel requires parentMessageId");
+      const participants = await playbotInvoke("conversations:participants", { conversationId: channel.id });
+      if (!Array.isArray(participants?.participants)) throw new Error("Playbot returned unreadable channel participants");
+      const mentions = args.mentions ?? [];
+      if (!Array.isArray(mentions) || !mentions.every((mention) => participants.participants.some((person) => person.type === mention.type && person.id === mention.id))) throw new Error("Every mention must name an exact channel participant");
+      const clientMessageId = args.clientMessageId ?? crypto.randomUUID();
+      const payload = { conversationId: channel.id, body, mentions, clientMessageId, ...(args.parentMessageId ? { parentMessageId: args.parentMessageId } : {}), ...(args.alsoInChannel ? { alsoInChannel: true } : {}), ...(args.category ? { category: args.category } : {}) };
+      let posted;
+      try { posted = await playbotInvoke("conversations:post", payload); }
+      catch (error) { return { channel: channel.id, clientMessageId, delivery: { state: "unknown", note: `Playbot post was not confirmed: ${error instanceof Error ? error.message : String(error)}. Read the channel before retrying.` } }; }
+      if (typeof posted?.id !== "string" || !Number.isInteger(posted.seq)) return { channel: channel.id, clientMessageId, delivery: { state: "unknown", note: "Playbot returned no readable message identity; read the channel before retrying" } };
+      try {
+        const page = args.parentMessageId
+          ? await playbotInvoke("conversations:replies", { conversationId: channel.id, messageId: args.parentMessageId, after: Math.max(0, posted.seq - 1), limit: 40 })
+          : await readChannelMessages(channel.id, { after: Math.max(0, posted.seq - 1), limit: 40 });
+        const messages = args.parentMessageId ? page?.replies : page?.messages;
+        if (Array.isArray(messages) && messages.some((item) => item.id === posted.id)) return { channel: channel.id, clientMessageId, messageId: posted.id, delivery: { state: "confirmed", evidence: "message id read back from Playbot" } };
+      } catch { /* The accepted post may exist; never resend automatically. */ }
+      return { channel: channel.id, clientMessageId, messageId: posted.id, delivery: { state: "unknown", note: "Playbot accepted the post, but readback did not confirm it; read the channel before retrying" } };
+    }
+  }
   if (name === "get_engine_readiness") {
     return engineReadiness(project, resolveWorkspace(project, explicitWorkspaceSelector(name, args.workspace)));
   }
@@ -7765,6 +8066,7 @@ function cliUsage() {
     "  fm-playbot-lanes.mjs lane-task-discard --force <task.meta> <state-dir> <data-dir> <authorization>",
     "  fm-playbot-lanes.mjs lane-task-discard-check --force <task.meta> <state-dir> <data-dir> <authorization>",
     "  fm-playbot-lanes.mjs board-lanes <state-dir>",
+    "  fm-playbot-lanes.mjs channel-poll --state <state-dir> --task <task-id>",
     "",
     `MCP tools: ${toolDefinitions().map((tool) => tool.name).join(", ")}`,
   ].join("\n");
@@ -7982,6 +8284,13 @@ async function main() {
     return;
   }
   if (command === "supervision-poll") return await supervisionPoll(process.argv.slice(3));
+  if (command === "channel-poll") {
+    const argv = process.argv.slice(3);
+    if (argv.length !== 4 || argv[0] !== "--state" || argv[2] !== "--task") throw new Error("channel-poll requires --state <state-dir> --task <task-id>");
+    try { await channelWatchPoll(argv[1], argv[3]); }
+    catch (error) { console.log(`check: Playbot channel watch ${argv[3]} failed: ${error instanceof Error ? error.message : String(error)}`); }
+    return;
+  }
   if (command === "board-lanes") {
     if (process.argv.length !== 4) throw new Error("board-lanes requires one state directory");
     return console.log(JSON.stringify(boardLanes(process.argv[3])));
