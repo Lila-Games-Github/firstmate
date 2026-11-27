@@ -34,14 +34,15 @@
 //   lane-task-branch  Resolve the exact recorded branch of one lane workspace.
 //
 // The server talks to Playbot through its local Electron DevTools socket and
-// invokes Playbot's own IPC handlers: threads:launch for chat and workspace
-// creation on Playbot 0.94.0 and newer, including both known workspace launch
-// schemas and optional catalog-validated
-// linked planning and execution model profiles, with a detected fallback to
-// the pre-0.94 threads:openThread and workspace:create channels, plus the
-// unchanged threads:send and threads:archiveThread channels, whose send response
-// is the thread snapshot that says whether Playbot delivered the message or is
-// only holding it. On Playbot 0.95.x an explicit forced send promotes that exact
+// invokes Playbot's own IPC handlers: threads:launch on prior supported builds,
+// threads:launchTask on 0.157, or the detected pre-0.94 threads:openThread
+// and workspace:create fallback. The 0.157 path creates workspaces through a
+// project-bearing new-chat intent and honors a named branch by renaming the
+// generated one after provisioning. All launch paths retain catalog-validated
+// linked planning and execution model profiles where supported. Playbot 0.157
+// uses threads:sendMessage and threads:archive; earlier builds use threads:send
+// and threads:archiveThread. Send delivery is read from a thread snapshot, not
+// inferred from the IPC response. An explicit forced send promotes that exact
 // held message through threads:steerMessage into the active turn without
 // interrupting it. Guarded workspace retirement uses Playbot's own
 // workspace:delete channel only after a fresh landing, Git, thread-state, and
@@ -3993,21 +3994,26 @@ function createThreadId() {
   return `chat-lane-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
 }
 
-// This incomplete new-workspace launch is rejected by both known launch
-// schemas before a handler can create anything. Its validation error names
-// either the old required strategy or the newer required mode. A missing
-// handler identifies the pre-0.94 channels; every unknown response refuses.
+// This incomplete new-workspace launch is rejected by every known launch
+// schema before a handler can create anything. A missing threads:launch handler
+// selects a second probe for threads:launchTask; two missing handlers select
+// the pre-0.94 channels. Every unknown response refuses.
 const CHAT_API_PROBE = { destination: { kind: "new-workspace", workspace: {} } };
 let detectedChatApi = null;
 let detectedWorkspaceLaunchSchema = null;
 
 async function chatCreationApi() {
   if (detectedChatApi) return detectedChatApi;
-  const outcome = await withPlaybotPage((client) => client.evaluate(
-    `window.electronAPI.invoke("threads:launch", ${JSON.stringify(CHAT_API_PROBE)}).then(() => ({ accepted: true }), (error) => ({ accepted: false, message: String((error && error.message) || error) }))`
+  const probe = async (channel) => withPlaybotPage((client) => client.evaluate(
+    `window.electronAPI.invoke(${JSON.stringify(channel)}, ${JSON.stringify(CHAT_API_PROBE)}).then(() => ({ accepted: true }), (error) => ({ accepted: false, message: String((error && error.message) || error) }))`
   ));
-  if (!outcome || outcome.accepted !== false) {
-    throw new Error("Playbot accepted the threads:launch capability probe; refusing to guess the chat-creation API");
+  let channel = "threads:launch";
+  let outcome = await probe(channel);
+  if (!outcome || outcome.accepted !== false) throw new Error(`Playbot accepted the ${channel} capability probe; refusing to guess the chat-creation API`);
+  if (/No handler registered/i.test(outcome.message ?? "")) {
+    channel = "threads:launchTask";
+    outcome = await probe(channel);
+    if (!outcome || outcome.accepted !== false) throw new Error(`Playbot accepted the ${channel} capability probe; refusing to guess the chat-creation API`);
   }
   const message = outcome.message ?? "";
   let issues = null;
@@ -4024,13 +4030,14 @@ async function chatCreationApi() {
   if (/No handler registered/i.test(message)) {
     detectedChatApi = "openThread";
   } else if (modeIssue || (/\bmode\b/i.test(message) && /open.*from.*copy/i.test(message) && !workspaceIssue("strategy"))) {
-    detectedChatApi = "launch";
+    detectedChatApi = channel === "threads:launchTask" ? "launchTask" : "launch";
     detectedWorkspaceLaunchSchema = "mode";
   } else if ((workspaceIssue("strategy") || /\bstrategy\b/i.test(message)) && /\bproject\b/i.test(message) && !workspaceIssue("mode")) {
+    if (channel !== "threads:launch") throw new Error(`Playbot rejected the ${channel} capability probe with an unknown workspace schema; refusing to guess: ${message}`);
     detectedChatApi = "launch";
     detectedWorkspaceLaunchSchema = "strategy";
   } else {
-    throw new Error(`Playbot rejected the threads:launch capability probe with an unknown workspace schema; refusing to guess: ${message}`);
+    throw new Error(`Playbot rejected the ${channel} capability probe with an unknown workspace schema; refusing to guess: ${message}`);
   }
   return detectedChatApi;
 }
@@ -4105,6 +4112,52 @@ function readBackWorkspace(project, workspaceId) {
   return fresh;
 }
 
+function taskWorkspaceIntent(project, options = {}) {
+  const primary = project.roots.find((root) => root.id === project.defaultWorkingRootId);
+  if (!primary || !project.roots.length) throw new Error(`Project ${project.id} has no readable default working root; refusing to guess a Playbot new-chat intent`);
+  const base = String(options.baseBranch ?? primary.defaultBranch ?? "").trim();
+  if (!base || project.roots.some((root) => !String(options.baseBranch ?? root.defaultBranch ?? "").trim())) {
+    throw new Error(`Project ${project.id} has no readable base branch for every root; refusing to guess a Playbot new-chat intent`);
+  }
+  return {
+    projectId: project.id,
+    primary: { projectRootId: primary.id, source: { kind: "branch", branch: base } },
+    otherRoots: project.roots.filter((root) => root.id !== primary.id).map((root) => ({ projectRootId: root.id, branch: String(options.baseBranch ?? root.defaultBranch).trim() })),
+    action: "fork",
+    includeLocalChanges: false,
+  };
+}
+
+async function launchTaskWorkspace(project, options, thread, settleTimeoutMs) {
+  const intent = taskWorkspaceIntent(project, options);
+  const priorWorkspaceIds = new Set(project.workspaces.map((workspace) => workspace.id));
+  const planned = await playbotInvoke("workspace:planNewChat", intent);
+  if (planned?.destination?.kind !== "new-workspace" || planned.destination.workspace?.projectId !== project.id) {
+    throw new Error(`Playbot did not plan a new workspace for project ${project.id}; refusing to guess the launch destination`);
+  }
+  const launched = await playbotInvoke("threads:launchTask", {
+    destination: { kind: "new-chat", intent },
+    ...thread,
+    activate: false,
+  });
+  const workspaceId = launched?.workspaceId;
+  const threadId = launched?.threadId;
+  if (!workspaceId || !threadId) throw new Error("Playbot did not return the launched workspace and chat ids");
+  if (priorWorkspaceIds.has(workspaceId)) {
+    throw new Error(`Playbot created chat ${threadId} in existing workspace ${workspaceId} after planning a new one; no branch was renamed, and the caller must inspect this pair before retrying`);
+  }
+  try {
+    await verifyCreatedWorkspaceRootCoverage(project.id, workspaceId, settleTimeoutMs, { threadId });
+    const branch = String(options.branch ?? "").trim();
+    if (branch) await playbotInvoke("workspace:renameBranch", { workspaceId, newBranch: branch });
+    const name = String(options.name ?? "").trim();
+    if (name) await playbotInvoke("workspace:update", { id: workspaceId, changes: { name } });
+  } catch (error) {
+    throw new Error(`Workspace ${workspaceId} and chat ${threadId} were created, but workspace finalization failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { workspaceId, threadId };
+}
+
 // verifyRootCoverage is false only when a caller (dispatch) immediately
 // performs its own, richer post-creation settle-and-refuse check; every other
 // caller needs this function to be the one place that confirms coverage.
@@ -4118,6 +4171,17 @@ async function createWorkspace(project, options = {}, verifyRootCoverage = true)
     const workspaceId = created?.id;
     if (!workspaceId) throw new Error("Playbot did not return the created workspace id");
     if (verifyRootCoverage) await verifyCreatedWorkspaceRootCoverage(project.id, workspaceId, settleTimeoutMs);
+    return readBackWorkspace(project, workspaceId);
+  }
+  if (detectedChatApi === "launchTask") {
+    const { workspaceId, threadId } = await launchTaskWorkspace(project, options, {
+      title: "Firstmate workspace setup", approvalMode: "default", planMode: false,
+    }, settleTimeoutMs ?? workspaceRootsSettleTimeoutMs());
+    try {
+      await playbotInvoke("threads:archive", { threadId });
+    } catch (error) {
+      throw new Error(`Workspace ${workspaceId} was created, but archiving its setup chat ${threadId} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     return readBackWorkspace(project, workspaceId);
   }
   const launch = await playbotInvoke("threads:launch", {
@@ -4158,6 +4222,26 @@ async function createChat({ project, workspace, newWorkspace, title, approvalMod
   const targetProject = resolveProject(project, projects);
   const cleanTitle = String(title ?? "").trim();
   if (!cleanTitle) throw new Error("title must not be blank; Playbot requires a non-empty chat title");
+  if (await chatCreationApi() === "launchTask") {
+    const settleTimeoutMs = newWorkspace === undefined ? null : workspaceRootsSettleTimeoutMs();
+    const launched = newWorkspace === undefined
+      ? await playbotInvoke("threads:launchTask", {
+        destination: { kind: "existing-workspace", workspaceId: resolveWorkspace(targetProject, workspace).id },
+        title: cleanTitle, approvalMode, planMode: Boolean(planMode), ...(workerProfile ?? {}), activate: false,
+      })
+      : await launchTaskWorkspace(targetProject, newWorkspace, {
+        title: cleanTitle, approvalMode, planMode: Boolean(planMode), ...(workerProfile ?? {}),
+      }, settleTimeoutMs);
+    const threadId = launched?.threadId;
+    const workspaceId = launched?.workspaceId;
+    if (!threadId || !workspaceId) throw new Error("Playbot did not return the launched chat and workspace ids");
+    const created = publicThread(resolveThread(targetProject.id, workspaceId, threadId));
+    if (workerProfile && (created.model !== workerProfile.executionModel || created.reasoningEffort !== workerProfile.executionReasoningLevel)) {
+      const where = newWorkspace === undefined ? `Chat ${created.id} was created in workspace ${created.workspaceId}` : `Workspace ${created.workspaceId} and chat ${created.id} were created`;
+      throw new Error(`${where}, but Playbot persisted model ${created.model ?? "null"} at effort ${created.reasoningEffort ?? "null"} instead of the requested ${workerProfile.executionModel} at ${workerProfile.executionReasoningLevel}. No task was sent to it: archive chat ${created.id} with archive_chat, or use that persisted profile deliberately with send_message.`);
+    }
+    return created;
+  }
   if (await chatCreationApi() === "launch") {
     // Resolved before anything is created, so a malformed settle budget is a
     // configuration error up front instead of a refusal that has already left
@@ -4259,7 +4343,7 @@ async function deliveryVerdict(response, text, threadId) {
   const missing = unreadableProjections(response, SEND_SNAPSHOT_REQUIRED_KEYS);
   if (missing.length > 0) {
     throw new Error(`${playbotVersionLabel(await playbotVersion())} returned a send snapshot for ${threadId} without ${missing.join(", ")}, so whether the message was delivered or is only held cannot be read. `
-      + `The 'threads:send' return snapshot is verified against Playbot ${VERIFIED_PLAYBOT_VERSIONS}, and only the 'threads:getSnapshot' read against Playbot ${SNAPSHOT_VERIFIED_PLAYBOT_VERSIONS}; re-verify the snapshot shape, and check list_queued_messages before resending.`);
+      + `The send snapshot must have Playbot's verified queue projections; re-verify the snapshot shape, and check list_queued_messages before resending.`);
   }
   const queued = snapshotProjection(response, "pendingMessages");
   const outbound = snapshotProjection(response, "outboundMessages");
@@ -4420,7 +4504,16 @@ async function sendMessage(row, text, force = false) {
       return publicThread(row);
     }
   };
-  const response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
+  let currentApi = "send";
+  let response;
+  try {
+    response = await playbotInvoke("threads:send", { threadId: row.thread_id, text: value });
+  } catch (error) {
+    if (!/No handler registered for ['"]threads:send['"]/.test(String(error))) throw error;
+    if (await chatCreationApi() !== "launchTask") throw new Error(`${error instanceof Error ? error.message : String(error)}; replacement schema is unconfirmed, refusing to guess`);
+    currentApi = "launchTask";
+    response = await playbotInvoke("threads:sendMessage", { threadId: row.thread_id, text: value, steerIfRunning: false });
+  }
   let fresh = null;
   try {
     try {
@@ -4432,7 +4525,8 @@ async function sendMessage(row, text, force = false) {
       thread: resultThread(),
       supervisionAcceptance: fresh ? supervisionArmingBaseline(fresh) : null,
     });
-    const delivery = await deliveryVerdict(response, value, row.thread_id);
+    const delivery = await deliveryVerdict(currentApi === "launchTask"
+      ? await playbotInvoke("threads:getSnapshot", { threadId: row.thread_id }) : response, value, row.thread_id);
     if (!force) return { ...sendResult(), delivery };
     if (delivery.state !== "queued") {
       const forceState = delivery.state === "delivered" || delivery.state === "sending"
@@ -4472,6 +4566,7 @@ async function sendMessage(row, text, force = false) {
         threadId: row.thread_id,
         messageId: delivery.messageId,
       });
+      if (currentApi === "launchTask") forcedResponse = await playbotInvoke("threads:getSnapshot", { threadId: row.thread_id });
     } catch (error) {
       return {
         ...sendResult(),
@@ -7561,7 +7656,13 @@ async function handleTool(name, args = {}, callerMode = "mcp") {
   }
   if (name === "archive_chat") {
     if (args.confirm !== true) throw new Error("archive_chat requires confirm=true");
-    await playbotInvoke("threads:archiveThread", { threadId: thread.thread_id, nextActiveThreadId: null });
+    try {
+      await playbotInvoke("threads:archiveThread", { threadId: thread.thread_id, nextActiveThreadId: null });
+    } catch (error) {
+      if (!/No handler registered for ['"]threads:archiveThread['"]/.test(String(error))) throw error;
+      if (await chatCreationApi() !== "launchTask") throw new Error("Playbot has no threads:archiveThread handler and its replacement schema is unconfirmed; refusing to guess");
+      await playbotInvoke("threads:archive", { threadId: thread.thread_id });
+    }
     withRoutesLock(() => {
       for (const route of loadRoutes().filter((item) => item.supervisor?.id === thread.thread_id || item.worker?.id === thread.thread_id)) {
         route.active = false;
